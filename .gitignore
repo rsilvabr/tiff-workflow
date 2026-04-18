@@ -1,0 +1,38 @@
+# Logs
+Logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ImageMagick and exiftool temp files
+.magick/
+exiftool_arg_*.tmp
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Staging directories (user-configured, not code)
+# Don't ignore staging dirs in repo root - only auto-created ones
+# If you configure -StagingDir, it goes to a user-specified path
+
+# Test outputs
+tests/.tmp/
