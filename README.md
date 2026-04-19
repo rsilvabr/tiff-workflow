@@ -9,7 +9,7 @@ Unified TIFF processing toolkit with two complementary workflows:
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
 ---
-
+ 
 ## Why compress TIFFs to Deflate?
 
 TIFFs support many codecs, but only Deflate actually reduces size on 16-bit files. LZW makes 16-bit files *larger*. Deflate is the heaviest compression for TIFF encoding — but encoding happens only once. After encoding, there is no penalty: smaller files actually open faster.
