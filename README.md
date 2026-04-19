@@ -19,14 +19,14 @@ TIFFs support many codecs, but only Deflate actually reduces size on 16-bit file
 | Format | 16-bit real | 8-bit real | Padded 16-bit* |
 |--------|-------------|------------|----------------|
 | Uncompressed | 241 MB | 127 MB | 254 MB |
-| LZW | 277 MB (+15%) | 64 MB (-49%) | 84 MB (-4%) |
-| Deflate | 214 MB (-11%) | 60 MB (-53%) | 71 MB (-16%) |
+| LZW | 277 MB (+15%) | 64 MB (-49%) | 84 MB (-67%) |
+| Deflate | 214 MB (-11%) | 60 MB (-53%) | 71 MB (-72%) |
 
 *Padded 16-bit = 8-bit image converted to 16-bit TIFFs
 
 **For bloated 8-bit TIFFs** (marked as 16-bit but actually 8-bit padded):
 - Keep as 16-bit: 70 MB (Deflate)
-- Convert to 8-bit: 59 MB (Deflate, ~16% smaller)
+- Convert to 8-bit: 59 MB (Deflate, ~17% smaller)
 
 Option 7 (Diagnose TIFFs) helps you find these bloated files.
 
