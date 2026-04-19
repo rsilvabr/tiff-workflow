@@ -195,9 +195,6 @@ magick identify -verbose photo.tif
 # Should display image info without errors
 ```
 
-### Compressed TIFF is larger than original
-The TIFF was already compressed with equivalent Deflate. Try `-SkipLzwAsCompressed:$true` to skip TIFFs already having Deflate/ZIP compression.
-
 ---
 
 ## Disclaimer
