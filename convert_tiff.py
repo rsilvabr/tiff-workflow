@@ -112,6 +112,7 @@ class ConfigManager:
 
 def detect_powershell_version():
     """Detect PowerShell version. Returns (major, exe_path)."""
+    import re
     for ps_name in ["pwsh", "powershell"]:
         try:
             result = subprocess.run(
@@ -121,9 +122,12 @@ def detect_powershell_version():
                 capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0 and result.stdout.strip():
-                lines = result.stdout.strip().split('\n')
-                major = int(lines[0].strip()) if lines[0].strip().isdigit() else 0
-                version = lines[1].strip() if len(lines) > 1 else "unknown"
+                # Use regex to extract first number (version major)
+                match = re.search(r'(\d+)', result.stdout.strip())
+                major = int(match.group(1)) if match else 0
+                # Extract version string (e.g., "7.4.1")
+                version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', result.stdout.strip())
+                version = version_match.group(1) if version_match else "unknown"
                 if major > 0:
                     return major, ps_name, version
         except Exception:
@@ -148,7 +152,8 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
             continue
         for pat in patterns:
             if pat.lower() in path.name.lower():
-                tiffs = list(path.glob("*.tif")) + list(path.glob("*.tiff"))
+                tiffs = [f for f in path.glob("*.tif") if f.stat().st_size > 0] + \
+                        [f for f in path.glob("*.tiff") if f.stat().st_size > 0]
                 if tiffs:
                     results[path] = len(tiffs)
                 break
@@ -254,7 +259,12 @@ def step_autofind(cfg: ToolConfig, patterns: List[str], root: Path) -> Optional[
         if input(msg).strip().lower().startswith("n"):
             return None
 
-    return list(found.keys())
+    # Verify folders still exist before returning
+    existing = [p for p in found.keys() if p.exists()]
+    if len(existing) != len(found):
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]Note: {len(found) - len(existing)} folder(s) were removed during selection.[/yellow]")
+    return existing
 
 
 # --- Mode Selection (Free Compress 0-8) ---------------------------
@@ -287,7 +297,7 @@ MODE_DESCS = {
 
 
 def step_mode(cfg: ToolConfig) -> Optional[int]:
-    """Select mode 0-8 for Free Compress."""
+    """Select mode 0-9 for Free Compress."""
     if RICH_AVAILABLE and console:
         console.print("\n[bold cyan]Step 2: Organization Mode (Free Compress)[/bold cyan]")
         for m, name in MODE_NAMES.items():
@@ -366,6 +376,10 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         cfg.config.last_staging = staging
 
         workflow["dry_run"] = Confirm.ask("Dry-run mode?", default=False)
+        
+        # SafeMode and SkipLzw options
+        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (cap workers, extra checks)", default=True)
+        workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as compressed?[/cyan] (treat LZW as uncompressed)", default=False)
 
         # ForceParallel/ForceSequential: offer to toggle detected behavior
         if cfg.config.ps_major >= 7:
@@ -385,6 +399,10 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         cfg.config.last_staging = staging
         dry = input("Dry-run? [y/N]: ").strip().lower()
         workflow["dry_run"] = (dry == "y")
+        safe = input("Safe mode? (cap workers, extra checks) [Y/n]: ").strip().lower()
+        workflow["safe_mode"] = (safe != "n")
+        skip_lzw = input("Skip LZW as compressed? [y/N]: ").strip().lower()
+        workflow["skip_lzw"] = (skip_lzw == "y")
         if cfg.config.ps_major >= 7:
             fp = input("Force sequential? (y/N): ").strip().lower()
             if fp == "y":
@@ -525,6 +543,8 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
         cmd += ["-Workers", str(workflow["workers"])]
     if workflow.get("staging"):
         cmd += ["-StagingDir", workflow["staging"]]
+    if workflow.get("output_dir"):
+        cmd += ["-OutputDir", workflow["output_dir"]]
     if workflow.get("dry_run"):
         cmd += ["-DryRun"]
     if workflow.get("skip_exif"):
@@ -602,6 +622,10 @@ def run_subprocess(cmd: List[str], timeout: int = 3600) -> int:
         return -1
 
     process.wait()
+    try:
+        process.stdout.close()
+    except (OSError, ValueError):
+        pass
     if process.returncode != 0:
         if RICH_AVAILABLE and console:
             console.print(f"[red]WARNING: Process exited with code {process.returncode}[/red]")
@@ -669,29 +693,31 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
     for od in old_dirs:
         old_path = Path(od)
         parent = old_path.parent
-        for f in old_path.glob("*"):
-            dest = parent / f.name
-            if dest.exists():
-                if overwrite:
-                    _safe_move(f, dest)
-                    moved += 1
-                    if RICH_AVAILABLE and console:
-                        console.print(f"  [green]OVERWRITE: {f.name}[/green]")
-                    else:
-                        print(f"  OVERWRITE: {f.name}")
-                else:
-                    skipped += 1
-                    if RICH_AVAILABLE and console:
-                        console.print(f"  [yellow]SKIP (exists): {f.name}[/yellow]")
-                    else:
-                        print(f"  SKIP (exists): {f.name}")
-            else:
+    for f in old_path.glob("*"):
+        if not f.exists():
+            continue
+        dest = parent / f.name
+        if dest.exists():
+            if overwrite:
                 _safe_move(f, dest)
                 moved += 1
                 if RICH_AVAILABLE and console:
-                    console.print(f"  [green]MOVED: {f.name}[/green]")
+                    console.print(f"  [green]OVERWRITE: {f.name}[/green]")
                 else:
-                    print(f"  MOVED: {f.name}")
+                    print(f"  OVERWRITE: {f.name}")
+            else:
+                skipped += 1
+                if RICH_AVAILABLE and console:
+                    console.print(f"  [yellow]SKIP (exists): {f.name}[/yellow]")
+                else:
+                    print(f"  SKIP (exists): {f.name}")
+        else:
+            _safe_move(f, dest)
+            moved += 1
+            if RICH_AVAILABLE and console:
+                console.print(f"  [green]MOVED: {f.name}[/green]")
+            else:
+                print(f"  MOVED: {f.name}")
 
     # Ask to delete empty OLD_TIFFs folders
     if RICH_AVAILABLE and console:
@@ -1083,39 +1109,52 @@ def _process_single_padded(tiff_path, staging):
     unique_id = uuid.uuid4().hex[:8]
     tmp8 = staging / f"tmp8_{unique_id}_{name}"
     final_dst = parent / name
+    status = None
 
     try:
-        result = subprocess.run(
-            ["magick", str(tiff_path), "-depth", "8", "-compress", "zip", str(tmp8)],
-            capture_output=True, timeout=60
-        )
-    except FileNotFoundError:
-        return (name, parent, "magick_not_found", None, None, None, False, None, tmp8)
-    except Exception as e:
-        return (name, parent, "error", None, None, None, False, str(e), tmp8)
+        try:
+            result = subprocess.run(
+                ["magick", str(tiff_path), "-depth", "8", "-compress", "zip", str(tmp8)],
+                capture_output=True, timeout=60
+            )
+        except FileNotFoundError:
+            status = "magick_not_found"
+            return (name, parent, status, None, None, None, False, None, tmp8)
+        except Exception as e:
+            status = "error"
+            return (name, parent, status, None, None, None, False, str(e), tmp8)
 
-    if result.returncode != 0:
-        return (name, parent, "magick_error", None, None, None, False, None, tmp8)
+        if result.returncode != 0:
+            status = "magick_error"
+            return (name, parent, status, None, None, None, False, None, tmp8)
 
-    try:
-        exif_result = subprocess.run(
-            ["exiftool", "-q", "-overwrite_original",
-             "-tagsfromfile", str(tiff_path), "-all:all", "-unsafe",
-             "--Compression", "--BitsPerSample", "--SampleFormat",
-             str(tmp8)],
-            capture_output=True, timeout=30
-        )
-        exif_ok = exif_result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        exif_ok = False
+        try:
+            exif_result = subprocess.run(
+                ["exiftool", "-q", "-overwrite_original",
+                 "-tagsfromfile", str(tiff_path), "-all:all", "-unsafe",
+                 "--Compression", "--BitsPerSample", "--SampleFormat",
+                 str(tmp8)],
+                capture_output=True, timeout=30
+            )
+            exif_ok = exif_result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            exif_ok = False
 
-    if tmp8.exists():
-        size_orig = tiff_path.stat().st_size
-        size_zip = tmp8.stat().st_size
-        ratio = (1 - size_zip / size_orig) * 100 if size_orig > 0 else 0
-        return (name, parent, "ok", size_orig, size_zip, ratio, exif_ok, None, tmp8)
-    else:
-        return (name, parent, "missing", None, None, None, False, None, tmp8)
+        if tmp8.exists():
+            size_orig = tiff_path.stat().st_size
+            size_zip = tmp8.stat().st_size
+            ratio = (1 - size_zip / size_orig) * 100 if size_orig > 0 else 0
+            status = "ok"
+            return (name, parent, status, size_orig, size_zip, ratio, exif_ok, None, tmp8)
+        else:
+            status = "missing"
+            return (name, parent, status, None, None, None, False, None, tmp8)
+    finally:
+        if status and status != "ok" and tmp8.exists():
+            try:
+                tmp8.unlink()
+            except Exception:
+                pass
 
 
 def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg: ToolConfig):
@@ -1351,6 +1390,8 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
 
     deleted = 0
     for old_file, _, _ in items:
+        if not old_file.exists():
+            continue
         try:
             old_file.unlink()
             deleted += 1
@@ -1386,6 +1427,8 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
 
 def _format_size(size_bytes: int) -> str:
     """Format bytes as human-readable string."""
+    if size_bytes < 0:
+        return "0B"
     for unit in ["B", "KB", "MB", "GB"]:
         if abs(size_bytes) < 1024:
             return f"{size_bytes:.1f}{unit}"
@@ -1544,7 +1587,11 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
 
     # AutoFind
     found_folders = step_autofind(cfg, patterns, root)
-    if found_folders is None:
+    if not found_folders:
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]No folders found matching pattern. Workflow cancelled.[/yellow]")
+        else:
+            print("No folders found matching pattern. Workflow cancelled.")
         return False
     workflow["folders"] = found_folders
 

@@ -1,7 +1,7 @@
 # ── CLI PARAMETERS ─────────────────────────────────────────────────
 param(
     [string]$InputDir = "",
-    [int]$Workers = 16,
+    [ValidateRange(1, 64)][int]$Workers = 16,
     [switch]$DryRun,
     [switch]$SkipIfTiffHasExif,
     [switch]$SkipLzwAsCompressed,

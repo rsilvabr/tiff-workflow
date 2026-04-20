@@ -527,9 +527,11 @@ if ($Mode -lt 0) {
                     $skipLzw   = $using:skipLzwL
 
                     $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
-                    $stagingName = "$([guid]::NewGuid().ToString('N'))_${stem}.tif"
+                    $ext = [System.IO.Path]::GetExtension($name)
+                    if (-not $ext) { $ext = ".tif" }
+                    $stagingName = "$([guid]::NewGuid().ToString('N'))_${stem}${ext}"
                     $writeDst = Join-Path $writeDirL $stagingName
-                    $finalDst = Join-Path $finalDirL "${stem}.tif"
+                    $finalDst = Join-Path $finalDirL "${stem}${ext}"
 
                     $argComp = [System.IO.Path]::GetTempFileName()
                     try {
@@ -800,7 +802,13 @@ foreach ($f in $files) {
             $oldSrc = Join-Path $oldTiffDir $f.Name
             if (Test-Path -LiteralPath $oldSrc) {
                 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-                $oldSrc = Join-Path $oldTiffDir "$($f.BaseName)_$timestamp$($f.Extension)"
+                $counter = 1
+                $baseOldSrc = Join-Path $oldTiffDir "$($f.BaseName)_$timestamp"
+                $oldSrc = "$baseOldSrc$($f.Extension)"
+                while (Test-Path -LiteralPath $oldSrc) {
+                    $oldSrc = "${baseOldSrc}_${counter}$($f.Extension)"
+                    $counter++
+                }
             }
             Move-Item -LiteralPath $f.FullName -Destination $oldSrc -Force
             if (-not (Test-Path -LiteralPath $oldSrc)) {
