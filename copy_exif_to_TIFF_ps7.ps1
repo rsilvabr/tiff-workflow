@@ -196,21 +196,26 @@ function Invoke-S5ProFolder {
             if ($safeModeL) {
                 $magickTimeoutSec = if ($magickTimeoutL -gt 0) { $magickTimeoutL } else { 30 }
                 $tiffPathCapture = $p.Tiff
-                $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $tiffPathCapture
-                $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
-                if ($pageCountJob.State -eq 'Running') {
-                    Stop-Job $pageCountJob
-                    Remove-Job $pageCountJob
-                    return @{ Result = "ERROR (magick timeout) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
-                }
-                $pageCountStr = $pageCountJob | Receive-Job
-                Remove-Job $pageCountJob
-                if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
-                    return @{ Result = "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
-                }
-                $pageCount = [int]$pageCountStr
-                if ($pageCount -gt 1) {
-                    return @{ Result = "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; MultiPagePath = $p.Tiff }
+                $pageCountJob = $null
+                try {
+                    $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $tiffPathCapture
+                    $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
+                    if ($pageCountJob.State -eq 'Running') {
+                        Stop-Job $pageCountJob
+                        return @{ Result = "ERROR (magick timeout) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
+                    }
+                    $pageCountStr = $pageCountJob | Receive-Job
+                    if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
+                        return @{ Result = "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
+                    }
+                    $pageCount = [int]$pageCountStr
+                    if ($pageCount -gt 1) {
+                        return @{ Result = "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; MultiPagePath = $p.Tiff }
+                    }
+                } finally {
+                    if ($pageCountJob) {
+                        Remove-Job $pageCountJob -Force -ErrorAction SilentlyContinue
+                    }
                 }
             }
 

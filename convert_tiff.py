@@ -143,12 +143,11 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
     Returns dict of {folder_path: tiff_count}
     """
     results = {}
-    for path in root.rglob("*"):
-        if not path.is_dir():
-            continue
+    exclude_names = {"logs", "converted_zip", "zip", "_export", "old_tiffs"}
+    for path in root.rglob("*/"):
         if path.name.startswith("."):
             continue
-        if path.name.lower() in ("logs", "converted_zip", "zip", "_export", "old_tiffs"):
+        if path.name.lower() in exclude_names:
             continue
         for pat in patterns:
             if pat.lower() in path.name.lower():

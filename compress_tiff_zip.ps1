@@ -40,6 +40,16 @@ $script:DeleteSource = $false
 $script:MagickTimeout = 30
 # -----------------------------------------------------------------
 
+# -- Prerequisite checks -------------------------------------------
+$missingTools = @()
+if (-not (Get-Command exiftool -ErrorAction SilentlyContinue)) { $missingTools += "exiftool" }
+if (-not (Get-Command magick -ErrorAction SilentlyContinue)) { $missingTools += "ImageMagick (magick)" }
+if ($missingTools.Count -gt 0) {
+    Write-Host "ERROR: Required tools not found in PATH: $($missingTools -join ', ')" -ForegroundColor Red
+    Write-Host "Please install the missing tools and try again." -ForegroundColor Yellow
+    exit 1
+}
+
 # -- Logging -------------------------------------------------------
 $scriptName = "compress_tiff_zip"
 $logDir     = Join-Path $PWD.Path "Logs\$scriptName"
@@ -59,7 +69,7 @@ trap {
     }
     foreach ($dir in $script:cleanupDirs) {
         if (Test-Path -LiteralPath $dir) {
-            Remove-Item -Path "$dir\*" -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $dir | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
     }
     foreach ($file in $script:cleanupFiles) {
@@ -73,7 +83,11 @@ trap {
 function Write-Log {
     param([string]$msg, [string]$level = "INFO")
     $line = "$(Get-Date -Format 'HH:mm:ss') | $level | $msg"
-    Write-Host $line
+    if ($Host.Name -eq 'ConsoleHost' -or $Host.Name -eq 'Windows PowerShell ISE Host') {
+        Write-Host $line
+    } else {
+        Write-Information $line
+    }
     [System.IO.File]::AppendAllText($logFile, $line + [System.Environment]::NewLine)
 }
 
@@ -186,10 +200,11 @@ function Get-Files-Mode5 {
 
 function Get-Files-Mode6 {
     param([string]$root, [string]$marker)
+    $markerLower = $marker.ToLowerInvariant()
     Get-ChildItem -LiteralPath $root -File -Recurse:$true |
         Where-Object {
             $_.Extension -match '^\.(tif|tiff)$' -and
-            ($_.DirectoryName -split '[\\/]' | ForEach-Object { $_.ToLowerInvariant() }) -contains $marker.ToLowerInvariant()
+            $_.DirectoryName -match "(?i)[\\/]$([regex]::Escape($marker))(?:[\\/]|$)"
         }
 }
 
@@ -504,8 +519,20 @@ if ($Mode -lt 0) {
 
             $writeDir = if ($script:StagingDir -and -not $script:DryRun) { $script:StagingDir } else { $finalDir }
 
-            if ($script:StagingDir -and -not $script:DryRun) { [System.IO.Directory]::CreateDirectory($script:StagingDir) | Out-Null }
-            if ($script:OutputDir) { [System.IO.Directory]::CreateDirectory($finalDir) | Out-Null }
+            if ($script:StagingDir -and -not $script:DryRun) { 
+                if (Test-Path -LiteralPath $script:StagingDir -PathType Leaf) {
+                    Write-Log "ERROR: StagingDir exists as a file: $($script:StagingDir)" "ERROR"
+                    continue
+                }
+                [System.IO.Directory]::CreateDirectory($script:StagingDir) | Out-Null 
+            }
+            if ($script:OutputDir) { 
+                if (Test-Path -LiteralPath $finalDir -PathType Leaf) {
+                    Write-Log "ERROR: Output path exists as a file: $finalDir" "ERROR"
+                    continue
+                }
+                [System.IO.Directory]::CreateDirectory($finalDir) | Out-Null 
+            }
 
             $safeL        = $script:SafeMode
             $multiPageBag = $script:multiPagePaths
@@ -553,7 +580,7 @@ if ($Mode -lt 0) {
                     }
 
                     if ($safeMode) {
-                        $magickTimeoutSec = 30
+                        $magickTimeoutSec = $script:MagickTimeout
                         $srcCapture = $src
                         $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
                         $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
@@ -645,7 +672,8 @@ if ($Mode -lt 0) {
                             }
                         } catch {
                             $script:errTotal++
-                            Write-Log "ERROR (move exception) | $($f.Name): $($_.Exception.Message)" "ERROR"
+                            $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+                            Write-Log "ERROR (move exception) | $($f.Name): $errMsg" "ERROR"
                         }
                     }
                 }
@@ -757,6 +785,12 @@ foreach ($f in $files) {
     }
 
     $writeDst = if ($StagingDir -and -not $DryRun) {
+        if (Test-Path -LiteralPath $StagingDir -PathType Leaf) {
+            Write-Log "ERROR: StagingDir exists as a file: $StagingDir" "ERROR"
+            $script:errTotal++
+            $script:counterTotal++
+            continue
+        }
         $stagingName = "$([guid]::NewGuid().ToString('N'))_$($f.Name)"
         if (-not (Test-Path -LiteralPath $StagingDir)) {
             [System.IO.Directory]::CreateDirectory($StagingDir) | Out-Null
@@ -1061,7 +1095,8 @@ foreach ($group in $groupedTasks) {
                             $failedCount++
                         } catch {
                             $script:errTotal++
-                            Write-Log "ROLLBACK FAILED | $($t.Name): $($_.Exception.Message)" "ERROR"
+                            $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+                            Write-Log "ROLLBACK FAILED | $($t.Name): $errMsg" "ERROR"
                         }
                     }
                 }
@@ -1097,7 +1132,8 @@ foreach ($group in $groupedTasks) {
                     }
                 } catch {
                     $script:errTotal++
-                    Write-Log "ERROR (move failed) | $([System.IO.Path]::GetFileName($destPath)): $($_.Exception.Message)" "ERROR"
+                    $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+                    Write-Log "ERROR (move exception) | $([System.IO.Path]::GetFileName($destPath)): $errMsg" "ERROR"
                 }
             }
         }
