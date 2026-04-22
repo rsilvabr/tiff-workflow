@@ -537,6 +537,7 @@ if ($Mode -lt 0) {
             $safeL        = $script:SafeMode
             $multiPageBag = $script:multiPagePaths
             $skipLzwL     = $script:SkipLzwAsCompressed
+            $magickTimeout = $script:MagickTimeout
 
             $script:stagingMap = @{}
             $effectiveWorkersLegacy = if ($script:SafeMode) { [Math]::Min($script:Workers, 8) } else { $script:Workers }
@@ -552,13 +553,21 @@ if ($Mode -lt 0) {
                     $safeMode  = $using:safeL
                     $bagL      = $using:multiPageBag
                     $skipLzw   = $using:skipLzwL
+                    $magickTimeoutSec = $using:magickTimeout
 
                     $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
                     $ext = [System.IO.Path]::GetExtension($name)
                     if (-not $ext) { $ext = ".tif" }
-                    $stagingName = "$([guid]::NewGuid().ToString('N'))_${stem}${ext}"
-                    $writeDst = Join-Path $writeDirL $stagingName
-                    $finalDst = Join-Path $finalDirL "${stem}${ext}"
+                    $finalName = "${stem}${ext}"
+                    $finalDst = Join-Path $finalDirL $finalName
+                    # Only use staging name if staging dir is different from final dir
+                    if ($writeDirL -ne $finalDirL) {
+                        $stagingName = "$([guid]::NewGuid().ToString('N'))_${stem}${ext}"
+                        $writeDst = Join-Path $writeDirL $stagingName
+                    } else {
+                        $stagingName = $finalName
+                        $writeDst = $finalDst
+                    }
 
                     $argComp = [System.IO.Path]::GetTempFileName()
                     try {
@@ -580,7 +589,6 @@ if ($Mode -lt 0) {
                     }
 
                     if ($safeMode) {
-                        $magickTimeoutSec = $script:MagickTimeout
                         $srcCapture = $src
                         $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
                         $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
