@@ -1442,6 +1442,7 @@ WORKFLOW_OPTIONS = [
     ("5", "Restore OLD_TIFFs", "Move TIFFs from OLD_TIFFs/ to parent folder"),
     ("6", "Delete OLD_TIFFs", "Verify copy matches, then delete"),
     ("7", "Diagnose TIFFs", "Check if 16-bit is real or padded 8-bit"),
+    ("8", "Generate Thumbnails", "Create sRGB thumbnails from TIFFs"),
 ]
 
 
@@ -1456,7 +1457,7 @@ def show_menu() -> Optional[str]:
         for key, name, desc in WORKFLOW_OPTIONS:
             table.add_row(key, name, desc)
         console.print(table)
-        choice = Prompt.ask("\n[cyan]Select workflow[/cyan]", choices=["1", "2", "3", "4", "5", "6", "7"], default="1")
+        choice = Prompt.ask("\n[cyan]Select workflow[/cyan]", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="1")
     else:
         print("\n============================================")
         print("  TIFF Workflow Manager -- convert_tiff")
@@ -1466,7 +1467,7 @@ def show_menu() -> Optional[str]:
         print("============================================")
         choice = input("Select [1]: ").strip() or "1"
 
-    return choice if choice in ("1", "2", "3", "4", "5", "6", "7") else None
+    return choice if choice in ("1", "2", "3", "4", "5", "6", "7", "8") else None
 
 
 # --- Workflow Runners -----------------------------------------------
@@ -1719,6 +1720,79 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
         return True
 
 
+def run_generate_thumbnails(cfg: ToolConfig) -> bool:
+    """Workflow 8: Generate sRGB thumbnails from TIFFs."""
+    script = SCRIPT_DIR / "generate_thumbnails.ps1"
+    if not script.exists():
+        if RICH_AVAILABLE and console:
+            console.print("[red]generate_thumbnails.ps1 not found.[/red]")
+        else:
+            print("ERROR: generate_thumbnails.ps1 not found.")
+        return False
+    
+    # Input directory
+    if RICH_AVAILABLE and console:
+        input_dir = Prompt.ask("[cyan]Input directory[/cyan]", default=str(cfg.config.last_input_dir or "."))
+    else:
+        input_dir = input(f"Input directory [{cfg.config.last_input_dir or '.'}]: ").strip() or (cfg.config.last_input_dir or ".")
+    cfg.config.last_input_dir = input_dir
+    
+    # Thumbnail size
+    if RICH_AVAILABLE and console:
+        size_str = Prompt.ask("[cyan]Thumbnail size (px)[/cyan]", default="256")
+    else:
+        size_str = input("Thumbnail size (px) [256]: ").strip() or "256"
+    try:
+        size = int(size_str)
+    except ValueError:
+        size = 256
+    
+    # Quality
+    if RICH_AVAILABLE and console:
+        quality_str = Prompt.ask("[cyan]JPEG quality[/cyan]", default="85")
+    else:
+        quality_str = input("JPEG quality [85]: ").strip() or "85"
+    
+    # Format
+    if RICH_AVAILABLE and console:
+        fmt = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default="jpg")
+    else:
+        fmt = input("Format (jpg/png/tif) [jpg]: ").strip().lower() or "jpg"
+    
+    # Recursive
+    if RICH_AVAILABLE and console:
+        recursive = Confirm.ask("[cyan]Recursive?[/cyan]", default=False)
+    else:
+        rec = input("Recursive? [y/N]: ").strip().lower()
+        recursive = (rec == "y")
+    
+    # Dry run
+    if RICH_AVAILABLE and console:
+        dry_run = Confirm.ask("[cyan]Dry-run?[/cyan]", default=False)
+    else:
+        dry = input("Dry-run? [y/N]: ").strip().lower()
+        dry_run = (dry == "y")
+    
+    cmd = [
+        cfg.config.ps_name, "-NoProfile", "-File", str(script),
+        "-InputDir", input_dir,
+        "-Size", str(size),
+        "-Quality", quality_str,
+        "-Format", fmt,
+    ]
+    if recursive:
+        cmd += ["-Recursive"]
+    if dry_run:
+        cmd += ["-DryRun"]
+    
+    if RICH_AVAILABLE and console:
+        console.print(f"\n[dim]Running: {' '.join(cmd)}[/dim]\n")
+    else:
+        print(f"\nRunning: {' '.join(cmd)}\n")
+    
+    return run_subprocess(cmd) == 0
+
+
 # --- Main ---------------------------------------------------------
 
 def main():
@@ -1767,6 +1841,8 @@ def main():
             run_purge_old_tiffs(cfg)
         elif choice == "7":
             run_diagnose_tiffs(cfg)
+        elif choice == "8":
+            run_generate_thumbnails(cfg)
 
         if RICH_AVAILABLE and console:
             if not Confirm.ask("\n[cyan]Run another workflow?[/cyan]", default=False):
