@@ -21,7 +21,14 @@ param(
     [switch]$DeleteSource,
     [switch]$ForceParallel,         # force parallelism ON (use if PS5 detected but pwsh available)
     [switch]$ForceSequential,       # force parallelism OFF (use if PS7 detected but want sequential)
-    [string]$StagingDir = ""
+    [string]$StagingDir = "",
+    
+    # Thumbnail generation
+    [switch]$GenerateThumbnail,     # Generate embedded thumbnail in TIFF
+    [int]$ThumbSize = 256,          # Thumbnail size in pixels
+    [string]$ThumbQuality = "85",   # JPEG quality for thumbnail
+    [int]$ThumbPage = 1,            # Page number for thumbnail (0=first, 1=after main, etc.)
+    [switch]$SkipCompressedWithThumb  # Skip TIFFs that are already compressed AND have thumbnail
 )
 # -----------------------------------------------------------------
 
@@ -35,9 +42,15 @@ $script:SkipLzwAsCompressed = $SkipLzwAsCompressed
 $script:OutputDir  = $OutputDir
 $script:StagingDir = $StagingDir
 $script:Overwrite  = $Overwrite.IsPresent
-$script:Mode       = -1
+$script:Mode       = $Mode
 $script:DeleteSource = $false
 $script:MagickTimeout = 30
+$script:GenerateThumbnail = $GenerateThumbnail.IsPresent
+$script:ThumbSize = $ThumbSize
+$script:ThumbQuality = $ThumbQuality
+$script:ThumbPage = $ThumbPage
+$script:SkipCompressedWithThumb = $SkipCompressedWithThumb.IsPresent
+
 # -----------------------------------------------------------------
 
 # -- Prerequisite checks -------------------------------------------
@@ -364,7 +377,11 @@ function Process-TiffJob {
         [bool]$safeMode,
         [bool]$skipLzw,
         [bool]$deleteSource,
-        [int]$mode
+        [int]$mode,
+        [bool]$generateThumb = $false,
+        [int]$thumbSize = 256,
+        [string]$thumbQuality = "85",
+        [int]$thumbPage = 1
     )
 
     $name = [System.IO.Path]::GetFileName($srcPath)
@@ -388,7 +405,7 @@ function Process-TiffJob {
     }
 
     if ($safeMode) {
-        $magickTimeoutSec = 30
+        $magickTimeoutSec = $script:MagickTimeout
         $srcCapture = $srcPath
         $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
         $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
@@ -404,8 +421,20 @@ function Process-TiffJob {
         }
         $pageCount = [int]$pageCountStr
         if ($pageCount -gt 1) {
-            $script:multiPagePaths.Add($srcPath) | Out-Null
-            return @{ Result = "MULTI ($pageCount pages - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
+            # Check if all extra pages are thumbnails (subfiletype=1)
+            $hasOnlyThumbnails = $true
+            for ($i = 1; $i -lt $pageCount; $i++) {
+                $subfileType = magick identify -format "%[tiff:subfiletype]" "$srcPath[$i]" 2>$null
+                if ($subfileType -ne "1") {
+                    $hasOnlyThumbnails = $false
+                    break
+                }
+            }
+            if (-not $hasOnlyThumbnails) {
+                $script:multiPagePaths.Add($srcPath) | Out-Null
+                return @{ Result = "MULTI ($pageCount pages - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
+            }
+            # If only thumbnails, continue processing page 0
         }
     }
 
@@ -413,9 +442,59 @@ function Process-TiffJob {
         return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
     }
 
-    $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name }
+    # Build compression command
+    if ($generateThumb) {
+        # Compress page 0 only, then add thumbnail as page 1
+        $mainPage = "$srcPath[0]"
+        $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
+        $script:cleanupFiles += $tempTiff
+        
+        # First: compress main image
+        $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name }
+        }
+        
+        # Generate thumbnail: convert to sRGB, strip ICC, resize
+        $thumbTemp = [System.IO.Path]::GetTempFileName() + ".jpg"
+        $script:cleanupFiles += $thumbTemp
+        $thumbResult = magick -quiet $mainPage -colorspace sRGB -strip -thumbnail "${thumbSize}x${thumbSize}>" -quality $thumbQuality $thumbTemp 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            # If thumbnail fails, just copy the compressed TIFF
+            Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+            Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $thumbTemp -Force -ErrorAction SilentlyContinue
+            return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+        }
+        
+        # Combine: main TIFF + thumbnail as page 1
+        # Use magick to append pages: main[0] then thumbnail
+        $out = magick -quiet $tempTiff $thumbTemp -compress zip $writeDst 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            # Fallback: just use compressed main
+            Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+            Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $thumbTemp -Force -ErrorAction SilentlyContinue
+            return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+        }
+        
+        # Mark second page as thumbnail (subfiletype=1)
+        $argThumb = [System.IO.Path]::GetTempFileName()
+        $script:cleanupFiles += $argThumb
+        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-${thumbPage}`n-subfiletype=1`n$writeDst`n")
+        exiftool -@ $argThumb | Out-Null
+        Remove-Item $argThumb -Force
+        $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $argThumb }
+        
+        # Cleanup temp files
+        Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $thumbTemp -Force -ErrorAction SilentlyContinue
+    } else {
+        # Normal compression (all pages or page 0)
+        $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name }
+        }
     }
 
     $stagingName = [System.IO.Path]::GetFileName($writeDst)
@@ -866,6 +945,10 @@ foreach ($f in $files) {
                 Name     = $f.Name
                 MovedBy  = "mode0"
                 OldTiffBackup = $f.FullName
+                GenerateThumb = $script:GenerateThumbnail
+                ThumbSize = $script:ThumbSize
+                ThumbQuality = $script:ThumbQuality
+                ThumbPage = $script:ThumbPage
             }
         } else {
             # Dry-run: don't move, task reads from original path
@@ -874,6 +957,10 @@ foreach ($f in $files) {
                 WriteDst = $writeDst
                 FinalDst = $finalDst
                 Name     = $f.Name
+                GenerateThumb = $script:GenerateThumbnail
+                ThumbSize = $script:ThumbSize
+                ThumbQuality = $script:ThumbQuality
+                ThumbPage = $script:ThumbPage
             }
         }
     } else {
@@ -882,6 +969,10 @@ foreach ($f in $files) {
             WriteDst = $writeDst
             FinalDst = $finalDst
             Name     = $f.Name
+            GenerateThumb = $script:GenerateThumbnail
+            ThumbSize = $script:ThumbSize
+            ThumbQuality = $script:ThumbQuality
+            ThumbPage = $script:ThumbPage
         }
     }
 }
@@ -921,7 +1012,10 @@ foreach ($group in $groupedTasks) {
         Write-Log "Workers capped to $effectiveWorkers (SafeMode limit)"
     }
 
-    if ($script:IS_PS7) {
+    # Force sequential processing when generating thumbnails (parallel variable passing issues)
+    $useParallel = $script:IS_PS7 -and -not $script:GenerateThumbnail
+    
+    if ($useParallel) {
         # PS7+: use parallel threads, collect results then process sequentially
         $parallelResults = $groupTasks | ForEach-Object -Parallel {
             $t = $_
@@ -971,15 +1065,29 @@ foreach ($group in $groupedTasks) {
                 }
                 $pageCount = [int]$pageCountStr
                 if ($pageCount -gt 1) {
-                    return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
+                    # Check if all extra pages are thumbnails (subfiletype=1)
+                    $hasOnlyThumbnails = $true
+                    for ($i = 1; $i -lt $pageCount; $i++) {
+                        $subfileType = magick identify -format "%%[tiff:subfiletype]" "$srcPath[$i]" 2>$null
+                        if ($subfileType -ne "1") {
+                            $hasOnlyThumbnails = $false
+                            break
+                        }
+                    }
+                    if (-not $hasOnlyThumbnails) {
+                        return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
+                    }
+                    # If only thumbnails, continue processing page 0
                 }
             }
             if ($dryRun) {
                 return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name }
             }
+            
+            # Normal compression (no thumbnail in parallel mode)
             $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
             if ($LASTEXITCODE -ne 0) {
-        return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
             }
             $stagingName = [System.IO.Path]::GetFileName($writeDst)
             $argExif = [System.IO.Path]::GetTempFileName()
@@ -1077,7 +1185,8 @@ foreach ($group in $groupedTasks) {
         foreach ($t in $groupTasks) {
             $result = Process-TiffJob $t.Src $t.WriteDst $t.FinalDst `
                                 $DryRun $Overwrite $SafeMode `
-                                $SkipLzwAsCompressed $DeleteSource $Mode
+                                $SkipLzwAsCompressed $DeleteSource $Mode `
+                                $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbPage
             if ($result.StagingName) { $script:stagingMap[$t.FinalDst.ToLowerInvariant()] = @{ StagingName = $result.StagingName; FinalDst = $t.FinalDst } }
             Process-Results @($result.Result)
         }

@@ -520,6 +520,18 @@ def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: 
         cmd += ["-ForceParallel"]
     if workflow.get("force_sequential") == True:
         cmd += ["-ForceSequential"]
+    
+    # Thumbnail generation
+    if workflow.get("generate_thumbnail"):
+        cmd += ["-GenerateThumbnail"]
+        if workflow.get("thumb_size"):
+            cmd += ["-ThumbSize", str(workflow["thumb_size"])]
+        if workflow.get("thumb_quality"):
+            cmd += ["-ThumbQuality", str(workflow["thumb_quality"])]
+        if workflow.get("thumb_format"):
+            cmd += ["-ThumbFormat", str(workflow["thumb_format"])]
+        if workflow.get("skip_compressed_with_thumb"):
+            cmd += ["-SkipCompressedWithThumb"]
 
     return cmd
 
@@ -1499,6 +1511,44 @@ def run_free_compress(cfg: ToolConfig) -> bool:
 
     # Basic params
     step_basic_params(cfg, workflow)
+
+    # Thumbnail generation option
+    if RICH_AVAILABLE and console:
+        if Confirm.ask("[cyan]Generate embedded thumbnails?[/cyan]", default=False):
+            workflow["generate_thumbnail"] = True
+            if Confirm.ask("[cyan]Configure thumbnail settings?[/cyan]", default=False):
+                # Thumbnail size
+                size_str = Prompt.ask("[cyan]Thumbnail size (px)[/cyan]", default="256")
+                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else 256
+                # Quality
+                quality_str = Prompt.ask("[cyan]JPEG quality[/cyan]", default="85")
+                workflow["thumb_quality"] = quality_str
+                # Format
+                workflow["thumb_format"] = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default="jpg")
+            else:
+                workflow["thumb_size"] = 256
+                workflow["thumb_quality"] = "85"
+                workflow["thumb_format"] = "jpg"
+            # Option to skip compressed TIFFs with existing thumbnails
+            workflow["skip_compressed_with_thumb"] = Confirm.ask("[cyan]Skip already-compressed TIFFs that have thumbnails?[/cyan]", default=False)
+    else:
+        gen_thumb = input("Generate embedded thumbnails? [y/N]: ").strip().lower()
+        if gen_thumb == "y":
+            workflow["generate_thumbnail"] = True
+            config_thumb = input("Configure thumbnail settings? [y/N]: ").strip().lower()
+            if config_thumb == "y":
+                size_str = input("Thumbnail size (px) [256]: ").strip() or "256"
+                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else 256
+                quality_str = input("JPEG quality [85]: ").strip() or "85"
+                workflow["thumb_quality"] = quality_str
+                fmt = input("Format (jpg/png/tif) [jpg]: ").strip().lower() or "jpg"
+                workflow["thumb_format"] = fmt
+            else:
+                workflow["thumb_size"] = 256
+                workflow["thumb_quality"] = "85"
+                workflow["thumb_format"] = "jpg"
+            skip_existing = input("Skip already-compressed TIFFs that have thumbnails? [y/N]: ").strip().lower()
+            workflow["skip_compressed_with_thumb"] = (skip_existing == "y")
 
     # For mode 8: confirm delete
     if mode == 8:
