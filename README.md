@@ -5,6 +5,7 @@ Unified TIFF processing toolkit with two complementary workflows:
 1. **TIFF ZIP Compression** — Re-compress TIFFs with better Deflate parameters (lossless, smaller files)
 2. **Copy EXIF to TIFF** — Copy EXIF metadata from JPEG to TIFF (Fuji S3/S5 Pro workflow)
 3. **Diagnose TIFFs** — Detect if 16-bit TIFFs are real 16-bit or padded 8-bit (stretched from 8-bit)
+4. **Generate Thumbnails** — Create sRGB thumbnails from TIFFs (standalone or embedded in compression)
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
@@ -40,7 +41,7 @@ Option 7 (Diagnose TIFFs) helps you find these bloated files.
 python convert_tiff.py
 ```
 
-Four workflows available:
+Nine workflows available:
 - **[1] Compress TIFFs** — To Zip/Deflate, modes 0-9 (any folder)
 - **[2] Fuji: Copy EXIF** — From JPEG to TIFF (Fuji S3/S5 Pro)
 - **[3] Fuji: Compress** — To Zip/Deflate (Fuji S3/S5 Pro)
@@ -48,6 +49,7 @@ Four workflows available:
 - **[5] Restore OLD_TIFFs** — Move TIFFs from OLD_TIFFs/ back to parent folder
 - **[6] Delete OLD_TIFFs** — Delete OLD_TIFFs/ after verifying parent copy matches
 - **[7] Diagnose TIFFs** — Check if 16-bit TIFFs are real 16-bit or padded 8-bit
+- **[8] Generate Thumbnails** — Create sRGB thumbnails from TIFFs (standalone or embedded in compression)
 
 The wizard supports **AutoFind** — automatically locates folders matching patterns like `S5pro` or `S3pro` for Fuji workflows.
 
@@ -59,6 +61,12 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 0 -InputDir .
 
 # Compress TIFFs, mode 8 (recursive, delete source after)
 powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 8 -InputDir F:\Photos -DeleteSource
+
+# Compress with embedded thumbnail (creates multi-page TIFF: main image + thumbnail)
+powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -ThumbSize 512 -InputDir F:\Photos
+
+# Generate standalone thumbnails (sRGB, stripped ICC)
+powershell -NoProfile -File generate_thumbnails.ps1 -InputDir F:\Photos -Size 256
 ```
 
 ---
@@ -75,6 +83,10 @@ tiff-workflow/
 |
 |-- compress_tiff_zip.ps1         <- Compression backend
 |                                   [PowerShell 5.1 or 7, direct usage]
+|                                   Supports embedded thumbnail generation
+|
+|-- generate_thumbnails.ps1        <- Thumbnail generator (standalone)
+|                                   [sRGB, stripped ICC, configurable size/quality]
 |
 |-- copy_exif_to_TIFF_ps7.ps1      <- EXIF copy (PowerShell 7, parallel)
 |-- copy_exif_to_TIFF_ps5.ps1      <- EXIF copy (PowerShell 5.1, sequential)

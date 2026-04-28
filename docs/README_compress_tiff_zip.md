@@ -66,6 +66,27 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-ForceSequential` | switch | off | Force parallelism OFF (use if PS7 detected but want sequential) |
 | `-StagingDir` | string | `""` | SSD staging folder for faster I/O. Files moved to final destination after each group |
 
+### Thumbnail Generation (v1.2+)
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `-GenerateThumbnail` | switch | off | Embed thumbnail as additional page in TIFF |
+| `-ThumbSize` | int | `256` | Thumbnail size in pixels (max width/height) |
+| `-ThumbQuality` | string | `"85"` | JPEG quality for thumbnail |
+| `-ThumbPage` | int | `1` | Page number for thumbnail (0=first, 1=after main image) |
+| `-SkipCompressedWithThumb` | switch | off | Skip TIFFs that are already compressed AND have thumbnail |
+
+**Example:**
+```powershell
+# Compress with embedded 512px thumbnail
+powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -ThumbSize 512 -InputDir F:\Photos
+```
+
+**Thumbnail format:**
+- Page 0: Original image (compressed with ZIP/Deflate)
+- Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved)
+- Thumbnail page marked with `subfiletype=1` (reduced resolution flag)
+
 ---
 
 ## Modes 0-9

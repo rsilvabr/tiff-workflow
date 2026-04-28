@@ -12,14 +12,15 @@ Unified Python/Rich wizard for TIFF processing. Use this for guided workflows wi
 python convert_tiff.py
 ```
 
-Four workflows available:
-- **[1] Compress TIFFs** -- To Zip/Deflate, modes 0-8 (any folder)
+Nine workflows available:
+- **[1] Compress TIFFs** -- To Zip/Deflate, modes 0-9 (any folder)
 - **[2] Fuji: Copy EXIF** -- From JPEG to TIFF (AutoFind, S3/S5 Pro)
 - **[3] Fuji: Compress** -- To Zip/Deflate (AutoFind, S3/S5 Pro)
 - **[4] Fuji: Copy + Compress** -- Combined in one pass (AutoFind, S3/S5 Pro)
 - **[5] Restore OLD_TIFFs** -- Move TIFFs back to parent folder
 - **[6] Delete OLD_TIFFs** -- Verify copy matches, then delete
 - **[7] Diagnose TIFFs** -- Check if 16-bit is real or padded 8-bit
+- **[8] Generate Thumbnails** -- Create sRGB thumbnails from TIFFs (standalone or embedded in compression)
 
 ---
 
@@ -27,14 +28,27 @@ Four workflows available:
 
 ### Compress TIFFs (option 1)
 
-Full TIFF ZIP compression with modes 0-8:
+Full TIFF ZIP compression with modes 0-9:
 
 ```
-Step 1: Select mode (0-8)
+Step 1: Select mode (0-9)
 Step 2: Choose input folder
 Step 3: Workers, staging, dry-run
-Step 4: Summary + confirm
+Step 4: Thumbnail generation options (optional)
+Step 5: Summary + confirm
 ```
+
+**Thumbnail Options (v1.2+):**
+- Generate embedded thumbnails? [y/N]
+- Configure thumbnail settings? [y/N]
+  - Thumbnail size (px): default 256
+  - JPEG quality: default 85
+  - Format: jpg/png/tif (default: jpg)
+- Skip already-compressed TIFFs that have thumbnails? [y/N]
+
+When enabled, creates a multi-page TIFF:
+- Page 0: Original image (ZIP/Deflate compressed)
+- Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved)
 
 Mode 8 shows an extra confirmation prompt since it deletes source TIFFs after compression.
 
@@ -74,6 +88,26 @@ Verify each TIFF in OLD_TIFFs matches the parent copy (via RMSE), then delete if
 
 Check if 16-bit TIFFs are real 16-bit data or padded 8-bit (stretched from 8-bit by software that only converted depth). Uses round-trip RMSE method.
 
+### Generate Thumbnails (option 8)
+
+Create sRGB thumbnails from TIFFs. Can be used standalone or as part of the compression workflow.
+
+**Settings:**
+- Input directory
+- Thumbnail size (32-4096 px, default: 256)
+- JPEG quality (default: 85)
+- Format: jpg, png, or tif (default: jpg)
+- Recursive processing
+- Dry-run mode
+
+**Output:** `filename_thumb.jpg` next to each TIFF (or in specified output folder)
+
+**Thumbnail format:**
+- Converted to sRGB
+- ICC profile stripped
+- Aspect ratio preserved (only downscales)
+- First page only for multi-page TIFFs
+
 ---
 
 ## AutoFind
@@ -109,7 +143,7 @@ No CLI flags are required -- the wizard is fully interactive.
 
 ## Output
 
-The wizard calls `compress_tiff_zip.ps1` or `copy_exif_to_TIFF_ps7.ps1` as a subprocess and streams their output with color coding:
+The wizard calls `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps7.ps1`, or `generate_thumbnails.ps1` as a subprocess and streams their output with color coding:
 - `[OK]` lines -- green
 - `[ERROR]` lines -- red
 - `[WARNING]` / `[WARN]` lines -- yellow
