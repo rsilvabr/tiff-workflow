@@ -256,7 +256,10 @@ function Invoke-S5ProFolder {
             $tagsArgs += "-unsafe", $tiffTarget
 
             exiftool -q -q -overwrite_original -P @tagsArgs | Out-Null
-            if ($LASTEXITCODE -ne 0) { "ERROR (exiftool EXIF) | $($p.TifName)"; continue }
+            if ($LASTEXITCODE -ne 0) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "ERROR (exiftool EXIF) | $($p.TifName)"; continue
+            }
 
             if (-not $compressL) {
                 $copyNote = if ($tiffCopied) { " -> $finalDirL" } else { "" }
@@ -266,27 +269,38 @@ function Invoke-S5ProFolder {
 
             $comp = exiftool -s -s -s -Compression $tiffTarget 2>$null
             if ($LASTEXITCODE -ne 0 -or -not $comp) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "ERROR (exiftool check) | $($p.TifName) | cannot detect compression"
                 continue
             }
-            if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) { "OK+SKIP-ZIP ($comp) | $($p.TifName)"; continue }
+            if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
+                "OK+SKIP-ZIP ($comp) | $($p.TifName)"; continue
+            }
 
             $stagingName = "$([guid]::NewGuid().ToString('N'))_$($p.TifName)"
             $writeDst = Join-Path $writeDirL $stagingName
             $finalDst = Join-Path $finalDirL $p.TifName
 
             if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff)) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "OK+SKIP-ZIP (exists) | $($p.TifName)"; continue
             }
 
             $magickErr = magick -quiet $tiffTarget -compress zip $writeDst 2>&1
-            if ($LASTEXITCODE -ne 0) { "ERROR (magick ZIP) | $($p.TifName) | $magickErr"; continue }
+            if ($LASTEXITCODE -ne 0) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "ERROR (magick ZIP) | $($p.TifName) | $magickErr"; continue
+            }
 
             exiftool -q -q -overwrite_original -tagsfromfile $tiffTarget -all:all -unsafe $writeDst | Out-Null
             # Store staging mapping BEFORE checking LASTEXITCODE so WARN files get moved too
             if ($stagingName) { $script:stagingMap[$p.Tiff] = $stagingName }
-            if ($LASTEXITCODE -ne 0) { "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; continue }
-            
+            if ($LASTEXITCODE -ne 0) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; continue
+            }
+
+            if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
             "OK+ZIP | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"
         }
 
