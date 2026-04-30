@@ -408,17 +408,22 @@ function Process-TiffJob {
     if ($safeMode) {
         $magickTimeoutSec = $script:MagickTimeout
         $srcCapture = $srcPath
-        $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
-        $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
-        if ($pageCountJob.State -eq 'Running') {
-            Stop-Job $pageCountJob
-            Remove-Job $pageCountJob
-            return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
-        }
-        $pageCountStr = $pageCountJob | Receive-Job
-        Remove-Job $pageCountJob
-        if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
-            return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+        $pageCountJob = $null
+        try {
+            $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
+            $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
+            if ($pageCountJob.State -eq 'Running') {
+                Stop-Job $pageCountJob
+                return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+            }
+            $pageCountStr = $pageCountJob | Receive-Job
+            if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
+                return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+            }
+        } finally {
+            if ($pageCountJob) {
+                Remove-Job $pageCountJob -Force -ErrorAction SilentlyContinue
+            }
         }
         $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
         $pageCount = [int]$pageCountVal
@@ -451,7 +456,7 @@ function Process-TiffJob {
     # Build compression command
     if ($generateThumb) {
         # Compress page 0 only, then add thumbnail as page 1
-        $mainPage = "$srcPath[0]"
+        $mainPage = "$srcPath[$thumbPage]"
         $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
         $thumbTemp = [System.IO.Path]::GetTempFileName() + ".jpg"
         
@@ -671,15 +676,20 @@ if ($Mode -lt 0) {
 
                     if ($safeMode) {
                         $srcCapture = $src
-                        $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
-                        $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
-                        if ($pageCountJob.State -eq 'Running') {
-                            Stop-Job $pageCountJob
-                            Remove-Job $pageCountJob
-            return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                        $pageCountJob = $null
+                        try {
+                            $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
+                            $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
+                            if ($pageCountJob.State -eq 'Running') {
+                                Stop-Job $pageCountJob
+                return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                            }
+                            $pageCountStr = $pageCountJob | Receive-Job
+                        } finally {
+                            if ($pageCountJob) {
+                                Remove-Job $pageCountJob -Force -ErrorAction SilentlyContinue
+                            }
                         }
-                        $pageCountStr = $pageCountJob | Receive-Job
-                        Remove-Job $pageCountJob
                         if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
             return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
                         }
@@ -1074,17 +1084,22 @@ foreach ($group in $groupedTasks) {
             }
             if ($safeMode) {
                 $srcCapture = $srcPath
-                $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
-                $pageCountJob | Wait-Job -Timeout $magickTimeout | Out-Null
-                if ($pageCountJob.State -eq 'Running') {
-                    Stop-Job $pageCountJob
-                    Remove-Job $pageCountJob
-                    return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
-                }
-                $pageCountStr = $pageCountJob | Receive-Job
-                Remove-Job $pageCountJob
-                if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
-                    return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+                $pageCountJob = $null
+                try {
+                    $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
+                    $pageCountJob | Wait-Job -Timeout $magickTimeout | Out-Null
+                    if ($pageCountJob.State -eq 'Running') {
+                        Stop-Job $pageCountJob
+                        return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+                    }
+                    $pageCountStr = $pageCountJob | Receive-Job
+                    if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
+                        return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+                    }
+                } finally {
+                    if ($pageCountJob) {
+                        Remove-Job $pageCountJob -Force -ErrorAction SilentlyContinue
+                    }
                 }
                 $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
                 $pageCount = [int]$pageCountVal
@@ -1114,7 +1129,7 @@ foreach ($group in $groupedTasks) {
             
             if ($generateThumb) {
                 # Compress page 0 only, then add thumbnail as page 1
-                $mainPage = "$srcPath[0]"
+                $mainPage = "$srcPath[$thumbPage]"
                 $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
                 $thumbTemp = [System.IO.Path]::GetTempFileName() + ".jpg"
                 try {

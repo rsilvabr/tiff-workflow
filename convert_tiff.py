@@ -581,15 +581,18 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
 def run_subprocess(cmd: List[str], timeout: int = 3600) -> int:
     """Run command, stream output with Rich coloring. Has configurable timeout."""
     import time
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        encoding="utf-8",
-        errors="replace"
-    )
+    import sys
+    popen_kwargs = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "bufsize": 1,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if sys.platform == "win32":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(cmd, **popen_kwargs)
 
     start_time = time.time()
     try:
