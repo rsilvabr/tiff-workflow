@@ -520,7 +520,6 @@ function Process-TiffJob {
         }
     }
 
-    $stagingName = [System.IO.Path]::GetFileName($writeDst)
     $deleted = $false
     if ($deleteSource -and $mode -eq 8) {
         $stagingUsed = ($writeDst -ne $srcPath)

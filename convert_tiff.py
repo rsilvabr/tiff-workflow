@@ -912,7 +912,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             return False, 0.0, f"ERROR: compare failed (exit={result.returncode}): {output}"
 
         import re
-        match = re.search(r"(\d+\.?\d*)\s*\((\d+\.?\d*e?[+-]?\d*)\)", output)
+        match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
         if not match:
             return False, 0.0, f"ERROR: RMSE parse failed: '{output}'"
 
@@ -959,7 +959,7 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
             print("No TIFF files found.")
         return True
 
-    workers = cfg.config.default_workers
+    workers = cfg.config.last_workers or cfg.config.default_workers
     if RICH_AVAILABLE and console:
         workers_input = Prompt.ask(f"\n[cyan]Workers[/cyan]", default=str(workers))
         if workers_input:
@@ -1390,7 +1390,10 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
                 console.print(f"[red]Time mismatch: expected {current_time}, got {time_str}.[/red]")
             else:
                 print(f"Time mismatch: expected {current_time}, got {time_str}.")
-            console.print("[dim]Cancelled.[/dim]") if RICH_AVAILABLE and console else print("Cancelled.")
+            if RICH_AVAILABLE and console:
+                console.print("[dim]Cancelled.[/dim]")
+            else:
+                print("Cancelled.")
             return False
     except Exception as e:
         if RICH_AVAILABLE and console:
@@ -1785,7 +1788,12 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
         input_dir = Prompt.ask("[cyan]Input directory[/cyan]", default=str(cfg.config.last_input_dir or "."))
     else:
         input_dir = input(f"Input directory [{cfg.config.last_input_dir or '.'}]: ").strip() or (cfg.config.last_input_dir or ".")
-    cfg.config.last_input_dir = input_dir
+    p = Path(input_dir)
+    if not p.exists():
+        print(f"Directory does not exist: {input_dir}")
+        return False
+    cfg.config.last_input_dir = str(p.resolve())
+    cfg.save_config()
     
     # Thumbnail size
     if RICH_AVAILABLE and console:
