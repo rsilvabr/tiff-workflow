@@ -387,12 +387,13 @@ function Process-TiffJob {
     $name = [System.IO.Path]::GetFileName($srcPath)
 
     $argComp = [System.IO.Path]::GetTempFileName()
-    $script:cleanupFiles += $argComp
-    [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$srcPath`n")
-    $comp = exiftool -@ $argComp 2>$null
-    $exifExit = $LASTEXITCODE
-    Remove-Item $argComp -Force
-    $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $argComp }
+    try {
+        [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$srcPath`n")
+        $comp = exiftool -@ $argComp 2>$null
+        $exifExit = $LASTEXITCODE
+    } finally {
+        Remove-Item $argComp -Force -ErrorAction SilentlyContinue
+    }
     if ($exifExit -ne 0 -or -not $comp) {
         return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name }
     }
@@ -452,48 +453,43 @@ function Process-TiffJob {
         # Compress page 0 only, then add thumbnail as page 1
         $mainPage = "$srcPath[0]"
         $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
-        $script:cleanupFiles += $tempTiff
-        
-        # First: compress main image
-        $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name }
-        }
-        
-        # Generate thumbnail: convert to sRGB, strip ICC, resize
         $thumbTemp = [System.IO.Path]::GetTempFileName() + ".jpg"
-        $script:cleanupFiles += $thumbTemp
-        $thumbResult = magick -quiet $mainPage -colorspace sRGB -strip -thumbnail "${thumbSize}x${thumbSize}>" -quality $thumbQuality $thumbTemp 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            # If thumbnail fails, just copy the compressed TIFF
-            Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+        
+        try {
+            # First: compress main image
+            $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name }
+            }
+            
+            # Generate thumbnail: convert to sRGB, strip ICC, resize
+            $thumbResult = magick -quiet $mainPage -colorspace sRGB -strip -thumbnail "${thumbSize}x${thumbSize}>" -quality $thumbQuality $thumbTemp 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                # If thumbnail fails, just copy the compressed TIFF
+                Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+            }
+            
+            # Combine: main TIFF + thumbnail as page 1
+            $out = magick -quiet $tempTiff $thumbTemp -compress zip $writeDst 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                # Fallback: just use compressed main
+                Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+            }
+            
+            # Mark second page as thumbnail (subfiletype=1)
+            $argThumb = [System.IO.Path]::GetTempFileName()
+            try {
+                [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType=ReducedResolution`n$writeDst`n")
+                exiftool -@ $argThumb | Out-Null
+            } finally {
+                Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
+            }
+        } finally {
             Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $thumbTemp -Force -ErrorAction SilentlyContinue
-            return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
         }
-        
-        # Combine: main TIFF + thumbnail as page 1
-        # Use magick to append pages: main[0] then thumbnail
-        $out = magick -quiet $tempTiff $thumbTemp -compress zip $writeDst 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            # Fallback: just use compressed main
-            Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
-            Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $thumbTemp -Force -ErrorAction SilentlyContinue
-            return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
-        }
-        
-        # Mark second page as thumbnail (subfiletype=1)
-        $argThumb = [System.IO.Path]::GetTempFileName()
-        $script:cleanupFiles += $argThumb
-        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType=ReducedResolution`n$writeDst`n")
-        exiftool -@ $argThumb | Out-Null
-        Remove-Item $argThumb -Force
-        $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $argThumb }
-        
-        # Cleanup temp files
-        Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $thumbTemp -Force -ErrorAction SilentlyContinue
     } else {
         # Normal compression (all pages or page 0)
         $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
@@ -504,19 +500,21 @@ function Process-TiffJob {
 
     $stagingName = [System.IO.Path]::GetFileName($writeDst)
     $argExif = [System.IO.Path]::GetTempFileName()
-    $script:cleanupFiles += $argExif
-    [System.IO.File]::WriteAllText($argExif, "-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
-    $hasExif = exiftool -@ $argExif 2>$null
-    Remove-Item $argExif -Force
-    $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $argExif }
+    try {
+        [System.IO.File]::WriteAllText($argExif, "-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
+        $hasExif = exiftool -@ $argExif 2>$null
+    } finally {
+        Remove-Item $argExif -Force -ErrorAction SilentlyContinue
+    }
 
     if (-not $hasExif) {
         $argCopy = [System.IO.Path]::GetTempFileName()
-        $script:cleanupFiles += $argCopy
-        [System.IO.File]::WriteAllText($argCopy, "-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
-        exiftool -@ $argCopy | Out-Null
-        Remove-Item $argCopy -Force
-        $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $argCopy }
+        try {
+            [System.IO.File]::WriteAllText($argCopy, "-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
+            exiftool -@ $argCopy | Out-Null
+        } finally {
+            Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
+        }
         if ($LASTEXITCODE -ne 0) {
             return @{ Result = "WARN (exiftool failed, ZIP ok) | $name"; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst }
         }
@@ -917,12 +915,13 @@ foreach ($f in $files) {
             continue
         }
         $argComp = [System.IO.Path]::GetTempFileName()
-        $script:cleanupFiles += $argComp
-        [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$($f.FullName)`n")
-        $comp = exiftool -@ $argComp 2>$null
-        $exifExit = $LASTEXITCODE
-        Remove-Item $argComp -Force
-        $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $argComp }
+        try {
+            [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$($f.FullName)`n")
+            $comp = exiftool -@ $argComp 2>$null
+            $exifExit = $LASTEXITCODE
+        } finally {
+            Remove-Item $argComp -Force -ErrorAction SilentlyContinue
+        }
         if ($exifExit -ne 0 -or -not $comp) {
             $script:errTotal++
             $script:counterTotal++
@@ -1033,8 +1032,8 @@ foreach ($group in $groupedTasks) {
         Write-Log "Workers capped to $effectiveWorkers (SafeMode limit)"
     }
 
-    # Force sequential processing when generating thumbnails (parallel variable passing issues)
-    $useParallel = $script:IS_PS7 -and -not $script:GenerateThumbnail
+    # Enable parallel processing for all modes including thumbnail generation
+    $useParallel = $script:IS_PS7
     
     if ($useParallel) {
         # PS7+: use parallel threads, collect results then process sequentially
@@ -1050,6 +1049,10 @@ foreach ($group in $groupedTasks) {
             $deleteSource = $using:DeleteSource
             $mode = $using:Mode
             $magickTimeout = $using:MagickTimeout
+            $generateThumb = $using:GenerateThumbnail
+            $thumbSize = $using:ThumbSize
+            $thumbQuality = $using:ThumbQuality
+            $thumbPage = $using:ThumbPage
 
             $name = [System.IO.Path]::GetFileName($srcPath)
 
@@ -1110,10 +1113,43 @@ foreach ($group in $groupedTasks) {
                 return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name }
             }
             
-            # Normal compression (no thumbnail in parallel mode)
-            $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+            if ($generateThumb) {
+                # Compress page 0 only, then add thumbnail as page 1
+                $mainPage = "$srcPath[0]"
+                $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
+                $thumbTemp = [System.IO.Path]::GetTempFileName() + ".jpg"
+                try {
+                    $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
+                    if ($LASTEXITCODE -ne 0) {
+                        return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name }
+                    }
+                    $thumbResult = magick -quiet $mainPage -colorspace sRGB -strip -thumbnail "${thumbSize}x${thumbSize}>" -quality $thumbQuality $thumbTemp 2>&1
+                    if ($LASTEXITCODE -ne 0) {
+                        Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+                        return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                    }
+                    $out = magick -quiet $tempTiff $thumbTemp -compress zip $writeDst 2>&1
+                    if ($LASTEXITCODE -ne 0) {
+                        Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+                        return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                    }
+                    $argThumb = [System.IO.Path]::GetTempFileName()
+                    try {
+                        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType=ReducedResolution`n$writeDst`n")
+                        exiftool -@ $argThumb | Out-Null
+                    } finally {
+                        Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
+                    }
+                } finally {
+                    Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
+                    Remove-Item -LiteralPath $thumbTemp -Force -ErrorAction SilentlyContinue
+                }
+            } else {
+                # Normal compression (all pages or page 0)
+                $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                }
             }
             $stagingName = [System.IO.Path]::GetFileName($writeDst)
             $argExif = [System.IO.Path]::GetTempFileName()

@@ -279,8 +279,8 @@ function Invoke-S5ProFolder {
                 "OK+SKIP-ZIP (exists) | $($p.TifName)"; continue
             }
 
-            magick -quiet $tiffTarget -compress zip $writeDst 2>$null
-            if ($LASTEXITCODE -ne 0) { "ERROR (magick ZIP) | $($p.TifName)"; continue }
+            $magickErr = magick -quiet $tiffTarget -compress zip $writeDst 2>&1
+            if ($LASTEXITCODE -ne 0) { "ERROR (magick ZIP) | $($p.TifName) | $magickErr"; continue }
 
             exiftool -q -q -overwrite_original -tagsfromfile $tiffTarget -all:all -unsafe $writeDst | Out-Null
             # Store staging mapping BEFORE checking LASTEXITCODE so WARN files get moved too

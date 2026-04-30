@@ -897,7 +897,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
                 capture_output=True, text=True, timeout=120
             )
         except FileNotFoundError:
-            return True, 1.0, "ImageMagick not found (compare failed)"
+            return False, 0.0, "ERROR: ImageMagick not found (compare failed)"
         t3 = time.time() if DEBUG_TIMING else None
 
         if DEBUG_TIMING and t3 is not None:
@@ -909,12 +909,12 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
         output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
 
         if result.returncode not in (0, 1):
-            return True, 1.0, f"real 16-bit (compare failed: {output})"
+            return False, 0.0, f"ERROR: compare failed (exit={result.returncode}): {output}"
 
         import re
         match = re.search(r"(\d+\.?\d*)\s*\((\d+\.?\d*e?[+-]?\d*)\)", output)
         if not match:
-            return True, 1.0, f"real 16-bit (parse failed: '{output}')"
+            return False, 0.0, f"ERROR: RMSE parse failed: '{output}'"
 
         rmse = float(match.group(1))
 
@@ -924,9 +924,9 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             return True, rmse, f"real 16-bit (RMSE={rmse})"
 
     except subprocess.TimeoutExpired:
-        return True, 1.0, "real 16-bit (timeout)"
+        return False, 0.0, "ERROR: timeout during comparison"
     except Exception as e:
-        return True, 1.0, f"real 16-bit (error: {e})"
+        return False, 0.0, f"ERROR: {e}"
     finally:
         for f in (tmp8, tmp16):
             if f and f.exists():
