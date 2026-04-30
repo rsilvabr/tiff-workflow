@@ -531,6 +531,8 @@ def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: 
             cmd += ["-ThumbQuality", str(workflow["thumb_quality"])]
         if workflow.get("thumb_format"):
             cmd += ["-ThumbFormat", str(workflow["thumb_format"])]
+        if workflow.get("thumb_page"):
+            cmd += ["-ThumbPage", str(workflow["thumb_page"])]
         if workflow.get("skip_compressed_with_thumb"):
             cmd += ["-SkipCompressedWithThumb"]
 
@@ -710,6 +712,8 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
         parent = old_path.parent
         for f in list(old_path.glob("*")):
             if not f.exists():
+                continue
+            if f.suffix.lower() not in (".tif", ".tiff"):
                 continue
             dest = parent / f.name
             if dest.exists():

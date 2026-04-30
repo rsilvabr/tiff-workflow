@@ -34,7 +34,7 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
 | `-InputDir` | string | `.` | Source directory containing TIFF files |
 | `-Size` | int | `256` | Thumbnail size in pixels (32-4096) |
 | `-OutputDir` | string | `""` | Output directory. If empty, uses `InputDir/Thumbnails/` |
-| `-Remove` | switch | off | Remove source TIFFs after generating thumbnails |
+| `-Remove` | switch | off | Remove generated thumbnails instead of creating them |
 | `-DryRun` | switch | off | Show what would be generated, don't create files |
 | `-Recursive` | switch | off | Process subdirectories recursively |
 | `-Workers` | int | `4` | Number of parallel worker threads (PS7) |

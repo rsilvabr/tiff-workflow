@@ -921,6 +921,7 @@ foreach ($f in $files) {
         # Skip OLD_TIFFs folder itself (it's where we move originals to)
         if ($f.DirectoryName -match '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$') {
             $script:skipTotal++
+            $script:counterTotal++
             continue
         }
         $argComp = [System.IO.Path]::GetTempFileName()
@@ -1062,6 +1063,7 @@ foreach ($group in $groupedTasks) {
             $thumbSize = $using:ThumbSize
             $thumbQuality = $using:ThumbQuality
             $thumbPage = $using:ThumbPage
+            $skipCompressedWithThumb = $using:SkipCompressedWithThumb
 
             $name = [System.IO.Path]::GetFileName($srcPath)
 
@@ -1077,6 +1079,13 @@ foreach ($group in $groupedTasks) {
                 return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name }
             }
             if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
+                # Check if already has thumbnail when SkipCompressedWithThumb is enabled
+                if ($skipCompressedWithThumb) {
+                    $subfileType = magick identify -format "%[tiff:subfiletype]" "$srcPath" 2>$null
+                    if ($subfileType -eq "1") {
+                        return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name }
+                    }
+                }
                 return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name }
             }
             if ((Test-Path -LiteralPath $finalDst) -and -not $overWrite -and ($finalDst -ne $srcPath)) {
