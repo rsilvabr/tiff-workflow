@@ -120,23 +120,24 @@ if ($Remove) {
             Join-Path $f.DirectoryName $thumbName
         }
         
+        $script:counterTotal++
         if (Test-Path -LiteralPath $thumbPath) {
             if (-not $DryRun) {
                 try {
                     Remove-Item -LiteralPath $thumbPath -Force
                     $script:okTotal++
-                    Write-Log "[$($script:counterTotal + $script:okTotal)/$total] REMOVED | $thumbName"
+                    Write-Log "[$($script:counterTotal)/$total] REMOVED | $thumbName"
                 } catch {
                     $script:errTotal++
-                    Write-Log "[$($script:counterTotal + $script:okTotal)/$total] ERROR (remove failed) | $thumbName | $($_.Exception.Message)" "ERROR"
+                    Write-Log "[$($script:counterTotal)/$total] ERROR (remove failed) | $thumbName | $($_.Exception.Message)" "ERROR"
                 }
             } else {
                 $script:skipTotal++
-                Write-Log "[$($script:counterTotal + $script:skipTotal)/$total] DRY-RUN (would remove) | $thumbName"
+                Write-Log "[$($script:counterTotal)/$total] DRY-RUN (would remove) | $thumbName"
             }
         } else {
             $script:skipTotal++
-            Write-Log "[$($script:counterTotal + $script:skipTotal)/$total] SKIP (not found) | $thumbName"
+            Write-Log "[$($script:counterTotal)/$total] SKIP (not found) | $thumbName"
         }
     }
     

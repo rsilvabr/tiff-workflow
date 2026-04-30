@@ -148,16 +148,6 @@ class TestBuildCopyExifCommand:
         cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
         assert "copy_exif_to_TIFF_ps7.ps1" in cmd[3]
 
-    def test_ps5_script_for_powershell(self, tmp_path):
-        workflow = {}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="powershell")
-        assert "copy_exif_to_TIFF_ps5.ps1" in cmd[3]
-
-    def test_ps7_script_for_pwsh(self, tmp_path):
-        workflow = {}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
-        assert "copy_exif_to_TIFF_ps7.ps1" in cmd[3]
-
     def test_workers(self, tmp_path):
         workflow = {"workers": 4}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")

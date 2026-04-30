@@ -69,30 +69,6 @@ $logDir     = Join-Path $PWD.Path "Logs\$scriptName"
 [System.IO.Directory]::CreateDirectory($logDir) | Out-Null
 $logFile    = Join-Path $logDir "$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
-# -- Cleanup on interrupt -----------------------------------------
-$script:cleanupDirs   = @()
-$script:cleanupFiles  = @()
-if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
-
-trap {
-    if ($logFile) {
-        Write-Log "Interrupted! Cleaning up staging files..." "WARN"
-    } else {
-        Write-Host "Interrupted! Cleaning up..." -ForegroundColor Yellow
-    }
-    foreach ($dir in $script:cleanupDirs) {
-        if (Test-Path -LiteralPath $dir) {
-            Get-ChildItem -LiteralPath $dir | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-        }
-    }
-    foreach ($file in $script:cleanupFiles) {
-        if (Test-Path -LiteralPath $file) {
-            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
-        }
-    }
-    break
-}
-
 function Write-Log {
     param([string]$msg, [string]$level = "INFO")
     $line = "$(Get-Date -Format 'HH:mm:ss') | $level | $msg"
@@ -116,16 +92,37 @@ $script:multiPagePaths = [System.Collections.Concurrent.ConcurrentBag[string]]::
 function Process-Results {
     param($lines)
     foreach ($line in $lines) {
-        $script:counterTotal++
-        $lvl = "INFO"
-        if     ($line -match '^OK\+SKIP-ZIP') { $script:skipTotal++ }
-        elseif ($line -match '^OK')           { $script:okTotal++ }
-        elseif ($line -match '^SKIP')         { $script:skipTotal++ }
-        elseif ($line -match '^MULTI')        { $script:multiTotal++; $lvl = "WARN" }
-        elseif ($line -match '^ERROR')        { $script:errTotal++; $lvl = "ERROR" }
-        elseif ($line -match '^WARN')         { $script:warnTotal++; $lvl = "WARN" }
-        Write-Log "[$($script:counterTotal)/$($script:total)] $line" $lvl
+    $script:counterTotal++
+    $lvl = "INFO"
+    if     ($line -match '^OK\+SKIP-ZIP') { $script:skipTotal++ }
+    elseif ($line -match '^OK')           { $script:okTotal++ }
+    elseif ($line -match '^SKIP')         { $script:skipTotal++ }
+    elseif ($line -match '^MULTI')        { $script:multiTotal++; $lvl = "WARN" }
+    elseif ($line -match '^ERROR')        { $script:errTotal++; $lvl = "ERROR" }
+    elseif ($line -match '^WARN')         { $script:warnTotal++; $lvl = "WARN" }
+    Write-Log "[$($script:counterTotal)/$($script:total)] $line" $lvl
+}
+}
+
+# -- Cleanup on interrupt -----------------------------------------
+$script:cleanupDirs   = @()
+$script:cleanupFiles  = @()
+if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
+
+trap {
+    Write-Log "Interrupted! Cleaning up staging files..." "WARN"
+    foreach ($dir in $script:cleanupDirs) {
+        if (Test-Path -LiteralPath $dir) {
+            # Only remove files with UUID prefix (created by this script)
+            Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -match '^[0-9a-f]{32}_' } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        }
     }
+    foreach ($file in $script:cleanupFiles) {
+        if (Test-Path -LiteralPath $file) {
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        }
+    }
+    break
 }
 
 # Detect PowerShell version for parallel execution
@@ -226,7 +223,7 @@ function Get-Files-Mode7 {
     Get-ChildItem -LiteralPath $root -File -Recurse:$true |
         Where-Object {
             $_.Extension -match '^\.(tif|tiff)$' -and
-            $_.DirectoryName -match "[\\/]$marker[\\/]$tiffSubfolder(?:[\\/]|$)"
+            $_.DirectoryName -match "(?i)[\\/]$([regex]::Escape($marker))[\\/]$([regex]::Escape($tiffSubfolder))(?:[\\/]|$)"
         }
 }
 
@@ -292,17 +289,18 @@ function Resolve-Output {
             $grandparent  = Split-Path $parent -Parent
             # Replace TIFF suffix with ZIP, handling _TIFF → _ZIP and TIFF → ZIP
             if ($parentFolder -match '(?i)_(TIFF)$') {
-                $newFolderName = $parentFolder -replace '(?i)_(TIFF)$', '_ZIP'
+                $newFolderName = $parentFolder -replace '(?i)_(TIFF)$', "_$zipSuffix"
             } elseif ($parentFolder -match '(?i)^(.*)(TIFF)$') {
-                $newFolderName = $parentFolder -replace '(?i)(TIFF)$', 'ZIP'
+                $newFolderName = $parentFolder -replace '(?i)(TIFF)$', $zipSuffix
             } else {
-                $newFolderName = $parentFolder + $zipSuffix
+                $newFolderName = $parentFolder + "_$zipSuffix"
             }
             $newParent    = Join-Path $grandparent $newFolderName
             return Join-Path $newParent "$stem.tif"
         }
         5 {
             $grandparent = Split-Path $parent -Parent
+            if (-not $grandparent) { return $null }
             $zipFolder = Join-Path $grandparent $zipSubfolderName
             return Join-Path $zipFolder "$stem.tif"
         }
@@ -324,8 +322,8 @@ function Resolve-Output {
             $exportIdx = -1
             $tifIdx    = -1
             for ($i = 0; $i -lt $parts.Count; $i++) {
-                if ($parts[$i] -ieq $exportMarker) { $exportIdx = $i }
-                if ($parts[$i] -ieq $ExportTiffSubfolder) { $tifIdx = $i }
+                if ($parts[$i] -ieq $exportMarker) { $exportIdx = $i; break }
+                if ($parts[$i] -ieq $ExportTiffSubfolder) { $tifIdx = $i; break }
             }
             if ($exportIdx -lt 0 -or $tifIdx -lt 0) { return $null }
             $relParts = $parts[($tifIdx + 1)..($parts.Count - 1)]
@@ -419,7 +417,8 @@ function Process-TiffJob {
         if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
             return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
         }
-        $pageCount = [int]$pageCountStr
+        $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
+        $pageCount = [int]$pageCountVal
         if ($pageCount -gt 1) {
             # Check if all extra pages are thumbnails (subfiletype=1)
             $hasOnlyThumbnails = $true
@@ -429,6 +428,12 @@ function Process-TiffJob {
                     $hasOnlyThumbnails = $false
                     break
                 }
+            }
+            if (-not $hasOnlyThumbnails) {
+                return @{ Result = "MULTI ($pageCount pages - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
+            }
+            # If only thumbnails, continue processing page 0
+        }
             }
             if (-not $hasOnlyThumbnails) {
                 $script:multiPagePaths.Add($srcPath) | Out-Null
@@ -681,7 +686,8 @@ if ($Mode -lt 0) {
                         if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
             return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
                         }
-                        $pageCount = [int]$pageCountStr
+                        $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
+                        $pageCount = [int]$pageCountVal
                         if ($pageCount -gt 1) {
                             return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $src }
                         }
@@ -737,9 +743,10 @@ if ($Mode -lt 0) {
                 foreach ($f in $groupFiles) {
                     # Resolve-Output always returns .tif extension, but $f.Name may be .tiff
                     $expectedName = "$([System.IO.Path]::GetFileNameWithoutExtension($f.Name)).tif"
-                    $destPath = (Join-Path $finalDir $expectedName).ToLowerInvariant()
-                    if (-not $script:stagingMap.ContainsKey($destPath)) { continue }
-                    $stagingName = $script:stagingMap[$destPath].StagingName
+                    $destPath = Join-Path $finalDir $expectedName
+                    $destKey = $destPath.ToLowerInvariant()
+                    if (-not $script:stagingMap.ContainsKey($destKey)) { continue }
+                    $stagingName = $script:stagingMap[$destKey].StagingName
                     $stagePath = Join-Path $script:StagingDir $stagingName
                     if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
@@ -1063,12 +1070,13 @@ foreach ($group in $groupedTasks) {
                 if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
                     return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
                 }
-                $pageCount = [int]$pageCountStr
+                $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
+                $pageCount = [int]$pageCountVal
                 if ($pageCount -gt 1) {
                     # Check if all extra pages are thumbnails (subfiletype=1)
                     $hasOnlyThumbnails = $true
                     for ($i = 1; $i -lt $pageCount; $i++) {
-                        $subfileType = magick identify -format "%%[tiff:subfiletype]" "$srcPath[$i]" 2>$null
+                        $subfileType = magick identify -format "%[tiff:subfiletype]" "$srcPath[$i]" 2>$null
                         if ($subfileType -ne "1") {
                             $hasOnlyThumbnails = $false
                             break

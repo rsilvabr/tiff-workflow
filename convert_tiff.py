@@ -704,7 +704,7 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
     for od in old_dirs:
         old_path = Path(od)
         parent = old_path.parent
-    for f in old_path.glob("*"):
+        for f in old_path.glob("*"):
         if not f.exists():
             continue
         dest = parent / f.name
