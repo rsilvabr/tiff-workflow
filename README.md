@@ -41,7 +41,7 @@ Option 7 (Diagnose TIFFs) helps you find these bloated files.
 python convert_tiff.py
 ```
 
-Nine workflows available:
+Eight workflows available:
 - **[1] Compress TIFFs** — To Zip/Deflate, modes 0-9 (any folder)
 - **[2] Fuji: Copy EXIF** — From JPEG to TIFF (Fuji S3/S5 Pro)
 - **[3] Fuji: Compress** — To Zip/Deflate (Fuji S3/S5 Pro)
@@ -91,13 +91,11 @@ tiff-workflow/
 |-- copy_exif_to_TIFF_ps7.ps1      <- EXIF copy (PowerShell 7, parallel)
 |-- copy_exif_to_TIFF_ps5.ps1      <- EXIF copy (PowerShell 5.1, sequential)
 |
-|-- LEGACY/                        <- Legacy standalone script
-|   |-- README.md                  <- Link to old repo
-|
 |-- docs/
 |   |-- README_convert_tiff_py.md      <- Wizard detailed docs
 |   |-- README_compress_tiff_zip.md <- compress_tiff_zip.ps1 detailed docs
 |   |-- README_copy_exif.md           <- Copy EXIF scripts detailed docs
+|   |-- README_generate_thumbnails.md  <- Thumbnail generator docs
 |   |-- bugs_fixed.md                  <- Bug fixes history
 |
 |-- tests/                         <- Pytest + Pester tests

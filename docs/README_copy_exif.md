@@ -35,7 +35,7 @@ Fuji S3 Pro / S5 Pro workflow with Hyper Utility:
 
 ---
 
-## Planned CLI Parameters
+## CLI Parameters
 
 ```powershell
 # Basic usage (PowerShell 7, parallel)
@@ -59,7 +59,7 @@ powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -Overwrite
 
 ---
 
-## Planned Parameters
+## Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

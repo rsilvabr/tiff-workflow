@@ -1,6 +1,6 @@
 # compress_tiff_zip.ps1 -- ZIP Compression Backend
 
-PowerShell compression backend with modes 0-8 CLI flags. Called by `convert_tiff.py` wizard or used directly.
+PowerShell compression backend with modes 0-9 CLI flags. Called by `convert_tiff.py` wizard or used directly.
 
 **Requires:** PowerShell 5.1 or 7, ImageMagick 7, exiftool. No Python required for direct usage.
 

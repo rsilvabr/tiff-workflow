@@ -10,6 +10,7 @@ Unified wizard for TIFF processing workflows:
   [5] Restore OLD_TIFFs move TIFFs back to parent folder
   [6] Delete OLD_TIFFs verify copy, then purge
   [7] Diagnose TIFFs check if 16-bit is real or padded
+  [8] Generate Thumbnails create sRGB thumbnails from TIFFs
 
 Supports AutoFind for S3/S5 Pro folders, persistent config,
 and streaming output from PowerShell backends.
@@ -1488,7 +1489,7 @@ def show_menu() -> Optional[str]:
 # --- Workflow Runners -----------------------------------------------
 
 def run_free_compress(cfg: ToolConfig) -> bool:
-    """Workflow 1: Free compress with modes 0-8."""
+    """Workflow 1: Free compress with modes 0-9."""
     workflow = {
         "origin": "free_compress",
         "dest": "zip",

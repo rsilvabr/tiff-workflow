@@ -12,7 +12,7 @@ Unified Python/Rich wizard for TIFF processing. Use this for guided workflows wi
 python convert_tiff.py
 ```
 
-Nine workflows available:
+Eight workflows available:
 - **[1] Compress TIFFs** -- To Zip/Deflate, modes 0-9 (any folder)
 - **[2] Fuji: Copy EXIF** -- From JPEG to TIFF (AutoFind, S3/S5 Pro)
 - **[3] Fuji: Compress** -- To Zip/Deflate (AutoFind, S3/S5 Pro)
