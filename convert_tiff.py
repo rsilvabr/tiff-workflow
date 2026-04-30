@@ -705,30 +705,30 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
         old_path = Path(od)
         parent = old_path.parent
         for f in old_path.glob("*"):
-        if not f.exists():
-            continue
-        dest = parent / f.name
-        if dest.exists():
-            if overwrite:
+            if not f.exists():
+                continue
+            dest = parent / f.name
+            if dest.exists():
+                if overwrite:
+                    _safe_move(f, dest)
+                    moved += 1
+                    if RICH_AVAILABLE and console:
+                        console.print(f"  [green]OVERWRITE: {f.name}[/green]")
+                    else:
+                        print(f"  OVERWRITE: {f.name}")
+                else:
+                    skipped += 1
+                    if RICH_AVAILABLE and console:
+                        console.print(f"  [yellow]SKIP (exists): {f.name}[/yellow]")
+                    else:
+                        print(f"  SKIP (exists): {f.name}")
+            else:
                 _safe_move(f, dest)
                 moved += 1
                 if RICH_AVAILABLE and console:
-                    console.print(f"  [green]OVERWRITE: {f.name}[/green]")
+                    console.print(f"  [green]MOVED: {f.name}[/green]")
                 else:
-                    print(f"  OVERWRITE: {f.name}")
-            else:
-                skipped += 1
-                if RICH_AVAILABLE and console:
-                    console.print(f"  [yellow]SKIP (exists): {f.name}[/yellow]")
-                else:
-                    print(f"  SKIP (exists): {f.name}")
-        else:
-            _safe_move(f, dest)
-            moved += 1
-            if RICH_AVAILABLE and console:
-                console.print(f"  [green]MOVED: {f.name}[/green]")
-            else:
-                print(f"  MOVED: {f.name}")
+                    print(f"  MOVED: {f.name}")
 
     # Ask to delete empty OLD_TIFFs folders
     if RICH_AVAILABLE and console:

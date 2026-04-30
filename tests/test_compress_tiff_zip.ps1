@@ -19,7 +19,7 @@ Describe "compress_tiff_zip_v2.ps1 - Parameter Validation" {
     It "Has correct default values" {
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match '\$InputDir\s*=\s*"\."'
-        $content | Should -Match '\$Mode\s*=\s*0'
+        $content | Should -Match '\$Mode\s*=\s*-1'
         $content | Should -Match '\$Workers\s*=\s*8'
     }
 }

@@ -48,7 +48,7 @@ if ($Size -lt 32 -or $Size -gt 4096) {
 }
 
 if ($Format -notin @("jpg", "jpeg", "png", "tif", "tiff")) {
-    Write-Log "Invalid format: $Format. Must be jpg, png, or tif." "ERROR"
+    Write-Log "Invalid format: $Format. Must be jpg, png, tif, or tiff." "ERROR"
     exit 1
 }
 # -----------------------------------------------------------------

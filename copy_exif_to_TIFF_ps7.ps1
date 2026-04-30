@@ -43,7 +43,7 @@ trap {
     }
     foreach ($dir in $script:cleanupDirs) {
         if (Test-Path -LiteralPath $dir) {
-            Remove-Item -Path "$dir\*" -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -match '^[0-9a-f]{32}_' } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
     }
     foreach ($file in $script:cleanupFiles) {
@@ -208,7 +208,8 @@ function Invoke-S5ProFolder {
                     if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
                         return @{ Result = "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
                     }
-                    $pageCount = [int]$pageCountStr
+                    $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
+                    $pageCount = [int]$pageCountVal
                     if ($pageCount -gt 1) {
                         return @{ Result = "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; MultiPagePath = $p.Tiff }
                     }

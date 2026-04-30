@@ -27,6 +27,7 @@ param(
     [switch]$GenerateThumbnail,     # Generate embedded thumbnail in TIFF
     [int]$ThumbSize = 256,          # Thumbnail size in pixels
     [string]$ThumbQuality = "85",   # JPEG quality for thumbnail
+    [string]$ThumbFormat = "jpg",   # Thumbnail format (jpg, png, etc.)
     [int]$ThumbPage = 1,            # Page number for thumbnail (0=first, 1=after main, etc.)
     [switch]$SkipCompressedWithThumb  # Skip TIFFs that are already compressed AND have thumbnail
 )
@@ -289,11 +290,11 @@ function Resolve-Output {
             $grandparent  = Split-Path $parent -Parent
             # Replace TIFF suffix with ZIP, handling _TIFF → _ZIP and TIFF → ZIP
             if ($parentFolder -match '(?i)_(TIFF)$') {
-                $newFolderName = $parentFolder -replace '(?i)_(TIFF)$', "_$zipSuffix"
+                $newFolderName = $parentFolder -replace '(?i)_(TIFF)$', "$zipSuffix"
             } elseif ($parentFolder -match '(?i)^(.*)(TIFF)$') {
                 $newFolderName = $parentFolder -replace '(?i)(TIFF)$', $zipSuffix
             } else {
-                $newFolderName = $parentFolder + "_$zipSuffix"
+                $newFolderName = $parentFolder + "$zipSuffix"
             }
             $newParent    = Join-Path $grandparent $newFolderName
             return Join-Path $newParent "$stem.tif"
@@ -322,8 +323,9 @@ function Resolve-Output {
             $exportIdx = -1
             $tifIdx    = -1
             for ($i = 0; $i -lt $parts.Count; $i++) {
-                if ($parts[$i] -ieq $exportMarker) { $exportIdx = $i; break }
-                if ($parts[$i] -ieq $ExportTiffSubfolder) { $tifIdx = $i; break }
+                if ($parts[$i] -ieq $exportMarker) { $exportIdx = $i }
+                if ($parts[$i] -ieq $ExportTiffSubfolder) { $tifIdx = $i }
+                if ($exportIdx -ge 0 -and $tifIdx -ge 0) { break }
             }
             if ($exportIdx -lt 0 -or $tifIdx -lt 0) { return $null }
             $relParts = $parts[($tifIdx + 1)..($parts.Count - 1)]
@@ -422,18 +424,16 @@ function Process-TiffJob {
         if ($pageCount -gt 1) {
             # Check if all extra pages are thumbnails (subfiletype=1)
             $hasOnlyThumbnails = $true
-            for ($i = 1; $i -lt $pageCount; $i++) {
-                $subfileType = magick identify -format "%[tiff:subfiletype]" "$srcPath[$i]" 2>$null
-                if ($subfileType -ne "1") {
-                    $hasOnlyThumbnails = $false
-                    break
+            $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
+            if ($subfileTypes -is [array]) {
+                for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
+                    if ($subfileTypes[$i] -ne "1") {
+                        $hasOnlyThumbnails = $false
+                        break
+                    }
                 }
-            }
-            if (-not $hasOnlyThumbnails) {
-                return @{ Result = "MULTI ($pageCount pages - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
-            }
-            # If only thumbnails, continue processing page 0
-        }
+            } else {
+                $hasOnlyThumbnails = $false
             }
             if (-not $hasOnlyThumbnails) {
                 $script:multiPagePaths.Add($srcPath) | Out-Null
@@ -550,7 +550,7 @@ function _Verify-ZipIntegrity {
     param([string]$path, [int]$timeoutSec = 30)
     try {
         # Return exit code explicitly from the job — Receive-Job does NOT propagate $LASTEXITCODE
-        $job = Start-Job { param($p) magick identify $p 2>$null; $LASTEXITCODE } -ArgumentList $path
+        $job = Start-Job { param($p) magick convert "$p" null: 2>$null; $LASTEXITCODE } -ArgumentList $path
         $completed = $job | Wait-Job -Timeout $timeoutSec
         if (-not $completed) {
             Stop-Job $job -ErrorAction SilentlyContinue
@@ -1075,12 +1075,16 @@ foreach ($group in $groupedTasks) {
                 if ($pageCount -gt 1) {
                     # Check if all extra pages are thumbnails (subfiletype=1)
                     $hasOnlyThumbnails = $true
-                    for ($i = 1; $i -lt $pageCount; $i++) {
-                        $subfileType = magick identify -format "%[tiff:subfiletype]" "$srcPath[$i]" 2>$null
-                        if ($subfileType -ne "1") {
-                            $hasOnlyThumbnails = $false
-                            break
+                    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
+                    if ($subfileTypes -is [array]) {
+                        for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
+                            if ($subfileTypes[$i] -ne "1") {
+                                $hasOnlyThumbnails = $false
+                                break
+                            }
                         }
+                    } else {
+                        $hasOnlyThumbnails = $false
                     }
                     if (-not $hasOnlyThumbnails) {
                         return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
