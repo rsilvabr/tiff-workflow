@@ -37,5 +37,5 @@ desktop.ini
 # Test outputs
 tests/.tmp/
 
-# Internal documentation (not for public repo)
-docs/bugs_fixed.md
+# Documentation
+# docs/bugs_fixed.md  # Now tracked - documents fix history
