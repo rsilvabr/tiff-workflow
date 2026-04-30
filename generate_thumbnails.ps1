@@ -210,9 +210,10 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $magickArgs += $t.DestPath
                 
                 $allArgs = @($inputWithPage) + $magickArgs
-                $result = Start-Process -FilePath "magick" -ArgumentList $allArgs -Wait -NoNewWindow -PassThru
+                $null = & magick @allArgs 2>&1
+                $exitCode = $LASTEXITCODE
                 
-                if ($result.ExitCode -ne 0) {
+                if ($exitCode -ne 0) {
                     "ERROR (magick failed) | $name"
                 } elseif (Test-Path -LiteralPath $t.DestPath) {
                     $thumbSize = (Get-Item -LiteralPath $t.DestPath).Length
@@ -265,9 +266,10 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $magickArgs += $t.DestPath
                 
                 $allArgs = @($inputWithPage) + $magickArgs
-                $proc = Start-Process -FilePath "magick" -ArgumentList $allArgs -Wait -NoNewWindow -PassThru
+                $null = & magick @allArgs 2>&1
+                $exitCode = $LASTEXITCODE
                 
-                if ($proc.ExitCode -ne 0) {
+                if ($exitCode -ne 0) {
                     $result = "ERROR (magick failed) | $name"
                 } elseif (Test-Path -LiteralPath $t.DestPath) {
                     $thumbSize = (Get-Item -LiteralPath $t.DestPath).Length

@@ -486,7 +486,7 @@ function Process-TiffJob {
         # Mark second page as thumbnail (subfiletype=1)
         $argThumb = [System.IO.Path]::GetTempFileName()
         $script:cleanupFiles += $argThumb
-        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-${thumbPage}`n-subfiletype=1`n$writeDst`n")
+        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType=ReducedResolution`n$writeDst`n")
         exiftool -@ $argThumb | Out-Null
         Remove-Item $argThumb -Force
         $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $argThumb }
@@ -689,7 +689,21 @@ if ($Mode -lt 0) {
                         $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
                         $pageCount = [int]$pageCountVal
                         if ($pageCount -gt 1) {
-                            return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $src }
+                            $hasOnlyThumbnails = $true
+                            $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$src" 2>$null
+                            if ($subfileTypes -is [array]) {
+                                for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
+                                    if ($subfileTypes[$i] -ne "1") {
+                                        $hasOnlyThumbnails = $false
+                                        break
+                                    }
+                                }
+                            } else {
+                                $hasOnlyThumbnails = $false
+                            }
+                            if (-not $hasOnlyThumbnails) {
+                                return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $src }
+                            }
                         }
                     }
 
@@ -1126,7 +1140,7 @@ foreach ($group in $groupedTasks) {
             if ($deleteSource -and $mode -eq 8) {
                 # Inline ZIP integrity check (functions are not accessible in -Parallel scope)
                 $verifyPath = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
-                $integrityJob = Start-Job { param($p) magick identify $p 2>$null; $LASTEXITCODE } -ArgumentList $verifyPath
+                $integrityJob = Start-Job { param($p) magick "$p" null: 2>$null; $LASTEXITCODE } -ArgumentList $verifyPath
                 $integrityJob | Wait-Job -Timeout $magickTimeout | Out-Null
                 $integrityOk = $false
                 if ($integrityJob.State -ne 'Running') {

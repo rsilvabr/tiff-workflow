@@ -704,7 +704,7 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
     for od in old_dirs:
         old_path = Path(od)
         parent = old_path.parent
-        for f in old_path.glob("*"):
+        for f in list(old_path.glob("*")):
             if not f.exists():
                 continue
             dest = parent / f.name
@@ -872,10 +872,10 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
                 capture_output=True, timeout=60
             )
         except FileNotFoundError:
-            return True, 1.0, "ImageMagick not found"
+            return False, 0.0, "ERROR: ImageMagick not found"
         t1 = time.time() if DEBUG_TIMING else None
         if result.returncode != 0:
-            return True, 1.0, "real 16-bit (8-bit conversion failed)"
+            return False, 0.0, "ERROR: 8-bit conversion failed"
 
         try:
             result = subprocess.run(
@@ -883,13 +883,13 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
                 capture_output=True, timeout=60
             )
         except FileNotFoundError:
-            return True, 1.0, "ImageMagick not found"
+            return False, 0.0, "ERROR: ImageMagick not found"
         t2 = time.time() if DEBUG_TIMING else None
         if result.returncode != 0:
-            return True, 1.0, "real 16-bit (16-bit back conversion failed)"
+            return False, 0.0, "ERROR: 16-bit back conversion failed"
 
         if not tmp16.exists():
-            return True, 1.0, "real 16-bit (round-trip file missing)"
+            return False, 0.0, "ERROR: round-trip file missing"
 
         try:
             result = subprocess.run(
@@ -1244,7 +1244,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 tmp8.unlink(missing_ok=True)
 
     if staging.exists():
-        for f in staging.glob("*"):
+        for f in list(staging.glob("*")):
             try:
                 f.unlink()
             except Exception:

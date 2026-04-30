@@ -242,6 +242,7 @@ function Invoke-S5ProFolder {
                         Copy-Item -LiteralPath $p.Tiff -Destination $destTiff -Force
                         $tiffTarget = $destTiff
                         $tiffCopied = $true
+                        $script:cleanupFiles += $destTiff
                     } catch {
                         return @{ Result = "ERROR (copy to OutputDir failed) | $($p.TifName): $($_.Exception.Message)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
                     }
@@ -258,6 +259,7 @@ function Invoke-S5ProFolder {
             if ($LASTEXITCODE -ne 0) { return @{ Result = "ERROR (exiftool EXIF) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff } }
 
             if (-not $compressL) {
+                if ($tiffCopied) { $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $destTiff } }
                 $copyNote = if ($tiffCopied) { " -> $finalDirL" } else { "" }
                 return @{ Result = "OK | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
             }
@@ -267,6 +269,7 @@ function Invoke-S5ProFolder {
                 return @{ Result = "ERROR (exiftool check) | $($p.TifName) | cannot detect compression"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
             }
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
+                if ($tiffCopied) { $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $destTiff } }
                 return @{ Result = "OK+SKIP-ZIP ($comp) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
             }
 
@@ -275,6 +278,7 @@ function Invoke-S5ProFolder {
             $finalDst = Join-Path $finalDirL $p.TifName
 
             if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff)) {
+                if ($tiffCopied) { $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $destTiff } }
                 return @{ Result = "OK+SKIP-ZIP (exists) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff }
             }
 
@@ -283,6 +287,7 @@ function Invoke-S5ProFolder {
 
             exiftool -q -q -overwrite_original -tagsfromfile $tiffTarget -all:all -unsafe $writeDst | Out-Null
             if ($LASTEXITCODE -ne 0) { return @{ Result = "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff } }
+            if ($tiffCopied) { $script:cleanupFiles = $script:cleanupFiles | Where-Object { $_ -ne $destTiff } }
             return @{ Result = "OK+ZIP | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff }
         }
 
