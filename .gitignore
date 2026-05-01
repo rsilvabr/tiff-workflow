@@ -39,3 +39,6 @@ tests/.tmp/
 
 # Documentation
 # docs/bugs_fixed.md  # Now tracked - documents fix history
+
+# Release notes (local only, copied to GitHub releases)
+RELEASE_*.md
