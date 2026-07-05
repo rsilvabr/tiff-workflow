@@ -128,12 +128,12 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 
 ---
 
-## v2.1.2 - Centralized SubfileType Detection
+## v2.1 - Audit Round 2
 
 ### 🔴 CRITICAL - SubfileType Check Still Fail-Open in PS7 New-Mode Parallel
-**Issue:** The v2.1.1 audit follow-up fixed the fail-closed subfiletype behavior in two of the three checks inside `compress_tiff_zip.ps1`, but the PS7 parallel path for new modes (the default wizard path on PS7) still used `$st -and $st -notin`. Genuine multi-page TIFFs without a subfiletype tag on extra pages were allowed through SafeMode, and `-GenerateThumbnail` silently discarded the extra pages.
-- **Fix (v2.1.2):** Extracted the subfiletype iteration logic into `Test-TiffHasOnlySubfilePages`. The function is placed in `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, and `copy_exif_to_TIFF_ps7.ps1` (kept inline so each script remains self-contained). All call sites now treat missing/empty subfiletype as non-thumbnail.
-- **Fix (v2.1.2 patch):** Functions defined in the parent scope are not visible inside `ForEach-Object -Parallel` runspaces. The function definition is captured once as `$script:TestSubfileFnDef` and re-injected at the top of every parallel block with `${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef`, so the check now works in the PS7 parallel paths as well as the sequential ones.
+**Issue:** The Audit Round 1 follow-up fixed the fail-closed subfiletype behavior in two of the three checks inside `compress_tiff_zip.ps1`, but the PS7 parallel path for new modes (the default wizard path on PS7) still used `$st -and $st -notin`. Genuine multi-page TIFFs without a subfiletype tag on extra pages were allowed through SafeMode, and `-GenerateThumbnail` silently discarded the extra pages.
+- **Fix (Audit Round 2):** Extracted the subfiletype iteration logic into `Test-TiffHasOnlySubfilePages`. The function is placed in `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, and `copy_exif_to_TIFF_ps7.ps1` (kept inline so each script remains self-contained). All call sites now treat missing/empty subfiletype as non-thumbnail.
+- **Fix (Audit Round 2 patch):** Functions defined in the parent scope are not visible inside `ForEach-Object -Parallel` runspaces. The function definition is captured once as `$script:TestSubfileFnDef` and re-injected at the top of every parallel block with `${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef`, so the check now works in the PS7 parallel paths as well as the sequential ones.
 - **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
 
 ### 🟡 MEDIUM - Different SubfileType Whitelists Between Scripts
@@ -144,7 +144,7 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 
 ---
 
-## v2.1.1 - Audit Follow-up Fixes
+## v2.1 - Audit Round 1
 
 ### 🔴 CRITICAL - PS7 `copy_exif` Deleted Final Outputs with `-OutputDir`
 **Issue:** When `copy_exif_to_TIFF_ps7.ps1` was run with `-OutputDir` (and no `-CompressZip`), the final output file was copied, EXIF was applied, the script reported OK, and then the parent loop deleted the output file because every return carried `CopiedTiffPath`.

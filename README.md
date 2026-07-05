@@ -231,6 +231,17 @@ I am sharing these scripts because getting all of this to work correctly was une
 
 Getting there required finding and fixing several bugs. The full history and technical details are documented in [`docs/bugs_fixed.md`](docs/bugs_fixed.md).
 
+### Latest release
+
+**v2.1** — Data-loss prevention and audit follow-up fixes:
+- Fail-closed subfiletype detection in all PS5/PS7/legacy paths
+- Fixed `copy_exif_to_TIFF_ps7.ps1` deleting final `-OutputDir` outputs
+- Removed GUID duplication in Mode 2; numbered suffixes (`_v2`, `_v3`) via `-DuplicateAction`
+- Hardened Modes 6/7 `_EXPORT/` path resolution for root-level files
+- Runspace-safe helper-function re-injection in `-Parallel` blocks
+
+See [`docs/bugs_fixed.md`](docs/bugs_fixed.md) for the complete list.
+
 ---
 
 ## License
