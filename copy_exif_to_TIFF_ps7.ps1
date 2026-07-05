@@ -97,6 +97,10 @@ function Test-TiffHasOnlySubfilePages {
     .NOTES
         This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1 scripts.
         Keep implementations identical. If you change one, change all three.
+
+        Inside ForEach-Object -Parallel runspaces, functions defined in the parent script are not
+        visible. Re-inject the function at the top of each parallel block with:
+            ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
     #>
     param(
         [string]$Path,
@@ -117,6 +121,9 @@ function Test-TiffHasOnlySubfilePages {
     }
     return $true
 }
+
+# Capture function definition once so it can be re-injected into -Parallel runspaces
+$script:TestSubfileFnDef = ${function:Test-TiffHasOnlySubfilePages}.ToString()
 
 function Invoke-S5ProFolder {
     param([string]$RootPath, [bool]$IsRecurse)
@@ -208,6 +215,7 @@ function Invoke-S5ProFolder {
 
         $results = $pairs | ForEach-Object -ThrottleLimit $Workers -Parallel {
             $p         = $_
+            ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
             $skipExifL = $using:skipExifCapture
             $dryL      = $using:dryCapture
             $compressL = $using:compressCapture

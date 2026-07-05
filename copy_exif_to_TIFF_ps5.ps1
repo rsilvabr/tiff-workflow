@@ -99,6 +99,10 @@ function Test-TiffHasOnlySubfilePages {
     .NOTES
         This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1 scripts.
         Keep implementations identical. If you change one, change all three.
+
+        Inside ForEach-Object -Parallel runspaces, functions defined in the parent script are not
+        visible. Re-inject the function at the top of each parallel block with:
+            ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
     #>
     param(
         [string]$Path,

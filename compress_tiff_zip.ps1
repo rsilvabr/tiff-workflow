@@ -384,6 +384,10 @@ function Test-TiffHasOnlySubfilePages {
     .NOTES
         This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1 scripts.
         Keep implementations identical. If you change one, change all three.
+
+        Inside ForEach-Object -Parallel runspaces, functions defined in the parent script are not
+        visible. Re-inject the function at the top of each parallel block with:
+            ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
     #>
     param(
         [string]$Path,
@@ -404,6 +408,9 @@ function Test-TiffHasOnlySubfilePages {
     }
     return $true
 }
+
+# Capture function definition once so it can be re-injected into -Parallel runspaces
+$script:TestSubfileFnDef = ${function:Test-TiffHasOnlySubfilePages}.ToString()
 
 # -- Process one TIFF -> ZIP job ------------------------------------
 
@@ -675,6 +682,7 @@ if ($Mode -lt 0) {
                 $results = $groupFiles | ForEach-Object -Parallel {
                     $src       = $_.FullName
                     $name      = $_.Name
+                    ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
                     $writeDirL = $using:writeDir
                     $finalDirL = $using:finalDir
                     $dryL      = $using:DryRun
@@ -1137,6 +1145,7 @@ foreach ($group in $groupedTasks) {
         # PS7+: use parallel threads, collect results then process sequentially
         $parallelResults = $groupTasks | ForEach-Object -Parallel {
             $t = $_
+            ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
             $srcPath = $t.Src
             $writeDst = $t.WriteDst
             $finalDst = $t.FinalDst
