@@ -113,6 +113,14 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -Th
 
 Multi-page TIFFs (scanner Infrared files, Photoshop layer stacks) have proprietary IFD structures that can be corrupted by re-compression. SafeMode detects these via `magick identify` with a 30-second timeout and skips them.
 
+A TIFF with extra pages is only treated as "single-page with thumbnail" when every extra page reports one of these `tiff:subfiletype` values:
+
+- `REDUCEDIMAGE` / `REDUCED`
+
+If any extra page has an empty, missing, or other subfiletype value, SafeMode marks the file as multi-page and skips it. This is **fail-closed** behavior: when in doubt, the file is not touched.
+
+> **Note:** `copy_exif_to_TIFF_ps*.ps1` uses a broader whitelist (`REDUCEDIMAGE`/`REDUCED`/`MASK`/`PAGE`) because those scripts preserve all existing pages while copying metadata. `compress_tiff_zip.ps1` only trusts `REDUCEDIMAGE`/`REDUCED` because `-GenerateThumbnail` discards extra pages and replaces them with a generated thumbnail.
+
 ```
 SKIP Multi-page TIFFs: SafeMode=$true
 COMPRESS all TIFFs: SafeMode=$false

@@ -80,6 +80,46 @@ function Process-Results {
     }
 }
 
+function Test-TiffHasOnlySubfilePages {
+    <#
+    .SYNOPSIS
+        Checks whether all pages beyond IFD[0] are non-independent subfile pages.
+        Empty/missing subfiletype is treated as non-thumbnail (fail-closed).
+
+    .PARAMETER Path
+        Path to the TIFF file.
+
+    .PARAMETER PageCount
+        Total number of pages/IFDs in the TIFF.
+
+    .PARAMETER AllowedSubfileTypes
+        List of symbolic subfiletype values considered safe for extra pages.
+        Default: @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")
+
+    .NOTES
+        This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1 scripts.
+        Keep implementations identical. If you change one, change all three.
+    #>
+    param(
+        [string]$Path,
+        [int]$PageCount,
+        [string[]]$AllowedSubfileTypes = @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")
+    )
+
+    if ($PageCount -le 1) { return $true }
+
+    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$Path" 2>$null
+    if (-not ($subfileTypes -is [array])) { return $false }
+
+    for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $PageCount; $i++) {
+        $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+        if ($st -notin $AllowedSubfileTypes) {
+            return $false
+        }
+    }
+    return $true
+}
+
 function Invoke-S5ProFolder {
     param([string]$RootPath, [bool]$IsRecurse)
 
@@ -214,21 +254,7 @@ function Invoke-S5ProFolder {
                 $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
                 $pageCount = [int]$pageCountVal
                 if ($pageCount -gt 1) {
-                    # Check all extra pages: only treat as single-page if every extra page is thumbnail/MASK/PAGE
-                    $hasOnlySubfilePages = $true
-                    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$($p.Tiff)" 2>$null
-                    if ($subfileTypes -is [array]) {
-                        for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
-                            $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
-                            if ($st -notin @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")) {
-                                $hasOnlySubfilePages = $false
-                                break
-                            }
-                        }
-                    } else {
-                        $hasOnlySubfilePages = $false
-                    }
-                    if (-not $hasOnlySubfilePages) {
+                    if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pageCount)) {
                         $bagL.Add($p.Tiff) | Out-Null
                         "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"
                         continue

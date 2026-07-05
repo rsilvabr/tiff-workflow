@@ -365,6 +365,46 @@ function Get-Files-ForMode {
     }
 }
 
+function Test-TiffHasOnlySubfilePages {
+    <#
+    .SYNOPSIS
+        Checks whether all pages beyond IFD[0] are non-independent subfile pages.
+        Empty/missing subfiletype is treated as non-thumbnail (fail-closed).
+
+    .PARAMETER Path
+        Path to the TIFF file.
+
+    .PARAMETER PageCount
+        Total number of pages/IFDs in the TIFF.
+
+    .PARAMETER AllowedSubfileTypes
+        List of symbolic subfiletype values considered safe for extra pages.
+        Default: @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")
+
+    .NOTES
+        This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1 scripts.
+        Keep implementations identical. If you change one, change all three.
+    #>
+    param(
+        [string]$Path,
+        [int]$PageCount,
+        [string[]]$AllowedSubfileTypes = @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")
+    )
+
+    if ($PageCount -le 1) { return $true }
+
+    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$Path" 2>$null
+    if (-not ($subfileTypes -is [array])) { return $false }
+
+    for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $PageCount; $i++) {
+        $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+        if ($st -notin $AllowedSubfileTypes) {
+            return $false
+        }
+    }
+    return $true
+}
+
 # -- Process one TIFF -> ZIP job ------------------------------------
 
 function Process-TiffJob {
@@ -429,21 +469,7 @@ function Process-TiffJob {
         $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
         $pageCount = [int]$pageCountVal
         if ($pageCount -gt 1) {
-                        # Check if all extra pages are thumbnails (subfiletype=ReducedImage)
-                        $hasOnlyThumbnails = $true
-                        $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
-                        if ($subfileTypes -is [array]) {
-                            for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
-                                $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
-                                if ($st -notin @("REDUCEDIMAGE", "REDUCED")) {
-                                    $hasOnlyThumbnails = $false
-                                    break
-                                }
-                            }
-                        } else {
-                            $hasOnlyThumbnails = $false
-                        }
-                        if (-not $hasOnlyThumbnails) {
+            if (-not (Test-TiffHasOnlySubfilePages -Path $srcPath -PageCount $pageCount -AllowedSubfileTypes @("REDUCEDIMAGE", "REDUCED"))) {
                 $script:multiPagePaths.Add($srcPath) | Out-Null
                 return @{ Result = "MULTI ($pageCount pages - skipped) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; MultiPagePath = $srcPath }
             }
@@ -713,20 +739,7 @@ if ($Mode -lt 0) {
                         $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
                         $pageCount = [int]$pageCountVal
                         if ($pageCount -gt 1) {
-                            $hasOnlyThumbnails = $true
-                            $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$src" 2>$null
-                            if ($subfileTypes -is [array]) {
-                                for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
-                                    $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
-                                    if ($st -notin @("REDUCEDIMAGE", "REDUCED")) {
-                                        $hasOnlyThumbnails = $false
-                                        break
-                                    }
-                                }
-                            } else {
-                                $hasOnlyThumbnails = $false
-                            }
-                            if (-not $hasOnlyThumbnails) {
+                            if (-not (Test-TiffHasOnlySubfilePages -Path $src -PageCount $pageCount -AllowedSubfileTypes @("REDUCEDIMAGE", "REDUCED"))) {
                                 return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $src }
                             }
                         }
@@ -1200,20 +1213,7 @@ foreach ($group in $groupedTasks) {
                 $pageCount = [int]$pageCountVal
                 if ($pageCount -gt 1) {
                     # Check if all extra pages are thumbnails (subfiletype=ReducedImage)
-                    $hasOnlyThumbnails = $true
-                    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
-                    if ($subfileTypes -is [array]) {
-                        for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
-                            $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
-                            if ($st -and $st -notin @("REDUCEDIMAGE", "REDUCED")) {
-                                $hasOnlyThumbnails = $false
-                                break
-                            }
-                        }
-                    } else {
-                        $hasOnlyThumbnails = $false
-                    }
-                    if (-not $hasOnlyThumbnails) {
+                    if (-not (Test-TiffHasOnlySubfilePages -Path $srcPath -PageCount $pageCount -AllowedSubfileTypes @("REDUCEDIMAGE", "REDUCED"))) {
                         return @{ Result = "MULTI ($pageCount IFDs - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
                     }
                     # If only thumbnails, continue processing page 0

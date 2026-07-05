@@ -128,6 +128,21 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 
 ---
 
+## v2.1.2 - Centralized SubfileType Detection
+
+### 🔴 CRITICAL - SubfileType Check Still Fail-Open in PS7 New-Mode Parallel
+**Issue:** The v2.1.1 audit follow-up fixed the fail-closed subfiletype behavior in two of the three checks inside `compress_tiff_zip.ps1`, but the PS7 parallel path for new modes (the default wizard path on PS7) still used `$st -and $st -notin`. Genuine multi-page TIFFs without a subfiletype tag on extra pages were allowed through SafeMode, and `-GenerateThumbnail` silently discarded the extra pages.
+- **Fix:** Extracted the subfiletype iteration logic into `Test-TiffHasOnlySubfilePages`. The function is placed in `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, and `copy_exif_to_TIFF_ps7.ps1` (kept inline so each script remains self-contained). All three call sites now treat missing/empty subfiletype as non-thumbnail (fail-closed). A synchronization note is included in each function's help block.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - Different SubfileType Whitelists Between Scripts
+**Issue:** `compress_tiff_zip.ps1` rejected `MASK`/`PAGE` extra pages while `copy_exif_to_TIFF_ps*.ps1` accepted them, which could be confusing and was not documented.
+- **Rationale:** The difference is intentional. `compress_tiff_zip.ps1` with `-GenerateThumbnail` discards existing extra pages and replaces them with a generated thumbnail, so it only trusts `REDUCEDIMAGE`/`REDUCED`. `copy_exif_to_TIFF_ps*.ps1` preserve all existing pages while copying metadata, so `MASK`/`PAGE` pages are also safe to keep.
+- **Fix:** Documented the whitelist difference in `bugs_fixed.md` and the README.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`, `docs/bugs_fixed.md`, `docs/README_compress_tiff_zip.md`
+
+---
+
 ## v2.1.1 - Audit Follow-up Fixes
 
 ### 🔴 CRITICAL - PS7 `copy_exif` Deleted Final Outputs with `-OutputDir`
