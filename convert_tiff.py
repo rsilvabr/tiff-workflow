@@ -850,9 +850,6 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     old_w, old_h = get_dimensions(old_path)
     new_w, new_h = get_dimensions(new_path)
 
-    old_w, old_h = get_dimensions(old_path)
-    new_w, new_h = get_dimensions(new_path)
-
     if old_w is None or new_w is None:
         return False, "magick identify failed"
 

@@ -98,8 +98,33 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 
 ### 🟢 LOW - `-ThumbFormat` Ignored
 **Issue:** Thumbnail format parameter was declared but unused; thumbnails were always JPEG.
-- **Fix:** Use `$thumbFormat` for the temporary thumbnail file and magick format prefix.
+- **Fix:** Use `$thumbFormat` for the temporary thumbnail file and magick format prefix, pass it explicitly into `Process-TiffJob`, and fix the missing `$using:ThumbFormat` in the PS7 parallel block.
 - **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - SubfileType Marker Used Wrong IFD for `ThumbPage=0`
+**Issue:** When `-ThumbPage 0` was used, the thumbnail page was still written to `IFD1`, so the marker (`IFD1:SubfileType#=1`) could mark the main image.
+- **Fix:** Choose `IFD0` when `ThumbPage -le 0`, otherwise `IFD1`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - Mode 8 Default Temp Staging Not Cleaned Up on Interrupt
+**Issue:** If mode 8 used the default temp staging directory and the script was interrupted, the staging directory could be left behind.
+- **Fix:** Add the default temp staging directory to `$script:cleanupDirs`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - `MagickTimeout` Hard-Coded
+**Issue:** The `$script:MagickTimeout` value was hard-coded to 30 seconds with no CLI override.
+- **Fix:** Added `-MagickTimeout` parameter (default 30) to `compress_tiff_zip.ps1`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - Multi-Page False Positives in `copy_exif`
+**Issue:** TIFFs with a single logical image plus thumbnail/MASK pages were skipped as multi-page.
+- **Fix:** Apply the same `tiff:subfiletype` heuristic used by `compress_tiff_zip.ps1`; treat `REDUCEDIMAGE`/`REDUCED`/`MASK`/`PAGE` pages as non-independent.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟢 LOW - Duplicate `get_dimensions` Call in `_compare_tiff_metadata`
+**Issue:** Dimensions were fetched twice, duplicating work and leaving redundant code.
+- **Fix:** Removed the second identical call pair.
+- **Files:** `convert_tiff.py`
 
 ### 🟢 LOW - Wizard Prompts Misleading
 **Issue:** "Safe mode" and "Skip LZW" prompts described the opposite behavior.

@@ -23,6 +23,7 @@ param(
     [switch]$ForceSequential,       # force parallelism OFF (use if PS7 detected but want sequential)
     [string]$StagingDir = "",
     [ValidateSet("Skip", "Numbered", "Overwrite")][string]$DuplicateAction = "Numbered",
+    [int]$MagickTimeout = 30,
 
     # Thumbnail generation
     [switch]$GenerateThumbnail,     # Generate embedded thumbnail in TIFF
@@ -46,7 +47,7 @@ $script:StagingDir = $StagingDir
 $script:Overwrite  = $Overwrite.IsPresent
 $script:Mode       = $Mode
 $script:DeleteSource = $DeleteSource.IsPresent
-$script:MagickTimeout = 30
+$script:MagickTimeout = $MagickTimeout
 $script:GenerateThumbnail = $GenerateThumbnail.IsPresent
 $script:ThumbSize = $ThumbSize
 $script:ThumbQuality = $ThumbQuality
@@ -383,6 +384,7 @@ function Process-TiffJob {
         [bool]$generateThumb = $false,
         [int]$thumbSize = 256,
         [string]$thumbQuality = "85",
+        [string]$thumbFormat = "jpg",
         [int]$thumbPage = 1
     )
 
@@ -495,9 +497,11 @@ function Process-TiffJob {
             }
             
             # Mark thumbnail page as ReducedResolution (subfiletype=1)
+            # When thumbPage <= 0 the thumbnail is page 0; otherwise it's page 1
+            $thumbIfd = if ($thumbPage -le 0) { "IFD0" } else { "IFD1" }
             $argThumb = [System.IO.Path]::GetTempFileName()
             try {
-                [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType#=1`n$writeDst`n")
+                [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
                 $thumbExifOut = exiftool -@ $argThumb 2>&1
                 $thumbExifExit = $LASTEXITCODE
             } finally {
@@ -770,7 +774,8 @@ if ($Mode -lt 0) {
                     $tifName = "$([System.IO.Path]::GetFileNameWithoutExtension($f.Name)).tif"
                     $result = Process-TiffJob $f.FullName $(Join-Path $writeDir $tifName) $(Join-Path $finalDir $tifName) `
                                 $script:DryRun $script:Overwrite $script:SafeMode `
-                                $script:SkipLzwAsCompressed $script:DeleteSource $script:Mode
+                                $script:SkipLzwAsCompressed $script:DeleteSource $script:Mode `
+                                $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbFormat $script:ThumbPage
                     if ($result.StagingName) { $script:stagingMap[$result.FinalDst.ToLowerInvariant()] = @{ StagingName = $result.StagingName; FinalDst = $result.FinalDst } }
                     Process-Results @($result.Result)
                 }
@@ -884,6 +889,8 @@ if ($Mode -eq 8 -and -not $DryRun -and [string]::IsNullOrWhiteSpace($StagingDir)
     if (-not (Test-Path -LiteralPath $StagingDir)) {
         [System.IO.Directory]::CreateDirectory($StagingDir) | Out-Null
     }
+    # Ensure the temp staging dir is cleaned up on interrupt
+    $script:cleanupDirs += $StagingDir
 }
 
 # Build (src, writeDst, finalDst) tasks grouped by output directory
@@ -1103,6 +1110,7 @@ foreach ($group in $groupedTasks) {
             $generateThumb = $using:GenerateThumbnail
             $thumbSize = $using:ThumbSize
             $thumbQuality = $using:ThumbQuality
+            $thumbFormat = $using:ThumbFormat
             $thumbPage = $using:ThumbPage
             $skipCompressedWithThumb = $using:SkipCompressedWithThumb
 
@@ -1217,8 +1225,9 @@ foreach ($group in $groupedTasks) {
                         return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                     }
                     $argThumb = [System.IO.Path]::GetTempFileName()
+                    $thumbIfd = if ($thumbPage -le 0) { "IFD0" } else { "IFD1" }
                     try {
-                        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType#=1`n$writeDst`n")
+                        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
                         $thumbExifOut = exiftool -@ $argThumb 2>&1
                         $thumbExifExit = $LASTEXITCODE
                     } finally {
@@ -1340,6 +1349,10 @@ foreach ($group in $groupedTasks) {
             $deletedCount = 0
             foreach ($r in $parallelResults) {
                 if ($r.CanDeleteSource -and $r.SrcPath -and (Test-Path -LiteralPath $r.SrcPath)) {
+                    if ($r.SrcPath -eq $r.FinalDst) {
+                        # In-place move: the original was already replaced by the compressed file
+                        continue
+                    }
                     if (Test-Path -LiteralPath $r.FinalDst) {
                         try {
                             Remove-Item -LiteralPath $r.SrcPath -Force
@@ -1391,7 +1404,7 @@ foreach ($group in $groupedTasks) {
             $result = Process-TiffJob $t.Src $t.WriteDst $t.FinalDst `
                                 $DryRun $Overwrite $SafeMode `
                                 $SkipLzwAsCompressed $DeleteSource $Mode `
-                                $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbPage
+                                $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbFormat $script:ThumbPage
             if ($result.StagingName) { $script:stagingMap[$t.FinalDst.ToLowerInvariant()] = @{ StagingName = $result.StagingName; FinalDst = $t.FinalDst } }
             if ($result.SrcPath -and $result.Result -and $result.Result.StartsWith("ERROR")) { $errorSrcPaths.Add($result.SrcPath) | Out-Null }
             $sequentialResults += $result
@@ -1440,6 +1453,10 @@ foreach ($group in $groupedTasks) {
             $deletedCount = 0
             foreach ($r in $sequentialResults) {
                 if ($r.CanDeleteSource -and $r.SrcPath -and (Test-Path -LiteralPath $r.SrcPath)) {
+                    if ($r.SrcPath -eq $r.FinalDst) {
+                        # In-place move: the original was already replaced by the compressed file
+                        continue
+                    }
                     if (Test-Path -LiteralPath $r.FinalDst) {
                         try {
                             Remove-Item -LiteralPath $r.SrcPath -Force
