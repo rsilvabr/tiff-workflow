@@ -126,6 +126,55 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 - **Fix:** Removed the second identical call pair.
 - **Files:** `convert_tiff.py`
 
+---
+
+## v2.1.1 - Audit Follow-up Fixes
+
+### 🔴 CRITICAL - PS7 `copy_exif` Deleted Final Outputs with `-OutputDir`
+**Issue:** When `copy_exif_to_TIFF_ps7.ps1` was run with `-OutputDir` (and no `-CompressZip`), the final output file was copied, EXIF was applied, the script reported OK, and then the parent loop deleted the output file because every return carried `CopiedTiffPath`.
+- **Fix:** Added an explicit `IsIntermediate` flag to parallel returns. The cleanup loop now only removes files marked as intermediate (error paths and OK+ZIP staging paths). OK and OK+SKIP-ZIP final outputs are preserved.
+- **Files:** `copy_exif_to_TIFF_ps7.ps1`
+
+### 🔴 CRITICAL - SubfileType Check Failed Open (Multi-Page False Negative)
+**Issue:** `compress_tiff_zip.ps1` treated an unset `tiff:subfiletype` as a thumbnail, so genuine multi-page TIFFs without the tag passed SafeMode and had extra pages silently discarded.
+- **Fix:** Removed the `$st -and` guard; an empty/missing subfiletype is now treated as non-thumbnail, keeping the fail-closed behavior.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Mode 2 Re-Executions Created GUID-Suffixed Duplicates
+**Issue:** `Resolve-Output` mode 2 generated a random GUID suffix whenever the destination file already existed on disk, before `DuplicateAction` was evaluated. Running the script twice produced unpredictable `_a1b2c3d4` files instead of numbered versions.
+- **Fix:** Removed the GUID fallback from `Resolve-Output`. `DuplicateAction` (`Skip | Numbered | Overwrite`, default `Numbered`) now handles both intra-run collisions and on-disk duplicates consistently, producing `_v2`, `_v3`, etc.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Mode 6 Path Resolution Broke for Files Directly in `_EXPORT/`
+**Issue:** Mode 6 built a relative path without validating that the relative part was non-empty, producing an empty path segment when a TIFF sat directly inside the `_EXPORT` folder.
+- **Fix:** Applied the same `$relParts[0]` guard already used by Mode 7.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - `copy_exif` Multi-Page Detection Only Checked Page `[0]`
+**Issue:** The thumbnail/MASK heuristic only looked at the first IFD, so the canonical case (page 0 untagged, page 1 `REDUCEDIMAGE`) was still skipped, while a `PAGE` tag on IFD0 could let a genuine multi-page file through.
+- **Fix:** Iterates all extra pages (`1..n`) and only treats the TIFF as single-page when every extra page is `REDUCEDIMAGE`/`REDUCED`/`MASK`/`PAGE`, matching `compress_tiff_zip.ps1`.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - Legacy Mode (`-1`) Left Files in Staging
+**Issue:** Legacy mode populated the staging map but never moved files from `-StagingDir` to the final output directory.
+- **Fix:** Added a staging-to-final move block after group processing, mirroring the new-mode logic.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - PS7 Parallel Thumbnail Marker Failure Skipped EXIF Copy
+**Issue:** In the PS7 parallel path, if the thumbnail `SubfileType` marker failed, the script returned immediately with an OK status before copying EXIF metadata, producing a ZIP file without metadata. The sequential path correctly logged a warning and continued.
+- **Fix:** The PS7 parallel path now sets a `$thumbMarkerFailed` flag, continues through EXIF copy, and emits a `WARN` result at the end.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - DryRun Created Output Directories
+**Issue:** Several `CreateDirectory` calls in legacy and new-mode paths ran even when `-DryRun` was specified.
+- **Fix:** Guarded all output-directory creations with `-not $DryRun`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - Mode 8 Default Staging Prompt Could Hang in Non-Interactive Sessions
+**Issue:** The `Read-Host` prompt used a case-sensitive `-NonInteractive` check, and ignored `[Environment]::UserInteractive`, so CI/scheduled tasks could hang.
+- **Fix:** Detect `-NonInteractive` case-insensitively and skip the prompt when `[Environment]::UserInteractive` is `$false`.
+- **Files:** `compress_tiff_zip.ps1`
+
 ### 🟢 LOW - Wizard Prompts Misleading
 **Issue:** "Safe mode" and "Skip LZW" prompts described the opposite behavior.
 - **Fix:** Rewrote prompts to match actual effects.

@@ -181,17 +181,17 @@ function Invoke-S5ProFolder {
             $magickTimeoutL = $using:magickTimeoutCapture
 
             if (-not $p.Jpeg) {
-                return @{ Result = "MISS | $($p.TifName) | no matching JPEG (base: $($p.TifBase))"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "MISS | $($p.TifName) | no matching JPEG (base: $($p.TifBase))"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
             if ($skipExifL) {
                 $firstExif = exiftool -q -q -G1 -s -EXIF:all $p.Tiff 2>$null | Select-Object -First 1
-                if ($firstExif) { return @{ Result = "SKIP (already has EXIF) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath } }
+                if ($firstExif) { return @{ Result = "SKIP (already has EXIF) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false } }
             }
 
             if ($dryL) {
                 $zipInfo = if ($compressL) { " + ZIP" } else { "" }
-                return @{ Result = "DRY (EXIF$zipInfo) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "DRY (EXIF$zipInfo) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
             if ($safeModeL) {
@@ -203,21 +203,31 @@ function Invoke-S5ProFolder {
                     $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
                     if ($pageCountJob.State -eq 'Running') {
                         Stop-Job $pageCountJob
-                        return @{ Result = "ERROR (magick timeout) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                        return @{ Result = "ERROR (magick timeout) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
                     }
                     $pageCountStr = $pageCountJob | Receive-Job
                     if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
-                        return @{ Result = "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                        return @{ Result = "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
                     }
                     $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
                     $pageCount = [int]$pageCountVal
                     if ($pageCount -gt 1) {
-                        # Detect thumbnail/MASK pages which do not count as independent multi-page images
-                        $subTypeStr = magick identify -format "%[tiff:subfiletype]\n" "$($p.Tiff)[0]" 2>$null
-                        if ($subTypeStr -and ($subTypeStr[0] -match 'REDUCEDIMAGE|REDUCED|MASK|PAGE')) {
-                            # Single logical image with extra subfile pages; treat as 1-page
+                        # Check all extra pages: only treat as single-page if every extra page is thumbnail/MASK/PAGE
+                        $hasOnlySubfilePages = $true
+                        $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$($p.Tiff)" 2>$null
+                        if ($subfileTypes -is [array]) {
+                            for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
+                                $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+                                if ($st -notin @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")) {
+                                    $hasOnlySubfilePages = $false
+                                    break
+                                }
+                            }
                         } else {
-                            return @{ Result = "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; MultiPagePath = $p.Tiff }
+                            $hasOnlySubfilePages = $false
+                        }
+                        if (-not $hasOnlySubfilePages) {
+                            return @{ Result = "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; MultiPagePath = $p.Tiff; IsIntermediate = $false }
                         }
                     }
                 } finally {
@@ -252,10 +262,10 @@ function Invoke-S5ProFolder {
                         $tiffCopied = $true
                         $copiedTiffPath = $destTiff
                     } catch {
-                        return @{ Result = "ERROR (copy to OutputDir failed) | $($p.TifName): $($_.Exception.Message)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                        return @{ Result = "ERROR (copy to OutputDir failed) | $($p.TifName): $($_.Exception.Message)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
                     }
                 } else {
-                    return @{ Result = "SKIP (exists in OutputDir) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                    return @{ Result = "SKIP (exists in OutputDir) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
                 }
             }
 
@@ -266,21 +276,21 @@ function Invoke-S5ProFolder {
             exiftool -q -q -overwrite_original -P @tagsArgs | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-                return @{ Result = "ERROR (exiftool EXIF) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "ERROR (exiftool EXIF) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
 
             if (-not $compressL) {
                 $copyNote = if ($tiffCopied) { " -> $finalDirL" } else { "" }
-                return @{ Result = "OK | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "OK | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
             $comp = exiftool -s -s -s -Compression $tiffTarget 2>$null
             if ($LASTEXITCODE -ne 0 -or -not $comp) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-                return @{ Result = "ERROR (exiftool check) | $($p.TifName) | cannot detect compression"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "ERROR (exiftool check) | $($p.TifName) | cannot detect compression"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-                return @{ Result = "OK+SKIP-ZIP ($comp) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "OK+SKIP-ZIP ($comp) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
             $stagingName = "$([guid]::NewGuid().ToString('N'))_$($p.TifName)"
@@ -289,23 +299,23 @@ function Invoke-S5ProFolder {
 
             if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff)) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-                return @{ Result = "OK+SKIP-ZIP (exists) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "OK+SKIP-ZIP (exists) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
 
             $magickErr = magick -quiet $tiffTarget -compress zip $writeDst 2>&1
             if ($LASTEXITCODE -ne 0) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-                return @{ Result = "ERROR (magick ZIP) | $($p.TifName) | $magickErr"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "ERROR (magick ZIP) | $($p.TifName) | $magickErr"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
 
             exiftool -q -q -overwrite_original -tagsfromfile $tiffTarget -all:all -unsafe $writeDst | Out-Null
             if ($LASTEXITCODE -ne 0) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-                return @{ Result = "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+                return @{ Result = "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
 
             if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-            return @{ Result = "OK+ZIP | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath }
+            return @{ Result = "OK+ZIP | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
         }
 
         # Process results and build staging map
@@ -313,7 +323,7 @@ function Invoke-S5ProFolder {
         foreach ($r in $results) {
             if ($r.StagingName) { $script:groupStagingMap[$r.SrcPath] = $r.StagingName }
             if ($r.MultiPagePath) { $script:multiPagePaths.Add($r.MultiPagePath) | Out-Null }
-            if ($r.CopiedTiffPath -and (Test-Path -LiteralPath $r.CopiedTiffPath)) {
+            if ($r.CopiedTiffPath -and $r.IsIntermediate -and (Test-Path -LiteralPath $r.CopiedTiffPath)) {
                 Remove-Item -LiteralPath $r.CopiedTiffPath -Force -ErrorAction SilentlyContinue
             }
             Process-Line $r.Result

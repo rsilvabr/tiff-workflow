@@ -277,12 +277,7 @@ function Resolve-Output {
             } else {
                 $inputRootP
             }
-            $candidate = Join-Path $root "$stem.tif"
-            if ((Test-Path -LiteralPath $candidate) -and -not $overWrite) {
-                $uniq = [guid]::NewGuid().ToString('N')[0..7] -join ''
-                $candidate = Join-Path $root "${stem}_${uniq}.tif"
-            }
-            return $candidate
+            return Join-Path $root "$stem.tif"
         }
         3 {
             $subfolder = Join-Path $parent $zipSubfolderName
@@ -316,9 +311,11 @@ function Resolve-Output {
             }
             if ($exportIdx -lt 0) { return $null }
             $relParts = $parts[($exportIdx + 1)..($parts.Count - 1)]
-            $relPath  = $relParts -join '/'
             $newParent = Join-Path (Join-Path $inputRootP $exportMarker) $exportZipSubfolder
-            if ($relPath) { $newParent = Join-Path $newParent $relPath }
+            if ($relParts.Count -gt 0 -and $relParts[0]) {
+                $relPath = $relParts -join '/'
+                $newParent = Join-Path $newParent $relPath
+            }
             return Join-Path $newParent "$stem.tif"
         }
         7 {
@@ -438,7 +435,7 @@ function Process-TiffJob {
                         if ($subfileTypes -is [array]) {
                             for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
                                 $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
-                                if ($st -and $st -notin @("REDUCEDIMAGE", "REDUCED")) {
+                                if ($st -notin @("REDUCEDIMAGE", "REDUCED")) {
                                     $hasOnlyThumbnails = $false
                                     break
                                 }
@@ -632,7 +629,7 @@ if ($Mode -lt 0) {
                 }
                 [System.IO.Directory]::CreateDirectory($script:StagingDir) | Out-Null 
             }
-            if ($script:OutputDir) { 
+            if ($script:OutputDir -and -not $script:DryRun) { 
                 if (Test-Path -LiteralPath $finalDir -PathType Leaf) {
                     Write-Log "ERROR: Output path exists as a file: $finalDir" "ERROR"
                     continue
@@ -721,7 +718,7 @@ if ($Mode -lt 0) {
                             if ($subfileTypes -is [array]) {
                                 for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
                                     $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
-                                    if ($st -and $st -notin @("REDUCEDIMAGE", "REDUCED")) {
+                                    if ($st -notin @("REDUCEDIMAGE", "REDUCED")) {
                                         $hasOnlyThumbnails = $false
                                         break
                                     }
@@ -779,6 +776,34 @@ if ($Mode -lt 0) {
                     if ($result.StagingName) { $script:stagingMap[$result.FinalDst.ToLowerInvariant()] = @{ StagingName = $result.StagingName; FinalDst = $result.FinalDst } }
                     Process-Results @($result.Result)
                 }
+            }
+
+            # Move from staging to final destination (legacy mode)
+            if ($writeDir -ne $finalDir -and -not $script:DryRun) {
+                $moved = 0
+                foreach ($key in $script:stagingMap.Keys) {
+                    $stagePath = Join-Path $writeDir $script:stagingMap[$key].StagingName
+                    $destPath  = $script:stagingMap[$key].FinalDst
+                    if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
+                        try {
+                            $stageSize = (Get-Item -LiteralPath $stagePath).Length
+                            if (-not (Test-Path -LiteralPath (Split-Path $destPath -Parent))) {
+                                [System.IO.Directory]::CreateDirectory((Split-Path $destPath -Parent)) | Out-Null
+                            }
+                            Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
+                            if ((Test-Path -LiteralPath $destPath) -and ((Get-Item -LiteralPath $destPath).Length -eq $stageSize)) {
+                                $moved++
+                            } else {
+                                $script:errTotal++
+                                Write-Log "ERROR (legacy move failed) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
+                            }
+                        } catch {
+                            $script:errTotal++
+                            Write-Log "ERROR (legacy move failed) | $([System.IO.Path]::GetFileName($destPath)): $($_.Exception.Message)" "ERROR"
+                        }
+                    }
+                }
+                if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $finalDir" }
             }
         }
 
@@ -870,7 +895,9 @@ if ($Mode -eq 8 -and -not $DryRun -and [string]::IsNullOrWhiteSpace($StagingDir)
     Write-Log "Default temporary staging will be used: $defaultStaging" "WARN"
 
     $useDefault = $true
-    if ($Host.Name -eq 'ConsoleHost' -and -not [Environment]::GetCommandLineArgs().Contains('-NonInteractive')) {
+    $nonInteractiveArg = [Environment]::GetCommandLineArgs() | Where-Object { $_ -ieq '-NonInteractive' }
+    $isInteractive = ($Host.Name -eq 'ConsoleHost') -and [Environment]::UserInteractive -and (-not $nonInteractiveArg)
+    if ($isInteractive) {
         Write-Host ""
         Write-Host $msg -ForegroundColor Yellow
         Write-Host "Staging directory: $defaultStaging" -ForegroundColor Yellow
@@ -904,7 +931,7 @@ foreach ($f in $files) {
 
     # Ensure the final output directory exists before queueing the task
     $finalDstDir = [System.IO.Path]::GetDirectoryName($finalDst)
-    if (-not [string]::IsNullOrWhiteSpace($finalDstDir) -and -not (Test-Path -LiteralPath $finalDstDir)) {
+    if (-not $DryRun -and -not [string]::IsNullOrWhiteSpace($finalDstDir) -and -not (Test-Path -LiteralPath $finalDstDir)) {
         [System.IO.Directory]::CreateDirectory($finalDstDir) | Out-Null
     }
 
@@ -1080,7 +1107,7 @@ foreach ($group in $groupedTasks) {
         Write-Log "-- Group: $groupDir ($($groupTasks.Count) file(s))"
     }
 
-    if (-not (Test-Path -LiteralPath $groupDir)) {
+    if (-not $DryRun -and -not (Test-Path -LiteralPath $groupDir)) {
         [System.IO.Directory]::CreateDirectory($groupDir) | Out-Null
     }
 
@@ -1202,6 +1229,7 @@ foreach ($group in $groupedTasks) {
                 $thumbExt = if ($thumbFormat) { $thumbFormat.ToLowerInvariant() } else { "jpg" }
                 $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
                 $thumbTemp = [System.IO.Path]::GetTempFileName() + ".$thumbExt"
+                $thumbMarkerFailed = $false
                 try {
                     $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
                     if ($LASTEXITCODE -ne 0) {
@@ -1234,8 +1262,8 @@ foreach ($group in $groupedTasks) {
                         Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
                     }
                     if ($thumbExifExit -ne 0) {
-                        # Cannot log via Write-Log inside -Parallel; surface as warning in result string
-                        return @{ Result = "OK ($comp -> ZIP) [thumb marker failed] | $name"; StagingName = [System.IO.Path]::GetFileName($writeDst); OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+                        # Cannot log via Write-Log inside -Parallel; surface as warning in result string later
+                        $thumbMarkerFailed = $true
                     }
                 } finally {
                     Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
@@ -1284,6 +1312,16 @@ foreach ($group in $groupedTasks) {
                 Remove-Job $integrityJob -Force -ErrorAction SilentlyContinue
                 if ($integrityOk -and (Test-Path -LiteralPath $srcPath)) {
                     $canDeleteSource = $true
+                }
+            }
+            if ($thumbMarkerFailed) {
+                return @{
+                    Result = "WARN (exiftool failed, ZIP ok) [thumb marker failed] | $name"
+                    StagingName = $stagingName
+                    OriginalName = $name
+                    SrcPath = $srcPath
+                    FinalDst = $finalDst
+                    CanDeleteSource = $canDeleteSource
                 }
             }
             return @{

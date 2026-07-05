@@ -214,11 +214,21 @@ function Invoke-S5ProFolder {
                 $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
                 $pageCount = [int]$pageCountVal
                 if ($pageCount -gt 1) {
-                    # Detect thumbnail/MASK pages which do not count as independent multi-page images
-                    $subTypeStr = magick identify -format "%[tiff:subfiletype]\n" "$($p.Tiff)[0]" 2>$null
-                    if ($subTypeStr -and ($subTypeStr[0] -match 'REDUCEDIMAGE|REDUCED|MASK|PAGE')) {
-                        # Single logical image with extra subfile pages; treat as 1-page
+                    # Check all extra pages: only treat as single-page if every extra page is thumbnail/MASK/PAGE
+                    $hasOnlySubfilePages = $true
+                    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$($p.Tiff)" 2>$null
+                    if ($subfileTypes -is [array]) {
+                        for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
+                            $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+                            if ($st -notin @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")) {
+                                $hasOnlySubfilePages = $false
+                                break
+                            }
+                        }
                     } else {
+                        $hasOnlySubfilePages = $false
+                    }
+                    if (-not $hasOnlySubfilePages) {
                         $bagL.Add($p.Tiff) | Out-Null
                         "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"
                         continue
