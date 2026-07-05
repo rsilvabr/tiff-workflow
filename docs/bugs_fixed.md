@@ -2,7 +2,7 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
-## v1.2.3 - Data Loss Prevention & Stability Fixes
+## v2.1 - Data Loss Prevention & Stability Fixes
 
 ### 🔴 CRITICAL - Thumbnail Page Used as Source Page
 **Issue:** `-GenerateThumbnail` read the main image from page `$ThumbPage` instead of page 0.
