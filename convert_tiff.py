@@ -378,8 +378,8 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         workflow["dry_run"] = Confirm.ask("Dry-run mode?", default=False)
         
         # SafeMode and SkipLzw options
-        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (cap workers, extra checks)", default=True)
-        workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as compressed?[/cyan] (treat LZW as uncompressed)", default=False)
+        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs, cap workers)", default=True)
+        workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as already compressed?[/cyan] (LZW files will be ignored)", default=False)
 
         # ForceParallel/ForceSequential: offer to toggle detected behavior
         if cfg.config.ps_major >= 7:
@@ -399,9 +399,9 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         cfg.config.last_staging = staging
         dry = input("Dry-run? [y/N]: ").strip().lower()
         workflow["dry_run"] = (dry == "y")
-        safe = input("Safe mode? (cap workers, extra checks) [Y/n]: ").strip().lower()
+        safe = input("Safe mode? (skip multi-page TIFFs, cap workers) [Y/n]: ").strip().lower()
         workflow["safe_mode"] = (safe != "n")
-        skip_lzw = input("Skip LZW as compressed? [y/N]: ").strip().lower()
+        skip_lzw = input("Skip LZW as already compressed? (LZW files will be ignored) [y/N]: ").strip().lower()
         workflow["skip_lzw"] = (skip_lzw == "y")
         if cfg.config.ps_major >= 7:
             fp = input("Force sequential? (y/N): ").strip().lower()
@@ -580,10 +580,12 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
 
 # --- Subprocess Runner ----------------------------------------------
 
-def run_subprocess(cmd: List[str], timeout: int = 3600) -> int:
+def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
     """Run command, stream output with Rich coloring. Has configurable timeout."""
     import time
     import sys
+    import threading
+
     popen_kwargs = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
@@ -593,30 +595,55 @@ def run_subprocess(cmd: List[str], timeout: int = 3600) -> int:
         "errors": "replace",
     }
     if sys.platform == "win32":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        # Keep the child in the same console process group so Ctrl+C propagates.
+        popen_kwargs["creationflags"] = 0
+
     process = subprocess.Popen(cmd, **popen_kwargs)
+    output_queue = []
+    queue_lock = threading.Lock()
+    stop_reader = threading.Event()
+
+    def reader():
+        try:
+            for line in process.stdout:
+                with queue_lock:
+                    output_queue.append(line)
+        except Exception:
+            pass
+        finally:
+            stop_reader.set()
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+
+    def _kill_tree():
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
+                    timeout=10,
+                )
+            else:
+                process.kill()
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
 
     start_time = time.time()
     try:
         while True:
-            # Check for timeout
-            if time.time() - start_time > timeout:
-                process.kill()
-                if RICH_AVAILABLE and console:
-                    console.print(f"[red]ERROR: Process timed out after {timeout}s[/red]")
-                else:
-                    print(f"ERROR: Process timed out after {timeout}s")
-                return -1
-
-            # Poll for output (cross-platform, works on Windows)
-            line = process.stdout.readline()
-            if not line:
-                if process.poll() is not None:
-                    break
-                time.sleep(0.05)
-                continue
-            line = line.strip()
-            if line:
+            # Drain queued output
+            lines_to_print = []
+            with queue_lock:
+                lines_to_print = output_queue[:]
+                output_queue.clear()
+            for line in lines_to_print:
+                line = line.strip()
+                if not line:
+                    continue
                 if RICH_AVAILABLE and console:
                     if " OK " in line or "+ZIP" in line:
                         console.print(f"  [green]{line}[/green]")
@@ -630,19 +657,45 @@ def run_subprocess(cmd: List[str], timeout: int = 3600) -> int:
                         console.print(f"  {line}")
                 else:
                     print(f"  {line}")
+
+            if stop_reader.is_set() and process.poll() is not None:
+                break
+
+            if timeout is not None and time.time() - start_time > timeout:
+                _kill_tree()
+                if RICH_AVAILABLE and console:
+                    console.print(f"[red]ERROR: Process timed out after {timeout}s[/red]")
+                else:
+                    print(f"ERROR: Process timed out after {timeout}s")
+                return -1
+
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        _kill_tree()
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]Interrupted by user.[/yellow]")
+        else:
+            print("Interrupted by user.")
+        return -1
     except Exception as e:
-        process.kill()
+        _kill_tree()
         if RICH_AVAILABLE and console:
             console.print(f"[red]ERROR: {e}[/red]")
         else:
             print(f"ERROR: {e}")
         return -1
 
-    process.wait()
     try:
         process.stdout.close()
     except (OSError, ValueError):
         pass
+
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _kill_tree()
+        return -1
+
     if process.returncode != 0:
         if RICH_AVAILABLE and console:
             console.print(f"[red]WARNING: Process exited with code {process.returncode}[/red]")
@@ -781,18 +834,21 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     def get_dimensions(path):
         try:
             result = subprocess.run(
-                ["magick", "identify", "-format", "%w %h", str(path)],
+                ["magick", "identify", "-format", "%w %h", f"{path}[0]"],
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0:
                 parts = result.stdout.strip().split()
-                if len(parts) == 2:
+                if len(parts) >= 2:
                     return int(parts[0]), int(parts[1])
             return None, None
         except FileNotFoundError:
             return None, None
         except Exception:
             return None, None
+
+    old_w, old_h = get_dimensions(old_path)
+    new_w, new_h = get_dimensions(new_path)
 
     old_w, old_h = get_dimensions(old_path)
     new_w, new_h = get_dimensions(new_path)
@@ -805,7 +861,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
 
     try:
         result = subprocess.run(
-            ["magick", "compare", "-metric", "RMSE", str(old_path), str(new_path), "null:"],
+            ["magick", "compare", "-metric", "RMSE", f"{old_path}[0]", f"{new_path}[0]", "null:"],
             capture_output=True, text=True, timeout=120
         )
         output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
@@ -845,11 +901,12 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
     def get_depth(path):
         try:
             result = subprocess.run(
-                ["magick", "identify", "-format", "%z", str(path)],
+                ["magick", "identify", "-format", "%z", f"{path}[0]"],
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0:
-                return int(result.stdout.strip()), ""
+                first = result.stdout.strip().split()[0]
+                return int(first), ""
             err = result.stderr.strip() if result.stderr else ""
             return None, err
         except FileNotFoundError:
@@ -1042,9 +1099,9 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
                 tiff_path, (is_real, stddev, detail) = future.result()
             except Exception as e:
                 tiff_path = futures[future]
-                is_real = True
-                stddev = 1.0
-                detail = f"error: {e}"
+                is_real = False
+                stddev = 0.0
+                detail = f"ERROR: {e}"
             results.append((tiff_path, is_real, stddev, detail))
 
             if not is_real and "padded" in detail.lower():
@@ -1159,15 +1216,45 @@ def _process_single_padded(tiff_path, staging):
         except (FileNotFoundError, subprocess.TimeoutExpired):
             exif_ok = False
 
-        if tmp8.exists():
-            size_orig = tiff_path.stat().st_size
-            size_zip = tmp8.stat().st_size
-            ratio = (1 - size_zip / size_orig) * 100 if size_orig > 0 else 0
-            status = "ok"
-            return (name, parent, status, size_orig, size_zip, ratio, exif_ok, None, tmp8)
-        else:
+        if not tmp8.exists():
             status = "missing"
             return (name, parent, status, None, None, None, False, None, tmp8)
+
+        # Integrity check: ensure the compressed file decodes and dimensions match
+        try:
+            verify_result = subprocess.run(
+                ["magick", "convert", str(tmp8), "null:"],
+                capture_output=True, timeout=30
+            )
+            if verify_result.returncode != 0:
+                status = "integrity_error"
+                return (name, parent, status, None, None, None, False, None, tmp8)
+
+            dim_result = subprocess.run(
+                ["magick", "identify", "-format", "%w %h", f"{tmp8}[0]"],
+                capture_output=True, text=True, timeout=30
+            )
+            if dim_result.returncode == 0:
+                parts = dim_result.stdout.strip().split()
+                if len(parts) >= 2:
+                    orig_dims = subprocess.run(
+                        ["magick", "identify", "-format", "%w %h", f"{tiff_path}[0]"],
+                        capture_output=True, text=True, timeout=30
+                    )
+                    if orig_dims.returncode == 0:
+                        orig_parts = orig_dims.stdout.strip().split()
+                        if len(orig_parts) >= 2 and (orig_parts[0] != parts[0] or orig_parts[1] != parts[1]):
+                            status = "dimension_mismatch"
+                            return (name, parent, status, None, None, None, False, None, tmp8)
+        except Exception as e:
+            status = "integrity_error"
+            return (name, parent, status, None, None, None, False, str(e), tmp8)
+
+        size_orig = tiff_path.stat().st_size
+        size_zip = tmp8.stat().st_size
+        ratio = (1 - size_zip / size_orig) * 100 if size_orig > 0 else 0
+        status = "ok"
+        return (name, parent, status, size_orig, size_zip, ratio, exif_ok, None, tmp8)
     finally:
         if status and status != "ok" and tmp8.exists():
             try:
@@ -1227,6 +1314,11 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 console.print(f"    [red]FAILED: output missing[/red]")
             else:
                 print(f"    FAILED: output missing")
+        elif status in ("integrity_error", "dimension_mismatch"):
+            if RICH_AVAILABLE and console:
+                console.print(f"    [red]FAILED: {status}[/red]")
+            else:
+                print(f"    FAILED: {status}")
         elif status == "ok":
             if not exif_ok:
                 # Do NOT overwrite original if EXIF was lost

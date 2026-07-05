@@ -22,13 +22,14 @@ param(
     [switch]$ForceParallel,         # force parallelism ON (use if PS5 detected but pwsh available)
     [switch]$ForceSequential,       # force parallelism OFF (use if PS7 detected but want sequential)
     [string]$StagingDir = "",
-    
+    [ValidateSet("Skip", "Numbered", "Overwrite")][string]$DuplicateAction = "Numbered",
+
     # Thumbnail generation
     [switch]$GenerateThumbnail,     # Generate embedded thumbnail in TIFF
     [int]$ThumbSize = 256,          # Thumbnail size in pixels
     [string]$ThumbQuality = "85",   # JPEG quality for thumbnail
     [string]$ThumbFormat = "jpg",   # Thumbnail format (jpg, png, etc.)
-    [int]$ThumbPage = 1,            # Page number for thumbnail (0=first, 1=after main, etc.)
+    [int]$ThumbPage = 1,            # Output page position for the embedded thumbnail (0=first, 1=after main, etc.)
     [switch]$SkipCompressedWithThumb  # Skip TIFFs that are already compressed AND have thumbnail
 )
 # -----------------------------------------------------------------
@@ -44,13 +45,14 @@ $script:OutputDir  = $OutputDir
 $script:StagingDir = $StagingDir
 $script:Overwrite  = $Overwrite.IsPresent
 $script:Mode       = $Mode
-$script:DeleteSource = $false
+$script:DeleteSource = $DeleteSource.IsPresent
 $script:MagickTimeout = 30
 $script:GenerateThumbnail = $GenerateThumbnail.IsPresent
 $script:ThumbSize = $ThumbSize
 $script:ThumbQuality = $ThumbQuality
 $script:ThumbPage = $ThumbPage
 $script:SkipCompressedWithThumb = $SkipCompressedWithThumb.IsPresent
+$script:DuplicateAction = $DuplicateAction
 
 # -----------------------------------------------------------------
 
@@ -395,14 +397,14 @@ function Process-TiffJob {
         Remove-Item $argComp -Force -ErrorAction SilentlyContinue
     }
     if ($exifExit -ne 0 -or -not $comp) {
-        return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name }
+        return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
     }
     if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-        return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name }
+        return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
     }
 
     if ((Test-Path -LiteralPath $finalDst) -and -not $overWrite -and ($finalDst -ne $srcPath)) {
-        return @{ Result = "SKIP (exists) | $name"; StagingName = $null; OriginalName = $name }
+        return @{ Result = "SKIP (exists) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
     }
 
     if ($safeMode) {
@@ -414,11 +416,11 @@ function Process-TiffJob {
             $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
             if ($pageCountJob.State -eq 'Running') {
                 Stop-Job $pageCountJob
-                return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+                return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
             $pageCountStr = $pageCountJob | Receive-Job
             if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
-                return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+                return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
         } finally {
             if ($pageCountJob) {
@@ -428,68 +430,81 @@ function Process-TiffJob {
         $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
         $pageCount = [int]$pageCountVal
         if ($pageCount -gt 1) {
-            # Check if all extra pages are thumbnails (subfiletype=1)
-            $hasOnlyThumbnails = $true
-            $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
-            if ($subfileTypes -is [array]) {
-                for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
-                    if ($subfileTypes[$i] -ne "1") {
-                        $hasOnlyThumbnails = $false
-                        break
-                    }
-                }
-            } else {
-                $hasOnlyThumbnails = $false
-            }
-            if (-not $hasOnlyThumbnails) {
+                        # Check if all extra pages are thumbnails (subfiletype=ReducedImage)
+                        $hasOnlyThumbnails = $true
+                        $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
+                        if ($subfileTypes -is [array]) {
+                            for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
+                                $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+                                if ($st -and $st -notin @("REDUCEDIMAGE", "REDUCED")) {
+                                    $hasOnlyThumbnails = $false
+                                    break
+                                }
+                            }
+                        } else {
+                            $hasOnlyThumbnails = $false
+                        }
+                        if (-not $hasOnlyThumbnails) {
                 $script:multiPagePaths.Add($srcPath) | Out-Null
-                return @{ Result = "MULTI ($pageCount pages - skipped) | $name"; StagingName = $null; OriginalName = $name; MultiPagePath = $srcPath }
+                return @{ Result = "MULTI ($pageCount pages - skipped) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; MultiPagePath = $srcPath }
             }
             # If only thumbnails, continue processing page 0
         }
     }
 
     if ($dryRun) {
-        return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+        return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
     }
 
     # Build compression command
     if ($generateThumb) {
-        # Compress page 0 only, then add thumbnail as page 1
-        $mainPage = "$srcPath[$thumbPage]"
+        # Always read the main image from page 0; thumbnail will be placed at $thumbPage
+        $mainPage = "$srcPath[0]"
+        $thumbExt = if ($thumbFormat) { $thumbFormat.ToLowerInvariant() } else { "jpg" }
         $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
-        $thumbTemp = [System.IO.Path]::GetTempFileName() + ".jpg"
+        $thumbTemp = [System.IO.Path]::GetTempFileName() + ".$thumbExt"
         
         try {
             # First: compress main image
             $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
             if ($LASTEXITCODE -ne 0) {
-                return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name }
+                return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
             
             # Generate thumbnail: convert to sRGB, strip ICC, resize
-            $thumbResult = magick -quiet $mainPage -colorspace sRGB -strip -thumbnail "${thumbSize}x${thumbSize}>" -quality $thumbQuality $thumbTemp 2>&1
+            $thumbCmd = @("-quiet", $mainPage, "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSize}x${thumbSize}>")
+            if ($thumbExt -eq "jpg") { $thumbCmd += "-quality", $thumbQuality }
+            $thumbCmd += "$thumbExt`:$thumbTemp"
+            $thumbResult = magick @thumbCmd 2>&1
             if ($LASTEXITCODE -ne 0) {
                 # If thumbnail fails, just copy the compressed TIFF
                 Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
-                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
             }
             
-            # Combine: main TIFF + thumbnail as page 1
-            $out = magick -quiet $tempTiff $thumbTemp -compress zip $writeDst 2>&1
+            # Combine: main TIFF + thumbnail at configured page position
+            if ($thumbPage -le 0) {
+                $out = magick -quiet "$thumbExt`:$thumbTemp" $tempTiff -compress zip $writeDst 2>&1
+            } else {
+                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
+            }
             if ($LASTEXITCODE -ne 0) {
                 # Fallback: just use compressed main
                 Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
-                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
             }
             
-            # Mark second page as thumbnail (subfiletype=1)
+            # Mark thumbnail page as ReducedResolution (subfiletype=1)
             $argThumb = [System.IO.Path]::GetTempFileName()
             try {
-                [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType=ReducedResolution`n$writeDst`n")
-                exiftool -@ $argThumb | Out-Null
+                [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType#=1`n$writeDst`n")
+                $thumbExifOut = exiftool -@ $argThumb 2>&1
+                $thumbExifExit = $LASTEXITCODE
             } finally {
                 Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
+            }
+            if ($thumbExifExit -ne 0) {
+                Write-Log "WARN (thumbnail SubfileType marker failed) | $name | $thumbExifOut" "WARN"
             }
         } finally {
             Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
@@ -499,7 +514,7 @@ function Process-TiffJob {
         # Normal compression (all pages or page 0)
         $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
         if ($LASTEXITCODE -ne 0) {
-            return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name }
+            return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
         }
     }
 
@@ -521,30 +536,31 @@ function Process-TiffJob {
             Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
         }
         if ($LASTEXITCODE -ne 0) {
-            return @{ Result = "WARN (exiftool failed, ZIP ok) | $name"; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst }
+            return @{ Result = "WARN (exiftool failed, ZIP ok) | $name"; StagingName = $stagingName; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
         }
     }
 
-    $deleted = $false
+    $canDeleteSource = $false
     if ($deleteSource -and $mode -eq 8) {
         $stagingUsed = ($writeDst -ne $srcPath)
         if ($stagingUsed) {
             if ((_Verify-ZipIntegrity $writeDst) -and (Test-Path -LiteralPath $srcPath)) {
-                Remove-Item -LiteralPath $srcPath -Force
-                $deleted = $true
+                $canDeleteSource = $true
             }
         } else {
             if ((_Verify-ZipIntegrity $srcPath) -and (Test-Path -LiteralPath $srcPath)) {
-                $deleted = $true
+                $canDeleteSource = $true
             }
         }
     }
 
     return @{
-        Result = "OK ($comp -> ZIP)$(if ($deleted) { ' [SOURCE DELETED]' } else { '' }) | $name"
+        Result = "OK ($comp -> ZIP)$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
         StagingName = $stagingName
         OriginalName = $name
+        SrcPath = $srcPath
         FinalDst = $finalDst
+        CanDeleteSource = $canDeleteSource
     }
 }
 
@@ -700,7 +716,8 @@ if ($Mode -lt 0) {
                             $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$src" 2>$null
                             if ($subfileTypes -is [array]) {
                                 for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
-                                    if ($subfileTypes[$i] -ne "1") {
+                                    $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+                                    if ($st -and $st -notin @("REDUCEDIMAGE", "REDUCED")) {
                                         $hasOnlyThumbnails = $false
                                         break
                                     }
@@ -714,10 +731,10 @@ if ($Mode -lt 0) {
                         }
                     }
 
-                    if ($dryL) { return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name } }
+                    if ($dryL) { return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath } }
 
                     $out = magick -quiet $src -compress zip $writeDst 2>&1
-                    if ($LASTEXITCODE -ne 0) { return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name } }
+                    if ($LASTEXITCODE -ne 0) { return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath } }
 
                     $argExif = [System.IO.Path]::GetTempFileName()
                     try {
@@ -757,42 +774,6 @@ if ($Mode -lt 0) {
                     if ($result.StagingName) { $script:stagingMap[$result.FinalDst.ToLowerInvariant()] = @{ StagingName = $result.StagingName; FinalDst = $result.FinalDst } }
                     Process-Results @($result.Result)
                 }
-            }
-
-            if ($script:StagingDir -and -not $script:DryRun) {
-                $moved = 0
-                foreach ($f in $groupFiles) {
-                    # Resolve-Output always returns .tif extension, but $f.Name may be .tiff
-                    $expectedName = "$([System.IO.Path]::GetFileNameWithoutExtension($f.Name)).tif"
-                    $destPath = Join-Path $finalDir $expectedName
-                    $destKey = $destPath.ToLowerInvariant()
-                    if (-not $script:stagingMap.ContainsKey($destKey)) { continue }
-                    $stagingName = $script:stagingMap[$destKey].StagingName
-                    $stagePath = Join-Path $script:StagingDir $stagingName
-                    if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
-                        $stageSize = (Get-Item -LiteralPath $stagePath).Length
-                        try {
-                            Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
-                            if (Test-Path -LiteralPath $destPath) {
-                                $destSize = (Get-Item -LiteralPath $destPath).Length
-                                if ($destSize -eq $stageSize) {
-                                    $moved++
-                                } else {
-                                    $script:errTotal++
-                                    Write-Log "ERROR (size mismatch after move) | $($f.Name)" "ERROR"
-                                }
-                            } else {
-                                $script:errTotal++
-                                Write-Log "ERROR (move failed) | $($f.Name)" "ERROR"
-                            }
-                        } catch {
-                            $script:errTotal++
-                            $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
-                            Write-Log "ERROR (move exception) | $($f.Name): $errMsg" "ERROR"
-                        }
-                    }
-                }
-                if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $finalDir" }
             }
         }
 
@@ -852,7 +833,10 @@ Write-Log "Mode: $Mode | Workers: $Workers | OutputDir: $(if ($OutputDir) { $Out
 $allFiles = @()
 foreach ($inputRoot in $inputRoots) {
     $dirFiles = @(Get-Files-ForMode $Mode $inputRoot)
-    $allFiles += $dirFiles
+    foreach ($df in $dirFiles) {
+        $df | Add-Member -NotePropertyName 'InputRoot' -NotePropertyValue $inputRoot -Force
+        $allFiles += $df
+    }
     if ($inputRoots.Count -gt 1 -and $dirFiles.Count -gt 0) {
         Write-Log "  Found $($dirFiles.Count) TIFF(s) in: $inputRoot"
     }
@@ -872,14 +856,50 @@ $oldTiffsCount = ($files | Where-Object { $_.DirectoryName -match '(?i)[\\/]OLD_
 $oldTiffsNote = if ($oldTiffsCount -gt 0) { " ($oldTiffsCount in OLD_TIFFs)" } else { "" }
 Write-Log "Found: $($script:total) TIFF(s)$oldTiffsNote"
 
+# Mode 8 always requires staging to protect originals until verification.
+if ($Mode -eq 8 -and -not $DryRun -and [string]::IsNullOrWhiteSpace($StagingDir)) {
+    $defaultStaging = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "compress_tiff_zip_mode8_$([guid]::NewGuid().ToString('N'))")
+    $msg = "Mode 8 deletes source files after compression. A staging directory is required to avoid overwriting originals before verification."
+    Write-Log $msg "WARN"
+    Write-Log "Recommended: provide -StagingDir on a fast local drive." "WARN"
+    Write-Log "Default temporary staging will be used: $defaultStaging" "WARN"
+
+    $useDefault = $true
+    if ($Host.Name -eq 'ConsoleHost' -and -not [Environment]::GetCommandLineArgs().Contains('-NonInteractive')) {
+        Write-Host ""
+        Write-Host $msg -ForegroundColor Yellow
+        Write-Host "Staging directory: $defaultStaging" -ForegroundColor Yellow
+        $answer = Read-Host "Use default temporary staging? [Y/n]"
+        if ($answer -and $answer.Trim().ToLower().StartsWith('n')) {
+            $useDefault = $false
+        }
+    }
+
+    if (-not $useDefault) {
+        Write-Log "Mode 8 aborted: no staging directory selected." "ERROR"
+        return
+    }
+    $StagingDir = $defaultStaging
+    $script:StagingDir = $StagingDir
+    if (-not (Test-Path -LiteralPath $StagingDir)) {
+        [System.IO.Directory]::CreateDirectory($StagingDir) | Out-Null
+    }
+}
+
 # Build (src, writeDst, finalDst) tasks grouped by output directory
 $tasks = @()
 $usedNames = @{}  # Track allocated names per output directory to avoid collisions
 foreach ($f in $files) {
-    # Use the file's directory as the input root for path resolution
-    $fileInputRoot = $f.DirectoryName
+    # Use the original input root provided by the user for path resolution
+    $fileInputRoot = if ($f.InputRoot) { $f.InputRoot } else { $f.DirectoryName }
     $finalDst = Resolve-Output $f $Mode $fileInputRoot $OutputDir $ZipSuffix $ZipSubfolderName $ExportMarker $ExportZipSubfolder $Overwrite.IsPresent
     if (-not $finalDst) { continue }
+
+    # Ensure the final output directory exists before queueing the task
+    $finalDstDir = [System.IO.Path]::GetDirectoryName($finalDst)
+    if (-not [string]::IsNullOrWhiteSpace($finalDstDir) -and -not (Test-Path -LiteralPath $finalDstDir)) {
+        [System.IO.Directory]::CreateDirectory($finalDstDir) | Out-Null
+    }
 
     # Mode 2: Detect name collisions across different source folders
     if ($Mode -eq 2) {
@@ -888,15 +908,36 @@ foreach ($f in $files) {
         if (-not $usedNames.ContainsKey($destDir)) {
             $usedNames[$destDir] = @()
         }
+        $skipThisFile = $false
         if ($destName -in $usedNames[$destDir]) {
-            # Collision: append unique suffix
-            $uniq = [guid]::NewGuid().ToString('N').Substring(0, 8)
             $stem = [System.IO.Path]::GetFileNameWithoutExtension($destName)
             $ext = [System.IO.Path]::GetExtension($destName)
-            $destName = "${stem}_${uniq}${ext}"
-            $finalDst = Join-Path $destDir $destName
+            switch ($script:DuplicateAction) {
+                'Skip' {
+                    Write-Log "SKIP (duplicate filename in flat output) | $($f.Name)" "INFO"
+                    $script:skipTotal++
+                    $script:counterTotal++
+                    $skipThisFile = $true
+                }
+                'Overwrite' {
+                    # keep candidate as-is; Overwrite switch will allow replacement
+                }
+                default { # Numbered
+                    $counter = 2
+                    do {
+                        $candidateName = "${stem}_v${counter}${ext}"
+                        $candidatePath = Join-Path $destDir $candidateName
+                        $counter++
+                    } while (($candidateName -in $usedNames[$destDir]) -or (Test-Path -LiteralPath $candidatePath))
+                    $destName = $candidateName
+                    $finalDst = $candidatePath
+                }
+            }
         }
-        $usedNames[$destDir] += $destName
+        if ($skipThisFile) { continue }
+        if ($destName) {
+            $usedNames[$destDir] += $destName
+        }
     }
 
     $writeDst = if ($StagingDir -and -not $DryRun) {
@@ -1076,20 +1117,30 @@ foreach ($group in $groupedTasks) {
                 Remove-Item $argComp -Force -ErrorAction SilentlyContinue
             }
             if ($exifExit -ne 0 -or -not $comp) {
-                return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name }
+                return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
             if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
                 # Check if already has thumbnail when SkipCompressedWithThumb is enabled
                 if ($skipCompressedWithThumb) {
-                    $subfileType = magick identify -format "%[tiff:subfiletype]" "$srcPath" 2>$null
-                    if ($subfileType -eq "1") {
-                        return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name }
+                    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
+                    $hasThumb = $false
+                    if ($subfileTypes -is [array]) {
+                        for ($i = 0; $i -lt $subfileTypes.Count; $i++) {
+                            $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+                            if ($st -in @("REDUCEDIMAGE", "REDUCED")) {
+                                $hasThumb = $true
+                                break
+                            }
+                        }
+                    }
+                    if ($hasThumb) {
+                        return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                     }
                 }
-                return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name }
+                return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
             if ((Test-Path -LiteralPath $finalDst) -and -not $overWrite -and ($finalDst -ne $srcPath)) {
-                return @{ Result = "SKIP (exists) | $name"; StagingName = $null; OriginalName = $name }
+                return @{ Result = "SKIP (exists) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
             if ($safeMode) {
                 $srcCapture = $srcPath
@@ -1099,11 +1150,11 @@ foreach ($group in $groupedTasks) {
                     $pageCountJob | Wait-Job -Timeout $magickTimeout | Out-Null
                     if ($pageCountJob.State -eq 'Running') {
                         Stop-Job $pageCountJob
-                        return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+                        return @{ Result = "ERROR (magick timeout) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                     }
                     $pageCountStr = $pageCountJob | Receive-Job
                     if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
-                        return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name }
+                        return @{ Result = "ERROR (magick page count failed) | $name | possibly corrupted"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                     }
                 } finally {
                     if ($pageCountJob) {
@@ -1113,12 +1164,13 @@ foreach ($group in $groupedTasks) {
                 $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
                 $pageCount = [int]$pageCountVal
                 if ($pageCount -gt 1) {
-                    # Check if all extra pages are thumbnails (subfiletype=1)
+                    # Check if all extra pages are thumbnails (subfiletype=ReducedImage)
                     $hasOnlyThumbnails = $true
                     $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$srcPath" 2>$null
                     if ($subfileTypes -is [array]) {
                         for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $pageCount; $i++) {
-                            if ($subfileTypes[$i] -ne "1") {
+                            $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+                            if ($st -and $st -notin @("REDUCEDIMAGE", "REDUCED")) {
                                 $hasOnlyThumbnails = $false
                                 break
                             }
@@ -1133,35 +1185,48 @@ foreach ($group in $groupedTasks) {
                 }
             }
             if ($dryRun) {
-                return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name }
+                return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
             
             if ($generateThumb) {
-                # Compress page 0 only, then add thumbnail as page 1
-                $mainPage = "$srcPath[$thumbPage]"
+                # Always read the main image from page 0; thumbnail will be placed at $thumbPage
+                $mainPage = "$srcPath[0]"
+                $thumbExt = if ($thumbFormat) { $thumbFormat.ToLowerInvariant() } else { "jpg" }
                 $tempTiff = [System.IO.Path]::GetTempFileName() + ".tif"
-                $thumbTemp = [System.IO.Path]::GetTempFileName() + ".jpg"
+                $thumbTemp = [System.IO.Path]::GetTempFileName() + ".$thumbExt"
                 try {
                     $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
                     if ($LASTEXITCODE -ne 0) {
-                        return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name }
+                        return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                     }
-                    $thumbResult = magick -quiet $mainPage -colorspace sRGB -strip -thumbnail "${thumbSize}x${thumbSize}>" -quality $thumbQuality $thumbTemp 2>&1
+                    $thumbCmd = @("-quiet", $mainPage, "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSize}x${thumbSize}>")
+                    if ($thumbExt -eq "jpg") { $thumbCmd += "-quality", $thumbQuality }
+                    $thumbCmd += "$thumbExt`:$thumbTemp"
+                    $thumbResult = magick @thumbCmd 2>&1
                     if ($LASTEXITCODE -ne 0) {
                         Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
-                        return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                        return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                     }
-                    $out = magick -quiet $tempTiff $thumbTemp -compress zip $writeDst 2>&1
+                    if ($thumbPage -le 0) {
+                        $out = magick -quiet "$thumbExt`:$thumbTemp" $tempTiff -compress zip $writeDst 2>&1
+                    } else {
+                        $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
+                    }
                     if ($LASTEXITCODE -ne 0) {
                         Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
-                        return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                        return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                     }
                     $argThumb = [System.IO.Path]::GetTempFileName()
                     try {
-                        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType=ReducedResolution`n$writeDst`n")
-                        exiftool -@ $argThumb | Out-Null
+                        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-IFD1:SubfileType#=1`n$writeDst`n")
+                        $thumbExifOut = exiftool -@ $argThumb 2>&1
+                        $thumbExifExit = $LASTEXITCODE
                     } finally {
                         Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
+                    }
+                    if ($thumbExifExit -ne 0) {
+                        # Cannot log via Write-Log inside -Parallel; surface as warning in result string
+                        return @{ Result = "OK ($comp -> ZIP) [thumb marker failed] | $name"; StagingName = [System.IO.Path]::GetFileName($writeDst); OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                     }
                 } finally {
                     Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
@@ -1195,7 +1260,7 @@ foreach ($group in $groupedTasks) {
                     return @{ Result = "WARN (exiftool failed, ZIP ok) | $name"; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst }
                 }
             }
-            $deleted = $false
+            $canDeleteSource = $false
             if ($deleteSource -and $mode -eq 8) {
                 # Inline ZIP integrity check (functions are not accessible in -Parallel scope)
                 $verifyPath = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
@@ -1208,40 +1273,93 @@ foreach ($group in $groupedTasks) {
                     $integrityOk = [int]$integrityExit -eq 0
                 }
                 Remove-Job $integrityJob -Force -ErrorAction SilentlyContinue
-                if ($integrityOk) {
-                    if ($writeDst -ne $srcPath -and (Test-Path -LiteralPath $srcPath)) {
-                        # Staging was used: srcPath is the original, writeDst is the ZIP
-                        Remove-Item -LiteralPath $srcPath -Force
-                        $deleted = $true
-                    } elseif ($writeDst -eq $srcPath) {
-                        # No staging: magick already compressed in-place, nothing to delete
-                        $deleted = $true
-                    }
+                if ($integrityOk -and (Test-Path -LiteralPath $srcPath)) {
+                    $canDeleteSource = $true
                 }
             }
             return @{
-                Result = "OK ($comp -> ZIP)$(if ($deleted) { ' [SOURCE DELETED]' } else { '' }) | $name"
+                Result = "OK ($comp -> ZIP)$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
                 StagingName = $stagingName
                 OriginalName = $name
+                SrcPath = $srcPath
                 FinalDst = $finalDst
+                CanDeleteSource = $canDeleteSource
             }
         } -ThrottleLimit $effectiveWorkers
 
         # Process results sequentially (avoids scope issues with Process-Results)
         # Use FinalDst as key to handle duplicate filenames across different folders
         $errBefore = $script:errTotal
+        $errorSrcPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($r in $parallelResults) {
             if ($r.StagingName) { $script:stagingMap[$r.FinalDst.ToLowerInvariant()] = @{ StagingName = $r.StagingName; FinalDst = $r.FinalDst } }
             if ($r.MultiPagePath) { $script:multiPagePaths.Add($r.MultiPagePath) | Out-Null }
+            if ($r.SrcPath -and $r.Result -and $r.Result.StartsWith("ERROR")) { $errorSrcPaths.Add($r.SrcPath) | Out-Null }
             Process-Results @($r.Result)
         }
         $groupErrs = $script:errTotal - $errBefore
-        # Rollback: if errors occurred on files moved to OLD_TIFFs, restore originals
+
+        # Move from staging to final destination before rollback, so rollback can check FinalDst
+        if ($StagingDir -and -not $DryRun) {
+            $moved = 0
+            foreach ($t in $groupTasks) {
+                $key = $t.FinalDst.ToLowerInvariant()
+                if (-not $script:stagingMap.ContainsKey($key)) { continue }
+                $stagingName = $script:stagingMap[$key].StagingName
+                $stagePath = Join-Path $StagingDir $stagingName
+                $destPath  = $t.FinalDst
+
+                if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
+                    try {
+                        $stageSize = (Get-Item -LiteralPath $stagePath).Length
+                        Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
+                        if (Test-Path -LiteralPath $destPath) {
+                            $destSize = (Get-Item -LiteralPath $destPath).Length
+                            if ($destSize -eq $stageSize) {
+                                $moved++
+                            } else {
+                                $script:errTotal++
+                                Write-Log "ERROR (size mismatch after move) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
+                            }
+                        } else {
+                            $script:errTotal++
+                            Write-Log "ERROR (move failed) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
+                        }
+                    } catch {
+                        $script:errTotal++
+                        $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+                        Write-Log "ERROR (move exception) | $([System.IO.Path]::GetFileName($destPath)): $errMsg" "ERROR"
+                    }
+                }
+            }
+            if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $groupDir" }
+        }
+
+        # Mode 8: delete source files only after successful move to final destination
+        if ($Mode -eq 8 -and -not $DryRun) {
+            $deletedCount = 0
+            foreach ($r in $parallelResults) {
+                if ($r.CanDeleteSource -and $r.SrcPath -and (Test-Path -LiteralPath $r.SrcPath)) {
+                    if (Test-Path -LiteralPath $r.FinalDst) {
+                        try {
+                            Remove-Item -LiteralPath $r.SrcPath -Force
+                            $deletedCount++
+                        } catch {
+                            Write-Log "ERROR (failed to delete source after move) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
+                        }
+                    } else {
+                        Write-Log "ERROR (final destination missing, source preserved) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
+                    }
+                }
+            }
+            if ($deletedCount -gt 0) { Write-Log "  -> Deleted $deletedCount source file(s) after successful move" }
+        }
+
+        # Rollback: if errors occurred on files moved to OLD_TIFFs, restore originals only when FinalDst is missing
         if ($groupErrs -gt 0) {
             $failedCount = 0
             foreach ($t in $groupTasks) {
-                if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup) {
-                    # Only rollback if the ZIP wasn't created successfully
+                if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup -and $errorSrcPaths.Contains($t.Src)) {
                     if (Test-Path -LiteralPath $t.FinalDst) {
                         Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
                         continue
@@ -1267,21 +1385,81 @@ foreach ($group in $groupedTasks) {
     } else {
         # PS5.1: sequential (no -Parallel support)
         $errBefore = $script:errTotal
+        $errorSrcPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $sequentialResults = @()
         foreach ($t in $groupTasks) {
             $result = Process-TiffJob $t.Src $t.WriteDst $t.FinalDst `
                                 $DryRun $Overwrite $SafeMode `
                                 $SkipLzwAsCompressed $DeleteSource $Mode `
                                 $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbPage
             if ($result.StagingName) { $script:stagingMap[$t.FinalDst.ToLowerInvariant()] = @{ StagingName = $result.StagingName; FinalDst = $t.FinalDst } }
+            if ($result.SrcPath -and $result.Result -and $result.Result.StartsWith("ERROR")) { $errorSrcPaths.Add($result.SrcPath) | Out-Null }
+            $sequentialResults += $result
             Process-Results @($result.Result)
         }
         $groupErrs = $script:errTotal - $errBefore
-        # Rollback for PS5
+
+        # Move from staging to final destination before rollback, so rollback can check FinalDst
+        if ($StagingDir -and -not $DryRun) {
+            $moved = 0
+            foreach ($t in $groupTasks) {
+                $key = $t.FinalDst.ToLowerInvariant()
+                if (-not $script:stagingMap.ContainsKey($key)) { continue }
+                $stagingName = $script:stagingMap[$key].StagingName
+                $stagePath = Join-Path $StagingDir $stagingName
+                $destPath  = $t.FinalDst
+
+                if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
+                    try {
+                        $stageSize = (Get-Item -LiteralPath $stagePath).Length
+                        Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
+                        if (Test-Path -LiteralPath $destPath) {
+                            $destSize = (Get-Item -LiteralPath $destPath).Length
+                            if ($destSize -eq $stageSize) {
+                                $moved++
+                            } else {
+                                $script:errTotal++
+                                Write-Log "ERROR (size mismatch after move) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
+                            }
+                        } else {
+                            $script:errTotal++
+                            Write-Log "ERROR (move failed) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
+                        }
+                    } catch {
+                        $script:errTotal++
+                        $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+                        Write-Log "ERROR (move exception) | $([System.IO.Path]::GetFileName($destPath)): $errMsg" "ERROR"
+                    }
+                }
+            }
+            if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $groupDir" }
+        }
+
+        # Mode 8: delete source files only after successful move to final destination
+        if ($Mode -eq 8 -and -not $DryRun) {
+            $deletedCount = 0
+            foreach ($r in $sequentialResults) {
+                if ($r.CanDeleteSource -and $r.SrcPath -and (Test-Path -LiteralPath $r.SrcPath)) {
+                    if (Test-Path -LiteralPath $r.FinalDst) {
+                        try {
+                            Remove-Item -LiteralPath $r.SrcPath -Force
+                            $deletedCount++
+                        } catch {
+                            Write-Log "ERROR (failed to delete source after move) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
+                        }
+                    } else {
+                        Write-Log "ERROR (final destination missing, source preserved) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
+                    }
+                }
+            }
+            if ($deletedCount -gt 0) { Write-Log "  -> Deleted $deletedCount source file(s) after successful move" }
+        }
+
+        # Rollback for PS5: restore originals only for tasks that reported ERROR and have no FinalDst
         if ($groupErrs -gt 0) {
             $failedCount = 0
             foreach ($t in $groupTasks) {
-                if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup) {
-                    # Only rollback if the ZIP wasn't created successfully
+                if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup -and $errorSrcPaths.Contains($t.Src)) {
                     if (Test-Path -LiteralPath $t.FinalDst) {
                         Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
                         continue
@@ -1305,41 +1483,6 @@ foreach ($group in $groupedTasks) {
             }
             if ($failedCount -gt 0) { Write-Log "  -> Rolled back $failedCount file(s) from OLD_TIFFs" "WARN" }
         }
-    }
-
-    if ($StagingDir -and -not $DryRun) {
-        $moved = 0
-        foreach ($t in $groupTasks) {
-            $key = $t.FinalDst.ToLowerInvariant()
-            if (-not $script:stagingMap.ContainsKey($key)) { continue }
-            $stagingName = $script:stagingMap[$key].StagingName
-            $stagePath = Join-Path $StagingDir $stagingName
-            $destPath  = $t.FinalDst
-
-            if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
-                try {
-                    $stageSize = (Get-Item -LiteralPath $stagePath).Length
-                    Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
-                    if (Test-Path -LiteralPath $destPath) {
-                        $destSize = (Get-Item -LiteralPath $destPath).Length
-                        if ($destSize -eq $stageSize) {
-                            $moved++
-                        } else {
-                            $script:errTotal++
-                            Write-Log "ERROR (size mismatch after move) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
-                        }
-                    } else {
-                        $script:errTotal++
-                        Write-Log "ERROR (move failed) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
-                    }
-                } catch {
-                    $script:errTotal++
-                    $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
-                    Write-Log "ERROR (move exception) | $([System.IO.Path]::GetFileName($destPath)): $errMsg" "ERROR"
-                }
-            }
-        }
-        if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $groupDir" }
     }
 }
 

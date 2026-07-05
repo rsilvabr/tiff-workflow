@@ -65,6 +65,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-ForceParallel` | switch | off | Force parallelism ON (use if PS5 detected but pwsh is available) |
 | `-ForceSequential` | switch | off | Force parallelism OFF (use if PS7 detected but want sequential) |
 | `-StagingDir` | string | `""` | SSD staging folder for faster I/O. Files moved to final destination after each group |
+| `-DuplicateAction` | string | `"Numbered"` | Mode 2 collision handling: `Skip`, `Numbered` (v2, v3...), or `Overwrite` |
 
 ### Thumbnail Generation (v1.2+)
 
@@ -72,8 +73,9 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 |-----------|------|---------|-------------|
 | `-GenerateThumbnail` | switch | off | Embed thumbnail as additional page in TIFF |
 | `-ThumbSize` | int | `256` | Thumbnail size in pixels (max width/height) |
-| `-ThumbQuality` | string | `"85"` | JPEG quality for thumbnail |
-| `-ThumbPage` | int | `1` | Page number for thumbnail (0=first, 1=after main image) |
+| `-ThumbQuality` | string | `"85"` | JPEG quality for thumbnail (JPEG only) |
+| `-ThumbPage` | int | `1` | Output page position for embedded thumbnail (`0`=first, `1`=after main image) |
+| `-ThumbFormat` | string | `"jpg"` | Thumbnail format: `jpg`, `png`, or `tif` |
 | `-SkipCompressedWithThumb` | switch | off | Skip TIFFs that are already compressed AND have thumbnail |
 
 **Example:**
@@ -86,6 +88,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -Th
 - Page 0: Original image (compressed with ZIP/Deflate)
 - Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved)
 - Thumbnail page marked with `subfiletype=1` (reduced resolution flag)
+- The main image is always read from page 0; `-ThumbPage` controls where the thumbnail is inserted in the output.
 
 ---
 
@@ -155,10 +158,13 @@ Files are written to staging with UUID names, then moved to final destination af
 
 ## Delete Source (Mode 8)
 
-Mode 8 deletes the original TIFF after successful ZIP compression. Deletion only happens if:
-1. ZIP file was created successfully
-2. `magick identify` verifies ZIP integrity
-3. Source file still exists
+Mode 8 deletes the original TIFF after successful ZIP compression. **Mode 8 always requires a staging directory** to avoid overwriting the original before verification. If `-StagingDir` is not provided, a temporary directory under `%TEMP%` is used and you are prompted to confirm.
+
+Deletion only happens if:
+1. ZIP file was created successfully in staging
+2. `magick convert file null:` verifies ZIP integrity
+3. File was moved successfully to the final destination
+4. Source file still exists
 
 If any check fails, the source is preserved.
 

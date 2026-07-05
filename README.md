@@ -243,4 +243,4 @@ MIT License — feel free to use, modify, and distribute.
 
 - [ExifTool](https://exiftool.org) by Phil Harvey for metadata handling
 - [ImageMagick](https://imagemagick.org) for TIFF processing and compression
-- [Kimi](https://www.kimi.com) (Moonshot AI) and [MiniMax](https://www.minimax.io/) (MiniMax AI) for code assistance and technical discussion
+- [Kimi](https://www.kimi.com) (Moonshot AI) and [Claude](https://www.anthropic.com/claude) (Anthropic) for code assistance and technical discussion

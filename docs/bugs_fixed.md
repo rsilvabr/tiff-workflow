@@ -2,6 +2,112 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## v1.2.3 - Data Loss Prevention & Stability Fixes
+
+### 🔴 CRITICAL - Thumbnail Page Used as Source Page
+**Issue:** `-GenerateThumbnail` read the main image from page `$ThumbPage` instead of page 0.
+- **Root Cause:** Commit `6b08bbb` replaced `[0]` with `[$thumbPage]` in the wrong place; `ThumbPage` was intended as the output position for the thumbnail, not the source page.
+- **Impact:** Single-page TIFFs failed with "no images defined"; multi-page TIFFs with existing thumbnails compressed the thumbnail instead of the main image, causing silent data loss.
+- **Fix:** Always read the main image from `[0]`; `ThumbPage` now controls where the thumbnail is inserted in the output.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 CRITICAL - Rollback + Staging Destroyed Originals
+**Issue:** In modes 0/9 with `-StagingDir`, successful files lost their originals when any file in the group errored.
+- **Root Cause:** Rollback checked `Test-Path $t.FinalDst`, which is false while files are still in staging, so it "restored" the original from `OLD_TIFFs/` and the subsequent staging move overwrote it.
+- **Fix:** Rollback now uses the task result (`Result -like "ERROR*"`) and staging is moved to the final destination *before* rollback runs.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 CRITICAL - Mode 8 Staging Trap Deleted Only Copy
+**Issue:** Mode 8 with `-StagingDir` deleted the source before the staging file was moved to the final destination.
+- **Root Cause:** The worker deleted the source after verification; if a terminating error occurred before the group-level move, the trap removed the staging files.
+- **Fix:** Mode 8 now requires staging, deletes sources only after a successful final move, and prompts for confirmation when using a default temp staging dir.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 CRITICAL - `-DeleteSource` Switch Ignored in New Modes
+**Issue:** Passing `-DeleteSource` on the command line had no effect; mode 8 never deleted sources.
+- **Root Cause:** Legacy settings block set `$script:DeleteSource = $false`, shadowing the bound parameter value in the new-mode path.
+- **Fix:** Changed to `$script:DeleteSource = $DeleteSource.IsPresent` so the CLI flag is honored.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Multi-Page Detection Missed Non-Thumbnail Extra Pages
+**Issue:** SafeMode did not skip TIFFs whose extra pages included masks/transparency pages alongside thumbnails.
+- **Root Cause:** Subfiletype check only looked at `IFD1` or compared a single numeric value, missing pages with symbolic types like `MASK`.
+- **Fix:** Check all extra pages using `magick identify -format "%[tiff:subfiletype]\n"` and accept only `REDUCEDIMAGE`/`REDUCED` as thumbnails.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Output Directory Not Created (Modes 1/3/5/6/7)
+**Issue:** Modes that create subfolders failed on clean trees.
+- **Root Cause:** `Group-Object` keyed on the parent directory and only that parent was created, never the actual output folder.
+- **Fix:** Ensure the full `FinalDst` directory exists when building tasks.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Wrong inputRoot Broke Modes 6/7 and Relative Mode 2
+**Issue:** Path resolution used each file's own directory as the input root.
+- **Root Cause:** `$fileInputRoot = $f.DirectoryName` discarded the user-provided root.
+- **Fix:** Propagate the original `$inputRoot` from file discovery via a new `InputRoot` note property.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - copy_exif Left UUID Files Without StagingDir
+**Issue:** `copy_exif` with `-CompressZip` and no `-StagingDir` wrote files with UUID prefixes that were never renamed.
+- **Root Cause:** Rename/move block was gated by `$StagingDir`.
+- **Fix:** Always rename staging files to final names when compression is enabled.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟠 HIGH - _is_real_16bit False Positives Reintroduced
+**Issue:** Worker exceptions in `run_diagnose_tiffs` were reported as "real 16-bit".
+- **Root Cause:** Exception handler set `is_real = True`.
+- **Fix:** Set `is_real = False` and `detail = f"ERROR: {e}"`.
+- **Files:** `convert_tiff.py`
+
+### 🟠 HIGH - Timeout/Process Group Handling in Python
+**Issue:** `run_subprocess` timeout only fired between output lines; `CREATE_NEW_PROCESS_GROUP` broke Ctrl+C and did not kill child processes.
+- **Root Cause:** Blocking `readline()` loop and incorrect use of process group flag.
+- **Fix:** Reader thread + `process.wait(timeout)`; use `taskkill /F /T /PID` on Windows; handle `KeyboardInterrupt`.
+- **Files:** `convert_tiff.py`
+
+### 🟠 HIGH - Thumbnail SubfileType Marker Broken
+**Issue:** Generated thumbnails were never marked as `ReducedResolution`, so `SkipCompressedWithThumb` and multi-page detection never matched.
+- **Root Cause:** Used `SubfileType=ReducedResolution` string (PrintConv error) and compared `%[tiff:subfiletype]` to `"1"`.
+- **Fix:** Write `-IFD1:SubfileType#=1` and read symbolic subfiletype strings (`REDUCEDIMAGE`/`REDUCED`) with ImageMagick.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Diagnose/Purge Broke on Multi-Page TIFFs
+**Issue:** `%z`, `%w`, `%h` concatenate per page, producing bogus depths/dimensions; `magick compare` compared all pages.
+- **Fix:** Use `file[0]` for single-page metadata and comparison.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - `$script:cleanupFiles` in PS7 Parallel Runspace
+**Issue:** `copy_exif_ps7` referenced `$script:cleanupFiles` inside `-Parallel`, which is null in the local runspace.
+- **Fix:** Removed runspace-scoped cleanup; intermediate copied TIFFs are returned and cleaned up by the parent loop.
+- **Files:** `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - Mode 2 Duplicated Files Every Run
+**Issue:** Mode 2 generated random UUID suffixes on collisions, creating new files each run.
+- **Fix:** Added `-DuplicateAction` parameter (`Skip | Numbered | Overwrite`, default `Numbered`) producing predictable `v2`, `v3`, etc. suffixes.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Padded Compression Without Integrity Check
+**Issue:** `_compress_padded_files` replaced originals without verifying the compressed output.
+- **Fix:** Added decode check and dimension comparison before overwriting.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - JPEG Search in Subfolders Never Worked
+**Issue:** `Find-JpegPair` searched `JPEG/`/`JPG/` subfolders, but the JPEG index was built non-recursively.
+- **Fix:** JPEG index is now always built recursively.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟢 LOW - `-ThumbFormat` Ignored
+**Issue:** Thumbnail format parameter was declared but unused; thumbnails were always JPEG.
+- **Fix:** Use `$thumbFormat` for the temporary thumbnail file and magick format prefix.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - Wizard Prompts Misleading
+**Issue:** "Safe mode" and "Skip LZW" prompts described the opposite behavior.
+- **Fix:** Rewrote prompts to match actual effects.
+- **Files:** `convert_tiff.py`
+
+---
+
 ## v1.2.2 - Critical Fixes & Regression Repair (2024-04-30)
 
 ### 🔴 CRITICAL - Data Loss Regression (Fixed in fba6801)

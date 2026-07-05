@@ -84,7 +84,8 @@ function Invoke-S5ProFolder {
     param([string]$RootPath, [bool]$IsRecurse)
 
     $allFiles  = Get-ChildItem -LiteralPath $RootPath -File -Recurse:$IsRecurse
-    $jpgFiles  = $allFiles | Where-Object { $_.Extension -match '^\.(jpg|jpeg)$' }
+    # JPEG index is always built recursively so JPEG/JPG subfolders can be found by Find-JpegPair
+    $jpgFiles  = Get-ChildItem -LiteralPath $RootPath -File -Recurse | Where-Object { $_.Extension -match '^\.(jpg|jpeg)$' }
     $tiffFiles = $allFiles | Where-Object { $_.Extension -match '^\.(tif|tiff)$' }
 
     if ($tiffFiles.Count -eq 0) {
@@ -307,16 +308,16 @@ function Invoke-S5ProFolder {
         foreach ($line in $results) { Process-Results @($line) }
 
         # Move from staging to final destination (with integrity check and UUID mapping)
-        if ($CompressZip -and $StagingDir -and -not $DryRun) {
+        if ($CompressZip -and -not $DryRun) {
             $moved = 0
             foreach ($tif in $groupFiles) {
                 # Use full path as key (filename-only collides across folders)
                 $tifFullPath = $tif.FullName
                 if ($script:stagingMap.ContainsKey($tifFullPath)) {
                     $stagingName = $script:stagingMap[$tifFullPath]
-                    $stagePath = Join-Path $StagingDir $stagingName
+                    $stagePath = Join-Path $writeDir $stagingName
                 } else {
-                    $stagePath = Join-Path $StagingDir $tif.Name
+                    $stagePath = Join-Path $writeDir $tif.Name
                 }
                 $destPath  = Join-Path $finalDir   $tif.Name
                 if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
