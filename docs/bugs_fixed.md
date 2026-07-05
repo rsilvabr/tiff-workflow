@@ -162,8 +162,8 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 - **Files:** `compress_tiff_zip.ps1`
 
 ### 🟠 HIGH - Mode 6 Path Resolution Broke for Files Directly in `_EXPORT/`
-**Issue:** Mode 6 built a relative path without validating that the relative part was non-empty, producing an empty path segment when a TIFF sat directly inside the `_EXPORT` folder.
-- **Fix:** Applied the same `$relParts[0]` guard already used by Mode 7.
+**Issue:** Mode 6 built a relative path without validating that the relative part was non-empty. When a TIFF sat directly inside the `_EXPORT` folder, the PowerShell range `$parts[($exportIdx + 1)..($parts.Count - 1)]` returned the last element instead of an empty array, causing the output path to repeat the `_EXPORT` segment (`_EXPORT/ZIP/_EXPORT/photo.tif`).
+- **Fix:** Guard the range so `$relParts` is `@()` when there are no components after `_EXPORT` (or `_EXPORT/TIFF` for Mode 7), and only append the relative path when it actually exists.
 - **Files:** `compress_tiff_zip.ps1`
 
 ### 🟡 MEDIUM - `copy_exif` Multi-Page Detection Only Checked Page `[0]`

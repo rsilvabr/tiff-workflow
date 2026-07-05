@@ -310,7 +310,7 @@ function Resolve-Output {
                 if ($parts[$i] -ieq $exportMarker) { $exportIdx = $i; break }
             }
             if ($exportIdx -lt 0) { return $null }
-            $relParts = $parts[($exportIdx + 1)..($parts.Count - 1)]
+            $relParts = if (($exportIdx + 1) -le ($parts.Count - 1)) { $parts[($exportIdx + 1)..($parts.Count - 1)] } else { @() }
             $newParent = Join-Path (Join-Path $inputRootP $exportMarker) $exportZipSubfolder
             if ($relParts.Count -gt 0 -and $relParts[0]) {
                 $relPath = $relParts -join '/'
@@ -328,7 +328,7 @@ function Resolve-Output {
                 if ($exportIdx -ge 0 -and $tifIdx -ge 0) { break }
             }
             if ($exportIdx -lt 0 -or $tifIdx -lt 0) { return $null }
-            $relParts = $parts[($tifIdx + 1)..($parts.Count - 1)]
+            $relParts = if (($tifIdx + 1) -le ($parts.Count - 1)) { $parts[($tifIdx + 1)..($parts.Count - 1)] } else { @() }
             $newParent = Join-Path (Join-Path $inputRootP $exportMarker) $exportZipSubfolder
             if ($relParts.Count -gt 0 -and $relParts[0]) {
                 $relPath = $relParts -join '/'
