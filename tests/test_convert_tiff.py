@@ -5,12 +5,17 @@ Tests functions that don't require external tools (magick, exiftool).
 
 import pytest
 from pathlib import Path
+import json
+import shutil
+import subprocess
+import sys
 import tempfile
 import os
-import sys
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import convert_tiff
 from convert_tiff import (
     _format_size,
     truncate_path,
@@ -18,6 +23,17 @@ from convert_tiff import (
     build_compress_command,
     build_copy_exif_command,
     _compare_tiff_metadata,
+    _compress_padded_files,
+    run_purge_old_tiffs,
+    step_folder,
+    main,
+    ConfigManager,
+    ToolConfig,
+)
+
+MAGICK_AVAILABLE = shutil.which("magick") is not None
+POWERSHELL_AVAILABLE = (
+    shutil.which("pwsh") is not None or shutil.which("powershell") is not None
 )
 
 
@@ -58,7 +74,19 @@ class TestTruncatePath:
         assert "file.tif" in result
         assert len(result) <= 43  # includes ellipsis
 
+    @pytest.mark.parametrize("max_len", [1, 2, 3])
+    def test_tiny_max_len(self, max_len):
+        path = Path("C:/some/deep/path/structure/file.tif")
+        result = truncate_path(path, max_len=max_len)
+        assert len(result) <= max_len
 
+    def test_never_exceeds_max_len(self):
+        path = Path("C:/very/long/path/that/exceeds/maximum/length/and/needs/to/be/truncated/file.tif")
+        for max_len in range(1, 60):
+            assert len(truncate_path(path, max_len=max_len)) <= max_len
+
+
+@pytest.mark.skipif(not POWERSHELL_AVAILABLE, reason="no powershell/pwsh on PATH")
 class TestDetectPowershellVersion:
     def test_returns_tuple(self):
         major, name, version = detect_powershell_version()
@@ -180,6 +208,7 @@ class TestBuildCopyExifCommand:
         assert "-CompressZip" not in cmd
 
 
+@pytest.mark.skipif(not MAGICK_AVAILABLE, reason="ImageMagick (magick) not on PATH")
 class TestCompareTiffMetadata:
     def test_dimension_mismatch_detection(self, tmp_path):
         """Create two files with different dimensions to test mismatch detection."""
@@ -216,6 +245,155 @@ class TestCompareTiffMetadata:
         match, detail = _compare_tiff_metadata(file1, file2)
         assert match is True
         assert "IDENTICAL" in detail
+
+
+class TestSaveConfig:
+    def test_ps_fields_not_persisted(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        cm = ConfigManager()
+        cm.config.ps_major = 7
+        cm.config.ps_name = "pwsh"
+        cm.save_config()
+
+        config_file = tmp_path / ".convert_tiff_config.json"
+        assert config_file.exists()
+        data = json.loads(config_file.read_text())
+        assert "ps_major" not in data
+        assert "ps_name" not in data
+
+    def test_other_fields_persisted(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        cm = ConfigManager()
+        cm.config.last_input_dir = str(tmp_path)
+        cm.save_config()
+
+        data = json.loads((tmp_path / ".convert_tiff_config.json").read_text())
+        assert data["default_workers"] == 8
+        assert data["last_input_dir"] == str(tmp_path)
+
+
+class TestCompressPaddedFiles:
+    def _fake_run(self, cmd, **kwargs):
+        if cmd[0] == "magick" and "-depth" in cmd:
+            # Simulate 16->8 bit ZIP conversion producing a smaller output
+            Path(cmd[-1]).write_bytes(b"z" * 100)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "exiftool":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "null:" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "identify" in cmd:
+            return SimpleNamespace(returncode=0, stdout="100 100", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def test_original_backed_up_before_replacement(self, tmp_path, monkeypatch):
+        src = tmp_path / "photo.tif"
+        src.write_bytes(b"x" * 2000)
+        monkeypatch.setattr(subprocess, "run", self._fake_run)
+
+        cfg = SimpleNamespace(config=ToolConfig())
+        _compress_padded_files([src], tmp_path / "staging_root", workers=1, cfg=cfg)
+
+        backup = tmp_path / "OLD_PADDED" / "photo.tif"
+        assert backup.exists()
+        assert backup.read_bytes() == b"x" * 2000
+        assert src.exists()
+        assert src.read_bytes() == b"z" * 100
+
+    def test_backup_collision_gets_v2_suffix(self, tmp_path, monkeypatch):
+        src = tmp_path / "photo.tif"
+        src.write_bytes(b"x" * 2000)
+        old_dir = tmp_path / "OLD_PADDED"
+        old_dir.mkdir()
+        (old_dir / "photo.tif").write_bytes(b"old")
+        monkeypatch.setattr(subprocess, "run", self._fake_run)
+
+        cfg = SimpleNamespace(config=ToolConfig())
+        _compress_padded_files([src], tmp_path / "staging_root", workers=1, cfg=cfg)
+
+        assert (old_dir / "photo.tif").read_bytes() == b"old"
+        backup_v2 = old_dir / "photo_v2.tif"
+        assert backup_v2.exists()
+        assert backup_v2.read_bytes() == b"x" * 2000
+        assert src.read_bytes() == b"z" * 100
+
+
+class TestPurgeOldTiffs:
+    def test_sidecar_files_not_sent_to_magick(self, tmp_path, monkeypatch):
+        folder = tmp_path / "root"
+        old_dir = folder / "OLD_TIFFs"
+        old_dir.mkdir(parents=True)
+        (old_dir / "img.tif").write_bytes(b"tiffdata")
+        (old_dir / "img.jpg").write_bytes(b"jpegdata")
+        (old_dir / "notes.txt").write_text("notes")
+        (folder / "img.tif").write_bytes(b"tiffdata")
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append([str(a) for a in cmd])
+            if "compare" in cmd:
+                return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
+            return SimpleNamespace(returncode=0, stdout="10 10", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, prompt: folder)
+        if convert_tiff.RICH_AVAILABLE:
+            monkeypatch.setattr(
+                convert_tiff.Confirm, "ask",
+                classmethod(lambda cls, *a, **k: False),
+            )
+        else:
+            monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+
+        cfg = SimpleNamespace(config=ToolConfig())
+        result = run_purge_old_tiffs(cfg)
+        assert result is False  # cancelled at confirmation
+
+        flat = [arg for cmd in calls for arg in cmd]
+        assert any("img.tif" in arg for arg in flat)
+        assert not any("img.jpg" in arg for arg in flat)
+        assert not any("notes.txt" in arg for arg in flat)
+
+
+class TestStepFolder:
+    def _set_input(self, monkeypatch, value):
+        if convert_tiff.RICH_AVAILABLE:
+            monkeypatch.setattr(
+                convert_tiff.Prompt, "ask",
+                classmethod(lambda cls, *a, **k: value),
+            )
+        else:
+            monkeypatch.setattr("builtins.input", lambda *a, **k: value)
+
+    def test_strips_double_quotes(self, tmp_path, monkeypatch):
+        self._set_input(monkeypatch, f'"{tmp_path}"')
+        cfg = SimpleNamespace(config=ToolConfig())
+        result = step_folder(cfg)
+        assert result == Path(str(tmp_path))
+
+    def test_strips_single_quotes(self, tmp_path, monkeypatch):
+        self._set_input(monkeypatch, f"'{tmp_path}'")
+        cfg = SimpleNamespace(config=ToolConfig())
+        result = step_folder(cfg)
+        assert result == Path(str(tmp_path))
+
+    def test_rejects_semicolon_path(self, tmp_path, monkeypatch):
+        semicolon_dir = tmp_path / "a;b"
+        semicolon_dir.mkdir()
+        self._set_input(monkeypatch, str(semicolon_dir))
+        cfg = SimpleNamespace(config=ToolConfig())
+        assert step_folder(cfg) is None
+
+
+class TestMainArgparse:
+    def test_help_exits_zero(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["convert_tiff.py", "--help"])
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 0
+        out = capsys.readouterr().out
+        assert "TIFF Workflow Manager" in out
 
 
 if __name__ == "__main__":

@@ -114,7 +114,7 @@ Create sRGB thumbnails from TIFFs. Can be used standalone or as part of the comp
 
 Recursively scans a root folder for sessions matching the chosen pattern. Shows a table with session name, TIFF count, and truncated path. Prompts for confirmation before processing.
 
-Excluded from scan: `Logs`, `logs`, `converted_zip`, `ZIP`, `_EXPORT` folders.
+Excluded from scan: `Logs`, `logs`, `converted_zip`, `ZIP`, `_EXPORT`, `OLD_TIFFs` folders.
 
 ---
 

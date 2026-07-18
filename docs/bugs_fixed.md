@@ -2,6 +2,72 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## v2.2 - Audit Round 3
+
+### 🔴 CRITICAL - `[no thumb]` Fallback Orphaned Output in Staging
+**Issue:** When thumbnail generation failed, the compressed main image was copied to the write destination but the result carried `StagingName = $null`, so the staging→final move loop skipped it. With `-StagingDir` the final output was missing while the result said "OK" and the original was already in `OLD_TIFFs/` (modes 0/9), with no rollback.
+- **Fix:** The `[no thumb]` returns now set `StagingName` to the written file name, mirroring the success path, in `Process-TiffJob` and the PS7 parallel block.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 CRITICAL - `-SkipCompressedWithThumb` Was a No-Op
+**Issue:** A compressed TIFF without a thumbnail was always skipped; the flag only changed the log wording, and the check existed only in the PS7 new-mode parallel path.
+- **Fix:** All three paths (`Process-TiffJob`, mode 0/9 pre-check, PS7 parallel) now implement consistent semantics: flag off → skip all compressed; flag on → skip only compressed+thumbnail, reprocess compressed-without-thumbnail to add one.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - `-Page all` + jpg/png Reported False Errors
+**Issue:** ImageMagick writes `name-0.jpg`, `name-1.jpg`, ... for multi-page input with single-frame formats, but `generate_thumbnails.ps1` tested the exact unsuffixed path and reported `ERROR (output not created)` despite success.
+- **Fix:** When the exact path is missing, the script now looks for suffixed frames (`base-*.ext`) and reports OK with the frame count.
+- **Files:** `generate_thumbnails.ps1`
+
+### 🟠 HIGH - Modes 6/7 Destination Collisions Across `_EXPORT` Trees
+**Issue:** `Resolve-Output` flattened outputs to `<inputRoot>\_EXPORT\ZIP\<rel-after-_EXPORT>\name.tif`, discarding the path between the root and `_EXPORT`. Same-named files under different `_EXPORT` trees collided and were skipped or silently overwritten.
+- **Fix:** Claimed destinations are tracked per run; a different source claiming the same destination gets `_v2`, `_v3`, ... with a note in the result.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - `DuplicateAction: Numbered` Ignored On-Disk Duplicates
+**Issue:** Mode 2 only numbered intra-run collisions; a name existing only on disk fell through to `SKIP (exists)`, contradicting the documented behavior.
+- **Fix:** When `DuplicateAction` is `Numbered` and the destination exists on disk, `_v2`, `_v3`, ... are generated until a free name is found. Skip/Overwrite unchanged.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - `_compress_padded_files` Replaced Originals Without Backup
+**Issue:** The lossy 16→8-bit padded-file conversion replaced originals in place with no backup.
+- **Fix:** The original is moved to an `OLD_PADDED/` subfolder (with `_v2` collision suffixes) before the converted file is written; backup failure preserves the original.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - Undefined/Before-Assignment Variables
+**Issue:** The legacy PS7 parallel block referenced undefined `$srcPath` (only `$src` existed), and `copy_exif_to_TIFF_ps7.ps1` used `$copiedTiffPath` before assignment in MISS/SKIP/DRY returns.
+- **Fix:** Corrected the variable reference; `$copiedTiffPath` is now initialized at the top of the parallel block.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - Wizard Crashed When PowerShell Executable Missing
+**Issue:** `subprocess.Popen` ran outside any try block, so a missing PowerShell executable crashed the wizard with a raw traceback.
+- **Fix:** Wrapped in try/except with a handled error message.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - Rich Markup Silently Eaten from Echoed Output
+**Issue:** Subprocess lines echoed via `console.print` were parsed as Rich markup; a file named `IMG_[test].tif` printed as `IMG_.tif`.
+- **Fix:** All echoed subprocess/user content is escaped with `rich.markup.escape()`.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - Legacy Path Divergences (PS5 vs PS7)
+**Issue:** The legacy PS7 parallel path ignored `-GenerateThumbnail`, and legacy PS5 forced `.tif` output names while PS7 kept the original extension.
+- **Fix:** Legacy PS7 now honors `-GenerateThumbnail`; legacy PS5 keeps the original extension.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Scripts Exited 0 Despite Per-File Errors
+**Issue:** None of the scripts exited non-zero on processing errors, so the wizard/CI could not detect failures.
+- **Fix:** All scripts now `exit 1` when the error count > 0 (dry-run errors included), `exit 0` otherwise.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`, `generate_thumbnails.ps1`
+
+### 🟢 LOW - Stability & Hygiene Fixes
+- Deprecated `magick convert` replaced with IM7 `magick ... null:` in `_Verify-ZipIntegrity`; 0-byte `.tmp` files from `GetTempFileName()` are deleted immediately; mode-8 default temp staging dir is removed after a successful run; mode 8 no longer recurses into `OLD_TIFFs/`; staging files carry a per-run prefix so the trap only deletes files created by this run; `-Workers` validates `[ValidateRange(1, 64)]`; `[int]` casts on `identify` output use `TryParse` with explicit error results; dead `$script:cleanupFiles` trap code removed. **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+- `generate_thumbnails.ps1`: `*_thumb` files excluded from input scans (no more `_thumb_thumb` on re-runs); `-Page`/`-Quality` validated; `-Remove` cleans thumbnails of all formats; magick stderr included in error results. **Files:** `generate_thumbnails.ps1`
+- `copy_exif`: `-OutputDir` normalized (trailing slashes) and self-copy guarded. **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+- `convert_tiff.py`: `--help` now works via argparse; PS5 (OEM codepage) output decoded with UTF-8 → locale fallback; `ps_major`/`ps_name` no longer persisted to config; purge verification only feeds TIFFs to `magick identify`; timeouts lifted to `CONVERT_TIMEOUT_S`/`COMPARE_TIMEOUT_S` constants; pasted paths strip surrounding quotes; `truncate_path` guarantees `max_len`; folder names containing `;` rejected; dead imports removed.
+- Docs aligned with code: default thumbnail output location (next to source TIFF), no `-AsJob`, AutoFind exclusions include `OLD_TIFFs`, Python 3.9+ requirement.
+
+---
+
 ## v2.1 - Data Loss Prevention & Stability Fixes
 
 ### 🔴 CRITICAL - Thumbnail Page Used as Source Page

@@ -32,7 +32,6 @@ function Write-Log {
 
 # ── Cleanup on interrupt ─────────────────────────────────────────
 $script:cleanupDirs  = @()
-$script:cleanupFiles = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
 trap {
@@ -44,11 +43,6 @@ trap {
     foreach ($dir in $script:cleanupDirs) {
         if (Test-Path -LiteralPath $dir) {
             Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -match '^[0-9a-f]{32}_' } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-        }
-    }
-    foreach ($file in $script:cleanupFiles) {
-        if (Test-Path -LiteralPath $file) {
-            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
         }
     }
     break
@@ -227,6 +221,7 @@ function Invoke-S5ProFolder {
             $bagL      = $using:multiPageBagCapture
             $iccPolicyL = $using:iccPolicyCapture
             $magickTimeoutL = $using:magickTimeoutCapture
+            $copiedTiffPath = $null
 
             if (-not $p.Jpeg) {
                 return @{ Result = "MISS | $($p.TifName) | no matching JPEG (base: $($p.TifBase))"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
@@ -258,7 +253,10 @@ function Invoke-S5ProFolder {
                         return @{ Result = "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
                     }
                     $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
-                    $pageCount = [int]$pageCountVal
+                    $pageCount = 0
+                    if (-not [int]::TryParse("$pageCountVal", [ref]$pageCount)) {
+                        return @{ Result = "ERROR (magick page count parse) | $($p.TifName) | unexpected output: $pageCountVal"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
+                    }
                     if ($pageCount -gt 1) {
                         if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pageCount)) {
                             return @{ Result = "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; MultiPagePath = $p.Tiff; IsIntermediate = $false }
@@ -284,7 +282,8 @@ function Invoke-S5ProFolder {
             $tiffTarget = $p.Tiff
             $tiffCopied = $false
             $copiedTiffPath = $null
-            if ($finalDirL -and ($finalDirL -ne (Split-Path $p.Tiff -Parent)) -and -not $dryL) {
+            $srcDir = [System.IO.Path]::GetFullPath((Split-Path $p.Tiff -Parent)).TrimEnd('\', '/')
+            if ($finalDirL -and ($finalDirL -ine $srcDir) -and -not $dryL) {
                 $destTiff = Join-Path $finalDirL $p.TifName
                 if (-not (Test-Path -LiteralPath $destTiff) -or $overL) {
                     if (-not (Test-Path -LiteralPath $finalDirL)) {
@@ -396,6 +395,10 @@ function Invoke-S5ProFolder {
 }
 
 # ── Entry point ─────────────────────────────────────────────────────
+if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
+    $OutputDir = [System.IO.Path]::GetFullPath($OutputDir.TrimEnd('\', '/'))
+}
+
 $inputDirs = if ($InputDir) { $InputDir -split ';' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } } else { @($PWD.Path) }
 if ($inputDirs.Count -eq 0) { $inputDirs = @($PWD.Path) }
 
@@ -438,3 +441,5 @@ if ($script:multiTotal -gt 0) {
     }
 }
 Write-Log "Log: $logFile"
+
+if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }

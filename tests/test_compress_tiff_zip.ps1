@@ -107,6 +107,79 @@ Describe "compress_tiff_zip_v2.ps1 - Error Handling" {
         # exiftool failure return should have stagingName defined
         $content | Should -Match 'WARN \(exiftool failed'
     }
+
+    It "Exits 1 when errors occurred" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'if \(\$script:errTotal -gt 0\) \{ exit 1 \}'
+    }
+}
+
+Describe "compress_tiff_zip_v2.ps1 - Workers Validation" {
+    It "Workers parameter has ValidateRange(1, 64)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\[ValidateRange\(1,\s*64\)\]\s*\[int\]\$Workers'
+    }
+}
+
+Describe "compress_tiff_zip_v2.ps1 - Run-Scoped Staging" {
+    It "Generates a run-scoped staging prefix (runStagingId)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$script:runStagingId\s*=\s*\[guid\]::NewGuid\(\)'
+    }
+
+    It "Staging file names use the run-scoped prefix" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$stagingName = "\$\(\$script:runStagingId\)_'
+    }
+
+    It "Staging cleanup only removes files from this run" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$_\.Name -like "\$\(\$script:runStagingId\)_\*"'
+    }
+}
+
+Describe "compress_tiff_zip_v2.ps1 - No-Thumb StagingName" {
+    It "All '[no thumb]' returns set StagingName from the written file" {
+        $returns = Select-String -Path $script:ScriptPath -Pattern 'return @\{[^}]*\[no thumb\][^}]*\}'
+        $returns.Count | Should -BeGreaterThan 0
+        foreach ($r in $returns) {
+            $r.Line | Should -Match 'StagingName = \[System\.IO\.Path\]::GetFileName'
+        }
+    }
+}
+
+Describe "compress_tiff_zip_v2.ps1 - SkipCompressedWithThumb Reprocess" {
+    It "Checks tiff:subfiletype for embedded thumbnail in all processing paths" {
+        $matches = Select-String -Path $script:ScriptPath -Pattern 'tiff:subfiletype'
+        $matches.Count | Should -BeGreaterOrEqual 3
+    }
+
+    It "Detects REDUCEDIMAGE/REDUCED subfiletype as thumbnail marker" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'REDUCEDIMAGE'
+    }
+
+    It "Compressed but no thumbnail falls through to reprocess" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'fall through to reprocess'
+    }
+
+    It "Only skips when thumbnail already embedded (not blindly on compression)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'SKIP \(compressed\+thumb\)'
+    }
+}
+
+Describe "compress_tiff_zip_v2.ps1 - Integrity Check Command" {
+    It "Uses 'magick <file> null:' for integrity verification" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'magick "\$p" null:'
+    }
+
+    It "Does not use legacy 'magick convert'" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Not -Match 'magick convert'
+    }
 }
 
 AfterAll {

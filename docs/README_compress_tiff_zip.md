@@ -180,7 +180,7 @@ If any check fails, the source is preserved.
 
 ## PowerShell Version Handling
 
-- **PS7+**: Uses `ForEach-Object -Parallel` with `-ThrottleLimit $Workers -AsJob`
+- **PS7+**: Uses `ForEach-Object -Parallel` with `-ThrottleLimit $Workers` (synchronous parallel — no background jobs)
 - **PS5.1**: Falls back to sequential `foreach` loop (no parallel execution)
 
 Detected automatically via `$PSVersionTable.PSVersion.Major -ge 7`.

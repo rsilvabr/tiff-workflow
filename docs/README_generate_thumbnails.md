@@ -33,7 +33,7 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
 |-----------|------|---------|-------------|
 | `-InputDir` | string | `.` | Source directory containing TIFF files |
 | `-Size` | int | `256` | Thumbnail size in pixels (32-4096) |
-| `-OutputDir` | string | `""` | Output directory. If empty, uses `InputDir/Thumbnails/` |
+| `-OutputDir` | string | `""` | Output directory. If empty, thumbnails are written next to each source TIFF |
 | `-Remove` | switch | off | Remove generated thumbnails instead of creating them |
 | `-DryRun` | switch | off | Show what would be generated, don't create files |
 | `-Recursive` | switch | off | Process subdirectories recursively |
@@ -46,8 +46,8 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
 
 ## Output
 
-Thumbnails are saved with the original filename plus `_thumb` suffix:
-- `photo.tif` → `Thumbnails/photo_thumb.jpg`
+Thumbnails are saved with the original filename plus `_thumb` suffix. By default (empty `-OutputDir`) they are written next to each source TIFF:
+- `photo.tif` → `photo_thumb.jpg` (same folder as `photo.tif`)
 
 Logs are written to `Logs/generate_thumbnails/`.
 

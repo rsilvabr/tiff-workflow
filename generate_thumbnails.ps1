@@ -7,7 +7,9 @@ param(
     [switch]$DryRun,
     [switch]$Recursive,
     [int]$Workers = 4,
+    [ValidatePattern('^(all|\d+)$')]
     [string]$Page = "0",
+    [ValidatePattern('^(100|[1-9][0-9]?)$')]
     [string]$Quality = "85",
     [string]$Format = "jpg"
 )
@@ -70,7 +72,7 @@ $allFiles = foreach ($root in $inputRoots) {
     }
 }
 
-$files = $allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' }
+$files = $allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch '(?i)_thumb$' }
 $total = $files.Count
 
 if ($total -eq 0) {
@@ -111,40 +113,49 @@ function Process-Results($lines) {
 
 # -- Remove thumbnails ---------------------------------------------
 if ($Remove) {
+    $allFormats = @("jpg", "jpeg", "png", "tif", "tiff")
     foreach ($f in $files) {
-        $thumbName = "$($f.BaseName)_thumb.$Format"
-        $thumbPath = if ($OutputDir) {
-            $outDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $f.DirectoryName $OutputDir }
-            Join-Path $outDir $thumbName
+        $outDir = if ($OutputDir) {
+            if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $f.DirectoryName $OutputDir }
         } else {
-            Join-Path $f.DirectoryName $thumbName
+            $f.DirectoryName
         }
         
         $script:counterTotal++
-        if (Test-Path -LiteralPath $thumbPath) {
-            if (-not $DryRun) {
-                try {
-                    Remove-Item -LiteralPath $thumbPath -Force
-                    $script:okTotal++
-                    Write-Log "[$($script:counterTotal)/$total] REMOVED | $thumbName"
-                } catch {
-                    $script:errTotal++
-                    Write-Log "[$($script:counterTotal)/$total] ERROR (remove failed) | $thumbName | $($_.Exception.Message)" "ERROR"
+        $thumbPaths = @(foreach ($ext in $allFormats) {
+            $exactPath = Join-Path $outDir "$($f.BaseName)_thumb.$ext"
+            if (Test-Path -LiteralPath $exactPath) { $exactPath }
+            Get-ChildItem -LiteralPath $outDir -Filter "$($f.BaseName)_thumb-*.$ext" -File -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName }
+        })
+        
+        if ($thumbPaths.Count -gt 0) {
+            foreach ($thumbPath in $thumbPaths) {
+                $thumbName = [System.IO.Path]::GetFileName($thumbPath)
+                if (-not $DryRun) {
+                    try {
+                        Remove-Item -LiteralPath $thumbPath -Force
+                        $script:okTotal++
+                        Write-Log "[$($script:counterTotal)/$total] REMOVED | $thumbName"
+                    } catch {
+                        $script:errTotal++
+                        Write-Log "[$($script:counterTotal)/$total] ERROR (remove failed) | $thumbName | $($_.Exception.Message)" "ERROR"
+                    }
+                } else {
+                    $script:skipTotal++
+                    Write-Log "[$($script:counterTotal)/$total] DRY-RUN (would remove) | $thumbName"
                 }
-            } else {
-                $script:skipTotal++
-                Write-Log "[$($script:counterTotal)/$total] DRY-RUN (would remove) | $thumbName"
             }
         } else {
             $script:skipTotal++
-            Write-Log "[$($script:counterTotal)/$total] SKIP (not found) | $thumbName"
+            Write-Log "[$($script:counterTotal)/$total] SKIP (not found) | $($f.BaseName)_thumb.*"
         }
     }
     
     Write-Log ""
     Write-Log "Done: $($script:okTotal) removed | $($script:skipTotal) skipped | $($script:errTotal) errors | $total processed"
     Write-Log "Log: $logFile"
-    exit 0
+    if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
 }
 # -----------------------------------------------------------------
 
@@ -210,16 +221,26 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $magickArgs += $t.DestPath
                 
                 $allArgs = @($inputWithPage) + $magickArgs
-                $null = & magick @allArgs 2>&1
+                $magickOutput = & magick @allArgs 2>&1
                 $exitCode = $LASTEXITCODE
                 
                 if ($exitCode -ne 0) {
-                    "ERROR (magick failed) | $name"
+                    $errLine = ($magickOutput | ForEach-Object {
+                        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
+                    } | Where-Object { $_.Trim() } | Select-Object -First 1)
+                    "ERROR (magick failed) | $name | $errLine"
                 } elseif (Test-Path -LiteralPath $t.DestPath) {
                     $thumbSize = (Get-Item -LiteralPath $t.DestPath).Length
                     "OK | $name -> $([System.IO.Path]::GetFileName($t.DestPath)) ($thumbSize bytes)"
                 } else {
-                    "ERROR (output not created) | $name"
+                    $destBase = [System.IO.Path]::GetFileNameWithoutExtension($t.DestPath)
+                    $destExt = [System.IO.Path]::GetExtension($t.DestPath)
+                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter "$destBase-*$destExt" -File -ErrorAction SilentlyContinue)
+                    if ($frames.Count -gt 0) {
+                        "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"
+                    } else {
+                        "ERROR (output not created) | $name"
+                    }
                 }
             } catch {
                 $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
@@ -266,16 +287,26 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $magickArgs += $t.DestPath
                 
                 $allArgs = @($inputWithPage) + $magickArgs
-                $null = & magick @allArgs 2>&1
+                $magickOutput = & magick @allArgs 2>&1
                 $exitCode = $LASTEXITCODE
                 
                 if ($exitCode -ne 0) {
-                    $result = "ERROR (magick failed) | $name"
+                    $errLine = ($magickOutput | ForEach-Object {
+                        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
+                    } | Where-Object { $_.Trim() } | Select-Object -First 1)
+                    $result = "ERROR (magick failed) | $name | $errLine"
                 } elseif (Test-Path -LiteralPath $t.DestPath) {
                     $thumbSize = (Get-Item -LiteralPath $t.DestPath).Length
                     $result = "OK | $name -> $([System.IO.Path]::GetFileName($t.DestPath)) ($thumbSize bytes)"
                 } else {
-                    $result = "ERROR (output not created) | $name"
+                    $destBase = [System.IO.Path]::GetFileNameWithoutExtension($t.DestPath)
+                    $destExt = [System.IO.Path]::GetExtension($t.DestPath)
+                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter "$destBase-*$destExt" -File -ErrorAction SilentlyContinue)
+                    if ($frames.Count -gt 0) {
+                        $result = "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"
+                    } else {
+                        $result = "ERROR (output not created) | $name"
+                    }
                 }
             } catch {
                 $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
@@ -290,3 +321,4 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
 Write-Log ""
 Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:errTotal) errors | $($script:counterTotal)/$total processed"
 Write-Log "Log: $logFile"
+if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }

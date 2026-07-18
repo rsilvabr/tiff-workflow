@@ -32,7 +32,6 @@ function Write-Log {
 
 # ── Cleanup on interrupt ─────────────────────────────────────────
 $script:cleanupDirs  = @()
-$script:cleanupFiles = @()
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
 trap {
@@ -44,11 +43,6 @@ trap {
     foreach ($dir in $script:cleanupDirs) {
         if (Test-Path -LiteralPath $dir) {
             Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -match '^[0-9a-f]{32}_' } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-        }
-    }
-    foreach ($file in $script:cleanupFiles) {
-        if (Test-Path -LiteralPath $file) {
-            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
         }
     }
     break
@@ -256,7 +250,11 @@ function Invoke-S5ProFolder {
                     continue
                 }
                 $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
-                $pageCount = [int]$pageCountVal
+                $pageCount = 0
+                if (-not [int]::TryParse("$pageCountVal", [ref]$pageCount)) {
+                    "ERROR (magick page count parse) | $($p.TifName) | unexpected output: $pageCountVal"
+                    continue
+                }
                 if ($pageCount -gt 1) {
                     if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pageCount)) {
                         $bagL.Add($p.Tiff) | Out-Null
@@ -278,7 +276,8 @@ function Invoke-S5ProFolder {
             # Determine target TIFF path: if OutputDir is specified (different from source dir), copy first to preserve original
             $tiffTarget = $p.Tiff
             $tiffCopied = $false
-            if ($finalDirL -and ($finalDirL -ne (Split-Path $p.Tiff -Parent)) -and -not $dryL) {
+            $srcDir = [System.IO.Path]::GetFullPath((Split-Path $p.Tiff -Parent)).TrimEnd('\', '/')
+            if ($finalDirL -and ($finalDirL -ine $srcDir) -and -not $dryL) {
                 $destTiff = Join-Path $finalDirL $p.TifName
                 if (-not (Test-Path -LiteralPath $destTiff) -or $overL) {
                     if (-not (Test-Path -LiteralPath $finalDirL)) {
@@ -388,6 +387,10 @@ function Invoke-S5ProFolder {
 }
 
 # ── Entry point ────────────────────────────────────────────────────
+if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
+    $OutputDir = [System.IO.Path]::GetFullPath($OutputDir.TrimEnd('\', '/'))
+}
+
 $inputDirs = if ($InputDir) { $InputDir -split ';' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } } else { @($PWD.Path) }
 if ($inputDirs.Count -eq 0) { $inputDirs = @($PWD.Path) }
 
@@ -432,3 +435,5 @@ if ($script:multiTotal -gt 0) {
     }
 }
 Write-Log "Log: $logFile"
+
+if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }

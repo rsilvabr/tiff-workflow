@@ -18,9 +18,14 @@ and streaming output from PowerShell backends.
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes
 
+# Subprocess timeouts (seconds)
+CONVERT_TIMEOUT_S = 60   # magick depth/format conversions
+COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
+
 import argparse
 import concurrent.futures
 import json
+import locale
 import os
 import platform
 import re
@@ -30,12 +35,13 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 try:
     from rich.console import Console
+    from rich.markup import escape
     from rich.panel import Panel
     from rich.table import Table
     from rich.box import SIMPLE as BOX_SIMPLE
@@ -46,8 +52,6 @@ try:
 except ImportError:
     RICH_AVAILABLE = False
     console = None
-
-PROMPT_TOOLKIT_AVAILABLE = False
 
 
 # --- Paths ---------------------------------------------------------
@@ -103,8 +107,12 @@ class ConfigManager:
     def save_config(self) -> None:
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            data = asdict(self.config)
+            # Runtime-detected fields, not persisted
+            data.pop("ps_major", None)
+            data.pop("ps_name", None)
             with open(self.config_path, 'w') as f:
-                json.dump(asdict(self.config), f, indent=2)
+                json.dump(data, f, indent=2)
         except Exception:
             pass
 
@@ -112,7 +120,7 @@ class ConfigManager:
 # --- PowerShell Version Detection -----------------------------------
 
 def detect_powershell_version():
-    """Detect PowerShell version. Returns (major, exe_path)."""
+    """Detect PowerShell version. Returns (major, name, version), e.g. (7, "pwsh", "7.4.1")."""
     import re
     for ps_name in ["pwsh", "powershell"]:
         try:
@@ -161,14 +169,21 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
 
 
 def truncate_path(p: Path, max_len: int = 50) -> str:
-    """Truncate long paths for display."""
+    """Truncate long paths for display. Result is always <= max_len."""
     s = str(p)
     if len(s) <= max_len:
         return s
     parts = s.split(os.sep)
-    if len(parts) <= 3:
-        return s
-    return f"{parts[0]}{os.sep}...{os.sep}{parts[-2]}{os.sep}{parts[-1]}"
+    ellipsis = "..."
+    if len(parts) > 3:
+        candidate = f"{parts[0]}{os.sep}{ellipsis}{os.sep}{parts[-2]}{os.sep}{parts[-1]}"
+        if len(candidate) <= max_len:
+            return candidate
+    # Fallback: keep the tail of the path within max_len
+    keep = max_len - len(ellipsis)
+    if keep <= 0:
+        return ellipsis[:max_len]
+    return ellipsis + s[-keep:]
 
 
 def _safe_move(src: Path, dst: Path) -> None:
@@ -333,18 +348,28 @@ def step_folder(cfg: ToolConfig, prompt_text: str = "Input folder") -> Optional[
         folder = Prompt.ask(f"[cyan]{prompt_text}[/cyan]", default=default).strip()
     else:
         folder = input(f"{prompt_text} [{default}]: ").strip() or default
+    # Strip surrounding quotes from pasted/dragged paths
+    if len(folder) >= 2 and folder[0] == folder[-1] and folder[0] in ("'", '"'):
+        folder = folder[1:-1]
     p = Path(folder)
     if not p.exists():
         if RICH_AVAILABLE and console:
-            console.print(f"[red]Folder not found: {folder}[/red]")
+            console.print(f"[red]Folder not found: {escape(folder)}[/red]")
         else:
             print(f"ERROR: Folder not found: {folder}")
         return None
     if not p.is_dir():
         if RICH_AVAILABLE and console:
-            console.print(f"[red]Not a directory: {folder}[/red]")
+            console.print(f"[red]Not a directory: {escape(folder)}[/red]")
         else:
             print(f"ERROR: Not a directory: {folder}")
+        return None
+    # ';' breaks the multi-folder contract (paths are joined/split on ';')
+    if ";" in str(p):
+        if RICH_AVAILABLE and console:
+            console.print(f"[red]Folder path contains ';' which is not supported: {escape(str(p))}[/red]")
+        else:
+            print(f"ERROR: Folder path contains ';' which is not supported: {p}")
         return None
     cfg.config.last_input_dir = str(p.resolve())
     return p
@@ -580,6 +605,15 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
 
 # --- Subprocess Runner ----------------------------------------------
 
+def _decode_console_line(raw: bytes) -> str:
+    """Decode subprocess output: try UTF-8, fall back to the locale codepage
+    (Windows PowerShell 5 emits OEM/ANSI, not UTF-8)."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode(locale.getpreferredencoding(False), errors="replace")
+
+
 def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
     """Run command, stream output with Rich coloring. Has configurable timeout."""
     import time
@@ -589,23 +623,29 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
     popen_kwargs = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
-        "text": True,
-        "bufsize": 1,
-        "encoding": "utf-8",
-        "errors": "replace",
+        # Binary mode: lines are decoded manually in the reader thread
+        # (UTF-8 with locale fallback, see _decode_console_line).
     }
     if sys.platform == "win32":
         # Keep the child in the same console process group so Ctrl+C propagates.
         popen_kwargs["creationflags"] = 0
 
-    process = subprocess.Popen(cmd, **popen_kwargs)
+    try:
+        process = subprocess.Popen(cmd, **popen_kwargs)
+    except (FileNotFoundError, OSError) as e:
+        if RICH_AVAILABLE and console:
+            console.print(f"[red]ERROR: Failed to start process: {e}[/red]")
+        else:
+            print(f"ERROR: Failed to start process: {e}")
+        return -1
     output_queue = []
     queue_lock = threading.Lock()
     stop_reader = threading.Event()
 
     def reader():
         try:
-            for line in process.stdout:
+            for raw_line in process.stdout:
+                line = _decode_console_line(raw_line)
                 with queue_lock:
                     output_queue.append(line)
         except Exception:
@@ -646,15 +686,15 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
                     continue
                 if RICH_AVAILABLE and console:
                     if " OK " in line or "+ZIP" in line:
-                        console.print(f"  [green]{line}[/green]")
+                        console.print(f"  [green]{escape(line)}[/green]")
                     elif " | ERROR |" in line or " ERROR " in line:
-                        console.print(f"  [red]{line}[/red]")
+                        console.print(f"  [red]{escape(line)}[/red]")
                     elif " | WARN |" in line or "WARNING" in line:
-                        console.print(f"  [yellow]{line}[/yellow]")
+                        console.print(f"  [yellow]{escape(line)}[/yellow]")
                     elif "DRY" in line:
-                        console.print(f"  [blue]{line}[/blue]")
+                        console.print(f"  [blue]{escape(line)}[/blue]")
                     else:
-                        console.print(f"  {line}")
+                        console.print(f"  {escape(line)}")
                 else:
                     print(f"  {line}")
 
@@ -730,7 +770,7 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
         console.print(f"\n[cyan]Found {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} file(s)[/cyan]")
         for od in old_dirs:
             count = len([f for f in Path(od).glob("*") if f.is_file()])
-            console.print(f"  {count:>4} files: {od}")
+            console.print(f"  {count:>4} files: {escape(str(od))}")
     else:
         print(f"\nFound {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} file(s):")
         for od in old_dirs:
@@ -774,20 +814,20 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
                     _safe_move(f, dest)
                     moved += 1
                     if RICH_AVAILABLE and console:
-                        console.print(f"  [green]OVERWRITE: {f.name}[/green]")
+                        console.print(f"  [green]OVERWRITE: {escape(f.name)}[/green]")
                     else:
                         print(f"  OVERWRITE: {f.name}")
                 else:
                     skipped += 1
                     if RICH_AVAILABLE and console:
-                        console.print(f"  [yellow]SKIP (exists): {f.name}[/yellow]")
+                        console.print(f"  [yellow]SKIP (exists): {escape(f.name)}[/yellow]")
                     else:
                         print(f"  SKIP (exists): {f.name}")
             else:
                 _safe_move(f, dest)
                 moved += 1
                 if RICH_AVAILABLE and console:
-                    console.print(f"  [green]MOVED: {f.name}[/green]")
+                    console.print(f"  [green]MOVED: {escape(f.name)}[/green]")
                 else:
                     print(f"  MOVED: {f.name}")
 
@@ -798,7 +838,7 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
                 if not any(Path(od).glob("*")):
                     Path(od).rmdir()
                     if RICH_AVAILABLE and console:
-                        console.print(f"  [green]Removed: {od}[/green]")
+                        console.print(f"  [green]Removed: {escape(str(od))}[/green]")
                     else:
                         print(f"  Removed: {od}")
     else:
@@ -859,7 +899,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     try:
         result = subprocess.run(
             ["magick", "compare", "-metric", "RMSE", f"{old_path}[0]", f"{new_path}[0]", "null:"],
-            capture_output=True, text=True, timeout=120
+            capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
         )
         output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
 
@@ -878,7 +918,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
             return False, f"PIXEL_DIFF RMSE={rmse}"
 
     except subprocess.TimeoutExpired:
-        return False, "compare timeout (>120s)"
+        return False, f"compare timeout (>{COMPARE_TIMEOUT_S}s)"
     except FileNotFoundError:
         return False, "ImageMagick not found (magick command missing)"
     except Exception as e:
@@ -915,7 +955,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
     if depth is None:
         return False, 0.0, f"magick identify failed: {err_msg}"
     if depth != 16:
-        return False, 0.0, f"{depth}-bit (neither 8-bit nor 16-bit)"
+        return False, 0.0, f"{depth}-bit (not 16-bit)"
 
     tmp8 = None
     tmp16 = None
@@ -931,7 +971,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
         try:
             result = subprocess.run(
                 ["magick", str(tiff_path), "-depth", "8"] + (compress_8.split() if compress_8 else []) + [str(tmp8)],
-                capture_output=True, timeout=60
+                capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found"
@@ -942,7 +982,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
         try:
             result = subprocess.run(
                 ["magick", str(tmp8), "-depth", "16"] + (compress_16.split() if compress_16 else []) + [str(tmp16)],
-                capture_output=True, timeout=60
+                capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found"
@@ -956,7 +996,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
         try:
             result = subprocess.run(
                 ["magick", "compare", "-metric", "RMSE", str(tiff_path), str(tmp16), "null:"],
-                capture_output=True, text=True, timeout=120
+                capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found (compare failed)"
@@ -1011,7 +1051,7 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
     tiff_files = sorted([
         f for f in folder.rglob("*")
         if f.suffix.lower() in (".tif", ".tiff") and f.is_file()
-        and not any(p.lower() in ("old_tiffs", "logs", "zip", "_export", "converted_zip") for p in f.parts)
+        and not any(p.lower() in ("old_tiffs", "old_padded", "logs", "zip", "_export", "converted_zip") for p in f.parts)
     ])
 
     if not tiff_files:
@@ -1108,7 +1148,7 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
             elif is_real:
                 real_count += 1
                 status = "real 16-bit"
-            elif "neither 8-bit nor 16-bit" in detail:
+            elif "not 16-bit" in detail:
                 other_count += 1
                 status = detail
             else:
@@ -1120,11 +1160,11 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
 
             if RICH_AVAILABLE and console:
                 if not is_real and "padded" in detail.lower():
-                    console.print(f"  {progress} [yellow]{status}[/yellow] {tiff_path.name}")
+                    console.print(f"  {progress} [yellow]{escape(status)}[/yellow] {escape(tiff_path.name)}")
                 elif not is_real:
-                    console.print(f"  {progress} [red]{status}[/red] {tiff_path.name}")
+                    console.print(f"  {progress} [red]{escape(status)}[/red] {escape(tiff_path.name)}")
                 else:
-                    console.print(f"  {progress} [dim]{status}[/dim] {tiff_path.name}")
+                    console.print(f"  {progress} [dim]{escape(status)}[/dim] {escape(tiff_path.name)}")
             else:
                 print(f"  {progress} {status} - {tiff_path.name}")
 
@@ -1188,7 +1228,7 @@ def _process_single_padded(tiff_path, staging):
         try:
             result = subprocess.run(
                 ["magick", str(tiff_path), "-depth", "8", "-compress", "zip", str(tmp8)],
-                capture_output=True, timeout=60
+                capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
             status = "magick_not_found"
@@ -1264,6 +1304,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     """
     Compress padded 8-bit TIFFs to 8-bit ZIP.
     Converts 16-bit to 8-bit then ZIP compresses. Preserves EXIF via exiftool.
+    Originals are backed up to an OLD_PADDED/ subfolder before being replaced.
     Uses parallel processing with ThreadPoolExecutor.
     """
     if temp_dir is None:
@@ -1287,7 +1328,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
         final_dst = parent / name
 
         if RICH_AVAILABLE and console:
-            console.print(f"  [{i+1}/{len(padded_files)}] {name}")
+            console.print(f"  [{i+1}/{len(padded_files)}] {escape(name)}")
         else:
             print(f"  [{i+1}/{len(padded_files)}] {name}")
 
@@ -1298,7 +1339,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 print(f"    FAILED: magick not found")
         elif status == "error":
             if RICH_AVAILABLE and console:
-                console.print(f"    [red]FAILED: {error_msg}[/red]")
+                console.print(f"    [red]FAILED: {escape(str(error_msg))}[/red]")
             else:
                 print(f"    FAILED: {error_msg}")
         elif status == "magick_error":
@@ -1332,7 +1373,29 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 print(f"    OK {_format_size(size_orig)} -> {_format_size(size_zip)} ({ratio:.1f}% smaller, EXIF preserved)")
 
             if size_zip < size_orig:
+                # Back up the original to OLD_PADDED/ before replacing (lossy 16 -> 8-bit)
+                backup_dir = parent / "OLD_PADDED"
+                try:
+                    backup_dir.mkdir(exist_ok=True)
+                    backup_path = backup_dir / name
+                    if backup_path.exists():
+                        v = 2
+                        while (backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}").exists():
+                            v += 1
+                        backup_path = backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}"
+                    _safe_move(final_dst, backup_path)
+                except Exception as e:
+                    if RICH_AVAILABLE and console:
+                        console.print(f"    [red]FAILED: backup to OLD_PADDED failed ({escape(str(e))}) — original preserved[/red]")
+                    else:
+                        print(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved")
+                    tmp8.unlink(missing_ok=True)
+                    continue
                 _safe_move(tmp8, final_dst)
+                if RICH_AVAILABLE and console:
+                    console.print(f"    [dim]Original backed up: OLD_PADDED/{escape(backup_path.name)}[/dim]")
+                else:
+                    print(f"    Original backed up: OLD_PADDED/{backup_path.name}")
             else:
                 if RICH_AVAILABLE and console:
                     console.print(f"    [dim]SKIPPED (ZIP larger than original)[/dim]")
@@ -1394,14 +1457,23 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             print("No files found in OLD_TIFFs folders.")
         return True
 
-    # Verify each file
-    for old_file, new_file, old_size in items:
+    # Verify each image file (non-TIFF sidecars are not verifiable and don't block the purge)
+    def _verify(item):
+        old_file, new_file, _ = item
+        if old_file.suffix.lower() not in (".tif", ".tiff"):
+            return None
         if not new_file.exists():
-            mismatches.append((old_file, new_file, "parent file missing"))
-            continue
+            return (old_file, new_file, "parent file missing")
         match, detail = _compare_tiff_metadata(old_file, new_file)
         if not match:
-            mismatches.append((old_file, new_file, detail))
+            return (old_file, new_file, detail)
+        return None
+
+    workers = cfg.config.last_workers or cfg.config.default_workers
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for result in executor.map(_verify, items):
+            if result:
+                mismatches.append(result)
 
     # Display results
     total_old_size = sum(s for _, _, s in items)
@@ -1432,7 +1504,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
         else:
             status = "OK"
         if RICH_AVAILABLE and console:
-            console.print(f"  [{status}] {old_file.relative_to(folder)}  {size_info}{detail}")
+            console.print(f"  [{status}] {escape(str(old_file.relative_to(folder)))}  {size_info}{escape(detail)}")
         else:
             status_str = status.replace("[red]", "").replace("[/red]", "")
             print(f"  [{status_str}] {old_file.relative_to(folder)}  {size_info}{detail}")
@@ -1441,7 +1513,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
         if RICH_AVAILABLE and console:
             console.print(f"\n[red]{len(mismatches)} file(s) have issues -- cannot purge.[/red]")
             for old_file, new_file, reason in mismatches:
-                console.print(f"  [red]! {old_file.relative_to(folder)}: {reason}[/red]")
+                console.print(f"  [red]! {escape(str(old_file.relative_to(folder)))}: {escape(reason)}[/red]")
         else:
             print(f"\n{len(mismatches)} file(s) have issues -- cannot purge.")
             for old_file, new_file, reason in mismatches:
@@ -1507,12 +1579,12 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             old_file.unlink()
             deleted += 1
             if RICH_AVAILABLE and console:
-                console.print(f"  [green]DELETED: {old_file.relative_to(folder)}[/green]")
+                console.print(f"  [green]DELETED: {escape(str(old_file.relative_to(folder)))}[/green]")
             else:
                 print(f"  DELETED: {old_file.relative_to(folder)}")
         except Exception as e:
             if RICH_AVAILABLE and console:
-                console.print(f"  [red]ERROR deleting {old_file.name}: {e}[/red]")
+                console.print(f"  [red]ERROR deleting {escape(old_file.name)}: {escape(str(e))}[/red]")
             else:
                 print(f"  ERROR deleting {old_file.name}: {e}")
 
@@ -1522,7 +1594,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             if od.exists() and not any(od.iterdir()):
                 od.rmdir()
                 if RICH_AVAILABLE and console:
-                    console.print(f"  [green]Removed folder: {od.relative_to(folder)}[/green]")
+                    console.print(f"  [green]Removed folder: {escape(str(od.relative_to(folder)))}[/green]")
                 else:
                     print(f"  Removed folder: {od.relative_to(folder)}")
         except Exception:
@@ -1951,6 +2023,14 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
 # --- Main ---------------------------------------------------------
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="TIFF Workflow Manager -- interactive wizard for TIFF compression, "
+                    "EXIF copy, diagnostics and cleanup.",
+        epilog="Run without arguments to start the interactive wizard. "
+               "See README.md and docs/README_convert_tiff_py.md for full documentation.",
+    )
+    parser.parse_args()
+
     cfg = ConfigManager()
 
     # Detect PowerShell version at startup

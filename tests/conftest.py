@@ -17,9 +17,3 @@ def temp_dir():
     """Create a temporary directory for test files."""
     with tempfile.TemporaryDirectory() as td:
         yield Path(td)
-
-
-@pytest.fixture
-def sample_tiff_path(temp_dir):
-    """Create a minimal valid TIFF for testing."""
-    return None  # Would need actual TIFF file

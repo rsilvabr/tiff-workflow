@@ -35,6 +35,18 @@ Describe "copy_exif_to_TIFF_ps5.ps1 - Page Count" {
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match '\$pageCount = \[int\]'
     }
+
+    It "Uses [int]::TryParse to guard page count parsing" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\[int\]::TryParse\("\$pageCountVal", \[ref\]\$pageCount\)'
+    }
+}
+
+Describe "copy_exif_to_TIFF_ps5.ps1 - Error Handling" {
+    It "Exits 1 when errors occurred" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'if \(\$script:errTotal -gt 0\) \{ exit 1 \}'
+    }
 }
 
 Describe "copy_exif_to_TIFF_ps5.ps1 - Original Name" {
