@@ -72,7 +72,7 @@ $allFiles = foreach ($root in $inputRoots) {
     }
 }
 
-$files = $allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch '(?i)_thumb$' }
+$files = $allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch '(?i)_thumb(-\d+)?$' }
 $total = $files.Count
 
 if ($total -eq 0) {

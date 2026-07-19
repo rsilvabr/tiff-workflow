@@ -154,6 +154,8 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
     results = {}
     exclude_names = {"logs", "converted_zip", "zip", "_export", "old_tiffs"}
     for path in root.rglob("*/"):
+        if not path.is_dir():
+            continue  # Python < 3.11: rglob("*/") also yields files
         if path.name.startswith("."):
             continue
         if path.name.lower() in exclude_names:
@@ -513,6 +515,30 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
 
 # --- Command Builders ----------------------------------------------
 
+def _wrap_ps5_command(cmd: List[str]) -> List[str]:
+    """powershell.exe 5.1 cannot bind switch values like -SafeMode:$false passed
+    via -File (command-line args arrive as strings). Wrap the invocation in
+    -Command so $true/$false literals are evaluated by the PowerShell parser."""
+    import re
+    exe, rest = cmd[0], cmd[1:]
+    try:
+        file_idx = rest.index("-File")
+        script = rest[file_idx + 1]
+        args = rest[file_idx + 2:]
+    except (ValueError, IndexError):
+        return cmd
+    prefix = rest[:file_idx]
+
+    def _quote(a: str) -> str:
+        # Parameter names and $bool switch values must stay unquoted to bind correctly
+        if re.fullmatch(r"-\w+(:\$(?:true|false))?", a):
+            return a
+        return "'" + a.replace("'", "''") + "'"
+
+    invocation = "& " + _quote(script) + (" " + " ".join(_quote(a) for a in args) if args else "")
+    return [exe] + prefix + ["-Command", invocation]
+
+
 def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: str = "pwsh") -> List[str]:
     """Build powershell command for compress_tiff_zip.ps1."""
     script = SCRIPT_DIR / "compress_tiff_zip.ps1"
@@ -561,6 +587,9 @@ def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: 
         if workflow.get("skip_compressed_with_thumb"):
             cmd += ["-SkipCompressedWithThumb"]
 
+    if ps_name == "powershell":
+        cmd = _wrap_ps5_command(cmd)
+
     return cmd
 
 
@@ -600,18 +629,28 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
     if extra_flags:
         cmd += extra_flags
 
+    if ps_name == "powershell":
+        cmd = _wrap_ps5_command(cmd)
+
     return cmd
 
 
 # --- Subprocess Runner ----------------------------------------------
 
 def _decode_console_line(raw: bytes) -> str:
-    """Decode subprocess output: try UTF-8, fall back to the locale codepage
-    (Windows PowerShell 5 emits OEM/ANSI, not UTF-8)."""
+    """Decode subprocess output: try UTF-8, fall back to the console OEM codepage
+    (Windows PowerShell 5 emits OEM, e.g. cp850, not UTF-8)."""
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
-        return raw.decode(locale.getpreferredencoding(False), errors="replace")
+        enc = locale.getpreferredencoding(False)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                enc = f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+            except Exception:
+                pass
+        return raw.decode(enc, errors="replace")
 
 
 def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
@@ -673,32 +712,35 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
                 pass
 
     start_time = time.time()
+
+    def _drain_lines():
+        with queue_lock:
+            pending = output_queue[:]
+            output_queue.clear()
+        for line in pending:
+            line = line.strip()
+            if not line:
+                continue
+            if RICH_AVAILABLE and console:
+                if " OK " in line or "+ZIP" in line:
+                    console.print(f"  [green]{escape(line)}[/green]")
+                elif " | ERROR |" in line or " ERROR " in line:
+                    console.print(f"  [red]{escape(line)}[/red]")
+                elif " | WARN |" in line or "WARNING" in line:
+                    console.print(f"  [yellow]{escape(line)}[/yellow]")
+                elif "DRY" in line:
+                    console.print(f"  [blue]{escape(line)}[/blue]")
+                else:
+                    console.print(f"  {escape(line)}")
+            else:
+                print(f"  {line}")
+
     try:
         while True:
-            # Drain queued output
-            lines_to_print = []
-            with queue_lock:
-                lines_to_print = output_queue[:]
-                output_queue.clear()
-            for line in lines_to_print:
-                line = line.strip()
-                if not line:
-                    continue
-                if RICH_AVAILABLE and console:
-                    if " OK " in line or "+ZIP" in line:
-                        console.print(f"  [green]{escape(line)}[/green]")
-                    elif " | ERROR |" in line or " ERROR " in line:
-                        console.print(f"  [red]{escape(line)}[/red]")
-                    elif " | WARN |" in line or "WARNING" in line:
-                        console.print(f"  [yellow]{escape(line)}[/yellow]")
-                    elif "DRY" in line:
-                        console.print(f"  [blue]{escape(line)}[/blue]")
-                    else:
-                        console.print(f"  {escape(line)}")
-                else:
-                    print(f"  {line}")
+            _drain_lines()
 
             if stop_reader.is_set() and process.poll() is not None:
+                _drain_lines()  # final drain: the reader may queue the last lines after our check
                 break
 
             if timeout is not None and time.time() - start_time > timeout:
@@ -887,6 +929,18 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
         except Exception:
             return None, None
 
+    def get_page_count(path):
+        try:
+            result = subprocess.run(
+                ["magick", "identify", "-format", "%n\n", str(path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0 and result.stdout:
+                return int(result.stdout.splitlines()[0].strip())
+            return None
+        except Exception:
+            return None
+
     old_w, old_h = get_dimensions(old_path)
     new_w, new_h = get_dimensions(new_path)
 
@@ -895,6 +949,12 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
 
     if old_w != new_w or old_h != new_h:
         return False, f"DIMENSION_MISMATCH {old_w}x{old_h} vs {new_w}x{new_h}"
+
+    # Page-count check: RMSE below only compares page [0], so a lost extra page must block the purge
+    old_pages = get_page_count(old_path)
+    new_pages = get_page_count(new_path)
+    if old_pages is not None and new_pages is not None and old_pages != new_pages:
+        return False, f"PAGE_COUNT_MISMATCH {old_pages} vs {new_pages}"
 
     try:
         result = subprocess.run(
@@ -1076,6 +1136,9 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
                 workers = int(resp)
             except ValueError:
                 print(f"Invalid workers value '{resp}', using default {workers}")
+
+    if workers < 1:
+        workers = 1
 
     temp_dir = None
     if RICH_AVAILABLE and console:
@@ -1260,7 +1323,7 @@ def _process_single_padded(tiff_path, staging):
         # Integrity check: ensure the compressed file decodes and dimensions match
         try:
             verify_result = subprocess.run(
-                ["magick", "convert", str(tmp8), "null:"],
+                ["magick", str(tmp8), "null:"],
                 capture_output=True, timeout=30
             )
             if verify_result.returncode != 0:
@@ -1319,7 +1382,11 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(_process_one, f): i for i, f in enumerate(padded_files)}
         for future in concurrent.futures.as_completed(futures):
-            results.append((futures[future], future.result()))
+            try:
+                results.append((futures[future], future.result()))
+            except Exception as e:
+                f = padded_files[futures[future]]
+                results.append((futures[future], (f.name, f.parent, "error", None, None, None, False, str(e), f)))
 
     results.sort(key=lambda x: x[0])
 
@@ -1457,10 +1524,17 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             print("No files found in OLD_TIFFs folders.")
         return True
 
-    # Verify each image file (non-TIFF sidecars are not verifiable and don't block the purge)
+    # Verify each image file; non-TIFF sidecars must at least have an identical-size copy in the parent
     def _verify(item):
         old_file, new_file, _ = item
         if old_file.suffix.lower() not in (".tif", ".tiff"):
+            if not new_file.exists():
+                return (old_file, new_file, "parent file missing")
+            try:
+                if new_file.stat().st_size != old_file.stat().st_size:
+                    return (old_file, new_file, "sidecar differs from parent copy")
+            except OSError as e:
+                return (old_file, new_file, f"stat failed: {e}")
             return None
         if not new_file.exists():
             return (old_file, new_file, "parent file missing")
@@ -1957,8 +2031,9 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
         input_dir = Prompt.ask("[cyan]Input directory[/cyan]", default=str(cfg.config.last_input_dir or "."))
     else:
         input_dir = input(f"Input directory [{cfg.config.last_input_dir or '.'}]: ").strip() or (cfg.config.last_input_dir or ".")
+    input_dir = (input_dir or "").strip().strip('"').strip("'")
     p = Path(input_dir)
-    if not p.exists():
+    if not p.is_dir():
         print(f"Directory does not exist: {input_dir}")
         return False
     cfg.config.last_input_dir = str(p.resolve())
@@ -2006,6 +2081,7 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
         "-Size", str(size),
         "-Quality", quality_str,
         "-Format", fmt,
+        "-Workers", str(cfg.config.last_workers or cfg.config.default_workers),
     ]
     if recursive:
         cmd += ["-Recursive"]

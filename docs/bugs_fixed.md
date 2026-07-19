@@ -2,6 +2,63 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## v2.3 - Audit Round 4
+
+### 🔴 CRITICAL - copy_exif `-OutputDir` + `-CompressZip` Deleted Its Own Output
+**Issue:** With `-OutputDir` (different from the source dir) and `-CompressZip` (without `-Overwrite`), the script copied the TIFF to the output dir, applied EXIF, then tested `Test-Path $finalDst` — but `$finalDst` and `$destTiff` are the same path the script itself just created. It entered the "exists" branch, deleted its own output, and returned `OK+SKIP-ZIP (exists)` producing no file at all.
+- **Fix:** The exists-check now skips files copied by the current run (`-and -not $tiffCopied`).
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟠 HIGH - Mode 8: Integrity Check Did Not Protect the Original
+**Issue:** For `.tif` sources `finalDst == srcPath`, and the staging→final move loop overwrote the original unconditionally. The verification only ran with `-DeleteSource`, and even when it failed (`CanDeleteSource = $false`) the move still replaced the original — the delete loop's `src == final` guard made it dead code for `.tif` files.
+- **Fix:** Mode 8 now always verifies the staged ZIP with `magick file null:` before the move. On failure the worker flags `IntegrityFailed`, the result is reported as `ERROR (ZIP integrity check failed - source preserved)`, the staged file is discarded, and the move loop skips it (exit code 1).
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Modes 4/5: Untreated Destination Collisions
+**Issue:** Dedup existed only for mode 2 and modes 6/7. Mode 5 flattens one level (`in\A\x.tif` and `in\B\x.tif` → same output) and mode 4 merges `X`/`X_TIFF` into `X_ZIP`. With staging, one output silently vanished; without staging, two magick processes raced on the same file.
+- **Fix:** The collision detection (number later claimants `_v2`, `_v3`, ...) now covers all flattening modes 4–7.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Page Count via `identify -format "%n"` Concatenated Digits
+**Issue:** `%n` prints once per frame with no separator: a 3-page TIFF returned `"333"` (log lied), and 10+ pages produced 20+ digit strings that overflowed int32 parsing → spurious `ERROR (page count parse)` instead of a clean MULTI skip.
+- **Fix:** Use `"%n\n"` and parse the first line (existing array handling).
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - Rollback Broken for `ERROR (magick)` (PS7 Parallel Path)
+**Issue:** The plain-compression `ERROR (magick)` return was the only one without `SrcPath`, so `errorSrcPaths` never contained it and the OLD_TIFFs rollback silently did not run.
+- **Fix:** Added `SrcPath` to that return.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Mode 8 Abort Exited 0
+**Issue:** Declining the default staging dir logged `Mode 8 aborted` as ERROR but used `return`, so the wizard/CI saw success.
+- **Fix:** `exit 1`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - PS 5.1: Wizard Generated Invalid Commands
+**Issue:** `build_compress_command`/`build_copy_exif_command` pass `-SafeMode:$false`/`-SkipLzwAsCompressed:$true`. `powershell.exe -File` (5.1) cannot bind `:$bool` values from the command line (verified empirically) — the backend failed to start when those defaults were changed.
+- **Fix:** For PS5 the wizard wraps the invocation in `-Command "& 'script' ..."` so `$true`/`$false` literals are evaluated by the PowerShell parser; parameter names stay unquoted, values are single-quoted with `''` escaping. PS7 path unchanged.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - Integrity Verification Failed Open on Job Failure
+**Issue:** In `_Verify-ZipIntegrity` and the inline parallel check, a failed job returning no output made `[int]$null = 0` → treated as "intact", the exact path that authorizes source destruction in mode 8.
+- **Fix:** Empty job output now fails closed (`return $false`).
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Exiftool Argfiles Broke Non-ASCII Paths
+**Issue:** Argfiles are written UTF-8 but exiftool interpreted file names in the system ANSI codepage unless told otherwise → paths like `Fotos_João` failed with mass `ERROR (exiftool check)`.
+- **Fix:** All 13 argfiles now start with `-charset filename=utf8`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - Stability & Hygiene Fixes
+- Mode 2: `-Overwrite` no longer renamed to `_v2` under the default `Numbered` action; intra-run duplicates with `DuplicateAction=Overwrite` now drop the earlier task (last claimant wins) instead of racing/orphaning staging files. **Files:** `compress_tiff_zip.ps1`
+- Legacy PS7 honors `-SkipCompressedWithThumb`; legacy PS5 staging names use the run-scoped prefix so the interrupt trap cleans them. **Files:** `compress_tiff_zip.ps1`
+- Wizard: `Workers = 0` clamped to 1 (was a `ValueError` traceback); `_compress_padded_files` catches worker exceptions per file instead of aborting the batch; `run_subprocess` does a final queue drain (last output lines could be lost); `run_generate_thumbnails` strips pasted quotes, validates `is_dir`, and passes `-Workers`; PS5 output decoding falls back to the console OEM codepage (cp850/cp866, not just ANSI). **Files:** `convert_tiff.py`
+- Purge: non-TIFF sidecars in OLD_TIFFs must have an identical-size copy in the parent or the purge is blocked; `_compare_tiff_metadata` now also compares page counts (RMSE only covered page `[0]`, so lost extra pages went unnoticed). **Files:** `convert_tiff.py`
+- Last `magick convert` (deprecated IM7) removed from `_process_single_padded`; AutoFind `rglob("*/")` guards `is_dir()` for Python < 3.11. **Files:** `convert_tiff.py`
+- `generate_thumbnails.ps1` self-exclusion now also covers multi-frame thumbs (`_thumb-0`, `_thumb-1`, ...).
+
+---
+
 ## v2.2 - Audit Round 3
 
 ### 🔴 CRITICAL - `[no thumb]` Fallback Orphaned Output in Staging

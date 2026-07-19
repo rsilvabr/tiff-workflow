@@ -434,7 +434,7 @@ function Process-TiffJob {
 
     $argComp = [System.IO.Path]::GetTempFileName()
     try {
-        [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$srcPath`n")
+        [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-Compression`n$srcPath`n")
         $comp = exiftool -@ $argComp 2>$null
         $exifExit = $LASTEXITCODE
     } finally {
@@ -471,7 +471,7 @@ function Process-TiffJob {
         $srcCapture = $srcPath
         $pageCountJob = $null
         try {
-            $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
+            $pageCountJob = Start-Job { param($path) magick identify -format "%n\n" $path 2>$null } -ArgumentList $srcCapture
             $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
             if ($pageCountJob.State -eq 'Running') {
                 Stop-Job $pageCountJob
@@ -553,7 +553,7 @@ function Process-TiffJob {
             $thumbIfd = if ($thumbPage -le 0) { "IFD0" } else { "IFD1" }
             $argThumb = [System.IO.Path]::GetTempFileName()
             try {
-                [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
+                [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
                 $thumbExifOut = exiftool -@ $argThumb 2>&1
                 $thumbExifExit = $LASTEXITCODE
             } finally {
@@ -577,7 +577,7 @@ function Process-TiffJob {
     $stagingName = [System.IO.Path]::GetFileName($writeDst)
     $argExif = [System.IO.Path]::GetTempFileName()
     try {
-        [System.IO.File]::WriteAllText($argExif, "-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
+        [System.IO.File]::WriteAllText($argExif, "-charset`nfilename=utf8`n-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
         $hasExif = exiftool -@ $argExif 2>$null
     } finally {
         Remove-Item $argExif -Force -ErrorAction SilentlyContinue
@@ -586,7 +586,7 @@ function Process-TiffJob {
     if (-not $hasExif) {
         $argCopy = [System.IO.Path]::GetTempFileName()
         try {
-            [System.IO.File]::WriteAllText($argCopy, "-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
+            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
             exiftool -@ $argCopy | Out-Null
         } finally {
             Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
@@ -597,16 +597,14 @@ function Process-TiffJob {
     }
 
     $canDeleteSource = $false
-    if ($deleteSource -and $mode -eq 8) {
-        $stagingUsed = ($writeDst -ne $srcPath)
-        if ($stagingUsed) {
-            if ((_Verify-ZipIntegrity $writeDst) -and (Test-Path -LiteralPath $srcPath)) {
-                $canDeleteSource = $true
-            }
+    $integrityFailed = $false
+    if ($mode -eq 8) {
+        # Always verify in mode 8: the staged file will overwrite the original, so a bad ZIP must not move
+        $verifyTarget = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
+        if ((_Verify-ZipIntegrity $verifyTarget) -and (Test-Path -LiteralPath $srcPath)) {
+            if ($deleteSource) { $canDeleteSource = $true }
         } else {
-            if ((_Verify-ZipIntegrity $srcPath) -and (Test-Path -LiteralPath $srcPath)) {
-                $canDeleteSource = $true
-            }
+            $integrityFailed = $true
         }
     }
 
@@ -617,6 +615,7 @@ function Process-TiffJob {
         SrcPath = $srcPath
         FinalDst = $finalDst
         CanDeleteSource = $canDeleteSource
+        IntegrityFailed = $integrityFailed
     }
 }
 
@@ -633,7 +632,8 @@ function _Verify-ZipIntegrity {
         }
         $jobOutput = Receive-Job $job
         Remove-Job $job -Force
-        # The last element is the explicit exit code we returned
+        # The last element is the explicit exit code we returned; no output = job failed -> fail closed
+        if ($null -eq $jobOutput) { return $false }
         $zipExitCode = if ($jobOutput -is [array]) { $jobOutput[-1] } else { $jobOutput }
         return [int]$zipExitCode -eq 0
     } catch {
@@ -720,6 +720,7 @@ if ($Mode -lt 0) {
                     $thumbQualityL = $using:ThumbQuality
                     $thumbFormatL = $using:ThumbFormat
                     $thumbPageL = $using:ThumbPage
+                    $skipCompThumbL = $using:SkipCompressedWithThumb
 
                     $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
                     $ext = [System.IO.Path]::GetExtension($name)
@@ -737,7 +738,7 @@ if ($Mode -lt 0) {
 
                     $argComp = [System.IO.Path]::GetTempFileName()
                     try {
-                        [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$src`n")
+                        [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-Compression`n$src`n")
                         $comp = exiftool -@ $argComp 2>$null
                         $exifExit = $LASTEXITCODE
                     } finally {
@@ -747,7 +748,23 @@ if ($Mode -lt 0) {
         return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
                     }
                     if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
+                        if ($skipCompThumbL) {
+                            # Only skip when a thumbnail is already embedded; otherwise reprocess
+                            $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$src" 2>$null
+                            $hasThumb = $false
+                            if ($subfileTypes -is [array]) {
+                                for ($i = 0; $i -lt $subfileTypes.Count; $i++) {
+                                    $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+                                    if ($st -in @("REDUCEDIMAGE", "REDUCED")) { $hasThumb = $true; break }
+                                }
+                            }
+                            if ($hasThumb) {
+        return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                            }
+                            # Compressed but no thumbnail: fall through to reprocess
+                        } else {
         return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                        }
                     }
 
                     if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $src)) {
@@ -758,7 +775,7 @@ if ($Mode -lt 0) {
                         $srcCapture = $src
                         $pageCountJob = $null
                         try {
-                            $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
+                            $pageCountJob = Start-Job { param($path) magick identify -format "%n\n" $path 2>$null } -ArgumentList $srcCapture
                             $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
                             if ($pageCountJob.State -eq 'Running') {
                                 Stop-Job $pageCountJob
@@ -825,7 +842,7 @@ if ($Mode -lt 0) {
                             $argThumb = [System.IO.Path]::GetTempFileName()
                             $thumbIfd = if ($thumbPageL -le 0) { "IFD0" } else { "IFD1" }
                             try {
-                                [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
+                                [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
                                 $thumbExifOut = exiftool -@ $argThumb 2>&1
                                 $thumbExifExit = $LASTEXITCODE
                             } finally {
@@ -846,7 +863,7 @@ if ($Mode -lt 0) {
 
                     $argExif = [System.IO.Path]::GetTempFileName()
                     try {
-                        [System.IO.File]::WriteAllText($argExif, "-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
+                        [System.IO.File]::WriteAllText($argExif, "-charset`nfilename=utf8`n-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
                         $hasExif = exiftool -@ $argExif 2>$null
                     } finally {
                         Remove-Item $argExif -Force -ErrorAction SilentlyContinue
@@ -855,7 +872,7 @@ if ($Mode -lt 0) {
                     if (-not $hasExif) {
                         $argCopy = [System.IO.Path]::GetTempFileName()
                         try {
-                            [System.IO.File]::WriteAllText($argCopy, "-q`n-q`n-overwrite_original`n-tagsfromfile`n$src`n-all:all`n-unsafe`n$writeDst`n")
+                            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$src`n-all:all`n-unsafe`n$writeDst`n")
                             exiftool -@ $argCopy | Out-Null
                         } finally {
                             Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
@@ -882,7 +899,9 @@ if ($Mode -lt 0) {
                     $ext = [System.IO.Path]::GetExtension($f.Name)
                     if (-not $ext) { $ext = ".tif" }
                     $tifName = "${stem}${ext}"
-                    $result = Process-TiffJob $f.FullName $(Join-Path $writeDir $tifName) $(Join-Path $finalDir $tifName) `
+                    # Prefix staged names with the run id so the interrupt trap can clean them up
+                    $writeName = if ($writeDir -ne $finalDir) { "$($script:runStagingId)_$([guid]::NewGuid().ToString('N'))_$tifName" } else { $tifName }
+                    $result = Process-TiffJob $f.FullName $(Join-Path $writeDir $writeName) $(Join-Path $finalDir $tifName) `
                                 $script:DryRun $script:Overwrite $script:SafeMode `
                                 $script:SkipLzwAsCompressed $script:DeleteSource $script:Mode `
                                 $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbFormat $script:ThumbPage `
@@ -1023,7 +1042,7 @@ if ($Mode -eq 8 -and -not $DryRun -and [string]::IsNullOrWhiteSpace($StagingDir)
 
     if (-not $useDefault) {
         Write-Log "Mode 8 aborted: no staging directory selected." "ERROR"
-        return
+        exit 1
     }
     $StagingDir = $defaultStaging
     $script:StagingDir = $StagingDir
@@ -1071,7 +1090,9 @@ foreach ($f in $files) {
                     $skipThisFile = $true
                 }
                 'Overwrite' {
-                    # keep candidate as-is; Overwrite switch will allow replacement
+                    # Last claimant wins: drop any earlier task targeting the same destination
+                    $tasks = @($tasks | Where-Object { $_.FinalDst -ne $finalDst })
+                    Write-Log "OVERWRITE (duplicate filename in flat output) | $($f.Name)" "INFO"
                 }
                 default { # Numbered
                     $counter = 2
@@ -1084,7 +1105,7 @@ foreach ($f in $files) {
                     $finalDst = $candidatePath
                 }
             }
-        } elseif ($script:DuplicateAction -eq 'Numbered' -and $finalDst -ne $f.FullName -and (Test-Path -LiteralPath $finalDst)) {
+        } elseif ($script:DuplicateAction -eq 'Numbered' -and -not $Overwrite -and $finalDst -ne $f.FullName -and (Test-Path -LiteralPath $finalDst)) {
             # Not claimed in this run but already exists on disk -> number it
             $stem = [System.IO.Path]::GetFileNameWithoutExtension($destName)
             $ext = [System.IO.Path]::GetExtension($destName)
@@ -1103,9 +1124,9 @@ foreach ($f in $files) {
         }
     }
 
-    # Modes 6/7: outputs flatten under <root>\_EXPORT, so same-named files from
+    # Modes 4/5/6/7: outputs flatten into shared folders, so same-named files from
     # different source trees collide -> number the later claimants
-    if ($Mode -eq 6 -or $Mode -eq 7) {
+    if ($Mode -ge 4 -and $Mode -le 7) {
         $dstKey = $finalDst.ToLowerInvariant()
         if ($claimedDst.ContainsKey($dstKey) -and $claimedDst[$dstKey] -ne $f.FullName) {
             $dstDir  = [System.IO.Path]::GetDirectoryName($finalDst)
@@ -1150,7 +1171,7 @@ foreach ($f in $files) {
         }
         $argComp = [System.IO.Path]::GetTempFileName()
         try {
-            [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$($f.FullName)`n")
+            [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-Compression`n$($f.FullName)`n")
             $comp = exiftool -@ $argComp 2>$null
             $exifExit = $LASTEXITCODE
         } finally {
@@ -1310,7 +1331,7 @@ foreach ($group in $groupedTasks) {
 
             $argComp = [System.IO.Path]::GetTempFileName()
             try {
-                [System.IO.File]::WriteAllText($argComp, "-s`n-s`n-s`n-Compression`n$srcPath`n")
+                [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-Compression`n$srcPath`n")
                 $comp = exiftool -@ $argComp 2>$null
                 $exifExit = $LASTEXITCODE
             } finally {
@@ -1348,7 +1369,7 @@ foreach ($group in $groupedTasks) {
                 $srcCapture = $srcPath
                 $pageCountJob = $null
                 try {
-                    $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $srcCapture
+                    $pageCountJob = Start-Job { param($path) magick identify -format "%n\n" $path 2>$null } -ArgumentList $srcCapture
                     $pageCountJob | Wait-Job -Timeout $magickTimeout | Out-Null
                     if ($pageCountJob.State -eq 'Running') {
                         Stop-Job $pageCountJob
@@ -1418,7 +1439,7 @@ foreach ($group in $groupedTasks) {
                     $argThumb = [System.IO.Path]::GetTempFileName()
                     $thumbIfd = if ($thumbPage -le 0) { "IFD0" } else { "IFD1" }
                     try {
-                        [System.IO.File]::WriteAllText($argThumb, "-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
+                        [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
                         $thumbExifOut = exiftool -@ $argThumb 2>&1
                         $thumbExifExit = $LASTEXITCODE
                     } finally {
@@ -1436,13 +1457,13 @@ foreach ($group in $groupedTasks) {
                 # Normal compression (all pages or page 0)
                 $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
                 if ($LASTEXITCODE -ne 0) {
-                    return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+                    return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                 }
             }
             $stagingName = [System.IO.Path]::GetFileName($writeDst)
             $argExif = [System.IO.Path]::GetTempFileName()
             try {
-                [System.IO.File]::WriteAllText($argExif, "-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
+                [System.IO.File]::WriteAllText($argExif, "-charset`nfilename=utf8`n-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
                 $hasExif = exiftool -@ $argExif 2>$null
             } finally {
                 Remove-Item $argExif -Force -ErrorAction SilentlyContinue
@@ -1450,7 +1471,7 @@ foreach ($group in $groupedTasks) {
             if (-not $hasExif) {
                 $argCopy = [System.IO.Path]::GetTempFileName()
                 try {
-                    [System.IO.File]::WriteAllText($argCopy, "-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
+                    [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
                     exiftool -@ $argCopy | Out-Null
                 } finally {
                     Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
@@ -1461,20 +1482,27 @@ foreach ($group in $groupedTasks) {
                 }
             }
             $canDeleteSource = $false
-            if ($deleteSource -and $mode -eq 8) {
+            $integrityFailed = $false
+            if ($mode -eq 8) {
                 # Inline ZIP integrity check (functions are not accessible in -Parallel scope)
+                # Always verify in mode 8: the staged file will overwrite the original, so a bad ZIP must not move
                 $verifyPath = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
                 $integrityJob = Start-Job { param($p) magick "$p" null: 2>$null; $LASTEXITCODE } -ArgumentList $verifyPath
                 $integrityJob | Wait-Job -Timeout $magickTimeout | Out-Null
                 $integrityOk = $false
                 if ($integrityJob.State -ne 'Running') {
                     $integrityOutput = Receive-Job $integrityJob
-                    $integrityExit = if ($integrityOutput -is [array]) { $integrityOutput[-1] } else { $integrityOutput }
-                    $integrityOk = [int]$integrityExit -eq 0
+                    # No output = job failed -> fail closed
+                    if ($null -ne $integrityOutput) {
+                        $integrityExit = if ($integrityOutput -is [array]) { $integrityOutput[-1] } else { $integrityOutput }
+                        $integrityOk = [int]$integrityExit -eq 0
+                    }
                 }
                 Remove-Job $integrityJob -Force -ErrorAction SilentlyContinue
                 if ($integrityOk -and (Test-Path -LiteralPath $srcPath)) {
-                    $canDeleteSource = $true
+                    if ($deleteSource) { $canDeleteSource = $true }
+                } else {
+                    $integrityFailed = $true
                 }
             }
             if ($thumbMarkerFailed) {
@@ -1485,6 +1513,7 @@ foreach ($group in $groupedTasks) {
                     SrcPath = $srcPath
                     FinalDst = $finalDst
                     CanDeleteSource = $canDeleteSource
+                    IntegrityFailed = $integrityFailed
                 }
             }
             return @{
@@ -1494,6 +1523,7 @@ foreach ($group in $groupedTasks) {
                 SrcPath = $srcPath
                 FinalDst = $finalDst
                 CanDeleteSource = $canDeleteSource
+                IntegrityFailed = $integrityFailed
             }
         } -ThrottleLimit $effectiveWorkers
 
@@ -1501,11 +1531,16 @@ foreach ($group in $groupedTasks) {
         # Use FinalDst as key to handle duplicate filenames across different folders
         $errBefore = $script:errTotal
         $errorSrcPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $integrityFailedDst = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($r in $parallelResults) {
             if ($r.StagingName) { $script:stagingMap[$r.FinalDst.ToLowerInvariant()] = @{ StagingName = $r.StagingName; FinalDst = $r.FinalDst } }
             if ($r.MultiPagePath) { $script:multiPagePaths.Add($r.MultiPagePath) | Out-Null }
             if ($r.SrcPath -and $r.Result -and $r.Result.StartsWith("ERROR")) { $errorSrcPaths.Add($r.SrcPath) | Out-Null }
             $resultText = $r.Result
+            if ($r.IntegrityFailed) {
+                if ($r.FinalDst) { $integrityFailedDst.Add($r.FinalDst.ToLowerInvariant()) | Out-Null }
+                $resultText = "ERROR (ZIP integrity check failed - source preserved) | $($r.OriginalName)"
+            }
             if ($r.FinalDst -and $collisionNotes.ContainsKey($r.FinalDst.ToLowerInvariant())) { $resultText += $collisionNotes[$r.FinalDst.ToLowerInvariant()] }
             Process-Results @($resultText)
         }
@@ -1517,6 +1552,11 @@ foreach ($group in $groupedTasks) {
             foreach ($t in $groupTasks) {
                 $key = $t.FinalDst.ToLowerInvariant()
                 if (-not $script:stagingMap.ContainsKey($key)) { continue }
+                if ($integrityFailedDst.Contains($key)) {
+                    # Bad ZIP must not replace the original; drop the staged file
+                    Remove-Item -LiteralPath (Join-Path $StagingDir $script:stagingMap[$key].StagingName) -Force -ErrorAction SilentlyContinue
+                    continue
+                }
                 $stagingName = $script:stagingMap[$key].StagingName
                 $stagePath = Join-Path $StagingDir $stagingName
                 $destPath  = $t.FinalDst
@@ -1602,17 +1642,22 @@ foreach ($group in $groupedTasks) {
         # PS5.1: sequential (no -Parallel support)
         $errBefore = $script:errTotal
         $errorSrcPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $integrityFailedDst = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         $sequentialResults = @()
         foreach ($t in $groupTasks) {
             $result = Process-TiffJob $t.Src $t.WriteDst $t.FinalDst `
-                                $DryRun $Overwrite $SafeMode `
-                                $SkipLzwAsCompressed $DeleteSource $Mode `
-                                $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbFormat $script:ThumbPage `
-                                $script:SkipCompressedWithThumb
+                            $DryRun $Overwrite $SafeMode `
+                            $SkipLzwAsCompressed $DeleteSource $Mode `
+                            $script:GenerateThumbnail $script:ThumbSize $script:ThumbQuality $script:ThumbFormat $script:ThumbPage `
+                            $script:SkipCompressedWithThumb
             if ($result.StagingName) { $script:stagingMap[$t.FinalDst.ToLowerInvariant()] = @{ StagingName = $result.StagingName; FinalDst = $t.FinalDst } }
             if ($result.SrcPath -and $result.Result -and $result.Result.StartsWith("ERROR")) { $errorSrcPaths.Add($result.SrcPath) | Out-Null }
             $sequentialResults += $result
             $resultText = $result.Result
+            if ($result.IntegrityFailed) {
+                $integrityFailedDst.Add($t.FinalDst.ToLowerInvariant()) | Out-Null
+                $resultText = "ERROR (ZIP integrity check failed - source preserved) | $($result.OriginalName)"
+            }
             if ($result.FinalDst -and $collisionNotes.ContainsKey($result.FinalDst.ToLowerInvariant())) { $resultText += $collisionNotes[$result.FinalDst.ToLowerInvariant()] }
             Process-Results @($resultText)
         }
@@ -1624,6 +1669,11 @@ foreach ($group in $groupedTasks) {
             foreach ($t in $groupTasks) {
                 $key = $t.FinalDst.ToLowerInvariant()
                 if (-not $script:stagingMap.ContainsKey($key)) { continue }
+                if ($integrityFailedDst.Contains($key)) {
+                    # Bad ZIP must not replace the original; drop the staged file
+                    Remove-Item -LiteralPath (Join-Path $StagingDir $script:stagingMap[$key].StagingName) -Force -ErrorAction SilentlyContinue
+                    continue
+                }
                 $stagingName = $script:stagingMap[$key].StagingName
                 $stagePath = Join-Path $StagingDir $stagingName
                 $destPath  = $t.FinalDst

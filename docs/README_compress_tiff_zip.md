@@ -168,9 +168,11 @@ Files are written to staging with UUID names, then moved to final destination af
 
 Mode 8 deletes the original TIFF after successful ZIP compression. **Mode 8 always requires a staging directory** to avoid overwriting the original before verification. If `-StagingDir` is not provided, a temporary directory under `%TEMP%` is used and you are prompted to confirm.
 
+The staged ZIP is **always verified** with `magick file null:` before the move. If the integrity check fails, the staged file is discarded, an error is logged (exit code 1), and the original is preserved.
+
 Deletion only happens if:
 1. ZIP file was created successfully in staging
-2. `magick convert file null:` verifies ZIP integrity
+2. `magick file null:` verifies ZIP integrity
 3. File was moved successfully to the final destination
 4. Source file still exists
 

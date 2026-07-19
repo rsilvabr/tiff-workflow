@@ -242,7 +242,7 @@ function Invoke-S5ProFolder {
                 $tiffPathCapture = $p.Tiff
                 $pageCountJob = $null
                 try {
-                    $pageCountJob = Start-Job { param($path) magick identify -format "%n" $path 2>$null } -ArgumentList $tiffPathCapture
+                    $pageCountJob = Start-Job { param($path) magick identify -format "%n\n" $path 2>$null } -ArgumentList $tiffPathCapture
                     $pageCountJob | Wait-Job -Timeout $magickTimeoutSec | Out-Null
                     if ($pageCountJob.State -eq 'Running') {
                         Stop-Job $pageCountJob
@@ -330,7 +330,7 @@ function Invoke-S5ProFolder {
             $writeDst = Join-Path $writeDirL $stagingName
             $finalDst = Join-Path $finalDirL $p.TifName
 
-            if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff)) {
+            if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff) -and -not $tiffCopied) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 return @{ Result = "OK+SKIP-ZIP (exists) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }

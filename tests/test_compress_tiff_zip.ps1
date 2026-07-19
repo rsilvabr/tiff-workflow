@@ -182,6 +182,67 @@ Describe "compress_tiff_zip_v2.ps1 - Integrity Check Command" {
     }
 }
 
+Describe "compress_tiff_zip_v2.ps1 - Audit Round 4" {
+    It "Page count uses '%n\n' (avoids concatenated '333' for multi-page)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Not -Match 'identify -format "%n"'
+        $content | Should -Match 'identify -format "%n\\n"'
+    }
+
+    It "Exiftool argfiles declare UTF-8 filename charset" {
+        $matches = Select-String -Path $script:ScriptPath -Pattern 'WriteAllText'
+        $matches.Count | Should -BeGreaterThan 0
+        foreach ($m in $matches) {
+            $m.Line | Should -Match '-charset`nfilename=utf8'
+        }
+    }
+
+    It "Mode 8 abort exits with code 1" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'Mode 8 aborted[\s\S]{0,200}exit 1'
+    }
+
+    It "ZIP integrity check fails closed when the job returns nothing" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$null -eq \$jobOutput\) \{ return \$false \}'
+        $content | Should -Match '\$null -ne \$integrityOutput\)'
+    }
+
+    It "Mode 8 integrity failure blocks the staging move (IntegrityFailed)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'IntegrityFailed = \$true'
+        $content | Should -Match '\$integrityFailedDst\.Contains\(\$key\)'
+    }
+
+    It "ERROR (magick) return includes SrcPath for rollback" {
+        $returns = Select-String -Path $script:ScriptPath -Pattern 'ERROR \(magick\) \| \$name'
+        $returns.Count | Should -BeGreaterThan 0
+        foreach ($r in $returns) {
+            $r.Line | Should -Match 'SrcPath'
+        }
+    }
+
+    It "Collision detection covers flattening modes 4-7" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$Mode -ge 4 -and \$Mode -le 7'
+    }
+
+    It "Numbered DuplicateAction does not rename when -Overwrite is set" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'DuplicateAction -eq ''Numbered'' -and -not \$Overwrite'
+    }
+
+    It "Legacy PS5 staging names use the run-scoped prefix" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$writeName = if \(\$writeDir -ne \$finalDir\) \{ "\$\(\$script:runStagingId\)_'
+    }
+
+    It "Legacy PS7 honors -SkipCompressedWithThumb" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$skipCompThumbL = \$using:SkipCompressedWithThumb'
+    }
+}
+
 AfterAll {
     # Clean up test directory
     if (Test-Path $script:TestDir) {

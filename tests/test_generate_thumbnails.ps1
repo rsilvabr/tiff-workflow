@@ -86,3 +86,10 @@ Describe "generate_thumbnails.ps1 - Magick Invocation" {
         $content | Should -Match '\$pageSuffix = if \(\$t\.Page -eq "all"\) \{ "" \} else \{ "\[\$\(\$t\.Page\)\]" \}'
     }
 }
+
+Describe "generate_thumbnails.ps1 - Audit Round 4" {
+    It "Self-exclusion covers multi-frame thumbs (_thumb-0, _thumb-1, ...)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '_thumb\(-\\d\+\)\?\$'
+    }
+}

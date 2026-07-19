@@ -396,5 +396,101 @@ class TestMainArgparse:
         assert "TIFF Workflow Manager" in out
 
 
+class TestWrapPs5Command:
+    def test_switch_bool_values_stay_unquoted(self):
+        from convert_tiff import _wrap_ps5_command
+        cmd = ["powershell", "-NoProfile", "-File", "C:\\s\\script.ps1",
+               "-InputDir", "F:\\My Photos", "-SafeMode:$false", "-DryRun"]
+        wrapped = _wrap_ps5_command(cmd)
+        assert wrapped[0] == "powershell"
+        assert "-Command" in wrapped
+        assert "-File" not in wrapped
+        invocation = wrapped[-1]
+        assert invocation.startswith("& '")
+        assert "-SafeMode:$false" in invocation  # unquoted, must be evaluated by the parser
+        assert "'-SafeMode:$false'" not in invocation
+        assert "-DryRun" in invocation  # param names unquoted
+        assert "'-DryRun'" not in invocation
+        assert "'F:\\My Photos'" in invocation  # values with spaces quoted
+
+    def test_single_quotes_in_paths_escaped(self):
+        from convert_tiff import _wrap_ps5_command
+        cmd = ["powershell", "-NoProfile", "-File", "C:\\s\\script.ps1", "-InputDir", "F:\\O'Brien"]
+        invocation = _wrap_ps5_command(cmd)[-1]
+        assert "'F:\\O''Brien'" in invocation
+
+    def test_pwsh_commands_not_wrapped(self):
+        cmd = build_compress_command({"mode": 3, "safe_mode": False}, [Path("F:\\x")], ps_name="pwsh")
+        assert "-File" in cmd
+        assert "-Command" not in cmd
+
+    def test_powershell_builder_wraps(self):
+        cmd = build_compress_command({"mode": 3, "safe_mode": False}, [Path("F:\\x")], ps_name="powershell")
+        assert "-Command" in cmd
+        assert "-File" not in cmd
+
+
+class TestComparePageCount:
+    def test_page_count_mismatch_detected(self, tmp_path, monkeypatch):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt == "%n\n":
+                old = "old" in cmd[-1]
+                return SimpleNamespace(returncode=0, stdout=("2\n2\n" if old else "1\n"), stderr="")
+            if fmt == "%w %h":
+                return SimpleNamespace(returncode=0, stdout="100 100", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(convert_tiff.subprocess, "run", fake_run)
+        match, detail = _compare_tiff_metadata(Path("old.tif"), Path("new.tif"))
+        assert match is False
+        assert "PAGE_COUNT_MISMATCH" in detail
+
+    def test_matching_page_counts_pass(self, tmp_path, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt == "%w %h":
+                return SimpleNamespace(returncode=0, stdout="100 100", stderr="")
+            if fmt == "%n\n":
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            # magick compare -> RMSE 0 output
+            return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
+
+        monkeypatch.setattr(convert_tiff.subprocess, "run", fake_run)
+        match, detail = _compare_tiff_metadata(Path("old.tif"), Path("new.tif"))
+        assert match is True
+
+
+class TestPurgeSidecarVerification:
+    def test_sidecar_without_parent_blocks_purge(self, tmp_path, monkeypatch):
+        old_dir = tmp_path / "OLD_TIFFs"
+        old_dir.mkdir()
+        (old_dir / "notes.txt").write_text("sidecar without parent copy")
+
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        cfg = SimpleNamespace(config=ToolConfig())
+        result = run_purge_old_tiffs(cfg)
+        assert result is False  # mismatch blocks purge, nothing deleted
+        assert (old_dir / "notes.txt").exists()
+
+    def test_sidecar_with_matching_parent_does_not_block(self, tmp_path, monkeypatch):
+        old_dir = tmp_path / "OLD_TIFFs"
+        old_dir.mkdir()
+        (old_dir / "notes.txt").write_text("same content")
+        (tmp_path / "notes.txt").write_text("same content")
+
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+        cfg = SimpleNamespace(config=ToolConfig())
+        result = run_purge_old_tiffs(cfg)
+        assert result is False  # user cancelled at confirmation
+        assert (old_dir / "notes.txt").exists()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

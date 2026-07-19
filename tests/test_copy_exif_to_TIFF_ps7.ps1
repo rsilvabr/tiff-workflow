@@ -86,3 +86,15 @@ Describe "copy_exif_to_TIFF_ps7.ps1 - Original Name" {
         $content | Should -Match '\$destPath.*\$tif\.Name'
     }
 }
+Describe "copy_exif_to_TIFF_ps7.ps1 - Audit Round 4" {
+    It "Exists-check skips files copied by this run (-not `$tiffCopied)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'Test-Path -LiteralPath \$finalDst.*-not \$tiffCopied'
+    }
+
+    It "Page count uses '%n\n' (no concatenated digits)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Not -Match 'identify -format "%n"'
+        $content | Should -Match 'identify -format "%n\\n"'
+    }
+}

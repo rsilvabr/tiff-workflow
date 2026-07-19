@@ -235,7 +235,7 @@ function Invoke-S5ProFolder {
 
             if ($safeModeL) {
                 # Use a simple timeout mechanism for PS5
-                $magickJob = Start-Job { magick identify -format "%n" $args[0] 2>$null } -ArgumentList $p.Tiff
+                $magickJob = Start-Job { magick identify -format "%n\n" $args[0] 2>$null } -ArgumentList $p.Tiff
                 $completed = $magickJob | Wait-Job -Timeout $MagickTimeout
                 if (-not $completed) {
                     Stop-Job $magickJob -ErrorAction SilentlyContinue
@@ -327,7 +327,7 @@ function Invoke-S5ProFolder {
             $writeDst = Join-Path $writeDirL $stagingName
             $finalDst = Join-Path $finalDirL $p.TifName
 
-            if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff)) {
+            if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff) -and -not $tiffCopied) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "OK+SKIP-ZIP (exists) | $($p.TifName)"; continue
             }
