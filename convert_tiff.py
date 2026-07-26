@@ -188,6 +188,24 @@ def truncate_path(p: Path, max_len: int = 50) -> str:
     return ellipsis + s[-keep:]
 
 
+#: The PowerShell backends declare [ValidateRange(1, 64)] on -Workers; anything outside
+#: that range fails at parameter binding and the backend never starts.
+MAX_WORKERS = 64
+
+
+def clamp_workers(value: int, default: int = 8) -> int:
+    """Keep -Workers inside the range the PowerShell backends accept."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    if n < 1:
+        return 1
+    if n > MAX_WORKERS:
+        return MAX_WORKERS
+    return n
+
+
 def _safe_move(src: Path, dst: Path) -> None:
     """Move file, overwriting destination if it exists (Windows-safe)."""
     if dst.exists():
@@ -390,10 +408,13 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
             workers = int(workers_str)
             if workers < 1:
                 raise ValueError()
-            workflow["workers"] = workers
+            clamped = clamp_workers(workers, cfg.config.default_workers)
+            if clamped != workers:
+                console.print(f"[yellow]Workers clamped to {clamped} (backend accepts 1-{MAX_WORKERS}).[/yellow]")
+            workflow["workers"] = clamped
         except ValueError:
             console.print("[red]Invalid, using default.[/red]")
-            workflow["workers"] = cfg.config.default_workers
+            workflow["workers"] = clamp_workers(cfg.config.default_workers)
 
         staging = Prompt.ask(
             "[cyan]Staging folder (SSD for faster I/O)[/cyan]",
@@ -418,9 +439,12 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
     else:
         workers_str = input(f"Workers [{(cfg.config.last_workers or cfg.config.default_workers)}]: ").strip()
         try:
-            workflow["workers"] = int(workers_str) if workers_str else (cfg.config.last_workers or cfg.config.default_workers)
+            raw_workers = int(workers_str) if workers_str else (cfg.config.last_workers or cfg.config.default_workers)
         except ValueError:
-            workflow["workers"] = cfg.config.last_workers or cfg.config.default_workers
+            raw_workers = cfg.config.last_workers or cfg.config.default_workers
+        workflow["workers"] = clamp_workers(raw_workers, cfg.config.default_workers)
+        if workflow["workers"] != raw_workers:
+            print(f"Workers clamped to {workflow['workers']} (backend accepts 1-{MAX_WORKERS}).")
         staging = input(f"Staging folder (empty=disabled) []: ").strip()
         workflow["staging"] = staging
         cfg.config.last_staging = staging
@@ -554,10 +578,17 @@ def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: 
         folder_list = ";".join(str(f) for f in folders)
         cmd += ["-InputDir", folder_list]
 
+    # Mode 2 (flat) writes into the input root when -OutputDir is missing, which mixes
+    # the flattened copies with the sources and overwrites root-level TIFFs in place.
+    if workflow.get("output_dir"):
+        cmd += ["-OutputDir", workflow["output_dir"]]
+    if workflow.get("duplicate_action"):
+        cmd += ["-DuplicateAction", str(workflow["duplicate_action"])]
+
     if workflow.get("staging"):
         cmd += ["-StagingDir", workflow["staging"]]
     if workflow.get("workers"):
-        cmd += ["-Workers", str(workflow["workers"])]
+        cmd += ["-Workers", str(clamp_workers(workflow["workers"]))]
     if workflow.get("dry_run"):
         cmd += ["-DryRun"]
     if workflow.get("safe_mode") is False:
@@ -608,7 +639,7 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
         cmd += ["-InputDir", folder_list]
 
     if workflow.get("workers"):
-        cmd += ["-Workers", str(workflow["workers"])]
+        cmd += ["-Workers", str(clamp_workers(workflow["workers"]))]
     if workflow.get("staging"):
         cmd += ["-StagingDir", workflow["staging"]]
     if workflow.get("output_dir"):
@@ -967,7 +998,10 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
             return False, f"compare failed: {output}"
 
         import re
-        match = re.search(r"(\d+\.?\d*)\s*\((\d+\.?\d*e?[+-]?\d*)\)", output)
+        # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
+        # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
+        # it matched "06" as the RMSE.
+        match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
         if not match:
             return False, f"parse failed: '{output}'"
 
@@ -1137,8 +1171,10 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
             except ValueError:
                 print(f"Invalid workers value '{resp}', using default {workers}")
 
-    if workers < 1:
-        workers = 1
+    workers = clamp_workers(workers, cfg.config.default_workers)
+    # Remember the choice like the other workflows do
+    cfg.config.last_workers = workers
+    cfg.save_config()
 
     temp_dir = None
     if RICH_AVAILABLE and console:
@@ -1755,6 +1791,51 @@ def run_free_compress(cfg: ToolConfig) -> bool:
         return False
     workflow["input_dir"] = str(folder)
 
+    # Mode 2 flattens every TIFF into one folder. Without an explicit output folder the
+    # backend falls back to the input root, mixing outputs with sources and recompressing
+    # root-level TIFFs in place -- so ask for it here.
+    if mode == 2:
+        default_out = str(folder / "ZIP_flat")
+        if RICH_AVAILABLE and console:
+            out_dir = Prompt.ask(
+                "[cyan]Output folder (mode 2 merges all TIFFs here)[/cyan]",
+                default=default_out,
+            ).strip()
+        else:
+            out_dir = input(f"Output folder (mode 2 merges all TIFFs here) [{default_out}]: ").strip() or default_out
+        if len(out_dir) >= 2 and out_dir[0] == out_dir[-1] and out_dir[0] in ("'", '"'):
+            out_dir = out_dir[1:-1]
+        if ";" in out_dir:
+            msg = f"Output path contains ';' which is not supported: {out_dir}"
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]{escape(msg)}[/red]")
+            else:
+                print(f"ERROR: {msg}")
+            return False
+        if Path(out_dir).resolve() == folder.resolve():
+            warn = "Output folder is the input folder: TIFFs will be recompressed in place, without a backup."
+            if RICH_AVAILABLE and console:
+                if not Confirm.ask(f"[yellow]{warn} Continue?[/yellow]", default=False):
+                    console.print("[dim]Cancelled.[/dim]")
+                    return False
+            else:
+                if input(f"{warn} Continue? [y/N]: ").strip().lower() != "y":
+                    print("Cancelled.")
+                    return False
+        else:
+            workflow["output_dir"] = out_dir
+
+        # Collision policy for the flattened output
+        if RICH_AVAILABLE and console:
+            workflow["duplicate_action"] = Prompt.ask(
+                "[cyan]Duplicate filenames[/cyan]",
+                choices=["Numbered", "Skip", "Overwrite"],
+                default="Numbered",
+            )
+        else:
+            dup = input("Duplicate filenames (Numbered/Skip/Overwrite) [Numbered]: ").strip() or "Numbered"
+            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else "Numbered"
+
     # Basic params
     step_basic_params(cfg, workflow)
 
@@ -2038,61 +2119,121 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
         return False
     cfg.config.last_input_dir = str(p.resolve())
     cfg.save_config()
-    
-    # Thumbnail size
+
+    # Remove mode: skip the generation questions entirely
     if RICH_AVAILABLE and console:
-        size_str = Prompt.ask("[cyan]Thumbnail size (px)[/cyan]", default="256")
+        remove_mode = Confirm.ask("[yellow]Remove existing thumbnails instead of creating them?[/yellow]", default=False)
     else:
-        size_str = input("Thumbnail size (px) [256]: ").strip() or "256"
+        remove_mode = input("Remove existing thumbnails instead of creating them? [y/N]: ").strip().lower() == "y"
+
+    # Recursive / dry-run apply to both modes
+    def _ask_recursive_and_dry():
+        if RICH_AVAILABLE and console:
+            return (
+                Confirm.ask("[cyan]Recursive?[/cyan]", default=False),
+                Confirm.ask("[cyan]Dry-run?[/cyan]", default=False),
+            )
+        return (
+            input("Recursive? [y/N]: ").strip().lower() == "y",
+            input("Dry-run? [y/N]: ").strip().lower() == "y",
+        )
+
+    def _ask_output_dir():
+        if RICH_AVAILABLE and console:
+            value = Prompt.ask("[cyan]Output folder (empty = next to each TIFF)[/cyan]", default="").strip()
+        else:
+            value = input("Output folder (empty = next to each TIFF) []: ").strip()
+        return value.strip('"').strip("'")
+
+    if remove_mode:
+        out_dir = _ask_output_dir()
+        recursive, dry_run = _ask_recursive_and_dry()
+        cmd = [cfg.config.ps_name, "-NoProfile", "-File", str(script), "-InputDir", input_dir, "-Remove"]
+        if out_dir:
+            cmd += ["-OutputDir", out_dir]
+        if recursive:
+            cmd += ["-Recursive"]
+        if dry_run:
+            cmd += ["-DryRun"]
+        if RICH_AVAILABLE and console:
+            console.print(f"\n[dim]Running: {escape(' '.join(cmd))}[/dim]\n")
+        else:
+            print(f"\nRunning: {' '.join(cmd)}\n")
+        return run_subprocess(cmd) == 0
+
+    # Thumbnail size (backend accepts 32-4096)
+    if RICH_AVAILABLE and console:
+        size_str = Prompt.ask("[cyan]Thumbnail size (px, 32-4096)[/cyan]", default="256")
+    else:
+        size_str = input("Thumbnail size (px, 32-4096) [256]: ").strip() or "256"
     try:
         size = int(size_str)
     except ValueError:
         size = 256
-    
-    # Quality
+    if not (32 <= size <= 4096):
+        msg = f"Size {size} out of range (32-4096), using 256."
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{msg}[/yellow]")
+        else:
+            print(msg)
+        size = 256
+
+    # Quality: the backend validates 1-100 and refuses to start otherwise
     if RICH_AVAILABLE and console:
-        quality_str = Prompt.ask("[cyan]JPEG quality[/cyan]", default="85")
+        quality_str = Prompt.ask("[cyan]JPEG quality (1-100)[/cyan]", default="85")
     else:
-        quality_str = input("JPEG quality [85]: ").strip() or "85"
-    
+        quality_str = input("JPEG quality (1-100) [85]: ").strip() or "85"
+    if not (quality_str.isdigit() and 1 <= int(quality_str) <= 100):
+        msg = f"Invalid quality '{quality_str}' (must be 1-100), using 85."
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{escape(msg)}[/yellow]")
+        else:
+            print(msg)
+        quality_str = "85"
+
     # Format
     if RICH_AVAILABLE and console:
         fmt = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default="jpg")
     else:
         fmt = input("Format (jpg/png/tif) [jpg]: ").strip().lower() or "jpg"
-    
-    # Recursive
+        if fmt not in ("jpg", "jpeg", "png", "tif", "tiff"):
+            print(f"Invalid format '{fmt}', using jpg.")
+            fmt = "jpg"
+
+    # Page: 0 (first) or all
     if RICH_AVAILABLE and console:
-        recursive = Confirm.ask("[cyan]Recursive?[/cyan]", default=False)
+        page = Prompt.ask("[cyan]Page[/cyan]", choices=["0", "all"], default="0")
     else:
-        rec = input("Recursive? [y/N]: ").strip().lower()
-        recursive = (rec == "y")
-    
-    # Dry run
-    if RICH_AVAILABLE and console:
-        dry_run = Confirm.ask("[cyan]Dry-run?[/cyan]", default=False)
-    else:
-        dry = input("Dry-run? [y/N]: ").strip().lower()
-        dry_run = (dry == "y")
-    
+        page = input("Page (0=first, all) [0]: ").strip().lower() or "0"
+        if page != "all" and not page.isdigit():
+            print(f"Invalid page '{page}', using 0.")
+            page = "0"
+
+    out_dir = _ask_output_dir()
+    recursive, dry_run = _ask_recursive_and_dry()
+
     cmd = [
         cfg.config.ps_name, "-NoProfile", "-File", str(script),
         "-InputDir", input_dir,
         "-Size", str(size),
         "-Quality", quality_str,
         "-Format", fmt,
-        "-Workers", str(cfg.config.last_workers or cfg.config.default_workers),
+        "-Page", page,
+        "-Workers", str(clamp_workers(cfg.config.last_workers or cfg.config.default_workers)),
     ]
+    if out_dir:
+        cmd += ["-OutputDir", out_dir]
     if recursive:
         cmd += ["-Recursive"]
     if dry_run:
         cmd += ["-DryRun"]
-    
+
+
     if RICH_AVAILABLE and console:
-        console.print(f"\n[dim]Running: {' '.join(cmd)}[/dim]\n")
+        console.print(f"\n[dim]Running: {escape(' '.join(cmd))}[/dim]\n")
     else:
         print(f"\nRunning: {' '.join(cmd)}\n")
-    
+
     return run_subprocess(cmd) == 0
 
 

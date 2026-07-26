@@ -1,4 +1,4 @@
-# ── CLI PARAMETERS ─────────────────────────────────────────────────
+# -- CLI PARAMETERS -------------------------------------------------
 param(
     [string]$InputDir = "",
     [ValidateRange(1, 64)][int]$Workers = 16,
@@ -15,9 +15,9 @@ param(
     [string]$FolderPattern = "S5pro",
     [int]$MagickTimeout = 30
 )
-# ──────────────────────────────────────────────────────────────────
+# ------------------------------------------------------------------
 
-# ── Logging ───────────────────────────────────────────────────────────
+# -- Logging -----------------------------------------------------------
 $scriptName = "Copy-S5Pro-Exif"
 $logDir     = Join-Path $PWD.Path "Logs\$scriptName"
 [System.IO.Directory]::CreateDirectory($logDir) | Out-Null
@@ -30,7 +30,7 @@ function Write-Log {
     [System.IO.File]::AppendAllText($logFile, $line + [System.Environment]::NewLine)
 }
 
-# ── Cleanup on interrupt ─────────────────────────────────────────
+# -- Cleanup on interrupt -----------------------------------------
 $script:cleanupDirs  = @()
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
@@ -57,6 +57,9 @@ $script:errTotal     = 0
 $script:warnTotal    = 0
 $script:multiTotal   = 0
 $script:multiPagePaths = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
+# Destinations already claimed in this run (only used with -OutputDir, where every
+# session writes into the same folder). Shared across folders on purpose.
+$script:claimedDest  = @{}
 
 function Process-Results {
     param($lines)
@@ -72,6 +75,82 @@ function Process-Results {
         elseif ($line -match '^MULTI')  { $script:multiTotal++; $lvl = "WARN" }
         Write-Log "[$($script:counterTotal)/$($script:total)] $line" $lvl
     }
+}
+
+function Invoke-MagickWithTimeout {
+    <#
+    .SYNOPSIS
+        Runs `magick` with the given arguments under a timeout and returns
+        @{ TimedOut = [bool]; ExitCode = [int]; Output = [string[]] }.
+
+    .NOTES
+        Uses an in-process runspace instead of Start-Job: Start-Job spawns a whole
+        PowerShell process per call (~700 ms), which on this sequential PS5 path was
+        paid once per file, back to back.
+
+        ExitCode -1 means "could not determine" -- every caller must treat it as failure.
+
+        Duplicated across compress_tiff_zip.ps1 and copy_exif_to_TIFF_ps*.ps1 so each
+        script stays self-contained. Keep the implementations identical.
+    #>
+    param(
+        [string[]]$Arguments = @(),
+        [int]$TimeoutSec = 30
+    )
+
+    if ($TimeoutSec -le 0) { $TimeoutSec = 30 }
+
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    [void]$ps.AddScript({
+        param([string[]]$a)
+        $out = & magick @a 2>$null
+        [pscustomobject]@{ Output = @($out); ExitCode = $LASTEXITCODE }
+    }).AddArgument($Arguments)
+
+    try {
+        $handle = $ps.BeginInvoke()
+    } catch {
+        try { $ps.Dispose() } catch { }
+        return @{ TimedOut = $false; ExitCode = -1; Output = @() }
+    }
+
+    if (-not $handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSec))) {
+        # BeginStop (async): Stop() blocks until the native child exits, which defeats the timeout.
+        try { [void]$ps.BeginStop($null, $null) } catch { }
+        return @{ TimedOut = $true; ExitCode = -1; Output = @() }
+    }
+
+    try {
+        $res = $ps.EndInvoke($handle)
+        $payload = @($res | Where-Object { $null -ne $_ })
+        if ($payload.Count -eq 0) { return @{ TimedOut = $false; ExitCode = -1; Output = @() } }
+        $last = $payload[-1]
+        return @{ TimedOut = $false; ExitCode = [int]$last.ExitCode; Output = @($last.Output) }
+    } catch {
+        return @{ TimedOut = $false; ExitCode = -1; Output = @() }
+    } finally {
+        try { $ps.Dispose() } catch { }
+    }
+}
+
+function Get-TiffPageCount {
+    <#
+    .SYNOPSIS
+        Returns @{ Ok = [bool]; PageCount = [int]; Error = [string] } for a TIFF.
+        Error is "timeout", "failed" or "parse:<raw>" -- never silently 0.
+    #>
+    param([string]$Path, [int]$TimeoutSec = 30)
+
+    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%n\n", $Path) -TimeoutSec $TimeoutSec
+    if ($r.TimedOut) { return @{ Ok = $false; PageCount = 0; Error = "timeout" } }
+
+    $lines = @($r.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+    if ($lines.Count -eq 0) { return @{ Ok = $false; PageCount = 0; Error = "failed" } }
+
+    $val = "$($lines[0])".Trim()
+    $n = 0
+    if (-not [int]::TryParse($val, [ref]$n)) { return @{ Ok = $false; PageCount = 0; Error = "parse:$val" } }
+    return @{ Ok = $true; PageCount = $n; Error = "" }
 }
 
 function Test-TiffHasOnlySubfilePages {
@@ -93,24 +172,25 @@ function Test-TiffHasOnlySubfilePages {
     .NOTES
         This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1 scripts.
         Keep implementations identical. If you change one, change all three.
-
-        Inside ForEach-Object -Parallel runspaces, functions defined in the parent script are not
-        visible. Re-inject the function at the top of each parallel block with:
-            ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
     #>
     param(
         [string]$Path,
         [int]$PageCount,
-        [string[]]$AllowedSubfileTypes = @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE")
+        [string[]]$AllowedSubfileTypes = @("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE"),
+        [int]$TimeoutSec = 30
     )
 
     if ($PageCount -le 1) { return $true }
 
-    $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$Path" 2>$null
-    if (-not ($subfileTypes -is [array])) { return $false }
+    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $Path) -TimeoutSec $TimeoutSec
+    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
 
-    for ($i = 1; $i -lt $subfileTypes.Count -and $i -lt $PageCount; $i++) {
-        $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
+    $subfileTypes = @($r.Output)
+    # Fewer lines than pages means we could not classify every extra page -> fail closed
+    if ($subfileTypes.Count -lt $PageCount) { return $false }
+
+    for ($i = 1; $i -lt $PageCount; $i++) {
+        $st = if ($subfileTypes[$i]) { "$($subfileTypes[$i])".Trim() } else { "" }
         if ($st -notin $AllowedSubfileTypes) {
             return $false
         }
@@ -169,6 +249,15 @@ function Invoke-S5ProFolder {
                 if ($jpgIndex.ContainsKey($key)) {
                     return @{ Path = $jpgIndex[$key]; UsedBase = $b }
                 }
+                # The index only covers $RootPath, so the parent folder (and its JPEG/JPG
+                # subfolders) could never produce a hit -- half of $searchDirs was dead code.
+                # Probe the filesystem directly for those.
+                foreach ($ext in @(".jpg", ".jpeg")) {
+                    $probe = Join-Path $d "$b$ext"
+                    if (Test-Path -LiteralPath $probe -PathType Leaf) {
+                        return @{ Path = (Get-Item -LiteralPath $probe).FullName; UsedBase = $b }
+                    }
+                }
             }
         }
         return $null
@@ -182,7 +271,7 @@ function Invoke-S5ProFolder {
 
         if ($groups.Count -gt 1 -or $AutoFind) {
             Write-Log ""
-            Write-Log "── Group: $groupDir ($($groupFiles.Count) file(s))"
+            Write-Log "-- Group: $groupDir ($($groupFiles.Count) file(s))"
         }
 
         $finalDir = if ($OutputDir)                            { $OutputDir }  else { $groupDir }
@@ -191,12 +280,36 @@ function Invoke-S5ProFolder {
         if ($CompressZip -and $StagingDir -and -not $DryRun) { [System.IO.Directory]::CreateDirectory($StagingDir) | Out-Null }
         if ($CompressZip -and $OutputDir)                    { [System.IO.Directory]::CreateDirectory($OutputDir)  | Out-Null }
 
+        # DestName: with -OutputDir every session writes into the SAME folder, so two
+        # sessions holding DSC_0001.tif used to silently overwrite/skip each other.
+        # Later claimants get _v2, _v3, ... (same policy as compress_tiff_zip.ps1).
+        $destNameMap = @{}
         $pairs = @(foreach ($tif in $groupFiles) {
             $pair = Find-JpegPair $tif
+            $destName = $tif.Name
+            if ($OutputDir -and ($finalDir -ine $tif.DirectoryName)) {
+                $dKey = (Join-Path $finalDir $destName).ToLowerInvariant()
+                if ($script:claimedDest.ContainsKey($dKey) -and $script:claimedDest[$dKey] -ne $tif.FullName) {
+                    $dStem = $tif.BaseName
+                    $dExt  = $tif.Extension
+                    $n = 2
+                    do {
+                        $candidate = "${dStem}_v${n}${dExt}"
+                        $candKey = (Join-Path $finalDir $candidate).ToLowerInvariant()
+                        $n++
+                    } while ($script:claimedDest.ContainsKey($candKey) -or (Test-Path -LiteralPath (Join-Path $finalDir $candidate)))
+                    $destName = $candidate
+                    $dKey = $candKey
+                    Write-Log "  RENAME (name already taken in OutputDir) | $($tif.Name) -> $destName" "WARN"
+                }
+                $script:claimedDest[$dKey] = $tif.FullName
+            }
+            $destNameMap[$tif.FullName] = $destName
             [PSCustomObject]@{
                 Tiff     = $tif.FullName
                 TifName  = $tif.Name
                 TifBase  = $tif.BaseName
+                DestName = $destName
                 Jpeg     = if ($pair) { $pair.Path }    else { $null }
                 UsedBase = if ($pair) { $pair.UsedBase } else { $null }
             }
@@ -204,7 +317,7 @@ function Invoke-S5ProFolder {
 
         $script:stagingMap = @{}
 
-            # Sequential — compatible with PowerShell 5.1
+            # Sequential -- compatible with PowerShell 5.1
         $results = foreach ($p in $pairs) {
             $skipExifL = $SkipIfTiffHasExif
             $dryL      = $DryRun
@@ -234,31 +347,20 @@ function Invoke-S5ProFolder {
             }
 
             if ($safeModeL) {
-                # Use a simple timeout mechanism for PS5
-                $magickJob = Start-Job { magick identify -format "%n\n" $args[0] 2>$null } -ArgumentList $p.Tiff
-                $completed = $magickJob | Wait-Job -Timeout $MagickTimeout
-                if (-not $completed) {
-                    Stop-Job $magickJob -ErrorAction SilentlyContinue
-                    Remove-Job $magickJob
-                    "ERROR (magick timeout) | $($p.TifName) | possibly corrupted"
+                $magickTimeoutSec = if ($MagickTimeout -gt 0) { $MagickTimeout } else { 30 }
+                $pc = Get-TiffPageCount -Path $p.Tiff -TimeoutSec $magickTimeoutSec
+                if (-not $pc.Ok) {
+                    switch -Wildcard ($pc.Error) {
+                        "timeout" { "ERROR (magick timeout) | $($p.TifName) | possibly corrupted" }
+                        "parse:*" { "ERROR (magick page count parse) | $($p.TifName) | unexpected output: $($pc.Error.Substring(6))" }
+                        default   { "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted" }
+                    }
                     continue
                 }
-                $pageCountStr = $magickJob | Receive-Job
-                Remove-Job $magickJob
-                if ([string]::IsNullOrWhiteSpace($pageCountStr)) {
-                    "ERROR (magick page count failed) | $($p.TifName) | possibly corrupted"
-                    continue
-                }
-                $pageCountVal = if ($pageCountStr -is [array]) { $pageCountStr[0] } else { $pageCountStr }
-                $pageCount = 0
-                if (-not [int]::TryParse("$pageCountVal", [ref]$pageCount)) {
-                    "ERROR (magick page count parse) | $($p.TifName) | unexpected output: $pageCountVal"
-                    continue
-                }
-                if ($pageCount -gt 1) {
-                    if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pageCount)) {
+                if ($pc.PageCount -gt 1) {
+                    if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pc.PageCount -TimeoutSec $magickTimeoutSec)) {
                         $bagL.Add($p.Tiff) | Out-Null
-                        "MULTI ($pageCount IFDs — skipped) | $($p.TifName)"
+                        "MULTI ($($pc.PageCount) IFDs -- skipped) | $($p.TifName)"
                         continue
                     }
                 }
@@ -278,7 +380,7 @@ function Invoke-S5ProFolder {
             $tiffCopied = $false
             $srcDir = [System.IO.Path]::GetFullPath((Split-Path $p.Tiff -Parent)).TrimEnd('\', '/')
             if ($finalDirL -and ($finalDirL -ine $srcDir) -and -not $dryL) {
-                $destTiff = Join-Path $finalDirL $p.TifName
+                $destTiff = Join-Path $finalDirL $p.DestName
                 if (-not (Test-Path -LiteralPath $destTiff) -or $overL) {
                     if (-not (Test-Path -LiteralPath $finalDirL)) {
                         [System.IO.Directory]::CreateDirectory($finalDirL) | Out-Null
@@ -323,9 +425,9 @@ function Invoke-S5ProFolder {
                 "OK+SKIP-ZIP ($comp) | $($p.TifName)"; continue
             }
 
-            $stagingName = "$([guid]::NewGuid().ToString('N'))_$($p.TifName)"
+            $stagingName = "$([guid]::NewGuid().ToString('N'))_$($p.DestName)"
             $writeDst = Join-Path $writeDirL $stagingName
-            $finalDst = Join-Path $finalDirL $p.TifName
+            $finalDst = Join-Path $finalDirL $p.DestName
 
             if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff) -and -not $tiffCopied) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
@@ -364,7 +466,8 @@ function Invoke-S5ProFolder {
                 } else {
                     $stagePath = Join-Path $writeDir $tif.Name
                 }
-                $destPath  = Join-Path $finalDir   $tif.Name
+                $destName = if ($destNameMap.ContainsKey($tif.FullName)) { $destNameMap[$tif.FullName] } else { $tif.Name }
+                $destPath  = Join-Path $finalDir   $destName
                 if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
                     try {
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
@@ -381,12 +484,12 @@ function Invoke-S5ProFolder {
                     }
                 }
             }
-            if ($moved -gt 0) { Write-Log "  → Moved $moved file(s) → $finalDir" }
+            if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $finalDir" }
         }
     }
 }
 
-# ── Entry point ────────────────────────────────────────────────────
+# -- Entry point ----------------------------------------------------
 if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = [System.IO.Path]::GetFullPath($OutputDir.TrimEnd('\', '/'))
 }
@@ -412,7 +515,7 @@ foreach ($root in $inputDirs) {
             Write-Log ""
 
             foreach ($folder in $matchingFolders) {
-                Write-Log "════ Processing: $($folder.FullName)"
+                Write-Log "==== Processing: $($folder.FullName)"
                 Invoke-S5ProFolder -RootPath $folder.FullName -IsRecurse $false
                 Write-Log ""
             }
@@ -424,12 +527,12 @@ foreach ($root in $inputDirs) {
 }
 
 Write-Log ""
-Write-Log ("─" * 50)
+Write-Log ("-" * 50)
 Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:missTotal) no JPEG pair | $($script:multiTotal) multi-page | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
 
 if ($script:multiTotal -gt 0) {
     Write-Log ""
-    Write-Log "── Multi-page TIFFs found (not touched):"
+    Write-Log "-- Multi-page TIFFs found (not touched):"
     foreach ($p in ($script:multiPagePaths | Sort-Object)) {
         Write-Log "   $p" "WARN"
     }

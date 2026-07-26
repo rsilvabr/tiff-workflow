@@ -33,10 +33,18 @@ Full TIFF ZIP compression with modes 0-9:
 ```
 Step 1: Select mode (0-9)
 Step 2: Choose input folder
-Step 3: Workers, staging, dry-run
-Step 4: Thumbnail generation options (optional)
-Step 5: Summary + confirm
+Step 3: Output folder + duplicate policy (mode 2 only)
+Step 4: Workers, staging, dry-run
+Step 5: Thumbnail generation options (optional)
+Step 6: Summary + confirm
 ```
+
+**Mode 2** merges every TIFF into one folder, so the wizard asks where that folder is
+(default `<input>\ZIP_flat`) and how to handle duplicate filenames (`Numbered` (default),
+`Skip`, `Overwrite`). Choosing the input folder itself means recompressing in place without
+a backup, so it requires an explicit confirmation.
+
+**Workers** are clamped to 1-64, the range the PowerShell backends accept.
 
 **Thumbnail Options (v1.2+):**
 - Generate embedded thumbnails? [y/N]
@@ -94,11 +102,17 @@ Create sRGB thumbnails from TIFFs. Can be used standalone or as part of the comp
 
 **Settings:**
 - Input directory
+- Remove mode (delete existing thumbnails instead of creating them)
 - Thumbnail size (32-4096 px, default: 256)
-- JPEG quality (default: 85)
+- JPEG quality (1-100, default: 85)
 - Format: jpg, png, or tif (default: jpg)
+- Page: `0` (first) or `all`
+- Output folder (empty = next to each TIFF)
 - Recursive processing
 - Dry-run mode
+
+Size, quality and format are validated before the backend is launched — an out-of-range
+value falls back to the default instead of aborting at PowerShell parameter binding.
 
 **Output:** `filename_thumb.jpg` next to each TIFF (or in specified output folder)
 

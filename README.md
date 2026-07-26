@@ -233,12 +233,15 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ### Latest release
 
-**v2.1** — Data-loss prevention and audit follow-up fixes:
-- Fail-closed subfiletype detection in all PS5/PS7/legacy paths
-- Fixed `copy_exif_to_TIFF_ps7.ps1` deleting final `-OutputDir` outputs
-- Removed GUID duplication in Mode 2; numbered suffixes (`_v2`, `_v3`) via `-DuplicateAction`
-- Hardened Modes 6/7 `_EXPORT/` path resolution for root-level files
-- Runspace-safe helper-function re-injection in `-Parallel` blocks
+**v2.4** — Audit round 5, data-loss prevention and a 36% speed-up:
+- `copy_exif_to_TIFF_ps5.ps1` did not even parse on PowerShell 5.1 (BOM-less UTF-8 read as ANSI turned `—`/`─` into string delimiters); all scripts are now pure ASCII
+- Modes 0/9 no longer move multi-page TIFFs to `OLD_TIFFs/` before rejecting them — SafeMode now runs before the move
+- `photo.tif` + `photo.tiff` no longer overwrite each other; collision numbering (`_v2`, `_v3`) now covers every mode
+- Mode 8 always runs its ZIP integrity check, including the `[no thumb]` and exiftool-WARN paths
+- Wizard mode 2 finally asks for an output folder (it used to flatten everything into the input root)
+- `copy_exif -OutputDir` numbers same-named files from different sessions instead of silently skipping them
+- Modes 6/7 write inside the `_EXPORT` tree the file came from
+- `Start-Job` (one PowerShell process per file) replaced by in-process runspaces: **5.66 s → 3.60 s** on 24 files / 8 workers
 
 See [`docs/bugs_fixed.md`](docs/bugs_fixed.md) for the complete list.
 

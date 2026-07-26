@@ -107,11 +107,38 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -Th
 | `8` | In-place + delete | Directory (recursive) | In-place. Originals deleted after confirm | `photo.tif` → deleted after compression |
 | `9` | In-place recursive + OLD_TIFFs | Directory (recursive) | In-place. Originals → `OLD_TIFFs/` | `photo.tif` → compressed in place |
 
+**Modes 6/7** write inside the `_EXPORT` folder each file actually came from — `in\2024\JobA\_EXPORT\photo.tif` produces `in\2024\JobA\_EXPORT\ZIP\photo.tif`. Different jobs never share an output folder.
+
+**Mode 5** never writes above `-InputDir`: a TIFF sitting directly in the input root produces `<InputDir>\ZIP\photo.tif` instead of climbing to the drive root.
+
+---
+
+## Destination Collisions
+
+Every mode maps its output to `<stem>.tif`, so two different sources can claim one destination:
+
+- modes 4-7 flatten separate source trees into a shared folder;
+- modes 0/1/3/8/9 map both `photo.tif` and `photo.tiff` onto `photo.tif`.
+
+The later claimant is renamed `_v2`, `_v3`, ... and the rename is noted in the result line:
+
+```
+OK (Uncompressed -> ZIP) | photo.tiff [renamed to photo_v2.tif to avoid collision]
+```
+
+Mode 2 uses `-DuplicateAction` instead (`Skip`, `Numbered` (default), `Overwrite`), which also covers names that already exist on disk.
+
 ---
 
 ## SafeMode (default: ON)
 
-Multi-page TIFFs (scanner Infrared files, Photoshop layer stacks) have proprietary IFD structures that can be corrupted by re-compression. SafeMode detects these via `magick identify` with a 30-second timeout and skips them.
+Multi-page TIFFs (scanner Infrared files, Photoshop layer stacks) have proprietary IFD structures that can be corrupted by re-compression. SafeMode detects these via `magick identify` with a `-MagickTimeout` second timeout (default 30) and skips them.
+
+In modes 0 and 9 this check runs **before** the original is moved to `OLD_TIFFs/`, so a skipped multi-page TIFF stays exactly where it was:
+
+```
+MULTI (2 pages - skipped, original untouched) | scan_ir.tif
+```
 
 A TIFF with extra pages is only treated as "single-page with thumbnail" when every extra page reports one of these `tiff:subfiletype` values:
 
@@ -168,7 +195,7 @@ Files are written to staging with UUID names, then moved to final destination af
 
 Mode 8 deletes the original TIFF after successful ZIP compression. **Mode 8 always requires a staging directory** to avoid overwriting the original before verification. If `-StagingDir` is not provided, a temporary directory under `%TEMP%` is used and you are prompted to confirm.
 
-The staged ZIP is **always verified** with `magick file null:` before the move. If the integrity check fails, the staged file is discarded, an error is logged (exit code 1), and the original is preserved.
+The staged ZIP is **always verified** with `magick <file> null:` (full pixel decode) before the move — including the degraded paths (`[no thumb]` fallback, `WARN (exiftool failed, ZIP ok)`). If the integrity check fails, times out, or cannot be determined, the staged file is discarded, an error is logged (exit code 1), and the original is preserved.
 
 Deletion only happens if:
 1. ZIP file was created successfully in staging
@@ -186,6 +213,12 @@ If any check fails, the source is preserved.
 - **PS5.1**: Falls back to sequential `foreach` loop (no parallel execution)
 
 Detected automatically via `$PSVersionTable.PSVersion.Major -ge 7`.
+
+`magick` calls that need a timeout (page count, ZIP integrity) run in an in-process runspace
+(`Invoke-MagickWithTimeout`) rather than `Start-Job`, which used to spawn a whole PowerShell
+process per file. Same timeout semantics, ~36% faster end-to-end on small files.
+
+`-Workers` accepts 1-64. Values outside that range are rejected at parameter binding.
 
 ---
 

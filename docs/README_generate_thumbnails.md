@@ -37,7 +37,7 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
 | `-Remove` | switch | off | Remove generated thumbnails instead of creating them |
 | `-DryRun` | switch | off | Show what would be generated, don't create files |
 | `-Recursive` | switch | off | Process subdirectories recursively |
-| `-Workers` | int | `4` | Number of parallel worker threads (PS7) |
+| `-Workers` | int | `4` | Number of parallel worker threads (PS7). Range 1-64, capped at 16 |
 | `-Page` | string | `"0"` | Page number to extract (`0`=first, `all`=all pages) |
 | `-Quality` | string | `"85"` | JPEG quality (1-100) or TIFF compression level |
 | `-Format` | string | `"jpg"` | Output format: `jpg`, `jpeg`, `png`, `tif`, `tiff` |
@@ -48,8 +48,32 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
 
 Thumbnails are saved with the original filename plus `_thumb` suffix. By default (empty `-OutputDir`) they are written next to each source TIFF:
 - `photo.tif` → `photo_thumb.jpg` (same folder as `photo.tif`)
+- `-Page all` on a multi-page TIFF → `photo_thumb-0.jpg`, `photo_thumb-1.jpg`, ...
+
+With `-OutputDir` + `-Recursive`, files with the same name in different folders would map to
+the same thumbnail. The later one is renamed instead of being skipped:
+
+```
+RENAME (thumbnail name already taken) | photo.tif -> photo_thumb_v2.jpg
+```
+
+Re-running is a no-op: existing thumbnails are detected (including the `-Page all` frames)
+and reported as `SKIP (exists)`.
 
 Logs are written to `Logs/generate_thumbnails/`.
+
+---
+
+## Removing thumbnails
+
+`-Remove` scans for thumbnail files directly (`*_thumb.*` and `*_thumb-N.*` in `jpg`, `jpeg`,
+`png`, `tif`, `tiff`) in `-InputDir` — or in `-OutputDir` when given — honouring `-Recursive`.
+Because it does not derive names from source TIFFs, thumbnails whose original was moved or
+deleted are also cleaned up. Combine with `-DryRun` to preview.
+
+```powershell
+powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -Recursive -Remove -DryRun
+```
 
 ---
 

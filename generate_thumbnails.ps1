@@ -6,7 +6,7 @@ param(
     [switch]$Remove,
     [switch]$DryRun,
     [switch]$Recursive,
-    [int]$Workers = 4,
+    [ValidateRange(1, 64)][int]$Workers = 4,
     [ValidatePattern('^(all|\d+)$')]
     [string]$Page = "0",
     [ValidatePattern('^(100|[1-9][0-9]?)$')]
@@ -57,6 +57,27 @@ if ($Format -notin @("jpg", "jpeg", "png", "tif", "tiff")) {
 
 # -- Resolve input -------------------------------------------------
 $inputRoots = if ([System.IO.Path]::IsPathRooted($InputDir)) { @($InputDir) } else { @(Join-Path $PWD.Path $InputDir) }
+$recurseFlag = [bool]$Recursive
+
+function Test-ThumbExists {
+    <#
+    .SYNOPSIS
+        True when a thumbnail for $destPath is already on disk.
+        With -Page all and a single-frame format ImageMagick writes name-0.jpg,
+        name-1.jpg, ... so testing only the unsuffixed path never matched and every
+        run regenerated everything.
+    #>
+    param([string]$destPath)
+
+    if (Test-Path -LiteralPath $destPath) { return $true }
+    $d = [System.IO.Path]::GetDirectoryName($destPath)
+    if (-not $d -or -not (Test-Path -LiteralPath $d)) { return $false }
+    $b = [System.IO.Path]::GetFileNameWithoutExtension($destPath)
+    $e = [System.IO.Path]::GetExtension($destPath)
+    return (@(Get-ChildItem -LiteralPath $d -Filter "$b-*$e" -File -ErrorAction SilentlyContinue).Count -gt 0)
+}
+$script:ThumbExistsFnDef = ${function:Test-ThumbExists}.ToString()
+
 $allFiles = foreach ($root in $inputRoots) {
     if (-not (Test-Path -LiteralPath $root)) {
         Write-Log "InputDir not found: $root" "WARN"
@@ -66,14 +87,75 @@ $allFiles = foreach ($root in $inputRoots) {
     if ($item -is [System.IO.FileInfo]) {
         if ($item.Extension -match '^\.(tif|tiff)$') { $item }
     } else {
-        $recurseFlag = if ($Recursive) { $true } else { $false }
         Get-ChildItem -LiteralPath $root -File -Recurse:$recurseFlag |
             Where-Object { $_.Extension -match '^\.(tif|tiff)$' }
     }
 }
 
-$files = $allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch '(?i)_thumb(-\d+)?$' }
+$files = @($allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch '(?i)_thumb(-\d+)?$' })
 $total = $files.Count
+
+# -- Statistics ----------------------------------------------------
+$script:okTotal     = 0
+$script:skipTotal   = 0
+$script:errTotal    = 0
+$script:counterTotal= 0
+
+# -- Remove thumbnails ---------------------------------------------
+# Enumerates the thumbnails themselves rather than deriving them from the source TIFFs:
+# a thumbnail whose TIFF was deleted or moved could never be cleaned up before, and the
+# counters mixed "source files" with "thumbnails removed".
+if ($Remove) {
+    $allFormats = @("jpg", "jpeg", "png", "tif", "tiff")
+    $searchRoots = if ($OutputDir) {
+        if ([System.IO.Path]::IsPathRooted($OutputDir)) {
+            @($OutputDir)
+        } else {
+            @($inputRoots | ForEach-Object { Join-Path $_ $OutputDir })
+        }
+    } else {
+        $inputRoots
+    }
+
+    $thumbs = @(foreach ($root in ($searchRoots | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        Get-ChildItem -LiteralPath $root -File -Recurse:$recurseFlag -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.BaseName -match '(?i)_thumb(-\d+)?$' -and
+                ($_.Extension.TrimStart('.').ToLowerInvariant() -in $allFormats)
+            }
+    })
+
+    $total = $thumbs.Count
+    Write-Log "Found: $total thumbnail(s) to remove"
+    if ($total -eq 0) {
+        Write-Log "No thumbnails found in: $(($searchRoots | Select-Object -Unique) -join '; ')" "WARN"
+        Write-Log "Log: $logFile"
+        exit 0
+    }
+
+    foreach ($thumb in $thumbs) {
+        $script:counterTotal++
+        if ($DryRun) {
+            $script:skipTotal++
+            Write-Log "[$($script:counterTotal)/$total] DRY-RUN (would remove) | $($thumb.Name)"
+            continue
+        }
+        try {
+            Remove-Item -LiteralPath $thumb.FullName -Force
+            $script:okTotal++
+            Write-Log "[$($script:counterTotal)/$total] REMOVED | $($thumb.Name)"
+        } catch {
+            $script:errTotal++
+            Write-Log "[$($script:counterTotal)/$total] ERROR (remove failed) | $($thumb.Name) | $($_.Exception.Message)" "ERROR"
+        }
+    }
+
+    Write-Log ""
+    Write-Log "Done: $($script:okTotal) removed | $($script:skipTotal) skipped | $($script:errTotal) errors | $($script:counterTotal)/$total processed"
+    Write-Log "Log: $logFile"
+    if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
+}
 
 if ($total -eq 0) {
     Write-Log "No TIFF files found in: $($inputRoots -join '; ')" "WARN"
@@ -85,12 +167,6 @@ Write-Log "Found: $total TIFF(s)"
 Write-Log "Size: ${Size}px | Format: $Format | Quality: $Quality | Page: $Page"
 Write-Log "Mode: $(if ($Remove) { 'REMOVE thumbnails' } else { 'GENERATE thumbnails' })"
 # -----------------------------------------------------------------
-
-# -- Statistics ----------------------------------------------------
-$script:okTotal     = 0
-$script:skipTotal   = 0
-$script:errTotal    = 0
-$script:counterTotal= 0
 
 function Process-Results($lines) {
     foreach ($line in $lines) {
@@ -111,68 +187,38 @@ function Process-Results($lines) {
 }
 # -----------------------------------------------------------------
 
-# -- Remove thumbnails ---------------------------------------------
-if ($Remove) {
-    $allFormats = @("jpg", "jpeg", "png", "tif", "tiff")
-    foreach ($f in $files) {
-        $outDir = if ($OutputDir) {
-            if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $f.DirectoryName $OutputDir }
-        } else {
-            $f.DirectoryName
-        }
-        
-        $script:counterTotal++
-        $thumbPaths = @(foreach ($ext in $allFormats) {
-            $exactPath = Join-Path $outDir "$($f.BaseName)_thumb.$ext"
-            if (Test-Path -LiteralPath $exactPath) { $exactPath }
-            Get-ChildItem -LiteralPath $outDir -Filter "$($f.BaseName)_thumb-*.$ext" -File -ErrorAction SilentlyContinue |
-                ForEach-Object { $_.FullName }
-        })
-        
-        if ($thumbPaths.Count -gt 0) {
-            foreach ($thumbPath in $thumbPaths) {
-                $thumbName = [System.IO.Path]::GetFileName($thumbPath)
-                if (-not $DryRun) {
-                    try {
-                        Remove-Item -LiteralPath $thumbPath -Force
-                        $script:okTotal++
-                        Write-Log "[$($script:counterTotal)/$total] REMOVED | $thumbName"
-                    } catch {
-                        $script:errTotal++
-                        Write-Log "[$($script:counterTotal)/$total] ERROR (remove failed) | $thumbName | $($_.Exception.Message)" "ERROR"
-                    }
-                } else {
-                    $script:skipTotal++
-                    Write-Log "[$($script:counterTotal)/$total] DRY-RUN (would remove) | $thumbName"
-                }
-            }
-        } else {
-            $script:skipTotal++
-            Write-Log "[$($script:counterTotal)/$total] SKIP (not found) | $($f.BaseName)_thumb.*"
-        }
-    }
-    
-    Write-Log ""
-    Write-Log "Done: $($script:okTotal) removed | $($script:skipTotal) skipped | $($script:errTotal) errors | $total processed"
-    Write-Log "Log: $logFile"
-    if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
-}
-# -----------------------------------------------------------------
-
 # -- Generate thumbnails -------------------------------------------
 $effectiveWorkers = [Math]::Min($Workers, 16)
 $isPS7 = $PSVersionTable.PSVersion.Major -ge 7
 
 # Prepare tasks
+# claimedDest: with -OutputDir + -Recursive, a\photo.tif and b\photo.tif both map to
+# photo_thumb.jpg. The second one used to report "SKIP (exists)" and never be generated,
+# so number later claimants instead (same policy as compress_tiff_zip.ps1).
+$claimedDest = @{}
 $tasks = foreach ($f in $files) {
     $thumbName = "$($f.BaseName)_thumb.$Format"
-    $destPath = if ($OutputDir) {
-        $outDir = if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $f.DirectoryName $OutputDir }
-        Join-Path $outDir $thumbName
+    $outDir = if ($OutputDir) {
+        if ([System.IO.Path]::IsPathRooted($OutputDir)) { $OutputDir } else { Join-Path $f.DirectoryName $OutputDir }
     } else {
-        Join-Path $f.DirectoryName $thumbName
+        $f.DirectoryName
     }
-    
+    $destPath = Join-Path $outDir $thumbName
+
+    $dKey = $destPath.ToLowerInvariant()
+    if ($claimedDest.ContainsKey($dKey)) {
+        $n = 2
+        do {
+            $candidateName = "$($f.BaseName)_thumb_v${n}.$Format"
+            $candidatePath = Join-Path $outDir $candidateName
+            $n++
+        } while ($claimedDest.ContainsKey($candidatePath.ToLowerInvariant()))
+        Write-Log "RENAME (thumbnail name already taken) | $($f.Name) -> $candidateName" "WARN"
+        $destPath = $candidatePath
+        $dKey = $candidatePath.ToLowerInvariant()
+    }
+    $claimedDest[$dKey] = $f.FullName
+
     @{
         SrcPath = $f.FullName
         DestPath = $destPath
@@ -189,9 +235,11 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
     # Parallel processing
     $results = $tasks | ForEach-Object -Parallel {
         $t = $_
+        # Functions from the parent scope are not visible inside -Parallel runspaces
+        ${function:Test-ThumbExists} = $using:ThumbExistsFnDef
         $name = [System.IO.Path]::GetFileName($t.SrcPath)
-        
-        if ((Test-Path -LiteralPath $t.DestPath) -and -not $t.DryRun) {
+
+        if ((Test-ThumbExists $t.DestPath) -and -not $t.DryRun) {
             "SKIP (exists) | $name"
         } elseif ($t.DryRun) {
             "DRY-RUN | $name -> $([System.IO.Path]::GetFileName($t.DestPath))"
@@ -256,8 +304,8 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
     # Sequential processing
     foreach ($t in $tasks) {
         $name = [System.IO.Path]::GetFileName($t.SrcPath)
-        
-        if ((Test-Path -LiteralPath $t.DestPath) -and -not $t.DryRun) {
+
+        if ((Test-ThumbExists $t.DestPath) -and -not $t.DryRun) {
             $result = "SKIP (exists) | $name"
         } elseif ($t.DryRun) {
             $result = "DRY-RUN | $name -> $([System.IO.Path]::GetFileName($t.DestPath))"

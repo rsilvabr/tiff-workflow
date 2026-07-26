@@ -2,6 +2,91 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## v2.4 - Audit Round 5
+
+### 🔴 CRITICAL - `copy_exif_to_TIFF_ps5.ps1` Did Not Run on PowerShell 5.1 At All
+**Issue:** The script is saved as UTF-8 **without BOM** but contains non-ASCII characters (`─`, `═`, `—`, `→`). Windows PowerShell 5.1 decodes BOM-less files as ANSI (cp1252), so `─` and `—` become `â”`/`â€”` — and `”` (U+201D) is a **string delimiter** for the PowerShell parser. Every affected string terminated early:
+```
+Token 'skipped' inesperado na expressão ou instrução.
++ "MULTI ($pageCount IFDs â€” skipped) | $($p.T ...
+```
+The PS5-only script — whose entire reason to exist is PowerShell 5.1 — failed to parse before executing a single line. It was invisible in review because PS7 (used by the tokenizer checks in `Notes`) reads BOM-less files as UTF-8.
+- **Fix:** All four `.ps1` files are now pure ASCII (`─`→`-`, `═`→`=`, `—`→`--`, `→`→`->`). Verified by running the script end-to-end under `powershell.exe` 5.1.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`, `compress_tiff_zip.ps1`
+
+### 🔴 CRITICAL - Modes 0/9: Multi-Page TIFFs Left Stranded in `OLD_TIFFs/`
+**Issue:** The pre-check moved the original to `OLD_TIFFs/` and only then queued the task; SafeMode's multi-page test ran later, inside the worker. A multi-page TIFF was therefore rejected *after* being moved, and since `MULTI` is not an `ERROR`, the rollback never restored it. The log said "skipped" while the file had disappeared from its folder, leaving nothing in the parent — the opposite of the documented "multi-page TIFFs are not touched".
+- **Fix:** The page-count/subfiletype check now runs in the task-building loop, before `Move-Item`. Rejected files are reported as `MULTI (n pages - skipped, original untouched)` and never moved.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 CRITICAL - `photo.tif` + `photo.tiff` Overwrote Each Other (Modes 0/1/3/8/9)
+**Issue:** `Resolve-Output` always returns `<stem>.tif`, but destination de-duplication existed only for mode 2 and modes 4-7. With both extensions present, two parallel workers wrote the same output file simultaneously, `$stagingMap` (keyed by destination) kept only the last entry — orphaning one staged file — and in mode 8 the `.tiff` source was deleted after the move. One of the two images was lost.
+- **Fix:** The claimed-destination map now covers every mode except 2 (which keeps its own `-DuplicateAction` policy). The later claimant becomes `_v2`, `_v3`, ...
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Mode 8 Skipped Its Own Integrity Gate on Three Paths
+**Issue:** The docs promise the staged ZIP is *always* verified with `magick ... null:` before replacing the original. But the `[no thumb]` fallbacks (thumbnail generation or merge failure) and the `WARN (exiftool failed, ZIP ok)` path returned early, before the mode 8 block — while still setting `StagingName`, so the move loop happily overwrote the original with a file that was never decoded.
+- **Fix:** Those paths no longer return early; they set `$noThumbNote` / `$exifWarn` and fall through to a single tail that always runs the integrity gate and builds the result string.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟠 HIGH - Wizard Had No Output Folder for Mode 2
+**Issue:** `build_compress_command()` never emitted `-OutputDir`. Mode 2 ("merge all TIFFs into a single output folder") therefore always ran with an empty `-OutputDir`, which the backend resolves to the *input root*: every TIFF from every subfolder was dumped next to the sources, and root-level TIFFs were recompressed in place (`magick photo.tif ... photo.tif`) with no backup.
+- **Fix:** The wizard asks for the output folder when mode 2 is selected (default `<input>\ZIP_flat`), warns and requires confirmation if it equals the input folder, and also exposes `-DuplicateAction`. `build_compress_command()` now passes `-OutputDir` and `-DuplicateAction`.
+- **Files:** `convert_tiff.py`
+
+### 🟠 HIGH - `copy_exif` `-OutputDir` Merged Every Session Into One Folder
+**Issue:** With AutoFind (or a `;` list) all sessions share a single `-OutputDir`, so a second session holding `DSC_0001.tif` hit `SKIP (exists in OutputDir)` and silently produced nothing (or overwrote the first with `-Overwrite`). None of the numbering added to `compress_tiff_zip.ps1` in v2.2/v2.3 existed here.
+- **Fix:** Destinations are claimed per run across folders; later claimants get `_v2`, `_v3`, ... with a `RENAME` log line. The staging→final move uses the same mapping.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟠 HIGH - Modes 6/7 Wrote Outside the Source `_EXPORT` Tree
+**Issue:** `Resolve-Output` built `<inputRoot>\_EXPORT\<ZIP>\...`, discarding the path between the root and the actual `_EXPORT`. `root\2024\JobA\_EXPORT\shot.tif` and `root\2024\JobB\_EXPORT\shot.tif` both landed in `root\_EXPORT\ZIP\` (one renamed `_v2`), inside an `_EXPORT` folder created at the root that never existed. The documented mapping is `_EXPORT/photo.tif → _EXPORT/ZIP/photo.tif`.
+- **Fix:** New `Get-PathPrefix` helper rebuilds the real `_EXPORT` location from the path segments; each tree now gets its own `ZIP/`. Mode 7 additionally requires the TIFF subfolder to sit *below* the marker.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - `Start-Job` Per File (Performance)
+**Issue:** SafeMode's page count and mode 8's integrity check used `Start-Job`, which spawns a full PowerShell **process** per file (~700 ms measured), inside `ForEach-Object -Parallel`. On the sequential PS5 path that cost was paid back-to-back for every file.
+- **Fix:** New `Invoke-MagickWithTimeout` runs `magick` in an in-process runspace with the same timeout semantics (`BeginStop` async, since `Stop()` blocks until the native child exits). `Get-TiffPageCount` and `Test-ZipIntegrity` are built on it and replace all six `Start-Job` call sites; `_Verify-ZipIntegrity` was removed. Arguments are passed as a real array, so no manual quoting. Measured: **5.66 s → 3.60 s (-36%)** on 24 files / 8 workers, identical output.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - Modes 0/9 Probed Every File Twice
+**Issue:** The exiftool compression probe and (after the fix above) the page count ran once in the task loop and again inside the worker.
+- **Fix:** Tasks carry `Comp` and `SafeChecked`; `Process-TiffJob` and the parallel block accept them and skip the redundant probes.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - `_compare_tiff_metadata` Mis-Parsed Scientific-Notation RMSE
+**Issue:** The regex fixed in `_is_real_16bit` was never applied here. For `1.23457e+06 (0.0188238)` it matched `06` as the RMSE, so the purge verification (workflow 6) reported a wrong value.
+- **Fix:** Same pattern as `_is_real_16bit`, accepting an exponent in the integer part.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - `copy_exif`: JPEG Search in the Parent Folder Was Dead Code
+**Issue:** `Find-JpegPair` searched `$parent`, `$parent\JPEG` and `$parent\JPG`, but the JPEG index is built only from `$RootPath` — those three directories could never produce a hit. Half the documented search path silently did nothing (the same class of bug as "JPEG Search in Subfolders Never Worked" in v2.1).
+- **Fix:** When the index misses, the filesystem is probed directly for `<base>.jpg` / `<base>.jpeg` in each search directory.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - `generate_thumbnails.ps1`: Collisions, Idempotence and `-Remove`
+- **Collisions:** with `-OutputDir` + `-Recursive`, `a\photo.tif` and `b\photo.tif` both mapped to `photo_thumb.jpg`; the second reported `SKIP (exists)` and was never generated. Later claimants now get `_thumb_v2`, `_thumb_v3`, ...
+- **Idempotence:** with `-Page all` the "already exists" test checked the unsuffixed path while ImageMagick writes `name_thumb-0.jpg`, `name_thumb-1.jpg`, so every run regenerated everything. New `Test-ThumbExists` also matches suffixed frames.
+- **`-Remove`:** now enumerates the thumbnails themselves instead of deriving them from source TIFFs, so orphans (whose TIFF was moved or deleted) are cleaned up, and the counters no longer mix "source files" with "thumbnails removed".
+- **`-Workers`:** gained `[ValidateRange(1, 64)]`.
+- **Files:** `generate_thumbnails.ps1`
+
+### 🟡 MEDIUM - Wizard Sent `-Workers` Values the Backends Reject
+**Issue:** The backends declare `[ValidateRange(1, 64)]`; the wizard accepted any integer, so `-Workers 100` aborted at parameter binding with a raw PowerShell error and the backend never started.
+- **Fix:** New `clamp_workers()` used by every command builder and prompt (workflow 7 included), with a message when the value is clamped.
+- **Files:** `convert_tiff.py`
+
+### 🟢 LOW - Stability & Hygiene Fixes
+- `Test-TiffHasOnlySubfilePages` now fails closed when `identify` returns fewer lines than pages, and honours `-MagickTimeout` (it previously called `magick` with no timeout at all). **Files:** all three PS scripts
+- Mode 5 no longer climbs above the input root: a TIFF sitting directly in the root used to produce `<drive>:\ZIP\`, outside the selected tree. **Files:** `compress_tiff_zip.ps1`
+- A non-existent `-InputDir` is now an error with exit code 1 instead of falling through to "No TIFF files found" and exit 0 (a typo was indistinguishable from an empty folder). **Files:** `compress_tiff_zip.ps1`
+- Files that `Resolve-Output` cannot map are reported as `SKIP` instead of being dropped silently, so the `N/N processed` total closes. **Files:** `compress_tiff_zip.ps1`
+- Mode 8's temporary staging directory is removed whenever it is empty (previously kept on any error) and any leftovers are reported with their path instead of being discarded silently. **Files:** `compress_tiff_zip.ps1`
+- Workflow 7 (Diagnose) now persists `last_workers` like every other workflow; workflow 8 gained `-OutputDir`, `-Page` and `-Remove`, and validates size/quality/format before starting the backend (invalid `-Quality` used to abort it at binding). **Files:** `convert_tiff.py`
+- Dead code removed: unused `$bagL` / `$multiPageBagCapture` in the PS7 parallel block, unused `$markerLower` in `Get-Files-Mode6`. **Files:** `copy_exif_to_TIFF_ps7.ps1`, `compress_tiff_zip.ps1`
+
+---
+
 ## v2.3 - Audit Round 4
 
 ### 🔴 CRITICAL - copy_exif `-OutputDir` + `-CompressZip` Deleted Its Own Output
