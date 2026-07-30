@@ -32,8 +32,9 @@ Describe "generate_thumbnails.ps1 - Parameter Validation" {
 
 Describe "generate_thumbnails.ps1 - Input Scan" {
     It "Excludes _thumb files from input scan (no _thumb_thumb)" {
+        # v2.3 widened the pattern to the suffixed frames -Page all produces (_thumb-0, ...)
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\$_\.BaseName -notmatch ''\(\?i\)_thumb\$'''
+        $content | Should -Match '\$_\.BaseName -notmatch ''\(\?i\)_thumb\(-\\d\+\)\?\$'''
     }
 
     It "Excludes OLD_TIFFs folders from input scan" {

@@ -56,7 +56,17 @@ if ($Format -notin @("jpg", "jpeg", "png", "tif", "tiff")) {
 # -----------------------------------------------------------------
 
 # -- Resolve input -------------------------------------------------
-$inputRoots = if ([System.IO.Path]::IsPathRooted($InputDir)) { @($InputDir) } else { @(Join-Path $PWD.Path $InputDir) }
+# Accepts a ';' separated list like the other backends, and reports a bad path as an ERROR
+# instead of a WARN: a typo used to look identical to "folder has no TIFFs" and exited 0.
+$inputRoots   = @()
+$missingRoots = @()
+foreach ($dir in ($InputDir -split ';')) {
+    $dir = $dir.Trim()
+    if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+    if (-not [System.IO.Path]::IsPathRooted($dir)) { $dir = Join-Path $PWD.Path $dir }
+    if (-not (Test-Path -LiteralPath $dir)) { $missingRoots += $dir; continue }
+    $inputRoots += $dir
+}
 $recurseFlag = [bool]$Recursive
 
 function Test-ThumbExists {
@@ -79,10 +89,6 @@ function Test-ThumbExists {
 $script:ThumbExistsFnDef = ${function:Test-ThumbExists}.ToString()
 
 $allFiles = foreach ($root in $inputRoots) {
-    if (-not (Test-Path -LiteralPath $root)) {
-        Write-Log "InputDir not found: $root" "WARN"
-        continue
-    }
     $item = Get-Item -LiteralPath $root
     if ($item -is [System.IO.FileInfo]) {
         if ($item.Extension -match '^\.(tif|tiff)$') { $item }
@@ -100,6 +106,16 @@ $script:okTotal     = 0
 $script:skipTotal   = 0
 $script:errTotal    = 0
 $script:counterTotal= 0
+
+# Counted after the reset above so a bad path still yields exit code 1
+foreach ($m in $missingRoots) { Write-Log "ERROR: input directory not found: $m" "ERROR" }
+$script:errTotal += $missingRoots.Count
+
+if ($inputRoots.Count -eq 0) {
+    Write-Log "No valid input directories specified." "ERROR"
+    Write-Log "Log: $logFile"
+    exit 1
+}
 
 # -- Remove thumbnails ---------------------------------------------
 # Enumerates the thumbnails themselves rather than deriving them from the source TIFFs:
@@ -131,7 +147,7 @@ if ($Remove) {
     if ($total -eq 0) {
         Write-Log "No thumbnails found in: $(($searchRoots | Select-Object -Unique) -join '; ')" "WARN"
         Write-Log "Log: $logFile"
-        exit 0
+        if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
     }
 
     foreach ($thumb in $thumbs) {
@@ -160,7 +176,7 @@ if ($Remove) {
 if ($total -eq 0) {
     Write-Log "No TIFF files found in: $($inputRoots -join '; ')" "WARN"
     Write-Log "Log: $logFile"
-    exit 0
+    if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
 }
 
 Write-Log "Found: $total TIFF(s)"

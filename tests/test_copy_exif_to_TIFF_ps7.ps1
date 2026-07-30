@@ -54,14 +54,11 @@ Describe "copy_exif_to_TIFF_ps7.ps1 - Page Count" {
         $content | Should -Not -Match 'Measure-Object -Line'
     }
 
-    It "Uses [int] cast for page count" {
+    It "Uses [int]::TryParse to guard page count parsing (fails closed)" {
+        # Must stay identical to the PS5 script -- divergence between the two is a bug class.
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\$pageCount = \[int\]'
-    }
-
-    It "Uses [int]::TryParse to guard page count parsing" {
-        $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\[int\]::TryParse\("\$pageCountVal", \[ref\]\$pageCount\)'
+        $content | Should -Match '\[int\]::TryParse\(\$val, \[ref\]\$n\)'
+        $content | Should -Match 'PageCount = 0; Error = "parse:\$val"'
     }
 }
 
@@ -80,10 +77,12 @@ Describe "copy_exif_to_TIFF_ps7.ps1 - Error Handling" {
 }
 
 Describe "copy_exif_to_TIFF_ps7.ps1 - Original Name" {
-    It "Uses `$tif.Name not undefined `$originalName" {
+    It "Destination name comes from the file, never from an undefined variable" {
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Not -Match '\$originalName(?!\s*\])'
-        $content | Should -Match '\$destPath.*\$tif\.Name'
+        # v2.4 added $destNameMap for -OutputDir collisions; it falls back to $tif.Name
+        $content | Should -Match '\$destName = if \(\$destNameMap\.ContainsKey\(\$tif\.FullName\)\).*else \{ \$tif\.Name \}'
+        $content | Should -Match '\$destPath\s+= Join-Path \$finalDir\s+\$destName'
     }
 }
 Describe "copy_exif_to_TIFF_ps7.ps1 - Audit Round 4" {
@@ -94,7 +93,7 @@ Describe "copy_exif_to_TIFF_ps7.ps1 - Audit Round 4" {
 
     It "Page count uses '%n\n' (no concatenated digits)" {
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Not -Match 'identify -format "%n"'
-        $content | Should -Match 'identify -format "%n\\n"'
+        $content | Should -Not -Match '"-format", "%n"'
+        $content | Should -Match '@\("identify", "-format", "%n\\n", \$Path\)'
     }
 }

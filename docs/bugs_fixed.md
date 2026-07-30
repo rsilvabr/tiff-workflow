@@ -2,6 +2,157 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## v2.5 - Audit Round 6
+
+Round 6 was a **class-directed** audit rather than a free read: the five recurring failure
+classes from rounds 1-5 (destination collision, data loss, PS5/PS7 divergence, path
+resolution, exit code) were swept across all ten modes and all five scripts. Every finding
+below is an instance of a class that had already been fixed *somewhere else* — the fixes had
+never been generalised, and no regression test pinned them.
+
+### 🔴 CRITICAL - Legacy In-Place Compression Silently Stripped All EXIF
+**Issue:** With no `-StagingDir` and no output folder, `$writeDst` equals `$srcPath`. `magick`
+overwrote the original, and the EXIF restore that follows then ran
+`-tagsfromfile <source> -all:all` against the **already-compressed file** — so it copied
+nothing. Every tag (Make, Model, Artist, XMP, IPTC) was lost, reported as `OK` with `0 warnings`.
+Reproduced on both PS5 and PS7, with and without `-GenerateThumbnail`; the same applied to
+Mode 2 without `-OutputDir`, where files at the input root also resolve to an in-place write.
+- **Fix:** New `Backup-TiffMetadata` parks the source metadata in a temp MIE container before
+  compression whenever the write target is the source, and the restore reads from that
+  container. Cleaned up on every exit path, including the `magick` error returns.
+- **Files:** `compress_tiff_zip.ps1` (all three workers: `Process-TiffJob`, legacy `-Parallel`, mode `-Parallel`)
+
+### 🟠 HIGH - `return` at Script Scope Reported Exit 0 With Errors Recorded
+**Issue:** Two early exits used `return`, which at script scope always yields exit code **0**,
+discarding the `$errTotal -gt 0 -> exit 1` contract. Reachable two ways: a bad path in a `;`
+list when the valid folders hold no TIFFs, and — worse — modes 0/9 failing *every* file in the
+pre-check loop, which empties `$tasks` and lands on the second `return` with N errors logged.
+`convert_tiff.py` gates Step 2 on this exit code, so a fully failed Step 1 read as success.
+Direct regression of the v2.2 fix "Scripts Exited 0 Despite Per-File Errors".
+- **Fix:** Both sites now end with `if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }`.
+  The same treatment was applied to the two `exit 0` sites in `generate_thumbnails.ps1`, which
+  additionally gained `;`-list splitting and missing-directory validation to match the other
+  backends. Verified end to end: bad path -> exit 1, valid empty folder -> exit 0.
+- **Files:** `compress_tiff_zip.ps1`, `generate_thumbnails.ps1`
+
+### 🟠 HIGH - Purge and Padded-Compress Gates Failed Open
+**Issue:** Two gates that authorise destroying data skipped their own check when they could not
+read it, instead of refusing:
+- `_compare_tiff_metadata` only compared page counts when *both* were readable. An unreadable
+  count left page-0 RMSE as the sole evidence, and `run_purge_old_tiffs` **permanently deletes**
+  on that verdict — despite the comment stating a lost page must block the purge.
+- `_process_single_padded` only compared dimensions when both `identify` calls returned 0 with
+  parseable output; any other outcome fell through to `status = "ok"` and the original was
+  replaced by a **lossy 16 -> 8-bit** conversion. It also never checked page count at all.
+- **Fix:** Both fail closed. Unreadable dimensions yield `dimension_unreadable`, unreadable or
+  differing page counts yield `page_count_mismatch`, and a page-count parity check was added to
+  the padded path. Matches the fail-closed contract of `Test-ZipIntegrity`/`Get-TiffPageCount`.
+- **Files:** `convert_tiff.py`
+
+### 🟠 HIGH - Legacy PS7 Lost EXIF Where PS5 Kept It (`[no thumb]` Fallback)
+**Issue:** In legacy mode with `-GenerateThumbnail`, a failed thumbnail made the PS7 `-Parallel`
+block `return` immediately, skipping the EXIF restore that the PS5 path (`Process-TiffJob`)
+reaches via `$noThumbNote`. Same input, same file: PS7 produced a TIFF with no metadata, PS5
+kept it. The mode `>= 0` worker had already been fixed this way; legacy never got the backport.
+- **Fix:** The legacy `-Parallel` block now accumulates `$noThumbNote`/`$exifWarn` and falls
+  through to the shared EXIF restore, matching the sequential path.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Staging Cleanup Destroyed Other Runs' In-Flight Files
+**Issue:** `compress_tiff_zip.ps1` scopes staging cleanup to `$script:runStagingId`; the other
+three did not.
+- Both `copy_exif` scripts' interrupt trap deleted anything matching `^[0-9a-f]{32}_`, and their
+  staging names were bare GUIDs. Ctrl-C in one session wiped a concurrent session's staged output.
+- `_compress_padded_files` deleted *every* file in a shared `compress_staging/`. A run caught
+  between its `OLD_PADDED` backup and its final move lost the file from the source folder.
+- **Fix:** Both `copy_exif` scripts gained a run-scoped `$script:runStagingId` prefix (passed
+  into the PS7 runspaces via `$using:`); the Python staging directory is now per-run
+  (`compress_staging_<uuid>`) and removed wholesale.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`, `convert_tiff.py`
+
+### 🟡 MEDIUM - `_safe_move` Destroyed the Destination Before It Could Fail
+**Issue:** `dst.unlink()` ran before `shutil.move`. A move that then failed (disk full,
+permission, cross-device) left **both** files gone. Worst in `run_undo_old_tiffs` with
+overwrite enabled. Separately, `shutil.rmtree(dst)` would recursively erase an entire directory
+that merely shared a filename.
+- **Fix:** An existing destination is parked under a sibling `.bak-<uuid>` name via `os.replace`
+  and only unlinked after the move succeeds; on failure it is restored. A directory destination
+  now raises `IsADirectoryError` instead of being deleted.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - Rollback Blind to Staging-Move and Mode 8 Delete Failures
+**Issue:** `$groupErrs` was measured *before* the staging-move block that increments
+`$script:errTotal`, so a modes 0/9 file whose staged output failed to move never triggered the
+rollback: the original stayed in `OLD_TIFFs/` with no output and no `ROLLBACK` line. Move
+failures were also never added to `$errorSrcPaths`. Mode 8's delete block logged `ERROR` for
+"final destination missing" and "failed to delete source" without counting them, so those runs
+still exited 0.
+- **Fix:** `$groupErrs` is computed immediately before the rollback in both branches, move
+  failures register their `$t.Src` in `$errorSrcPaths`, and the mode 8 delete errors increment
+  `$script:errTotal`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Dry-Run -> Real Path Dropped the Step 1 Gate
+**Issue:** The first pass refuses to run Step 2 when Copy EXIF fails, but the "run for real now?"
+follow-up called both steps unconditionally — a failed Copy EXIF still proceeded to Compress.
+Present in both the Rich and plain-input branches.
+- **Fix:** Both branches apply the same gate as the first pass.
+- **Files:** `convert_tiff.py`
+
+### 🟢 LOW - Reporting and Verification Hygiene
+- Purge verified non-TIFF sidecars by **size only**; a same-size sidecar with different content
+  passed and was deleted. Now compared by streamed SHA-256 (`_file_digest`). (`convert_tiff.py`)
+- `run_undo_old_tiffs` counted every file in the header but only moved `.tif`/`.tiff`, promising
+  more than the run delivered. Counts now match what is moved. (`convert_tiff.py`)
+- `Process-Results` carried a dead `^OK\+SKIP-ZIP` branch; that result string belongs to
+  `copy_exif` and is never emitted here. (`compress_tiff_zip.ps1`)
+- The non-SafeMode legacy summary omitted `warnTotal`. (`compress_tiff_zip.ps1`)
+- The PS7 `MULTI` return omitted `SrcPath`/`CopiedTiffPath` that every sibling return carries.
+  Harmless today (`$copiedTiffPath` is still `$null` there and the consumer is guarded by
+  `StagingName`), but the uneven shape is exactly how the rollback bugs above started.
+  (`copy_exif_to_TIFF_ps7.ps1`)
+
+### Regression coverage
+
+Every finding above is an instance of a class that had already been fixed elsewhere and was never
+pinned by a test, so round 6 closes with `tests/test_regression_classes.py` — one group per class,
+each written to fail when the fix is reverted:
+
+| Class | Coverage |
+|---|---|
+| Exit code | `compress_tiff_zip.ps1` and `generate_thumbnails.ps1` driven end to end on both shells: bad path in a `;` list → 1, valid empty folder → 0, every file failing the mode 0 pre-check → 1. Plus a static AST guard against `return` at script scope in all four backends. |
+| Data loss | In-place compression of a real TIFF across all three workers (`Process-TiffJob`, legacy `-Parallel`, mode `-Parallel`) × both shells, asserting the EXIF survives and the file really was compressed. |
+| PS5/PS7 divergence | The `[no thumb]` fallback forced via an unencodable `-ThumbFormat`, sequential and parallel, both shells. Plus an AST check that every `-Parallel` block re-injects — transitively — each script-level helper it calls. |
+| Fail-closed gates | `_compare_tiff_metadata` and `_process_single_padded` with `identify` returning non-zero, empty and unparseable output on either side, asserting no deletion or replacement is authorised, and that the happy path still is. |
+| Staging / collision | Run-scoped staging is not shared between runs and does not delete a concurrent run's files; `_safe_move` restores the destination when the move fails and refuses a directory destination. |
+
+The PowerShell behaviour is exercised from pytest through the real shells rather than from Pester,
+because it needs real TIFFs and both hosts; the Pester suites stay what they are, static pattern
+checks over the sources. Tests requiring a shell or ImageMagick/exiftool skip when those are
+absent. The static AST checks live in `tests/helpers/Find-PsInvariantViolations.ps1`.
+
+### Pester suites unblocked and refreshed
+
+Pester 6.0.1 was installed (`Install-Module Pester -Force -SkipPublisherCheck -Scope CurrentUser`),
+so the five `.ps1` suites ran for the first time since v2.1 — and 17 tests failed. All 17 were
+**stale assertions**, not regressions: they pinned code shapes that rounds 4-6 deliberately
+replaced (`[int]` cast → `[int]::TryParse`; `magick "$p" null:` → `Invoke-MagickWithTimeout`;
+`Start-Job`'s `$jobOutput` → the runspace helper's `TimedOut`/`ExitCode`; `$stagingUsed` →
+`$verifyTarget`; collision numbering restricted to modes 4-7 → every mode; `_thumb$` →
+`_thumb(-\d+)?$`; `$destPath`/`$tif.Name` → the `$destNameMap` fallback). Each was rewritten to
+pin the *current* invariant rather than the old syntax.
+
+One was the opposite of stale: `No-Thumb StagingName` asserted that every `[no thumb]` path
+returns early with a `StagingName` — the exact shape the CRITICAL/HIGH fixes above removed. It is
+now inverted: no worker may return there, and all three must accumulate `$noThumbNote` and fall
+through to the EXIF restore.
+
+**Verification:** all four `.ps1` files parse clean under both PowerShell 5.1 and 7 and remain
+pure ASCII without BOM (the v2.4 constraint); `pytest` 111/111 (52 existing + 59 new) and
+`Invoke-Pester` 76/76; modes 0-9 swept on both shells with real TIFFs, exit 0 throughout, EXIF
+preserved in-place on every worker, and no leaked temp files. Each new regression test was
+mutation-checked by reverting the corresponding v2.5 fix and confirming the test fails.
+
 ## v2.4 - Audit Round 5
 
 ### 🔴 CRITICAL - `copy_exif_to_TIFF_ps5.ps1` Did Not Run on PowerShell 5.1 At All

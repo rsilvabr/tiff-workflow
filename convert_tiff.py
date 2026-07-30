@@ -24,6 +24,7 @@ COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import locale
 import os
@@ -206,14 +207,45 @@ def clamp_workers(value: int, default: int = 8) -> int:
     return n
 
 
+def _file_digest(path: Path) -> str:
+    """SHA-256 of a file, streamed so large TIFF sidecars do not land in memory."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _safe_move(src: Path, dst: Path) -> None:
-    """Move file, overwriting destination if it exists (Windows-safe)."""
+    """
+    Move file, overwriting destination if it exists (Windows-safe).
+
+    The destination is only destroyed once the replacement is in place: the old code
+    unlinked dst first, so a move that failed afterwards (disk full, permission, cross-device)
+    left BOTH files gone. An existing dst is parked under a sibling .bak-<uuid> name, and only
+    unlinked after the move succeeds; on failure it is put back.
+
+    A destination that is a directory is an error, not something to delete -- the old
+    shutil.rmtree(dst) would recursively erase a whole folder that merely shared the filename.
+    """
+    if dst.exists() and dst.is_dir():
+        raise IsADirectoryError(f"refusing to replace directory with file: {dst}")
+
+    backup = None
     if dst.exists():
-        if dst.is_file():
-            dst.unlink()
-        elif dst.is_dir():
-            shutil.rmtree(dst)
-    shutil.move(str(src), str(dst))
+        backup = dst.with_name(f"{dst.name}.bak-{uuid.uuid4().hex[:8]}")
+        os.replace(str(dst), str(backup))
+    try:
+        shutil.move(str(src), str(dst))
+    except Exception:
+        if backup is not None:
+            os.replace(str(backup), str(dst))
+        raise
+    if backup is not None:
+        try:
+            backup.unlink()
+        except OSError:
+            pass
 
 
 # --- AutoFind: Pattern Selection ----------------------------------
@@ -834,21 +866,23 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
             print("No OLD_TIFFs folders found.")
         return True
 
-    # Count total files
-    total_files = 0
-    for od in old_dirs:
-        total_files += len([f for f in Path(od).glob("*") if f.is_file()])
+    # Count only what the move loop below will actually touch: counting every file made the
+    # header promise more than the run delivered whenever sidecars sat in OLD_TIFFs/.
+    def _restorable(od) -> list:
+        return [f for f in Path(od).glob("*")
+                if f.is_file() and f.suffix.lower() in (".tif", ".tiff")]
+
+    counts = {od: len(_restorable(od)) for od in old_dirs}
+    total_files = sum(counts.values())
 
     if RICH_AVAILABLE and console:
-        console.print(f"\n[cyan]Found {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} file(s)[/cyan]")
+        console.print(f"\n[cyan]Found {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} TIFF(s)[/cyan]")
         for od in old_dirs:
-            count = len([f for f in Path(od).glob("*") if f.is_file()])
-            console.print(f"  {count:>4} files: {escape(str(od))}")
+            console.print(f"  {counts[od]:>4} TIFFs: {escape(str(od))}")
     else:
-        print(f"\nFound {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} file(s):")
+        print(f"\nFound {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} TIFF(s):")
         for od in old_dirs:
-            count = len([f for f in Path(od).glob("*") if f.is_file()])
-            print(f"  {count:>4} files: {od}")
+            print(f"  {counts[od]:>4} TIFFs: {od}")
 
     if RICH_AVAILABLE and console:
         overwrite = Confirm.ask("\n[yellow]Overwrite existing files in parent folder?[/yellow]", default=False)
@@ -981,10 +1015,14 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     if old_w != new_w or old_h != new_h:
         return False, f"DIMENSION_MISMATCH {old_w}x{old_h} vs {new_w}x{new_h}"
 
-    # Page-count check: RMSE below only compares page [0], so a lost extra page must block the purge
+    # Page-count check: RMSE below only compares page [0], so a lost extra page must block the
+    # purge. This gate authorises permanent deletion, so an unreadable count fails CLOSED --
+    # skipping the check on None let a page-losing conversion pass on nothing but page-0 RMSE.
     old_pages = get_page_count(old_path)
     new_pages = get_page_count(new_path)
-    if old_pages is not None and new_pages is not None and old_pages != new_pages:
+    if old_pages is None or new_pages is None:
+        return False, "page count unreadable (cannot verify pages were preserved)"
+    if old_pages != new_pages:
         return False, f"PAGE_COUNT_MISMATCH {old_pages} vs {new_pages}"
 
     try:
@@ -1366,22 +1404,50 @@ def _process_single_padded(tiff_path, staging):
                 status = "integrity_error"
                 return (name, parent, status, None, None, None, False, None, tmp8)
 
-            dim_result = subprocess.run(
-                ["magick", "identify", "-format", "%w %h", f"{tmp8}[0]"],
-                capture_output=True, text=True, timeout=30
-            )
-            if dim_result.returncode == 0:
-                parts = dim_result.stdout.strip().split()
-                if len(parts) >= 2:
-                    orig_dims = subprocess.run(
-                        ["magick", "identify", "-format", "%w %h", f"{tiff_path}[0]"],
-                        capture_output=True, text=True, timeout=30
-                    )
-                    if orig_dims.returncode == 0:
-                        orig_parts = orig_dims.stdout.strip().split()
-                        if len(orig_parts) >= 2 and (orig_parts[0] != parts[0] or orig_parts[1] != parts[1]):
-                            status = "dimension_mismatch"
-                            return (name, parent, status, None, None, None, False, None, tmp8)
+            # This gate authorises replacing the original with a LOSSY 16 -> 8-bit conversion,
+            # so every branch fails CLOSED. Previously an unreadable identify (non-zero exit or
+            # unparseable output) fell through to status = "ok" and the original was replaced
+            # with nothing verified.
+            def _read_dims(path) -> Optional[tuple]:
+                r = subprocess.run(
+                    ["magick", "identify", "-format", "%w %h\n", f"{path}[0]"],
+                    capture_output=True, text=True, timeout=30
+                )
+                if r.returncode != 0 or not r.stdout:
+                    return None
+                parts = r.stdout.splitlines()[0].strip().split()
+                if len(parts) < 2:
+                    return None
+                return (parts[0], parts[1])
+
+            new_dims = _read_dims(tmp8)
+            orig_dims = _read_dims(tiff_path)
+            if new_dims is None or orig_dims is None:
+                status = "dimension_unreadable"
+                return (name, parent, status, None, None, None, False, None, tmp8)
+            if new_dims != orig_dims:
+                status = "dimension_mismatch"
+                return (name, parent, status, None, None, None, False, None, tmp8)
+
+            # Page-count parity: -depth 8 on a multi-page TIFF can drop pages, and the
+            # dimension check above only looks at page [0].
+            def _read_pages(path) -> Optional[int]:
+                r = subprocess.run(
+                    ["magick", "identify", "-format", "%n\n", str(path)],
+                    capture_output=True, text=True, timeout=30
+                )
+                if r.returncode != 0 or not r.stdout:
+                    return None
+                try:
+                    return int(r.stdout.splitlines()[0].strip())
+                except ValueError:
+                    return None
+
+            new_pages = _read_pages(tmp8)
+            orig_pages = _read_pages(tiff_path)
+            if new_pages is None or orig_pages is None or new_pages != orig_pages:
+                status = "page_count_mismatch"
+                return (name, parent, status, None, None, None, False, None, tmp8)
         except Exception as e:
             status = "integrity_error"
             return (name, parent, status, None, None, None, False, str(e), tmp8)
@@ -1408,7 +1474,11 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     """
     if temp_dir is None:
         temp_dir = Path(tempfile.gettempdir())
-    staging = temp_dir / "compress_staging"
+    # Run-scoped staging dir. A shared "compress_staging" meant the cleanup below wiped
+    # every file in it, including another concurrent run's in-flight output -- if that run
+    # was between the OLD_PADDED backup and the final move, the file vanished from the
+    # source folder. Same reasoning as $runStagingId in compress_tiff_zip.ps1.
+    staging = temp_dir / f"compress_staging_{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=True)
 
     def _process_one(tiff_path):
@@ -1455,7 +1525,8 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 console.print(f"    [red]FAILED: output missing[/red]")
             else:
                 print(f"    FAILED: output missing")
-        elif status in ("integrity_error", "dimension_mismatch"):
+        elif status in ("integrity_error", "dimension_mismatch",
+                        "dimension_unreadable", "page_count_mismatch"):
             if RICH_AVAILABLE and console:
                 console.print(f"    [red]FAILED: {status}[/red]")
             else:
@@ -1506,16 +1577,8 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                     print(f"    SKIPPED (ZIP larger than original)")
                 tmp8.unlink(missing_ok=True)
 
-    if staging.exists():
-        for f in list(staging.glob("*")):
-            try:
-                f.unlink()
-            except Exception:
-                pass
-        try:
-            staging.rmdir()
-        except Exception:
-            pass
+    # Safe to wipe wholesale: the directory belongs to this run only.
+    shutil.rmtree(staging, ignore_errors=True)
 
     return True
 
@@ -1566,11 +1629,15 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
         if old_file.suffix.lower() not in (".tif", ".tiff"):
             if not new_file.exists():
                 return (old_file, new_file, "parent file missing")
+            # Compare content, not just size: this gate authorises permanent deletion, and a
+            # same-size sidecar with different content used to pass.
             try:
                 if new_file.stat().st_size != old_file.stat().st_size:
-                    return (old_file, new_file, "sidecar differs from parent copy")
+                    return (old_file, new_file, "sidecar differs from parent copy (size)")
+                if _file_digest(old_file) != _file_digest(new_file):
+                    return (old_file, new_file, "sidecar differs from parent copy (content)")
             except OSError as e:
-                return (old_file, new_file, f"stat failed: {e}")
+                return (old_file, new_file, f"read failed: {e}")
             return None
         if not new_file.exists():
             return (old_file, new_file, "parent file missing")
@@ -2069,7 +2136,11 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                     else:
                         print(f"\n=== Step 1/2: Copy EXIF ===")
                         print(f"Running: {' '.join(cmd_copy_real)}\n")
-                    run_subprocess(cmd_copy_real)
+                    # Same gate as the first pass above: a failed Copy EXIF must not fall
+                    # through to Compress, which would ZIP TIFFs whose metadata never landed.
+                    if run_subprocess(cmd_copy_real) != 0:
+                        console.print("[red]Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).[/red]")
+                        return False
                     if RICH_AVAILABLE and console:
                         console.print(f"\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
                         console.print(f"[dim]Running: {' '.join(cmd_real)}[/dim]\n")
@@ -2089,7 +2160,9 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                     cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders, ps_name=cfg.config.ps_name)
                     cmd_real = build_compress_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
                     print("=== Step 1/2: Copy EXIF ===")
-                    run_subprocess(cmd_copy_real)
+                    if run_subprocess(cmd_copy_real) != 0:
+                        print("ERROR: Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).")
+                        return False
                     print("=== Step 2/2: Fuji: Compress ===")
                     run_subprocess(cmd_real)
                 else:

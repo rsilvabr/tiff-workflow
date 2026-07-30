@@ -32,6 +32,10 @@ function Write-Log {
 
 # -- Cleanup on interrupt -----------------------------------------
 $script:cleanupDirs  = @()
+# Run-scoped prefix: a bare GUID pattern matched EVERY run's staged files, so Ctrl-C in one
+# session destroyed the in-flight output of any other session sharing -StagingDir.
+# Same fix as compress_tiff_zip.ps1.
+$script:runStagingId = [guid]::NewGuid().ToString('N')
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
 trap {
@@ -42,7 +46,8 @@ trap {
     }
     foreach ($dir in $script:cleanupDirs) {
         if (Test-Path -LiteralPath $dir) {
-            Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -match '^[0-9a-f]{32}_' } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+            # Only remove staging files created by this run
+            Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -like "$($script:runStagingId)_*" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
     }
     break
@@ -332,6 +337,7 @@ function Invoke-S5ProFolder {
         $safeModeCapture  = $SafeMode
         $iccPolicyCapture = $IccPolicy
         $magickTimeoutCapture = $MagickTimeout
+        $runStagingIdCapture  = $script:runStagingId
 
         $results = $pairs | ForEach-Object -ThrottleLimit $Workers -Parallel {
             $p         = $_
@@ -378,7 +384,7 @@ function Invoke-S5ProFolder {
                 }
                 if ($pc.PageCount -gt 1) {
                     if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pc.PageCount -TimeoutSec $magickTimeoutSec)) {
-                        return @{ Result = "MULTI ($($pc.PageCount) IFDs -- skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; MultiPagePath = $p.Tiff; IsIntermediate = $false }
+                        return @{ Result = "MULTI ($($pc.PageCount) IFDs -- skipped) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; MultiPagePath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
                     }
                 }
             }
@@ -440,7 +446,9 @@ function Invoke-S5ProFolder {
                 return @{ Result = "OK+SKIP-ZIP ($comp) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
-            $stagingName = "$([guid]::NewGuid().ToString('N'))_$($p.DestName)"
+            $runIdL = $using:runStagingIdCapture
+            # Run-scoped prefix so the interrupt trap only cleans up this run's staged files
+            $stagingName = "${runIdL}_$([guid]::NewGuid().ToString('N'))_$($p.DestName)"
             $writeDst = Join-Path $writeDirL $stagingName
             $finalDst = Join-Path $finalDirL $p.DestName
 

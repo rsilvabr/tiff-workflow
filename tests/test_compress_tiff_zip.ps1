@@ -74,17 +74,24 @@ Describe "compress_tiff_zip_v2.ps1 - Page Count" {
         $content | Should -Not -Match 'Measure-Object -Line'
     }
 
-    It "Uses [int] cast for page count" {
+    It "Guards page count parsing with [int]::TryParse (fails closed)" {
+        # v2.3 replaced the raw [int] cast: unparseable identify output must yield Ok=$false,
+        # not a silent 0 that lets SafeMode wave a multi-page TIFF through.
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\$pageCount = \[int\]'
+        $content | Should -Match '\[int\]::TryParse\(\$val, \[ref\]\$n\)'
+        $content | Should -Match 'PageCount = 0; Error = "parse:\$val"'
     }
 }
 
 Describe "compress_tiff_zip_v2.ps1 - DeleteSource Logic" {
-    It "Has stagingUsed check for Mode 8 delete" {
+    It "Mode 8 verifies the file it actually wrote before allowing the delete" {
+        # v2.3 replaced the $stagingUsed flag: the target to verify is the staged file when
+        # one was written, otherwise the source itself. Both workers must do this.
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\$stagingUsed'
-        $content | Should -Match '\$writeDst -ne \$srcPath'
+        $content | Should -Match '\$verifyTarget = if \(\$writeDst -ne \$srcPath\) \{ \$writeDst \} else \{ \$srcPath \}'
+        $content | Should -Match '\$verifyPath = if \(\$writeDst -ne \$srcPath\) \{ \$writeDst \} else \{ \$srcPath \}'
+        $content | Should -Match 'Test-ZipIntegrity -Path \$verifyTarget'
+        $content | Should -Match 'Test-ZipIntegrity -Path \$verifyPath'
     }
 }
 
@@ -138,13 +145,17 @@ Describe "compress_tiff_zip_v2.ps1 - Run-Scoped Staging" {
     }
 }
 
-Describe "compress_tiff_zip_v2.ps1 - No-Thumb StagingName" {
-    It "All '[no thumb]' returns set StagingName from the written file" {
+Describe "compress_tiff_zip_v2.ps1 - No-Thumb Fallback (v2.5)" {
+    It "No worker returns early on '[no thumb]'" {
+        # Returning there skipped the EXIF restore and the mode 8 integrity gate, which is
+        # how PS7 lost metadata where PS5 kept it. The note is accumulated instead.
         $returns = Select-String -Path $script:ScriptPath -Pattern 'return @\{[^}]*\[no thumb\][^}]*\}'
-        $returns.Count | Should -BeGreaterThan 0
-        foreach ($r in $returns) {
-            $r.Line | Should -Match 'StagingName = \[System\.IO\.Path\]::GetFileName'
-        }
+        $returns | Should -BeNullOrEmpty
+    }
+
+    It "All three workers accumulate the note and fall through" {
+        $notes = Select-String -Path $script:ScriptPath -Pattern '\$noThumbNote = " \[no thumb\]"'
+        $notes.Count | Should -Be 6   # two fallback branches x three workers
     }
 }
 
@@ -172,8 +183,10 @@ Describe "compress_tiff_zip_v2.ps1 - SkipCompressedWithThumb Reprocess" {
 
 Describe "compress_tiff_zip_v2.ps1 - Integrity Check Command" {
     It "Uses 'magick <file> null:' for integrity verification" {
+        # v2.4 moved every magick call into an in-process runspace (Invoke-MagickWithTimeout),
+        # replacing the per-file Start-Job. The full pixel decode itself is unchanged.
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match 'magick "\$p" null:'
+        $content | Should -Match 'Invoke-MagickWithTimeout -Arguments @\(\$Path, "null:"\)'
     }
 
     It "Does not use legacy 'magick convert'" {
@@ -185,8 +198,8 @@ Describe "compress_tiff_zip_v2.ps1 - Integrity Check Command" {
 Describe "compress_tiff_zip_v2.ps1 - Audit Round 4" {
     It "Page count uses '%n\n' (avoids concatenated '333' for multi-page)" {
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Not -Match 'identify -format "%n"'
-        $content | Should -Match 'identify -format "%n\\n"'
+        $content | Should -Not -Match '"-format", "%n"'
+        $content | Should -Match '@\("identify", "-format", "%n\\n", \$Path\)'
     }
 
     It "Exiftool argfiles declare UTF-8 filename charset" {
@@ -202,10 +215,14 @@ Describe "compress_tiff_zip_v2.ps1 - Audit Round 4" {
         $content | Should -Match 'Mode 8 aborted[\s\S]{0,200}exit 1'
     }
 
-    It "ZIP integrity check fails closed when the job returns nothing" {
+    It "ZIP integrity check fails closed on timeout and non-zero exit" {
+        # Same contract as the old $jobOutput check, now expressed through the runspace
+        # helper: a magick run that timed out or that could not report an exit code is a
+        # FAILURE, never a pass -- this gate authorises overwriting the original.
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\$null -eq \$jobOutput\) \{ return \$false \}'
-        $content | Should -Match '\$null -ne \$integrityOutput\)'
+        $content | Should -Match 'if \(\$r\.TimedOut\) \{ return \$false \}'
+        $content | Should -Match 'return \(\$r\.ExitCode -eq 0\)'
+        $content | Should -Match 'return @\{ TimedOut = \$false; ExitCode = -1; Output = @\(\) \}'
     }
 
     It "Mode 8 integrity failure blocks the staging move (IntegrityFailed)" {
@@ -222,9 +239,12 @@ Describe "compress_tiff_zip_v2.ps1 - Audit Round 4" {
         }
     }
 
-    It "Collision detection covers flattening modes 4-7" {
+    It "Collision detection is not restricted to the flattening modes" {
+        # v2.4: photo.tif and photo.tiff both resolve to photo.tif, so two workers could race
+        # on one output in ANY mode -- the 4-7 restriction was the bug, not the fix.
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\$Mode -ge 4 -and \$Mode -le 7'
+        $content | Should -Not -Match '\$Mode -ge 4 -and \$Mode -le 7'
+        $content | Should -Match 'DuplicateAction -eq ''Numbered'' -and -not \$Overwrite'
     }
 
     It "Numbered DuplicateAction does not rename when -Overwrite is set" {

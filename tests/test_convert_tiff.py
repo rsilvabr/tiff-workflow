@@ -283,7 +283,11 @@ class TestCompressPaddedFiles:
         if "null:" in cmd:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "identify" in cmd:
-            return SimpleNamespace(returncode=0, stdout="100 100", stderr="")
+            # The integrity gate asks for dimensions (%w %h) and page count (%n) separately
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt.startswith("%n"):
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="100 100\n", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     def test_original_backed_up_before_replacement(self, tmp_path, monkeypatch):

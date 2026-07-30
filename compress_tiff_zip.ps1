@@ -98,8 +98,9 @@ function Process-Results {
     foreach ($line in $lines) {
     $script:counterTotal++
     $lvl = "INFO"
-    if     ($line -match '^OK\+SKIP-ZIP') { $script:skipTotal++ }
-    elseif ($line -match '^OK')           { $script:okTotal++ }
+    # No "OK+SKIP-ZIP" branch here: that result string belongs to copy_exif_to_TIFF_ps*.ps1.
+    # Nothing in this script emits it, so the branch was dead.
+    if     ($line -match '^OK')           { $script:okTotal++ }
     elseif ($line -match '^SKIP')         { $script:skipTotal++ }
     elseif ($line -match '^MULTI')        { $script:multiTotal++; $lvl = "WARN" }
     elseif ($line -match '^ERROR')        { $script:errTotal++; $lvl = "ERROR" }
@@ -492,6 +493,43 @@ function Test-ZipIntegrity {
     return ($r.ExitCode -eq 0)
 }
 
+function Backup-TiffMetadata {
+    <#
+    .SYNOPSIS
+        When $WriteDst overwrites $SrcPath, copies the source metadata into a temp MIE
+        container and returns its path (or $null when no backup is needed/possible).
+
+        In-place compression destroys the original before the EXIF restore step runs, so
+        `-tagsfromfile <source>` silently read the already-compressed file and every tag was
+        lost. Callers must pass the returned path as the tagsfromfile source and delete it
+        when done.
+
+    .NOTES
+        Re-inject into -Parallel runspaces with:
+            ${function:Backup-TiffMetadata} = $using:MetaBackupFnDef
+    #>
+    param([string]$SrcPath, [string]$WriteDst)
+
+    if ($WriteDst -ne $SrcPath) { return $null }
+
+    $metaBase = [System.IO.Path]::GetTempFileName()
+    Remove-Item -LiteralPath $metaBase -Force -ErrorAction SilentlyContinue
+    $metaBackup = $metaBase -replace '\.tmp$', '.mie'
+
+    $argMeta = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
+        exiftool -@ $argMeta | Out-Null
+    } catch {
+        return $null
+    } finally {
+        Remove-Item $argMeta -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path -LiteralPath $metaBackup) { return $metaBackup }
+    return $null
+}
+
 function Test-TiffHasOnlySubfilePages {
     <#
     .SYNOPSIS
@@ -547,6 +585,7 @@ $script:MagickTimeoutFnDef = ${function:Invoke-MagickWithTimeout}.ToString()
 $script:PageCountFnDef     = ${function:Get-TiffPageCount}.ToString()
 $script:ZipIntegrityFnDef  = ${function:Test-ZipIntegrity}.ToString()
 $script:TestSubfileFnDef   = ${function:Test-TiffHasOnlySubfilePages}.ToString()
+$script:MetaBackupFnDef    = ${function:Backup-TiffMetadata}.ToString()
 
 # -- Process one TIFF -> ZIP job ------------------------------------
 
@@ -632,6 +671,12 @@ function Process-TiffJob {
         return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
     }
 
+    # When the output overwrites the input (in-place: no -StagingDir and no separate output
+    # folder), the original is already gone by the time the EXIF restore below runs, so
+    # `-tagsfromfile $srcPath` would read the freshly compressed file and silently return
+    # nothing. Park the metadata in a temp MIE container first.
+    $metaBackup = Backup-TiffMetadata -SrcPath $srcPath -WriteDst $writeDst
+
     # Build compression command.
     # $noThumbNote / $exifWarn accumulate degraded outcomes instead of returning early:
     # every success path must reach the mode 8 integrity gate below.
@@ -652,6 +697,7 @@ function Process-TiffJob {
             # First: compress main image
             $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
             if ($LASTEXITCODE -ne 0) {
+                if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                 return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
 
@@ -704,6 +750,7 @@ function Process-TiffJob {
         # Normal compression (all pages or page 0)
         $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
         if ($LASTEXITCODE -ne 0) {
+            if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
             return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
         }
     }
@@ -720,13 +767,15 @@ function Process-TiffJob {
     if (-not $hasExif) {
         $argCopy = [System.IO.Path]::GetTempFileName()
         try {
-            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
+            $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
+            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
             exiftool -@ $argCopy | Out-Null
         } finally {
             Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
         }
         if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
     }
+    if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
 
     $canDeleteSource = $false
     $integrityFailed = $false
@@ -827,6 +876,7 @@ if ($Mode -lt 0) {
                     ${function:Get-TiffPageCount}            = $using:PageCountFnDef
                     ${function:Test-ZipIntegrity}            = $using:ZipIntegrityFnDef
                     ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
+                    ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
                     $writeDirL = $using:writeDir
                     $finalDirL = $using:finalDir
                     $dryL      = $using:DryRun
@@ -908,6 +958,16 @@ if ($Mode -lt 0) {
 
                     if ($dryL) { return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
 
+                    # $noThumbNote accumulates the degraded outcome instead of returning early:
+                    # returning here used to skip the EXIF restore block below, so a failed
+                    # thumbnail produced a TIFF with no metadata on PS7 while the PS5 path
+                    # (Process-TiffJob) kept it. Same fix as the Mode >= 0 worker.
+                    # In-place output destroys the original before the EXIF restore runs; park
+                    # the metadata in a temp MIE container first (see Backup-TiffMetadata).
+                    $metaBackup = Backup-TiffMetadata -SrcPath $src -WriteDst $writeDst
+
+                    $noThumbNote = ""
+                    $exifWarn = $false
                     $thumbMarkerFailed = $false
                     if ($genThumbL) {
                         # Always read the main image from page 0; thumbnail will be placed at $thumbPageL
@@ -922,6 +982,7 @@ if ($Mode -lt 0) {
                         try {
                             $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
                             if ($LASTEXITCODE -ne 0) {
+                                if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                                 return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src }
                             }
                             $thumbCmd = @("-quiet", $mainPage, "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSizeL}x${thumbSizeL}>")
@@ -930,29 +991,33 @@ if ($Mode -lt 0) {
                             $thumbResult = magick @thumbCmd 2>&1
                             if ($LASTEXITCODE -ne 0) {
                                 Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
-                                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = [System.IO.Path]::GetFileName($writeDst); OriginalName = $name; SrcPath = $src; FinalDst = $finalDst }
+                                $noThumbNote = " [no thumb]"
                             }
-                            if ($thumbPageL -le 0) {
-                                $out = magick -quiet "$thumbExt`:$thumbTemp" $tempTiff -compress zip $writeDst 2>&1
-                            } else {
-                                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
+                            if (-not $noThumbNote) {
+                                if ($thumbPageL -le 0) {
+                                    $out = magick -quiet "$thumbExt`:$thumbTemp" $tempTiff -compress zip $writeDst 2>&1
+                                } else {
+                                    $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
+                                }
+                                if ($LASTEXITCODE -ne 0) {
+                                    Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
+                                    $noThumbNote = " [no thumb]"
+                                }
                             }
-                            if ($LASTEXITCODE -ne 0) {
-                                Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
-                                return @{ Result = "OK ($comp -> ZIP) [no thumb] | $name"; StagingName = [System.IO.Path]::GetFileName($writeDst); OriginalName = $name; SrcPath = $src; FinalDst = $finalDst }
-                            }
-                            $argThumb = [System.IO.Path]::GetTempFileName()
-                            $thumbIfd = if ($thumbPageL -le 0) { "IFD0" } else { "IFD1" }
-                            try {
-                                [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
-                                $thumbExifOut = exiftool -@ $argThumb 2>&1
-                                $thumbExifExit = $LASTEXITCODE
-                            } finally {
-                                Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
-                            }
-                            if ($thumbExifExit -ne 0) {
-                                # Cannot log via Write-Log inside -Parallel; surface as warning in result string later
-                                $thumbMarkerFailed = $true
+                            if (-not $noThumbNote) {
+                                $argThumb = [System.IO.Path]::GetTempFileName()
+                                $thumbIfd = if ($thumbPageL -le 0) { "IFD0" } else { "IFD1" }
+                                try {
+                                    [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
+                                    $thumbExifOut = exiftool -@ $argThumb 2>&1
+                                    $thumbExifExit = $LASTEXITCODE
+                                } finally {
+                                    Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
+                                }
+                                if ($thumbExifExit -ne 0) {
+                                    # Cannot log via Write-Log inside -Parallel; surface as warning in result string later
+                                    $thumbMarkerFailed = $true
+                                }
                             }
                         } finally {
                             Remove-Item -LiteralPath $tempTiff -Force -ErrorAction SilentlyContinue
@@ -960,7 +1025,7 @@ if ($Mode -lt 0) {
                         }
                     } else {
                         $out = magick -quiet $src -compress zip $writeDst 2>&1
-                        if ($LASTEXITCODE -ne 0) { return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
+                        if ($LASTEXITCODE -ne 0) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
                     }
 
                     $argExif = [System.IO.Path]::GetTempFileName()
@@ -974,19 +1039,24 @@ if ($Mode -lt 0) {
                     if (-not $hasExif) {
                         $argCopy = [System.IO.Path]::GetTempFileName()
                         try {
-                            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$src`n-all:all`n-unsafe`n$writeDst`n")
+                            $tagSource = if ($metaBackup) { $metaBackup } else { $src }
+                            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
                             exiftool -@ $argCopy | Out-Null
                         } finally {
                             Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
                         }
                         $stagingName = [System.IO.Path]::GetFileName($writeDst)
-                        if ($LASTEXITCODE -ne 0) { return @{ Result = "WARN (exiftool failed, ZIP ok) | $name"; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst } }
+                        if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
                     }
+                    if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
 
-                    if ($thumbMarkerFailed) {
-                        return @{ Result = "WARN (exiftool failed, ZIP ok) [thumb marker failed] | $name"; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst }
+                    $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
+                    $resultText = if ($exifWarn -or $thumbMarkerFailed) {
+                        "WARN (exiftool failed, ZIP ok)$noThumbNote$markerNote | $name"
+                    } else {
+                        "OK ($comp -> ZIP)$noThumbNote | $name"
                     }
-                    return @{ Result = "OK ($comp -> ZIP) | $name"; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst }
+                    return @{ Result = $resultText; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst }
 
                 } -ThrottleLimit $effectiveWorkersLegacy
                 foreach ($r in $results) {
@@ -1047,7 +1117,7 @@ if ($Mode -lt 0) {
         if ($script:SafeMode) {
             Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:multiTotal) multi-page (not touched) | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
         } else {
-            Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
+            Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
         }
 
         if ($script:multiTotal -gt 0) {
@@ -1127,7 +1197,9 @@ $script:total = $files.Count
 if ($script:total -eq 0) {
     Write-Log "No TIFF files found for mode $Mode in: $($inputRoots -join '; ')" "WARN"
     Write-Log "Log: $logFile"
-    return
+    # `return` at script scope always exits 0, which silently discarded errors already
+    # counted above (a bad path in a ';' list) and made the wizard read the run as a success.
+    if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
 }
 
 # Count TIFFs inside OLD_TIFFs folders (already processed, will be skipped)
@@ -1433,7 +1505,9 @@ foreach ($f in $files) {
 if ($tasks.Count -eq 0) {
     Write-Log "No tasks to process (mode $Mode may have filtered all files)" "WARN"
     Write-Log "Log: $logFile"
-    return
+    # Same as above: modes 0/9 can fail every file in the pre-check loop (exiftool probe,
+    # move to OLD_TIFFs) and land here with $errTotal > 0. `return` reported exit 0.
+    if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
 }
 
 $groupedTasks = $tasks | Group-Object {
@@ -1477,6 +1551,7 @@ foreach ($group in $groupedTasks) {
             ${function:Get-TiffPageCount}            = $using:PageCountFnDef
             ${function:Test-ZipIntegrity}            = $using:ZipIntegrityFnDef
             ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
+            ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
             $srcPath = $t.Src
             $writeDst = $t.WriteDst
             $finalDst = $t.FinalDst
@@ -1553,6 +1628,10 @@ foreach ($group in $groupedTasks) {
                 return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
 
+            # In-place output destroys the original before the EXIF restore runs; park the
+            # metadata in a temp MIE container first (see Backup-TiffMetadata).
+            $metaBackup = Backup-TiffMetadata -SrcPath $srcPath -WriteDst $writeDst
+
             # $noThumbNote / $exifWarn accumulate degraded outcomes instead of returning early:
             # every success path must reach the mode 8 integrity gate below.
             $noThumbNote = ""
@@ -1571,6 +1650,7 @@ foreach ($group in $groupedTasks) {
                 try {
                     $out = magick -quiet $mainPage -compress zip $tempTiff 2>&1
                     if ($LASTEXITCODE -ne 0) {
+                        if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                         return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                     }
                     $thumbCmd = @("-quiet", $mainPage, "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSize}x${thumbSize}>")
@@ -1615,6 +1695,7 @@ foreach ($group in $groupedTasks) {
                 # Normal compression (all pages or page 0)
                 $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
                 if ($LASTEXITCODE -ne 0) {
+                    if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                     return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                 }
             }
@@ -1629,7 +1710,8 @@ foreach ($group in $groupedTasks) {
             if (-not $hasExif) {
                 $argCopy = [System.IO.Path]::GetTempFileName()
                 try {
-                    [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$srcPath`n-all:all`n-unsafe`n$writeDst`n")
+                    $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
+                    [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
                     exiftool -@ $argCopy | Out-Null
                 } finally {
                     Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
@@ -1637,6 +1719,7 @@ foreach ($group in $groupedTasks) {
                 $stagingName = [System.IO.Path]::GetFileName($writeDst)
                 if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
             }
+            if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
             $canDeleteSource = $false
             $integrityFailed = $false
             if ($mode -eq 8) {
@@ -1683,9 +1766,11 @@ foreach ($group in $groupedTasks) {
             if ($r.FinalDst -and $collisionNotes.ContainsKey($r.FinalDst.ToLowerInvariant())) { $resultText += $collisionNotes[$r.FinalDst.ToLowerInvariant()] }
             Process-Results @($resultText)
         }
-        $groupErrs = $script:errTotal - $errBefore
 
-        # Move from staging to final destination before rollback, so rollback can check FinalDst
+        # Move from staging to final destination before rollback, so rollback can check FinalDst.
+        # $groupErrs is computed AFTER this block and after the mode 8 deletes: measuring it here
+        # meant a failed staging move never triggered the rollback below, leaving the original
+        # stranded in OLD_TIFFs/ with no output and no ROLLBACK line.
         if ($StagingDir -and -not $DryRun) {
             $moved = 0
             foreach ($t in $groupTasks) {
@@ -1710,14 +1795,17 @@ foreach ($group in $groupedTasks) {
                                 $moved++
                             } else {
                                 $script:errTotal++
+                                $errorSrcPaths.Add($t.Src) | Out-Null
                                 Write-Log "ERROR (size mismatch after move) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
                             }
                         } else {
                             $script:errTotal++
+                            $errorSrcPaths.Add($t.Src) | Out-Null
                             Write-Log "ERROR (move failed) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
                         }
                     } catch {
                         $script:errTotal++
+                        $errorSrcPaths.Add($t.Src) | Out-Null
                         $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
                         Write-Log "ERROR (move exception) | $([System.IO.Path]::GetFileName($destPath)): $errMsg" "ERROR"
                     }
@@ -1740,9 +1828,12 @@ foreach ($group in $groupedTasks) {
                             Remove-Item -LiteralPath $r.SrcPath -Force
                             $deletedCount++
                         } catch {
+                            # Logged as ERROR but never counted, so the run still exited 0
+                            $script:errTotal++
                             Write-Log "ERROR (failed to delete source after move) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
                         }
                     } else {
+                        $script:errTotal++
                         Write-Log "ERROR (final destination missing, source preserved) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
                     }
                 }
@@ -1751,6 +1842,7 @@ foreach ($group in $groupedTasks) {
         }
 
         # Rollback: if errors occurred on files moved to OLD_TIFFs, restore originals only when FinalDst is missing
+        $groupErrs = $script:errTotal - $errBefore
         if ($groupErrs -gt 0) {
             $failedCount = 0
             foreach ($t in $groupTasks) {
@@ -1800,9 +1892,11 @@ foreach ($group in $groupedTasks) {
             if ($result.FinalDst -and $collisionNotes.ContainsKey($result.FinalDst.ToLowerInvariant())) { $resultText += $collisionNotes[$result.FinalDst.ToLowerInvariant()] }
             Process-Results @($resultText)
         }
-        $groupErrs = $script:errTotal - $errBefore
 
-        # Move from staging to final destination before rollback, so rollback can check FinalDst
+        # Move from staging to final destination before rollback, so rollback can check FinalDst.
+        # $groupErrs is computed AFTER this block and after the mode 8 deletes: measuring it here
+        # meant a failed staging move never triggered the rollback below, leaving the original
+        # stranded in OLD_TIFFs/ with no output and no ROLLBACK line.
         if ($StagingDir -and -not $DryRun) {
             $moved = 0
             foreach ($t in $groupTasks) {
@@ -1827,14 +1921,17 @@ foreach ($group in $groupedTasks) {
                                 $moved++
                             } else {
                                 $script:errTotal++
+                                $errorSrcPaths.Add($t.Src) | Out-Null
                                 Write-Log "ERROR (size mismatch after move) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
                             }
                         } else {
                             $script:errTotal++
+                            $errorSrcPaths.Add($t.Src) | Out-Null
                             Write-Log "ERROR (move failed) | $([System.IO.Path]::GetFileName($destPath))" "ERROR"
                         }
                     } catch {
                         $script:errTotal++
+                        $errorSrcPaths.Add($t.Src) | Out-Null
                         $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
                         Write-Log "ERROR (move exception) | $([System.IO.Path]::GetFileName($destPath)): $errMsg" "ERROR"
                     }
@@ -1857,9 +1954,12 @@ foreach ($group in $groupedTasks) {
                             Remove-Item -LiteralPath $r.SrcPath -Force
                             $deletedCount++
                         } catch {
+                            # Logged as ERROR but never counted, so the run still exited 0
+                            $script:errTotal++
                             Write-Log "ERROR (failed to delete source after move) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
                         }
                     } else {
+                        $script:errTotal++
                         Write-Log "ERROR (final destination missing, source preserved) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
                     }
                 }
@@ -1868,6 +1968,7 @@ foreach ($group in $groupedTasks) {
         }
 
         # Rollback for PS5: restore originals only for tasks that reported ERROR and have no FinalDst
+        $groupErrs = $script:errTotal - $errBefore
         if ($groupErrs -gt 0) {
             $failedCount = 0
             foreach ($t in $groupTasks) {
