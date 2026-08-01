@@ -32,9 +32,10 @@ Describe "generate_thumbnails.ps1 - Parameter Validation" {
 
 Describe "generate_thumbnails.ps1 - Input Scan" {
     It "Excludes _thumb files from input scan (no _thumb_thumb)" {
-        # v2.3 widened the pattern to the suffixed frames -Page all produces (_thumb-0, ...)
+        # v2.6 moved the literal into one $script:ThumbNamePattern shared with -Remove: the
+        # two had drifted, so the _v2 collision rename matched neither.
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '\$_\.BaseName -notmatch ''\(\?i\)_thumb\(-\\d\+\)\?\$'''
+        $content | Should -Match '\$_\.BaseName -notmatch \$script:ThumbNamePattern'
     }
 
     It "Excludes OLD_TIFFs folders from input scan" {
@@ -91,6 +92,25 @@ Describe "generate_thumbnails.ps1 - Magick Invocation" {
 Describe "generate_thumbnails.ps1 - Audit Round 4" {
     It "Self-exclusion covers multi-frame thumbs (_thumb-0, _thumb-1, ...)" {
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match '_thumb\(-\\d\+\)\?\$'
+        $content | Should -Match '_thumb\(_v\\d\+\)\?\(-\\d\+\)\?\$'
+    }
+}
+
+Describe "generate_thumbnails.ps1 - Audit Round 7" {
+    It "One pattern covers every name this script can produce, including _v2" {
+        # The collision rename (_thumb_v2) matched neither the self-exclusion nor -Remove, so
+        # a renamed .tif thumbnail came back as a source on the next run and never got cleaned up.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$script:ThumbNamePattern = ''\(\?i\)_thumb\(_v\\d\+\)\?\(-\\d\+\)\?\$'''
+        $uses = Select-String -Path $script:ScriptPath -Pattern '\$script:ThumbNamePattern'
+        $uses.Count | Should -Be 3   # the definition, the input scan and the -Remove filter
+    }
+
+    It "-Remove resolves a relative -OutputDir the same way generation does" {
+        # Generation joins it to each FILE's directory, so with -Recursive the thumbnails sit
+        # in <any subfolder>\<OutputDir>; -Remove only looked at <root>\<OutputDir>.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'Get-ChildItem -LiteralPath \$r -Directory -Recurse'
+        $content | Should -Match '\$_\.FullName -like "\*\\\$suffix"'
     }
 }

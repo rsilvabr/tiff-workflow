@@ -42,11 +42,12 @@ group per class, and each test was mutation-checked: revert the fix, the test fa
 
 | Class | What it pins |
 |---|---|
-| Exit code | `return` at script scope exits 0 and discards `$errTotal -gt 0 -> exit 1`, which `convert_tiff.py` uses to gate step 2 |
-| Data loss | In-place compression must not strip EXIF (`Backup-TiffMetadata`), on every worker |
-| PS5/PS7 divergence | The sequential and `-Parallel` paths must behave identically; helpers must be re-injected into runspaces |
+| Exit code | `return` at script scope exits 0 and discards `$errTotal -gt 0 -> exit 1`, which `convert_tiff.py` uses to gate step 2. Covers all four backends, including a missing input directory |
+| Data loss | In-place compression must not strip EXIF (`Backup-TiffMetadata`), on every worker; `OLD_TIFFs` backups stay untouched in every mode |
+| PS5/PS7 divergence | The sequential and `-Parallel` paths must behave identically; helpers must be re-injected into runspaces; probes go through the timeout wrapper |
 | Fail-closed gates | A gate that authorises deleting or replacing data must treat "cannot read" as failure |
 | Staging / collision | A run must not touch another run's in-flight files, and a failed move must not lose both files |
+| Round-trip | What a workflow creates, the same workflow must be able to find and undo -- thumbnail generate/remove, and OLD_TIFFs restore surviving a per-file failure |
 
 The PowerShell parts run **end to end through the real shells** (`powershell` and `pwsh`) instead
 of through Pester, because the Pester suites below need Pester 5 and the dev boxes here still ship

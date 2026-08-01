@@ -453,7 +453,7 @@ function Invoke-S5ProFolder {
             $finalDst = Join-Path $finalDirL $p.DestName
 
             if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff) -and -not $tiffCopied) {
-                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                # No cleanup here: the guard above already requires -not $tiffCopied
                 return @{ Result = "OK+SKIP-ZIP (exists) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
 
@@ -488,12 +488,12 @@ function Invoke-S5ProFolder {
         if ($CompressZip -and -not $DryRun) {
             $moved = 0
             foreach ($tif in $groupFiles) {
-                if ($script:groupStagingMap.ContainsKey($tif.FullName)) {
-                    $stagingName = $script:groupStagingMap[$tif.FullName]
-                    $stagePath = Join-Path $writeDir $stagingName
-                } else {
-                    $stagePath = Join-Path $writeDir $tif.Name
-                }
+                # No fallback to <writeDir>\<tif.Name>: this run stages under a run-scoped
+                # prefix, so an unprefixed file of that name belongs to somebody else. Moving
+                # it would drop a stranger's file on top of the user's TIFF.
+                if (-not $script:groupStagingMap.ContainsKey($tif.FullName)) { continue }
+                $stagingName = $script:groupStagingMap[$tif.FullName]
+                $stagePath = Join-Path $writeDir $stagingName
                 $destName = if ($destNameMap.ContainsKey($tif.FullName)) { $destNameMap[$tif.FullName] } else { $tif.Name }
                 $destPath  = Join-Path $finalDir   $destName
                 if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
@@ -522,10 +522,34 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = [System.IO.Path]::GetFullPath($OutputDir.TrimEnd('\', '/'))
 }
 
-$inputDirs = if ($InputDir) { $InputDir -split ';' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } } else { @($PWD.Path) }
-if ($inputDirs.Count -eq 0) { $inputDirs = @($PWD.Path) }
+# A bad path used to fall through to "No TIFFs found" and exit 0, so the wizard could not tell
+# a typo from an empty folder -- and convert_tiff.py gates Step 2 of workflow 4 on this exit
+# code, so a Copy EXIF that touched nothing read as success. Same contract as the other backends.
+$inputDirs    = @()
+$missingRoots = @()
+if ($InputDir) {
+    foreach ($dir in ($InputDir -split ';')) {
+        $dir = $dir.Trim()
+        if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+        if (-not [System.IO.Path]::IsPathRooted($dir)) { $dir = Join-Path $PWD.Path $dir }
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { $missingRoots += $dir; continue }
+        $inputDirs += $dir
+    }
+} else {
+    $inputDirs = @($PWD.Path)
+}
 
 Write-Log "Log: $logFile"
+
+foreach ($m in $missingRoots) { Write-Log "ERROR: input directory not found: $m" "ERROR" }
+$script:errTotal += $missingRoots.Count
+
+if ($inputDirs.Count -eq 0) {
+    Write-Log "No valid input directories specified." "ERROR"
+    Write-Log "Log: $logFile"
+    exit 1
+}
+
 Write-Log "Workers: $Workers | CompressZip: $CompressZip | SkipIfTiffHasExif: $SkipIfTiffHasExif | OutputDir: $(if ($OutputDir) { $OutputDir } else { '(overwrite in place)' }) | Staging: $(if ($StagingDir) { $StagingDir } else { 'disabled' }) | DryRun: $DryRun"
 
 foreach ($root in $inputDirs) {

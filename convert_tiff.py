@@ -907,6 +907,33 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
     # Move files
     moved = 0
     skipped = 0
+    failed = 0
+
+    def _try_move(src: Path, dest: Path, label: str) -> bool:
+        """
+        One unmovable file must not abandon the rest of the restore. _safe_move was called
+        bare, so a locked/read-only destination (or a directory sharing the name) raised
+        straight out of the workflow: files after it were never attempted, no summary was
+        printed, and the traceback killed the wizard. run_purge_old_tiffs already works
+        per-file this way.
+        """
+        nonlocal moved, failed
+        try:
+            _safe_move(src, dest)
+        except Exception as e:
+            failed += 1
+            if RICH_AVAILABLE and console:
+                console.print(f"  [red]FAILED: {escape(src.name)} -- {escape(str(e))}[/red]")
+            else:
+                print(f"  FAILED: {src.name} -- {e}")
+            return False
+        moved += 1
+        if RICH_AVAILABLE and console:
+            console.print(f"  [green]{label}: {escape(src.name)}[/green]")
+        else:
+            print(f"  {label}: {src.name}")
+        return True
+
     for od in old_dirs:
         old_path = Path(od)
         parent = old_path.parent
@@ -918,12 +945,7 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
             dest = parent / f.name
             if dest.exists():
                 if overwrite:
-                    _safe_move(f, dest)
-                    moved += 1
-                    if RICH_AVAILABLE and console:
-                        console.print(f"  [green]OVERWRITE: {escape(f.name)}[/green]")
-                    else:
-                        print(f"  OVERWRITE: {f.name}")
+                    _try_move(f, dest, "OVERWRITE")
                 else:
                     skipped += 1
                     if RICH_AVAILABLE and console:
@@ -931,41 +953,46 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
                     else:
                         print(f"  SKIP (exists): {f.name}")
             else:
-                _safe_move(f, dest)
-                moved += 1
-                if RICH_AVAILABLE and console:
-                    console.print(f"  [green]MOVED: {escape(f.name)}[/green]")
-                else:
-                    print(f"  MOVED: {f.name}")
+                _try_move(f, dest, "MOVED")
 
     # Ask to delete empty OLD_TIFFs folders
+    def _remove_empty_dirs():
+        for od in old_dirs:
+            try:
+                if any(Path(od).glob("*")):
+                    continue
+                Path(od).rmdir()
+            except OSError as e:
+                if RICH_AVAILABLE and console:
+                    console.print(f"  [yellow]Could not remove {escape(str(od))}: {escape(str(e))}[/yellow]")
+                else:
+                    print(f"  Could not remove {od}: {e}")
+                continue
+            if RICH_AVAILABLE and console:
+                console.print(f"  [green]Removed: {escape(str(od))}[/green]")
+            else:
+                print(f"  Removed: {od}")
+
     if RICH_AVAILABLE and console:
         if Confirm.ask("\n[cyan]Delete empty OLD_TIFFs folders?[/cyan]", default=False):
-            for od in old_dirs:
-                if not any(Path(od).glob("*")):
-                    Path(od).rmdir()
-                    if RICH_AVAILABLE and console:
-                        console.print(f"  [green]Removed: {escape(str(od))}[/green]")
-                    else:
-                        print(f"  Removed: {od}")
+            _remove_empty_dirs()
     else:
         resp = input("\nDelete empty OLD_TIFFs folders? [y/N]: ").strip().lower()
         if resp == "y":
-            for od in old_dirs:
-                if not any(Path(od).glob("*")):
-                    Path(od).rmdir()
-                    print(f"  Removed: {od}")
+            _remove_empty_dirs()
 
+    parts = [f"Moved {moved} file(s)"]
     if skipped > 0:
-        msg = f"\n[green]Done. Moved {moved} file(s), skipped {skipped}.[/green]"
-    else:
-        msg = f"\n[green]Done. Moved {moved} file(s).[/green]"
+        parts.append(f"skipped {skipped}")
+    if failed > 0:
+        parts.append(f"FAILED {failed}")
+    summary = "Done. " + ", ".join(parts) + "."
     if RICH_AVAILABLE and console:
-        console.print(msg)
+        console.print(f"\n[{'red' if failed else 'green'}]{escape(summary)}[/{'red' if failed else 'green'}]")
     else:
-        print(msg.replace("[green]", "").replace("[/green]", ""))
+        print(f"\n{summary}")
 
-    return True
+    return failed == 0
 
 
 def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
@@ -2188,7 +2215,20 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
     input_dir = (input_dir or "").strip().strip('"').strip("'")
     p = Path(input_dir)
     if not p.is_dir():
-        print(f"Directory does not exist: {input_dir}")
+        msg = f"Directory does not exist: {input_dir}"
+        if RICH_AVAILABLE and console:
+            console.print(f"[red]{escape(msg)}[/red]")
+        else:
+            print(msg)
+        return False
+    # The backend splits -InputDir on ';' like the other three, so a path containing one
+    # would silently become two bogus roots. step_folder rejects it for every other workflow.
+    if ";" in str(p):
+        msg = f"Folder path contains ';' which is not supported: {p}"
+        if RICH_AVAILABLE and console:
+            console.print(f"[red]{escape(msg)}[/red]")
+        else:
+            print(f"ERROR: {msg}")
         return False
     cfg.config.last_input_dir = str(p.resolve())
     cfg.save_config()
@@ -2216,10 +2256,20 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
             value = Prompt.ask("[cyan]Output folder (empty = next to each TIFF)[/cyan]", default="").strip()
         else:
             value = input("Output folder (empty = next to each TIFF) []: ").strip()
-        return value.strip('"').strip("'")
+        value = value.strip('"').strip("'")
+        if ";" in value:
+            msg = f"Output path contains ';' which is not supported: {value}"
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]{escape(msg)}[/red]")
+            else:
+                print(f"ERROR: {msg}")
+            return None
+        return value
 
     if remove_mode:
         out_dir = _ask_output_dir()
+        if out_dir is None:
+            return False
         recursive, dry_run = _ask_recursive_and_dry()
         cmd = [cfg.config.ps_name, "-NoProfile", "-File", str(script), "-InputDir", input_dir, "-Remove"]
         if out_dir:
@@ -2283,6 +2333,8 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
             page = "0"
 
     out_dir = _ask_output_dir()
+    if out_dir is None:
+        return False
     recursive, dry_run = _ask_recursive_and_dry()
 
     cmd = [

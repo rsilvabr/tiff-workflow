@@ -162,6 +162,51 @@ def test_all_files_failing_precheck_exits_1(tmp_path, shell):
     assert result.returncode == 1, f"errors were logged, exit must be 1\n{result.stdout}"
 
 
+# copy_exif ships one script per host; running the PS7 one under powershell is not a
+# supported combination, so each is pinned to its own shell.
+COPY_EXIF_TARGETS = [
+    (script, shell)
+    for script, shell in (("copy_exif_to_TIFF_ps5.ps1", "powershell"),
+                          ("copy_exif_to_TIFF_ps7.ps1", "pwsh"))
+    if shell in SHELLS
+]
+
+
+@requires_shell
+@pytest.mark.parametrize(
+    "script,shell", COPY_EXIF_TARGETS, ids=[f"{s}/{sh}" for s, sh in COPY_EXIF_TARGETS]
+)
+class TestCopyExifExitCodeContract:
+    """
+    The v2.5 exit-code fix landed in compress_tiff_zip.ps1 and generate_thumbnails.ps1 and was
+    never generalised here: a wrong path fell through to "No TIFFs found" and exited 0, so
+    convert_tiff.py let Step 2 of workflow 4 run after a Copy EXIF that touched nothing.
+    """
+
+    def test_missing_dir_exits_1(self, tmp_path, script, shell):
+        result = run_ps(shell, script, ["-InputDir", str(tmp_path / "nope")], tmp_path)
+        assert result.returncode == 1, (
+            f"a path that does not exist is an error, not an empty folder\n{result.stdout}"
+        )
+        assert "input directory not found" in result.stdout, result.stdout
+
+    def test_missing_dir_in_semicolon_list_exits_1(self, tmp_path, script, shell):
+        good = tmp_path / "good"
+        good.mkdir()
+        result = run_ps(
+            shell, script, ["-InputDir", f"{good};{tmp_path / 'nope'}"], tmp_path
+        )
+        assert result.returncode == 1, result.stdout
+
+    def test_valid_empty_dir_exits_0(self, tmp_path, script, shell):
+        good = tmp_path / "good"
+        good.mkdir()
+        result = run_ps(shell, script, ["-InputDir", str(good)], tmp_path)
+        assert result.returncode == 0, (
+            f"a valid folder with no TIFFs is not an error\n{result.stdout}"
+        )
+
+
 @requires_shell
 @pytest.mark.parametrize("script", PS_SCRIPTS)
 def test_no_return_at_script_scope(script):
@@ -235,6 +280,104 @@ class TestInPlaceExifPreservation:
         assert read_tag(src) == ARTIST, (
             f"[{parallel}/{shell}] the [no thumb] fallback skipped the EXIF restore"
         )
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+def test_legacy_mode_leaves_old_tiffs_untouched(tmp_path, shell):
+    """
+    OLD_TIFFs holds the pristine originals modes 0/9 preserved on purpose. Every mode >= 0
+    excludes it; legacy scanned $PWD with no exclusion at all and recompressed the backups.
+    """
+    work = tmp_path / "work"
+    old = work / "OLD_TIFFs"
+    old.mkdir(parents=True)
+    make_tiff(work / "photo.tif")
+    backup = make_tiff(old / "pristine.tif")
+
+    result = run_ps(shell, "compress_tiff_zip.ps1", ["-ForceSequential"], tmp_path)
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert read_compression(backup).lower() != "zip", (
+        "the OLD_TIFFs backup was recompressed in place"
+    )
+    assert read_compression(work / "photo.tif").lower() == "zip", (
+        "the real source was not compressed -- the exclusion is too broad"
+    )
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.skipif("pwsh" not in SHELLS, reason="thumbnail backend is exercised under pwsh")
+class TestThumbnailLifecycle:
+    """
+    Generation and removal must agree on where thumbnails live and what they are called.
+    They did not: a relative -OutputDir was resolved per file directory when generating and
+    per input root when removing, and the collision rename (_v2) matched neither the
+    self-exclusion nor the -Remove filter.
+    """
+
+    @staticmethod
+    def _two_colliding_tiffs(tmp_path):
+        root = tmp_path / "root"
+        for sub in ("sub1", "sub2"):
+            (root / sub).mkdir(parents=True)
+            make_tiff(root / sub / "photo.tif")
+        return root
+
+    def test_remove_finds_what_generate_created(self, tmp_path):
+        root = self._two_colliding_tiffs(tmp_path)
+        args = ["-InputDir", str(root), "-OutputDir", "thumbs", "-Recursive"]
+
+        gen = run_ps("pwsh", "generate_thumbnails.ps1", args, tmp_path)
+        assert gen.returncode == 0, gen.stdout
+        created = sorted(root.rglob("*_thumb*"))
+        assert len(created) == 2, f"setup failed: {created}"
+
+        rem = run_ps("pwsh", "generate_thumbnails.ps1", args + ["-Remove"], tmp_path)
+        assert rem.returncode == 0, rem.stdout
+        assert not list(root.rglob("*_thumb*")), (
+            "-Remove with the flags that created them found nothing:\n" + rem.stdout
+        )
+
+    def test_renamed_thumbnail_is_not_rescanned_as_a_source(self, tmp_path):
+        root = self._two_colliding_tiffs(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        args = ["-InputDir", str(root), "-OutputDir", str(out), "-Recursive", "-Format", "tif"]
+
+        gen = run_ps("pwsh", "generate_thumbnails.ps1", args, tmp_path)
+        assert gen.returncode == 0, gen.stdout
+        assert (out / "photo_thumb_v2.tif").exists(), f"no collision happened:\n{gen.stdout}"
+
+        # Second pass over the output folder: both thumbnails must be recognised as thumbnails
+        again = run_ps(
+            "pwsh", "generate_thumbnails.ps1",
+            ["-InputDir", str(out), "-Format", "tif"], tmp_path,
+        )
+        assert again.returncode == 0, again.stdout
+        assert not (out / "photo_thumb_v2_thumb.tif").exists(), (
+            "the _v2 rename was treated as a source TIFF (_thumb_thumb is back)"
+        )
+
+    def test_renamed_thumbnail_can_be_removed(self, tmp_path):
+        root = self._two_colliding_tiffs(tmp_path)
+        out = tmp_path / "out"
+        out.mkdir()
+        run_ps(
+            "pwsh", "generate_thumbnails.ps1",
+            ["-InputDir", str(root), "-OutputDir", str(out), "-Recursive", "-Format", "tif"],
+            tmp_path,
+        )
+        assert (out / "photo_thumb_v2.tif").exists()
+
+        rem = run_ps(
+            "pwsh", "generate_thumbnails.ps1",
+            ["-InputDir", str(out), "-Format", "tif", "-Remove"], tmp_path,
+        )
+        assert rem.returncode == 0, rem.stdout
+        assert not list(out.glob("*_thumb*")), f"_v2 survived -Remove:\n{rem.stdout}"
 
 
 # Canned `magick identify` responses for the gate tests below.
@@ -430,6 +573,47 @@ class TestPs5Ps7Parity:
             f"{script}: staging cleanup must be scoped to this run, not to every GUID-named file"
         )
 
+    @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
+    def test_staging_move_has_no_unprefixed_fallback(self, script):
+        """
+        Falling back to <writeDir>\\<tif.Name> would pick up a file this run never staged --
+        with a shared -StagingDir that is somebody else's in-flight output, moved on top of
+        the user's TIFF. Every name this run stages carries the run-scoped prefix.
+        """
+        source = (REPO / script).read_text(encoding="ascii")
+        assert "Join-Path $writeDir $tif.Name" not in source, (
+            f"{script}: unprefixed staging fallback is back"
+        )
+
+    def test_every_identify_goes_through_the_timeout_wrapper(self):
+        """
+        A bare `magick identify` has no timeout, so a corrupted file hangs the whole run.
+        The conversion calls are deliberately unwrapped; the probes are not.
+        """
+        code = [
+            ln for ln in (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii").splitlines()
+            if not ln.lstrip().startswith("#")
+        ]
+        offenders = [ln.strip() for ln in code if "magick identify" in ln]
+        assert not offenders, (
+            "use Invoke-MagickWithTimeout for identify probes:\n" + "\n".join(offenders)
+        )
+
+    def test_compression_probe_reads_page_zero_only(self):
+        """
+        exiftool prints one -Compression line per IFD, and `-match` on an array is truthy when
+        ANY element matches: an uncompressed main image with a compressed thumbnail page was
+        skipped as "already compressed". Each of the three workers plus the modes 0/9
+        pre-check must collapse the array to IFD0 first.
+        """
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        assert source.count('"$(@($comp)[0])".Trim()') == 4, (
+            "every compression probe must decide on the main image, not on any page"
+        )
+        assert 'Comp        = "$comp"' not in source, (
+            "tasks must carry the collapsed value, not the joined array"
+        )
+
 
 @pytest.mark.parametrize("script", PS_SCRIPTS)
 def test_ps_sources_are_pure_ascii_without_bom(script):
@@ -498,6 +682,57 @@ class TestStagingIsolation:
 
 
 # -- CLASS 5: destination collision ---------------------------------
+
+class TestUndoOldTiffsResilience:
+    """
+    _safe_move was called bare, so the first unmovable file raised straight out of the
+    workflow: every file after it was never attempted, no summary was printed, and the
+    traceback killed the wizard (main() only catches KeyboardInterrupt).
+    """
+
+    @staticmethod
+    def _prepare(tmp_path, monkeypatch, answers):
+        old = tmp_path / "OLD_TIFFs"
+        old.mkdir()
+        for name in ("a_first.tif", "b_blocked.tif", "c_last.tif"):
+            (old / name).write_bytes(name.encode())
+        # a directory in the parent sharing a TIFF's name -- _safe_move refuses it, and so
+        # does any locked or read-only destination
+        (tmp_path / "b_blocked.tif").mkdir()
+
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        it = iter(answers)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+        return old
+
+    def test_one_failure_does_not_abandon_the_rest(self, tmp_path, monkeypatch):
+        old = self._prepare(tmp_path, monkeypatch, ["y", "y", "n"])  # overwrite, move, keep dirs
+
+        result = convert_tiff.run_undo_old_tiffs(SimpleNamespace(config=ToolConfig()))
+
+        assert result is False, "a failed move must be reported, not swallowed"
+        assert (tmp_path / "a_first.tif").is_file()
+        assert (tmp_path / "c_last.tif").is_file(), (
+            "the file after the failure was never attempted"
+        )
+        assert (old / "b_blocked.tif").is_file(), "the unmovable file must stay put"
+        assert (tmp_path / "b_blocked.tif").is_dir(), "the directory was destroyed"
+
+    def test_clean_run_still_reports_success(self, tmp_path, monkeypatch):
+        old = tmp_path / "OLD_TIFFs"
+        old.mkdir()
+        (old / "photo.tif").write_bytes(b"data")
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        it = iter(["n", "y", "n"])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+
+        result = convert_tiff.run_undo_old_tiffs(SimpleNamespace(config=ToolConfig()))
+
+        assert result is True
+        assert (tmp_path / "photo.tif").read_bytes() == b"data"
+
 
 class TestSafeMoveNeverLosesBoth:
     """`dst.unlink()` before `shutil.move` meant a move that then failed left both files gone."""

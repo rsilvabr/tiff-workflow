@@ -2,6 +2,98 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## v2.6 - Audit Round 7
+
+A full read of all five files. Ten findings; the five that mattered were reproduced on disk
+before being touched, and every fix is pinned by a test that fails when reverted. Four of the
+five are the same story as round 6: **a fix that landed in one file and was never generalised**.
+
+### 🔴 HIGH - `copy_exif` Reported Success for a Folder That Does Not Exist
+**Issue:** The v2.5 exit-code fix ("a bad path in a `;` list must exit 1") was applied to
+`compress_tiff_zip.ps1` and `generate_thumbnails.ps1` and never to the two `copy_exif` scripts,
+which had **no input validation at all**. `Get-ChildItem` on a missing path raises a
+*non-terminating* error, so it never became an `ERROR` line and never reached `$errTotal`:
+
+```
+copy_exif_to_TIFF_ps5.ps1 -InputDir "<does not exist>"   ->  0 errors, EXIT 0
+copy_exif_to_TIFF_ps7.ps1 -InputDir "<valid>;<missing>"  ->  0 errors, EXIT 0
+```
+
+`convert_tiff.py` gates Step 2 of workflow 4 on that exit code, so a stale or mistyped AutoFind
+folder made Copy EXIF "succeed" without touching a file and Compress ran anyway.
+- **Fix:** Both scripts now resolve, validate and report each root exactly like the other two
+  backends: missing roots are logged as `ERROR`, counted in `$errTotal`, and a run with no valid
+  root exits 1. Verified on both hosts: bad path -> 1, `valid;bad` -> 1, valid empty folder -> 0.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - `-Remove` Could Not Find the Thumbnails `-Remove`'s Own Flags Had Created
+**Issue:** Generation resolves a relative `-OutputDir` **per file directory**
+(`Join-Path $f.DirectoryName $OutputDir`); removal resolved it **per input root**. With
+`-Recursive` the thumbnails land in `<any subfolder>\<OutputDir>`, so the identical command with
+`-Remove` looked in `<root>\<OutputDir>`, a folder that was never created, reported
+"No thumbnails found" and exited 0 with every thumbnail still on disk.
+- **Fix:** A relative `-OutputDir` now expands to every matching subfolder under each input root
+  when `-Recursive` is set. Search roots can nest, so the collected list is de-duplicated --
+  deleting one file twice would have counted a phantom error.
+- **Files:** `generate_thumbnails.ps1`
+
+### 🟡 MEDIUM - The Collision Rename Escaped Both the Self-Exclusion and `-Remove`
+**Issue:** The `_v2` numbering added in v2.3 produces `photo_thumb_v2.tif`, but both filters
+matched only `_thumb(-\d+)?$`. So a renamed **.tif** thumbnail was neither excluded from the
+input scan nor removable: the next run treated it as a source and produced
+`photo_thumb_v2_thumb.tif` -- the `_thumb_thumb` bug v2.3 fixed, coming back through a feature
+added in the same round.
+- **Fix:** One `$script:ThumbNamePattern` (`_thumb(_v\d+)?(-\d+)?$`) shared by the input scan and
+  the `-Remove` filter, covering all four shapes this script can emit (`_thumb`, `_thumb-0`,
+  `_thumb_v2`, `_thumb_v2-0`).
+- **Files:** `generate_thumbnails.ps1`
+
+### 🟡 MEDIUM - One Unmovable File Aborted the Whole OLD_TIFFs Restore
+**Issue:** `run_undo_old_tiffs` called `_safe_move` bare. A locked, read-only or otherwise
+unmovable destination raised straight out of the workflow: files queued after it were never
+attempted, no summary was printed, and since `main()` only catches `KeyboardInterrupt` the
+traceback killed the wizard. `run_purge_old_tiffs` already worked per-file.
+- **Fix:** Each move is guarded, failures are reported and counted, the run continues, and the
+  workflow returns `False` when anything failed. `rmdir` on the empty OLD_TIFFs folders is
+  guarded the same way.
+- **Files:** `convert_tiff.py`
+
+### 🟡 MEDIUM - Legacy Mode Recompressed the Pristine Originals in `OLD_TIFFs/`
+**Issue:** Every mode >= 0 excludes `OLD_TIFFs` (the `Get-Files-Mode8` filter, the guard in the
+modes 0/9 task loop). Legacy mode scanned `$PWD` recursively with **no exclusion at all**, so
+running it in a folder already processed by mode 0/9 rewrote the backups in place -- the one
+copy that exists specifically to stay untouched (`None` -> `Zip`, verified).
+- **Fix:** The legacy file scan carries the same `OLD_TIFFs` exclusion as the other modes.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - Probe and Hygiene Fixes
+- The modes 0/9 pre-check ran the only bare `magick identify` left in the script, so a corrupted
+  file could hang the whole run there while the three workers used the timeout wrapper for the
+  same probe. It now uses `Invoke-MagickWithTimeout` and the workers' output handling.
+  (`compress_tiff_zip.ps1`)
+- `exiftool -Compression` prints one line per IFD, and `-match` on an array is truthy when **any**
+  element matches: an uncompressed main image with a compressed thumbnail page was skipped as
+  "already compressed", and the log printed `SKIP (None Deflate/Adobe)`. All four probe sites now
+  decide on IFD0, and the task carries the collapsed value. (`compress_tiff_zip.ps1`)
+- Workflow 8 accepted a `;` in the input and output paths that `step_folder` rejects for every
+  other workflow, even though the backend splits `-InputDir` on it. (`convert_tiff.py`)
+- The staging move fell back to `<writeDir>\<tif.Name>` when this run had staged nothing for a
+  TIFF. Every name this run stages carries the run-scoped prefix, so that file belongs to another
+  session -- it would have been moved on top of the user's TIFF. Fallback removed.
+  (`copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`)
+- Dead `if ($tiffCopied) { Remove-Item ... }` inside a branch guarded by `-not $tiffCopied`.
+  (`copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`)
+
+**Checked and cleared** (suspected, then disproved): the legacy parallel worker's `$stagingName`
+is assigned early, so staged files are not orphaned; ImageMagick handles the `[0]` frame selector
+on filenames that contain brackets; and the `errorSrcPaths` / `IntegrityFailed` interaction in
+mode 8 cannot affect rollback, which only applies to modes 0/9.
+
+**Verification:** four `.ps1` parse clean under 5.1 and 7 and stay pure ASCII without BOM;
+`pytest` 128/128 (17 new) and `Invoke-Pester` 82/82 (6 new). Each of the five reproduced bugs was
+demonstrated before the fix, re-run after it, and mutation-checked: the fix was reverted in the
+working tree, the new test was confirmed to fail, and the file restored and md5-compared.
+
 ## v2.5 - Audit Round 6
 
 Round 6 was a **class-directed** audit rather than a free read: the five recurring failure

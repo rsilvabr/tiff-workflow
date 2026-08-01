@@ -97,3 +97,23 @@ Describe "copy_exif_to_TIFF_ps7.ps1 - Audit Round 4" {
         $content | Should -Match '@\("identify", "-format", "%n\\n", \$Path\)'
     }
 }
+
+Describe "copy_exif_to_TIFF_ps7.ps1 - Audit Round 7" {
+    It "Validates every input directory and counts a bad one as an error" {
+        # A wrong path fell through to "No TIFFs found" and exited 0, so convert_tiff.py let
+        # Step 2 of workflow 4 run after a Copy EXIF that had touched nothing.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'Test-Path -LiteralPath \$dir -PathType Container'
+        $content | Should -Match '\$missingRoots \+= \$dir'
+        $content | Should -Match 'ERROR: input directory not found'
+        $content | Should -Match '\$script:errTotal \+= \$missingRoots\.Count'
+        $content | Should -Match 'No valid input directories specified'
+    }
+
+    It "Staging move has no unprefixed fallback" {
+        # <writeDir>\<tif.Name> is a file this run never staged -- with a shared -StagingDir
+        # that is another session's in-flight output, moved on top of the user's TIFF.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Not -Match 'Join-Path \$writeDir \$tif\.Name'
+    }
+}

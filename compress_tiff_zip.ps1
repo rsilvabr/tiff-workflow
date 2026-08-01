@@ -627,6 +627,9 @@ function Process-TiffJob {
         if ($exifExit -ne 0 -or -not $comp) {
             return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
         }
+        # exiftool prints one -Compression line per IFD; the main image is IFD0. Matching the
+        # whole array skipped a file whose extra page (thumbnail) was the compressed one.
+        $comp = "$(@($comp)[0])".Trim()
         if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
             if ($skipCompressedWithThumb) {
                 # Only skip when a thumbnail is already embedded; otherwise reprocess
@@ -811,8 +814,15 @@ function Process-TiffJob {
 
 if ($Mode -lt 0) {
     $root = $PWD.Path
+    # OLD_TIFFs holds the pristine originals that modes 0/9 deliberately preserved; every
+    # mode >= 0 excludes it (Get-Files-Mode8, and the guard in the modes 0/9 task loop).
+    # Legacy had no exclusion at all, so running it in a folder already processed by mode 0/9
+    # recompressed the backups in place -- the one copy that was supposed to stay untouched.
     $files = Get-ChildItem -LiteralPath $root -File -Recurse:$script:Recurse |
-             Where-Object { $_.Extension -match '^\.(tif|tiff)$' }
+             Where-Object {
+                 $_.Extension -match '^\.(tif|tiff)$' -and
+                 $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$'
+             }
 
     $script:total = $files.Count
     Write-Log "Log: $logFile"
@@ -918,6 +928,9 @@ if ($Mode -lt 0) {
                     if ($exifExit -ne 0 -or -not $comp) {
         return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
                     }
+                    # exiftool prints one -Compression line per IFD; the main image is IFD0.
+                    # Matching the whole array skipped a file whose extra page was compressed.
+                    $comp = "$(@($comp)[0])".Trim()
                     if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
                         if ($skipCompThumbL) {
                             # Only skip when a thumbnail is already embedded; otherwise reprocess
@@ -1380,24 +1393,28 @@ foreach ($f in $files) {
             Write-Log "ERROR (exiftool check) | $($f.Name) | cannot detect compression" "ERROR"
             continue
         }
-        if ($comp -match $(if ($SkipLzwAsCompressed) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
+        # exiftool prints one -Compression line per IFD, so $comp is an ARRAY on a TIFF that
+        # carries an embedded thumbnail. `-match` on an array is truthy when ANY element
+        # matches, so an uncompressed main image with a compressed extra page was skipped as
+        # "already compressed". The main image is IFD0 -- decide on that, display the rest.
+        $compMain = "$(@($comp)[0])".Trim()
+        if ($compMain -match $(if ($SkipLzwAsCompressed) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
             $skipCompressed = -not $SkipCompressedWithThumb
             if ($SkipCompressedWithThumb) {
-                # Only skip when a thumbnail is already embedded; otherwise reprocess
-                $subfileTypes = magick identify -format "%[tiff:subfiletype]\n" "$($f.FullName)" 2>$null
+                # Only skip when a thumbnail is already embedded; otherwise reprocess.
+                # Uses the timeout wrapper like the three workers do: this was the last bare
+                # `magick identify` left, so a corrupted file hung the whole run here.
+                $stRes = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $f.FullName) -TimeoutSec $MagickTimeout
                 $hasThumb = $false
-                if ($subfileTypes -is [array]) {
-                    for ($i = 0; $i -lt $subfileTypes.Count; $i++) {
-                        $st = if ($subfileTypes[$i]) { $subfileTypes[$i].Trim() } else { "" }
-                        if ($st -in @("REDUCEDIMAGE", "REDUCED")) { $hasThumb = $true; break }
-                    }
+                foreach ($line in @($stRes.Output)) {
+                    if ("$line".Trim() -in @("REDUCEDIMAGE", "REDUCED")) { $hasThumb = $true; break }
                 }
                 $skipCompressed = $hasThumb
             }
             if ($skipCompressed) {
                 $script:skipTotal++
                 $script:counterTotal++
-                Write-Log "SKIP ($comp) | $($f.Name)"
+                Write-Log "SKIP ($compMain) | $($f.Name)"
                 continue
             }
         }
@@ -1468,7 +1485,7 @@ foreach ($f in $files) {
                 ThumbQuality = $script:ThumbQuality
                 ThumbPage = $script:ThumbPage
                 # Already probed above -- do not run exiftool/identify a second time per file
-                Comp        = "$comp"
+                Comp        = $compMain
                 SafeChecked = $safeChecked
             }
         } else {
@@ -1482,7 +1499,7 @@ foreach ($f in $files) {
                 ThumbSize = $script:ThumbSize
                 ThumbQuality = $script:ThumbQuality
                 ThumbPage = $script:ThumbPage
-                Comp        = "$comp"
+                Comp        = $compMain
                 SafeChecked = $safeChecked
             }
         }
@@ -1586,6 +1603,9 @@ foreach ($group in $groupedTasks) {
                 if ($exifExit -ne 0 -or -not $comp) {
                     return @{ Result = "ERROR (exiftool check) | $name | cannot detect compression"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                 }
+                # exiftool prints one -Compression line per IFD; the main image is IFD0.
+                # Matching the whole array skipped a file whose extra page was compressed.
+                $comp = "$(@($comp)[0])".Trim()
                 if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
                     if ($skipCompressedWithThumb) {
                         # Only skip when a thumbnail is already embedded; otherwise reprocess

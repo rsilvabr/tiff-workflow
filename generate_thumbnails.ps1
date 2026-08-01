@@ -88,6 +88,16 @@ function Test-ThumbExists {
 }
 $script:ThumbExistsFnDef = ${function:Test-ThumbExists}.ToString()
 
+# Every thumbnail this script can produce, in one pattern:
+#   name_thumb        plain
+#   name_thumb-0      one frame per page (-Page all)
+#   name_thumb_v2     collision rename under -OutputDir
+#   name_thumb_v2-0   both
+# Matching only '_thumb(-\d+)?$' left the _v2 variants out of BOTH the self-exclusion below
+# and the -Remove filter, so a renamed .tif thumbnail was rescanned as a source on the next
+# run (producing _thumb_v2_thumb) and could never be cleaned up.
+$script:ThumbNamePattern = '(?i)_thumb(_v\d+)?(-\d+)?$'
+
 $allFiles = foreach ($root in $inputRoots) {
     $item = Get-Item -LiteralPath $root
     if ($item -is [System.IO.FileInfo]) {
@@ -98,7 +108,7 @@ $allFiles = foreach ($root in $inputRoots) {
     }
 }
 
-$files = @($allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch '(?i)_thumb(-\d+)?$' })
+$files = @($allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch $script:ThumbNamePattern })
 $total = $files.Count
 
 # -- Statistics ----------------------------------------------------
@@ -127,7 +137,19 @@ if ($Remove) {
         if ([System.IO.Path]::IsPathRooted($OutputDir)) {
             @($OutputDir)
         } else {
-            @($inputRoots | ForEach-Object { Join-Path $_ $OutputDir })
+            # Generation resolves a relative -OutputDir per FILE directory
+            # (Join-Path $f.DirectoryName $OutputDir), so under -Recursive the thumbnails sit in
+            # <any subfolder>\<OutputDir>, not only <root>\<OutputDir>. Looking only at the
+            # latter meant -Remove with the exact flags that created them found nothing.
+            $suffix = $OutputDir.TrimEnd('\', '/').Replace('/', '\')
+            @(foreach ($r in $inputRoots) {
+                Join-Path $r $suffix
+                if ($recurseFlag) {
+                    Get-ChildItem -LiteralPath $r -Directory -Recurse -ErrorAction SilentlyContinue |
+                        Where-Object { $_.FullName -like "*\$suffix" } |
+                        ForEach-Object { $_.FullName }
+                }
+            })
         }
     } else {
         $inputRoots
@@ -137,10 +159,14 @@ if ($Remove) {
         if (-not (Test-Path -LiteralPath $root)) { continue }
         Get-ChildItem -LiteralPath $root -File -Recurse:$recurseFlag -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.BaseName -match '(?i)_thumb(-\d+)?$' -and
+                $_.BaseName -match $script:ThumbNamePattern -and
                 ($_.Extension.TrimStart('.').ToLowerInvariant() -in $allFormats)
             }
     })
+
+    # Search roots can nest (root\thumbs and root\sub\thumbs), so the same file can be
+    # enumerated twice -- deleting it twice would count a phantom error.
+    $thumbs = @($thumbs | Sort-Object -Property FullName -Unique)
 
     $total = $thumbs.Count
     Write-Log "Found: $total thumbnail(s) to remove"
