@@ -43,6 +43,17 @@ Describe "compress_tiff_zip_v2.ps1 - Parameter Validation" {
         # and every run logs what was excluded -- an exclusion is never invisible
         $content | Should -Match 'Excluded \$excludedCount file\(s\) under:'
     }
+
+    It "Compression probe is batched (one exiftool per chunk, per-file fallback)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        # the batched probe exists and reads IFD0 specifically
+        $content | Should -Match 'function Get-CompressionMap'
+        $content | Should -Match '-IFD0:Compression'
+        # built once after discovery, with a timing line
+        $content | Should -Match 'Compression probe: \$\(\$script:compMap.Count\)/\$\(\$script:total\)'
+        # modes 1-7 workers still SKIP deflate when Comp came from the map
+        $content | Should -Match 'runs for pre-probed files too'
+    }
 }
 
 Describe "compress_tiff_zip_v2.ps1 - StagingDir Check" {

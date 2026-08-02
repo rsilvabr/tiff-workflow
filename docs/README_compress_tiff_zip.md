@@ -69,6 +69,8 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-DuplicateAction` | string | `"Numbered"` | Mode 2 collision handling: `Skip`, `Numbered` (v2, v3...), or `Overwrite` |
 | `-ExcludeFolders` | string | `""` | `';'`-separated folder **names** skipped during discovery, in every mode. Segment match (case-insensitive): `_EXPORT` skips any `...\_EXPORT\...` tree but never `My_EXPORT_photos`. Entries containing `\` or `/` are rejected -- names only, no paths. Every run logs `Excluded N file(s) under: ...` so an exclusion is never invisible |
 
+> **Performance note:** the compression probe (Deflate or not?) reads only the IFD0 header tag, but it used to spawn one exiftool process per file. Probing is now batched (~400 files per exiftool invocation, logged as `Compression probe: N/M file(s) in Xms`); files a batch could not answer fall back to the per-file probe, so decisions are identical, just faster.
+
 ### Thumbnail Generation (v1.2+)
 
 | Parameter | Type | Default | Description |

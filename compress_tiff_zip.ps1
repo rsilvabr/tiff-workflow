@@ -405,6 +405,52 @@ function Resolve-Output {
     }
 }
 
+# -- Batched compression probe --------------------------------------
+
+function Get-CompressionMap {
+    <#
+    .SYNOPSIS
+        One exiftool invocation probes hundreds of files instead of one process per
+        file (~100-300 ms of process startup each, which dominated discovery on large
+        trees). Returns a hashtable: lowercase full path -> IFD0 compression string
+        ("Adobe Deflate", "Uncompressed", ...) or "-" when the tag is missing.
+
+        Files MISSING from the map must be probed individually by the caller: a failed
+        chunk degrades to the old per-file behavior, never to a wrong SKIP decision.
+        Used only from the main script scope (no runspace injection needed).
+    #>
+    param(
+        [string[]]$Paths,
+        [int]$ChunkSize = 400
+    )
+    $map = @{}
+    if (-not $Paths -or $Paths.Count -eq 0) { return $map }
+
+    for ($off = 0; $off -lt $Paths.Count; $off += $ChunkSize) {
+        $end = [Math]::Min($off + $ChunkSize, $Paths.Count) - 1
+        $chunk = @($Paths[$off..$end])
+        $argFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $argLines = @("-charset", "filename=utf8", "-T", "-Directory", "-FileName", "-IFD0:Compression") + $chunk
+            [System.IO.File]::WriteAllLines($argFile, $argLines, [System.Text.UTF8Encoding]::new($false))
+            $out = exiftool -@ $argFile 2>$null
+            if ($LASTEXITCODE -ne 0) { continue }   # whole chunk falls back to per-file probes
+            foreach ($line in @($out)) {
+                $cols = "$line" -split "`t", 3
+                if ($cols.Count -lt 2) { continue }
+                # -T prints the directory with forward slashes; normalise to the
+                # backslash form of FileInfo.FullName used as the map key
+                $full = (Join-Path $cols[0] $cols[1]).Replace('/', '\')
+                $comp = if ($cols.Count -ge 3) { $cols[2].Trim() } else { "-" }
+                $map[$full.ToLowerInvariant()] = $comp
+            }
+        } finally {
+            Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+    return $map
+}
+
 # -- Find Files for a given mode ------------------------------------
 
 function Get-Files-ForMode {
@@ -774,7 +820,7 @@ function Process-TiffJob {
     $name = [System.IO.Path]::GetFileName($srcPath)
 
     if ($preComp) {
-        # Modes 0/9 already ran the exiftool compression probe before moving the original
+        # Caller already ran the compression probe (modes 0/9 builder, or the batched map)
         $comp = $preComp
     } else {
         $argComp = [System.IO.Path]::GetTempFileName()
@@ -791,20 +837,22 @@ function Process-TiffJob {
         # exiftool prints one -Compression line per IFD; the main image is IFD0. Matching the
         # whole array skipped a file whose extra page (thumbnail) was the compressed one.
         $comp = "$(@($comp)[0])".Trim()
-        if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-            if ($skipCompressedWithThumb) {
-                # Only skip when a thumbnail is already embedded; otherwise reprocess
-                $stRes = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $srcPath) -TimeoutSec $script:MagickTimeout
-                $hasThumb = $false
-                foreach ($line in @($stRes.Output)) {
-                    if ("$line".Trim() -in @("REDUCEDIMAGE", "REDUCED")) { $hasThumb = $true; break }
-                }
-                if ($hasThumb) {
-                    return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
-                }
-            } else {
-                return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+    }
+    # The SKIP decision runs for pre-probed files too: modes 1-7 now receive Comp from the
+    # batched map, and a pre-probed Deflate file must still be skipped here.
+    if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
+        if ($skipCompressedWithThumb) {
+            # Only skip when a thumbnail is already embedded; otherwise reprocess
+            $stRes = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $srcPath) -TimeoutSec $script:MagickTimeout
+            $hasThumb = $false
+            foreach ($line in @($stRes.Output)) {
+                if ("$line".Trim() -in @("REDUCEDIMAGE", "REDUCED")) { $hasThumb = $true; break }
             }
+            if ($hasThumb) {
+                return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+            }
+        } else {
+            return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
         }
     }
 
@@ -1464,6 +1512,17 @@ $oldTiffsCount = ($files | Where-Object { $_.DirectoryName -match '(?i)[\\/]OLD_
 $oldTiffsNote = if ($oldTiffsCount -gt 0) { " ($oldTiffsCount in OLD_TIFFs)" } else { "" }
 Write-Log "Found: $($script:total) TIFF(s)$oldTiffsNote"
 
+# Batched compression probe: one exiftool run per ~400 files instead of one process
+# per file. Files missing from the map fall back to the old per-file probe at their
+# decision points, so a failed chunk never changes a SKIP/compress decision.
+$script:compMap = @{}
+if (-not $DryRun -and $script:total -gt 0) {
+    $probeStart = Get-Date
+    $script:compMap = Get-CompressionMap -Paths $files.FullName
+    $probeMs = [int]((Get-Date) - $probeStart).TotalMilliseconds
+    Write-Log "Compression probe: $($script:compMap.Count)/$($script:total) file(s) in ${probeMs}ms"
+}
+
 # Mode 8 always requires staging to protect originals until verification.
 if ($Mode -eq 8 -and -not $DryRun -and [string]::IsNullOrWhiteSpace($StagingDir)) {
     # Same-volume staging makes the final move an atomic rename instead of copy+delete.
@@ -1631,13 +1690,21 @@ foreach ($f in $files) {
             $script:counterTotal++
             continue
         }
-        $argComp = [System.IO.Path]::GetTempFileName()
-        try {
-            [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-Compression`n$($f.FullName)`n")
-            $comp = exiftool -@ $argComp 2>$null
-            $exifExit = $LASTEXITCODE
-        } finally {
-            Remove-Item $argComp -Force -ErrorAction SilentlyContinue
+        # Batched probe first; per-file exiftool only when the map has no answer
+        $mapHit = $script:compMap.ContainsKey($f.FullName.ToLowerInvariant())
+        if ($mapHit) {
+            $comp = $script:compMap[$f.FullName.ToLowerInvariant()]
+            $exifExit = 0
+            if ($comp -eq "-") { $comp = $null }
+        } else {
+            $argComp = [System.IO.Path]::GetTempFileName()
+            try {
+                [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-Compression`n$($f.FullName)`n")
+                $comp = exiftool -@ $argComp 2>$null
+                $exifExit = $LASTEXITCODE
+            } finally {
+                Remove-Item $argComp -Force -ErrorAction SilentlyContinue
+            }
         }
         if ($exifExit -ne 0 -or -not $comp) {
             $script:errTotal++
@@ -1768,6 +1835,13 @@ foreach ($f in $files) {
             }
         }
     } else {
+        # Other modes: hand the batched probe result to the worker when the map has a
+        # confident answer; "" keeps the worker's own per-file probe as the fallback.
+        $preComp = ""
+        if ($script:compMap.Count -gt 0) {
+            $v = $script:compMap[$f.FullName.ToLowerInvariant()]
+            if ($v -and $v -ne "-") { $preComp = $v }
+        }
         $tasks += @{
             Src      = $f.FullName
             WriteDst = $writeDst
@@ -1777,7 +1851,7 @@ foreach ($f in $files) {
             ThumbSize = $script:ThumbSize
             ThumbQuality = $script:ThumbQuality
             ThumbPage = $script:ThumbPage
-            Comp        = ""
+            Comp        = $preComp
             SafeChecked = $false
         }
     }
@@ -1855,7 +1929,7 @@ foreach ($group in $groupedTasks) {
             $name = [System.IO.Path]::GetFileName($srcPath)
 
             if ($t.Comp) {
-                # Modes 0/9 already probed compression before moving the original
+                # Modes 0/9 probed before moving the original; other modes get the batched map value
                 $comp = $t.Comp
             } else {
                 $argComp = [System.IO.Path]::GetTempFileName()
@@ -1872,21 +1946,23 @@ foreach ($group in $groupedTasks) {
                 # exiftool prints one -Compression line per IFD; the main image is IFD0.
                 # Matching the whole array skipped a file whose extra page was compressed.
                 $comp = "$(@($comp)[0])".Trim()
-                if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-                    if ($skipCompressedWithThumb) {
-                        # Only skip when a thumbnail is already embedded; otherwise reprocess
-                        $stRes = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $srcPath) -TimeoutSec $magickTimeout
-                        $hasThumb = $false
-                        foreach ($line in @($stRes.Output)) {
-                            if ("$line".Trim() -in @("REDUCEDIMAGE", "REDUCED")) { $hasThumb = $true; break }
-                        }
-                        if ($hasThumb) {
-                            return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
-                        }
-                        # Compressed but no thumbnail: fall through to reprocess
-                    } else {
-                        return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+            }
+            # The SKIP decision runs for pre-probed files too: modes 1-7 now receive Comp from
+            # the batched map, and a pre-probed Deflate file must still be skipped here.
+            if ($comp -match $(if ($skipLzw) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
+                if ($skipCompressedWithThumb) {
+                    # Only skip when a thumbnail is already embedded; otherwise reprocess
+                    $stRes = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $srcPath) -TimeoutSec $magickTimeout
+                    $hasThumb = $false
+                    foreach ($line in @($stRes.Output)) {
+                        if ("$line".Trim() -in @("REDUCEDIMAGE", "REDUCED")) { $hasThumb = $true; break }
                     }
+                    if ($hasThumb) {
+                        return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+                    }
+                    # Compressed but no thumbnail: fall through to reprocess
+                } else {
+                    return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                 }
             }
             if ((Test-Path -LiteralPath $finalDst) -and -not $overWrite -and ($finalDst -ne $srcPath)) {
