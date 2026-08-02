@@ -231,7 +231,8 @@ function Get-Files-Mode8 {
     Get-ChildItem -LiteralPath $root -File -Recurse:$true |
         Where-Object {
             $_.Extension -match '^\.(tif|tiff)$' -and
-            $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$'
+            $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and
+            $_.DirectoryName -notmatch '(?i)[\\/]compress_staging(_mode8)?_[0-9a-f]{32}[\\/]?'
         }
 }
 
@@ -493,16 +494,60 @@ function Test-ZipIntegrity {
     return ($r.ExitCode -eq 0)
 }
 
+function Test-PixelIdentical {
+    <#
+    .SYNOPSIS
+        Returns $true only when two TIFFs hold pixel-identical data: same page count and
+        per-page RMSE == 0. A decode check (Test-ZipIntegrity) cannot see a truncated page,
+        a wrong bit depth or a colorspace shift -- all of those still decode -- so this is
+        the gate that authorises destroying the source (mode 8, in-place replace).
+
+        `%[distortion]` goes to stdout, which the timeout wrapper captures (the RMSE metric
+        itself prints to stderr, which the wrapper drops). `magick compare A B` on
+        multi-page files pairs pages across the two lists and returns nonsense, so pages
+        are compared one by one. Anything unreadable fails CLOSED.
+
+    .NOTES
+        Re-inject into -Parallel runspaces with:
+            ${function:Test-PixelIdentical} = $using:PixelCompareFnDef
+        (Invoke-MagickWithTimeout and Get-TiffPageCount must be injected too.)
+    #>
+    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30)
+
+    $ps = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
+    $pd = Get-TiffPageCount -Path $DstPath -TimeoutSec $TimeoutSec
+    if (-not $ps.Ok -or -not $pd.Ok) { return $false }
+    if ($ps.PageCount -ne $pd.PageCount) { return $false }
+
+    for ($i = 0; $i -lt $ps.PageCount; $i++) {
+        $r = Invoke-MagickWithTimeout -Arguments @("compare", "-metric", "RMSE", "$SrcPath[$i]", "$DstPath[$i]", "-format", "%[distortion]`n", "info:") -TimeoutSec $TimeoutSec
+        # compare exits 1 when images differ -- that is data, not an error. Only a
+        # timeout or an undetermined/error exit code fails here directly; the parsed
+        # distortion value below has the final word.
+        if ($r.TimedOut -or $r.ExitCode -lt 0 -or $r.ExitCode -gt 1) { return $false }
+        $lines = @($r.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+        if ($lines.Count -eq 0) { return $false }
+        $val = 0.0
+        if (-not [double]::TryParse("$($lines[0])".Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$val)) { return $false }
+        if ($val -ne 0) { return $false }
+    }
+    return $true
+}
+
 function Backup-TiffMetadata {
     <#
     .SYNOPSIS
         When $WriteDst overwrites $SrcPath, copies the source metadata into a temp MIE
-        container and returns its path (or $null when no backup is needed/possible).
+        container. Returns @{ Needed = [bool]; Path = $null-or-mie-path }.
 
         In-place compression destroys the original before the EXIF restore step runs, so
         `-tagsfromfile <source>` silently read the already-compressed file and every tag was
         lost. Callers must pass the returned path as the tagsfromfile source and delete it
         when done.
+
+        FAIL-CLOSED: when a backup was needed but could not be written, Path stays $null --
+        the caller must REFUSE the in-place write, because going ahead would strip every
+        metadata tag from the only copy of the file.
 
     .NOTES
         Re-inject into -Parallel runspaces with:
@@ -510,7 +555,7 @@ function Backup-TiffMetadata {
     #>
     param([string]$SrcPath, [string]$WriteDst)
 
-    if ($WriteDst -ne $SrcPath) { return $null }
+    if ($WriteDst -ne $SrcPath) { return @{ Needed = $false; Path = $null } }
 
     $metaBase = [System.IO.Path]::GetTempFileName()
     Remove-Item -LiteralPath $metaBase -Force -ErrorAction SilentlyContinue
@@ -520,14 +565,15 @@ function Backup-TiffMetadata {
     try {
         [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
         exiftool -@ $argMeta | Out-Null
+        if ($LASTEXITCODE -ne 0) { return @{ Needed = $true; Path = $null } }
     } catch {
-        return $null
+        return @{ Needed = $true; Path = $null }
     } finally {
         Remove-Item $argMeta -Force -ErrorAction SilentlyContinue
     }
 
-    if (Test-Path -LiteralPath $metaBackup) { return $metaBackup }
-    return $null
+    if (Test-Path -LiteralPath $metaBackup) { return @{ Needed = $true; Path = $metaBackup } }
+    return @{ Needed = $true; Path = $null }
 }
 
 function Test-TiffHasOnlySubfilePages {
@@ -639,6 +685,7 @@ function Restore-TiffSubfileTypes {
 $script:MagickTimeoutFnDef = ${function:Invoke-MagickWithTimeout}.ToString()
 $script:PageCountFnDef     = ${function:Get-TiffPageCount}.ToString()
 $script:ZipIntegrityFnDef  = ${function:Test-ZipIntegrity}.ToString()
+$script:PixelCompareFnDef  = ${function:Test-PixelIdentical}.ToString()
 $script:TestSubfileFnDef   = ${function:Test-TiffHasOnlySubfilePages}.ToString()
 $script:MetaBackupFnDef    = ${function:Backup-TiffMetadata}.ToString()
 $script:RestoreSubfileFnDef = ${function:Restore-TiffSubfileTypes}.ToString()
@@ -734,7 +781,22 @@ function Process-TiffJob {
     # folder), the original is already gone by the time the EXIF restore below runs, so
     # `-tagsfromfile $srcPath` would read the freshly compressed file and silently return
     # nothing. Park the metadata in a temp MIE container first.
-    $metaBackup = Backup-TiffMetadata -SrcPath $srcPath -WriteDst $writeDst
+    $metaBackupInfo = Backup-TiffMetadata -SrcPath $srcPath -WriteDst $writeDst
+    if ($metaBackupInfo.Needed -and -not $metaBackupInfo.Path) {
+        # Fail-closed: in-place write without a metadata backup would strip every tag
+        return @{ Result = "ERROR (metadata backup failed - in-place write refused) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+    }
+    $metaBackup = $metaBackupInfo.Path
+
+    # Legacy in-place writes (mode -1 with no staging/output folder) would destroy the only
+    # copy of the image if magick died mid-write: compress to a temp sibling, then replace
+    # the original with an atomic same-volume rename (verified below). Modes 0/9 also pass
+    # writeDst == finalDst, but their original is already safe in OLD_TIFFs/.
+    $inPlaceFinalDst = $null
+    if ($mode -lt 0 -and $writeDst -eq $srcPath) {
+        $inPlaceFinalDst = $writeDst
+        $writeDst = "$writeDst.$($script:runStagingId)_$([guid]::NewGuid().ToString('N')).tif"
+    }
 
     # Build compression command.
     # $noThumbNote / $exifWarn accumulate degraded outcomes instead of returning early:
@@ -810,30 +872,24 @@ function Process-TiffJob {
         $out = magick -quiet $srcPath -compress zip $writeDst 2>&1
         if ($LASTEXITCODE -ne 0) {
             if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
+            if ($inPlaceFinalDst) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }
             return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
         }
     }
 
     $stagingName = [System.IO.Path]::GetFileName($writeDst)
-    $argExif = [System.IO.Path]::GetTempFileName()
+    # Always restore metadata from the source (or the MIE backup for in-place writes).
+    # The old EXIF:Make precheck skipped this whenever magick happened to keep Make --
+    # while XMP/IPTC/GPS/ICC were silently dropped by the same rewrite.
+    $argCopy = [System.IO.Path]::GetTempFileName()
     try {
-        [System.IO.File]::WriteAllText($argExif, "-charset`nfilename=utf8`n-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
-        $hasExif = exiftool -@ $argExif 2>$null
+        $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
+        [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
+        exiftool -@ $argCopy | Out-Null
     } finally {
-        Remove-Item $argExif -Force -ErrorAction SilentlyContinue
+        Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
     }
-
-    if (-not $hasExif) {
-        $argCopy = [System.IO.Path]::GetTempFileName()
-        try {
-            $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
-            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
-            exiftool -@ $argCopy | Out-Null
-        } finally {
-            Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
-        }
-        if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
-    }
+    if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
     if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
 
     if (-not $generateThumb) {
@@ -842,13 +898,33 @@ function Process-TiffJob {
         }
     }
 
+    if ($inPlaceFinalDst) {
+        # Only a fully decoded, verified ZIP may replace the original; on any failure the
+        # temp sibling is dropped and the source stays untouched.
+        if (Test-ZipIntegrity -Path $writeDst -TimeoutSec $script:MagickTimeout) {
+            try {
+                Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst -Force -ErrorAction Stop
+            } catch {
+                Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                return @{ Result = "ERROR (in-place replace failed) | $name | $($_.Exception.Message)"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+            }
+        } else {
+            Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+            return @{ Result = "ERROR (ZIP integrity check failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+        }
+    }
+
     $canDeleteSource = $false
     $integrityFailed = $false
     if ($mode -eq 8) {
         # Always verify in mode 8 -- including the [no thumb] and exiftool-WARN paths:
         # the staged file overwrites the original, so an unverified ZIP must never move.
+        # Decode-check alone is not enough (a truncated page still decodes): the staged
+        # file must also be pixel-identical to the source it replaces.
         $verifyTarget = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
-        if ((Test-ZipIntegrity -Path $verifyTarget -TimeoutSec $script:MagickTimeout) -and (Test-Path -LiteralPath $srcPath)) {
+        if ((Test-ZipIntegrity -Path $verifyTarget -TimeoutSec $script:MagickTimeout) -and
+            (Test-Path -LiteralPath $srcPath) -and
+            (Test-PixelIdentical -SrcPath $srcPath -DstPath $verifyTarget -TimeoutSec $script:MagickTimeout)) {
             if ($deleteSource) { $canDeleteSource = $true }
         } else {
             $integrityFailed = $true
@@ -947,6 +1023,7 @@ if ($Mode -lt 0) {
                     ${function:Invoke-MagickWithTimeout}      = $using:MagickTimeoutFnDef
                     ${function:Get-TiffPageCount}            = $using:PageCountFnDef
                     ${function:Test-ZipIntegrity}            = $using:ZipIntegrityFnDef
+                    ${function:Test-PixelIdentical}          = $using:PixelCompareFnDef
                     ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
                     ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
                     ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
@@ -1040,7 +1117,21 @@ if ($Mode -lt 0) {
                     # (Process-TiffJob) kept it. Same fix as the Mode >= 0 worker.
                     # In-place output destroys the original before the EXIF restore runs; park
                     # the metadata in a temp MIE container first (see Backup-TiffMetadata).
-                    $metaBackup = Backup-TiffMetadata -SrcPath $src -WriteDst $writeDst
+                    $metaBackupInfo = Backup-TiffMetadata -SrcPath $src -WriteDst $writeDst
+                    if ($metaBackupInfo.Needed -and -not $metaBackupInfo.Path) {
+                        # Fail-closed: in-place write without a metadata backup would strip every tag
+                        return @{ Result = "ERROR (metadata backup failed - in-place write refused) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
+                    }
+                    $metaBackup = $metaBackupInfo.Path
+
+                    # Legacy in-place writes would destroy the only copy of the image if
+                    # magick died mid-write: compress to a temp sibling, then replace the
+                    # original with an atomic same-volume rename (verified below).
+                    $inPlaceFinalDst = $null
+                    if ($writeDst -eq $src) {
+                        $inPlaceFinalDst = $writeDst
+                        $writeDst = "$writeDst.${runIdL}_$([guid]::NewGuid().ToString('N')).tif"
+                    }
 
                     $noThumbNote = ""
                     $exifWarn = $false
@@ -1102,34 +1193,43 @@ if ($Mode -lt 0) {
                         }
                     } else {
                         $out = magick -quiet $src -compress zip $writeDst 2>&1
-                        if ($LASTEXITCODE -ne 0) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
+                        if ($LASTEXITCODE -ne 0) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; if ($inPlaceFinalDst) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
                     }
 
-                    $argExif = [System.IO.Path]::GetTempFileName()
+                    # Always restore metadata from the source (or the MIE backup for in-place
+                    # writes). The old EXIF:Make precheck skipped this whenever magick kept
+                    # Make -- while XMP/IPTC/GPS/ICC were silently dropped by the rewrite.
+                    $argCopy = [System.IO.Path]::GetTempFileName()
                     try {
-                        [System.IO.File]::WriteAllText($argExif, "-charset`nfilename=utf8`n-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
-                        $hasExif = exiftool -@ $argExif 2>$null
+                        $tagSource = if ($metaBackup) { $metaBackup } else { $src }
+                        [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
+                        exiftool -@ $argCopy | Out-Null
                     } finally {
-                        Remove-Item $argExif -Force -ErrorAction SilentlyContinue
+                        Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
                     }
-
-                    if (-not $hasExif) {
-                        $argCopy = [System.IO.Path]::GetTempFileName()
-                        try {
-                            $tagSource = if ($metaBackup) { $metaBackup } else { $src }
-                            [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
-                            exiftool -@ $argCopy | Out-Null
-                        } finally {
-                            Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
-                        }
-                        $stagingName = [System.IO.Path]::GetFileName($writeDst)
-                        if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
-                    }
+                    $stagingName = [System.IO.Path]::GetFileName($writeDst)
+                    if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
                     if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
 
                     if (-not $genThumbL) {
                         if (-not (Restore-TiffSubfileTypes -SrcPath $src -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
                             $subfileRestoreFailed = $true
+                        }
+                    }
+
+                    if ($inPlaceFinalDst) {
+                        # Only a fully decoded, verified ZIP may replace the original; on any
+                        # failure the temp sibling is dropped and the source stays untouched.
+                        if (Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeoutSec) {
+                            try {
+                                Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst -Force -ErrorAction Stop
+                            } catch {
+                                Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                                return @{ Result = "ERROR (in-place replace failed) | $name | $($_.Exception.Message)"; StagingName = $null; OriginalName = $name; SrcPath = $src }
+                            }
+                        } else {
+                            Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                            return @{ Result = "ERROR (ZIP integrity check failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
                         }
                     }
 
@@ -1293,7 +1393,15 @@ Write-Log "Found: $($script:total) TIFF(s)$oldTiffsNote"
 
 # Mode 8 always requires staging to protect originals until verification.
 if ($Mode -eq 8 -and -not $DryRun -and [string]::IsNullOrWhiteSpace($StagingDir)) {
-    $defaultStaging = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "compress_tiff_zip_mode8_$([guid]::NewGuid().ToString('N'))")
+    # Same-volume staging makes the final move an atomic rename instead of copy+delete.
+    # %TEMP% is usually on another drive than the photos, so a crash mid-move could leave
+    # a truncated file at the destination. With several input roots there is no single
+    # same-volume choice, so fall back to %TEMP% (the post-move integrity gate applies).
+    if ($inputRoots.Count -eq 1) {
+        $defaultStaging = Join-Path $inputRoots[0] "compress_staging_mode8_$([guid]::NewGuid().ToString('N'))"
+    } else {
+        $defaultStaging = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "compress_tiff_zip_mode8_$([guid]::NewGuid().ToString('N'))")
+    }
     $msg = "Mode 8 deletes source files after compression. A staging directory is required to avoid overwriting originals before verification."
     Write-Log $msg "WARN"
     Write-Log "Recommended: provide -StagingDir on a fast local drive." "WARN"
@@ -1650,6 +1758,7 @@ foreach ($group in $groupedTasks) {
             ${function:Invoke-MagickWithTimeout}      = $using:MagickTimeoutFnDef
             ${function:Get-TiffPageCount}            = $using:PageCountFnDef
             ${function:Test-ZipIntegrity}            = $using:ZipIntegrityFnDef
+            ${function:Test-PixelIdentical}          = $using:PixelCompareFnDef
             ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
             ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
             ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
@@ -1734,7 +1843,12 @@ foreach ($group in $groupedTasks) {
 
             # In-place output destroys the original before the EXIF restore runs; park the
             # metadata in a temp MIE container first (see Backup-TiffMetadata).
-            $metaBackup = Backup-TiffMetadata -SrcPath $srcPath -WriteDst $writeDst
+            $metaBackupInfo = Backup-TiffMetadata -SrcPath $srcPath -WriteDst $writeDst
+            if ($metaBackupInfo.Needed -and -not $metaBackupInfo.Path) {
+                # Fail-closed: in-place write without a metadata backup would strip every tag
+                return @{ Result = "ERROR (metadata backup failed - in-place write refused) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+            }
+            $metaBackup = $metaBackupInfo.Path
 
             # $noThumbNote / $exifWarn accumulate degraded outcomes instead of returning early:
             # every success path must reach the mode 8 integrity gate below.
@@ -1805,25 +1919,19 @@ foreach ($group in $groupedTasks) {
                 }
             }
             $stagingName = [System.IO.Path]::GetFileName($writeDst)
-            $argExif = [System.IO.Path]::GetTempFileName()
+            # Always restore metadata from the source (or the MIE backup for in-place
+            # writes). The old EXIF:Make precheck skipped this whenever magick kept
+            # Make -- while XMP/IPTC/GPS/ICC were silently dropped by the rewrite.
+            $argCopy = [System.IO.Path]::GetTempFileName()
             try {
-                [System.IO.File]::WriteAllText($argExif, "-charset`nfilename=utf8`n-s`n-s`n-s`n-EXIF:Make`n$writeDst`n")
-                $hasExif = exiftool -@ $argExif 2>$null
+                $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
+                [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
+                exiftool -@ $argCopy | Out-Null
             } finally {
-                Remove-Item $argExif -Force -ErrorAction SilentlyContinue
+                Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
             }
-            if (-not $hasExif) {
-                $argCopy = [System.IO.Path]::GetTempFileName()
-                try {
-                    $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
-                    [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
-                    exiftool -@ $argCopy | Out-Null
-                } finally {
-                    Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
-                }
-                $stagingName = [System.IO.Path]::GetFileName($writeDst)
-                if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
-            }
+            $stagingName = [System.IO.Path]::GetFileName($writeDst)
+            if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
             if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
             if (-not $generateThumb) {
                 if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $magickTimeout)) {
@@ -1835,8 +1943,12 @@ foreach ($group in $groupedTasks) {
             if ($mode -eq 8) {
                 # Always verify in mode 8 -- including the [no thumb] and exiftool-WARN paths:
                 # the staged file overwrites the original, so an unverified ZIP must never move.
+                # Decode-check alone is not enough (a truncated page still decodes): the staged
+                # file must also be pixel-identical to the source it replaces.
                 $verifyPath = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
-                if ((Test-ZipIntegrity -Path $verifyPath -TimeoutSec $magickTimeout) -and (Test-Path -LiteralPath $srcPath)) {
+                if ((Test-ZipIntegrity -Path $verifyPath -TimeoutSec $magickTimeout) -and
+                    (Test-Path -LiteralPath $srcPath) -and
+                    (Test-PixelIdentical -SrcPath $srcPath -DstPath $verifyPath -TimeoutSec $magickTimeout)) {
                     if ($deleteSource) { $canDeleteSource = $true }
                 } else {
                     $integrityFailed = $true
@@ -1935,6 +2047,14 @@ foreach ($group in $groupedTasks) {
                         continue
                     }
                     if (Test-Path -LiteralPath $r.FinalDst) {
+                        # The pixel gate ran on the STAGED file; the move (possibly cross-volume)
+                        # is not atomic, so the file that authorises the delete is re-verified
+                        # where it actually sits.
+                        if (-not (Test-ZipIntegrity -Path $r.FinalDst -TimeoutSec $MagickTimeout)) {
+                            $script:errTotal++
+                            Write-Log "ERROR (final ZIP failed integrity - source preserved) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
+                            continue
+                        }
                         try {
                             Remove-Item -LiteralPath $r.SrcPath -Force
                             $deletedCount++
@@ -2061,6 +2181,14 @@ foreach ($group in $groupedTasks) {
                         continue
                     }
                     if (Test-Path -LiteralPath $r.FinalDst) {
+                        # The pixel gate ran on the STAGED file; the move (possibly cross-volume)
+                        # is not atomic, so the file that authorises the delete is re-verified
+                        # where it actually sits.
+                        if (-not (Test-ZipIntegrity -Path $r.FinalDst -TimeoutSec $MagickTimeout)) {
+                            $script:errTotal++
+                            Write-Log "ERROR (final ZIP failed integrity - source preserved) | $([System.IO.Path]::GetFileName($r.SrcPath))" "ERROR"
+                            continue
+                        }
                         try {
                             Remove-Item -LiteralPath $r.SrcPath -Force
                             $deletedCount++

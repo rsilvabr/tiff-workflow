@@ -1131,36 +1131,42 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     if old_pages != new_pages:
         return False, f"PAGE_COUNT_MISMATCH {old_pages} vs {new_pages}"
 
-    try:
-        result = subprocess.run(
-            ["magick", "compare", "-metric", "RMSE", f"{old_path}[0]", f"{new_path}[0]", "null:"],
-            capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
-        )
-        output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
+    # Every page is compared pairwise. `magick compare A B` on multi-page files pairs
+    # pages across the two lists and returns garbage RMSE (~27% for identical data), so
+    # a single whole-file compare cannot be trusted; comparing only [0] would miss a
+    # corrupted extra page. This gate authorises permanent deletion, so any page that
+    # differs (or cannot be compared) blocks the purge.
+    for page in range(old_pages):
+        try:
+            result = subprocess.run(
+                ["magick", "compare", "-metric", "RMSE", f"{old_path}[{page}]", f"{new_path}[{page}]", "null:"],
+                capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
+            )
+            output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
 
-        if result.returncode not in (0, 1):
-            return False, f"compare failed: {output}"
+            if result.returncode not in (0, 1):
+                return False, f"compare failed on page {page}: {output}"
 
-        import re
-        # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
-        # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
-        # it matched "06" as the RMSE.
-        match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
-        if not match:
-            return False, f"parse failed: '{output}'"
+            import re
+            # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
+            # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
+            # it matched "06" as the RMSE.
+            match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
+            if not match:
+                return False, f"parse failed on page {page}: '{output}'"
 
-        rmse = float(match.group(1))
-        if rmse == 0.0:
-            return True, f"IDENTICAL ({old_w}x{old_h})"
-        else:
-            return False, f"PIXEL_DIFF RMSE={rmse}"
+            rmse = float(match.group(1))
+            if rmse != 0.0:
+                return False, f"PIXEL_DIFF page {page} RMSE={rmse}"
 
-    except subprocess.TimeoutExpired:
-        return False, f"compare timeout (>{COMPARE_TIMEOUT_S}s)"
-    except FileNotFoundError:
-        return False, "ImageMagick not found (magick command missing)"
-    except Exception as e:
-        return False, f"compare error: {e}"
+        except subprocess.TimeoutExpired:
+            return False, f"compare timeout on page {page} (>{COMPARE_TIMEOUT_S}s)"
+        except FileNotFoundError:
+            return False, "ImageMagick not found (magick command missing)"
+        except Exception as e:
+            return False, f"compare error on page {page}: {e}"
+
+    return True, f"IDENTICAL ({old_w}x{old_h}, {old_pages} page(s))"
 
 
 def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "none") -> tuple[bool, float, str]:

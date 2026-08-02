@@ -247,6 +247,28 @@ class TestCompareTiffMetadata:
         assert match is True
         assert "IDENTICAL" in detail
 
+    def test_extra_page_difference_blocks_match(self, tmp_path):
+        """The purge gate deletes on this verdict: a difference on any page -- not
+        just page 0 -- must block it. Whole-file `magick compare` pairs pages across
+        lists and returns garbage, so pages are compared pairwise."""
+        import subprocess
+
+        main = tmp_path / "main.tif"
+        thumb_a = tmp_path / "thumb_a.tif"
+        thumb_b = tmp_path / "thumb_b.tif"
+        file1 = tmp_path / "multi1.tif"
+        file2 = tmp_path / "multi2.tif"
+
+        subprocess.run(["magick", "-size", "10x10", "gradient:red-blue", str(main)], capture_output=True)
+        subprocess.run(["magick", "-size", "4x4", "gradient:red-blue", str(thumb_a)], capture_output=True)
+        subprocess.run(["magick", "-size", "4x4", "gradient:blue-red", str(thumb_b)], capture_output=True)
+        subprocess.run(["magick", str(main), str(thumb_a), str(file1)], capture_output=True)
+        subprocess.run(["magick", str(main), str(thumb_b), str(file2)], capture_output=True)
+
+        match, detail = _compare_tiff_metadata(file1, file2)
+        assert match is False
+        assert "PIXEL_DIFF page 1" in detail
+
 
 @pytest.mark.skipif(not MAGICK_AVAILABLE, reason="ImageMagick (magick) not on PATH")
 class TestIsReal16Bit:

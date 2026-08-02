@@ -560,11 +560,34 @@ class TestPs5Ps7Parity:
         mode -Parallel); a fix applied to one has repeatedly been left out of the others.
         """
         source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
-        assert source.count("$metaBackup = Backup-TiffMetadata") == 3, (
+        assert source.count("$metaBackupInfo = Backup-TiffMetadata") == 3, (
             "every worker that can write in place must park the metadata first"
         )
+        # ...fail-closed when the backup was needed but failed (in-place write refused)...
+        assert source.count("$metaBackupInfo.Needed -and -not $metaBackupInfo.Path") == 3
         # ...and every one of them must restore FROM the backup, not from the overwritten source
         assert source.count("$tagSource = if ($metaBackup) { $metaBackup } else {") == 3
+
+    def test_mode8_pixel_gate_and_final_recheck_in_both_paths(self):
+        """The mode 8 delete gate must pixel-compare staged vs source (decode-check alone
+        cannot see a truncated page), and the file that authorises the delete must be
+        re-verified where it actually sits -- the staging move is not atomic cross-volume."""
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        assert source.count("Test-PixelIdentical -SrcPath") == 2, (
+            "sequential and -Parallel workers must both pixel-verify before delete"
+        )
+        assert source.count("final ZIP failed integrity - source preserved") == 2, (
+            "both delete loops must re-verify the final destination before Remove-Item"
+        )
+
+    def test_legacy_in_place_writes_go_through_verified_temp_sibling(self):
+        """Legacy mode (-1) wrote ZIP directly over the only copy; a magick crash destroyed
+        the image. Both legacy workers must write a temp sibling and replace atomically."""
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        assert source.count("$inPlaceFinalDst = $writeDst") == 2, (
+            "Process-TiffJob and the legacy -Parallel worker must both redirect in-place writes"
+        )
+        assert source.count("Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst") == 2
 
     @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
     def test_both_copy_exif_scripts_scope_staging_cleanup(self, script):
