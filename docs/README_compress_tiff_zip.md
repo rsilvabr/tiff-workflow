@@ -57,8 +57,9 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `-Workers` | int | `8` | Parallel jobs (PS7) / throttle limit |
+| `-CapWorkers` | int | `0` | Clamp parallel workers to this value (0 = no cap). Independent of SafeMode |
 | `-DryRun` | switch | off | Show what would be compressed, don't write anything |
-| `-SafeMode` | bool | `$true` | Skip multi-page TIFFs (scanner IR, Photoshop layers) |
+| `-SafeMode` | bool | `$true` | Skip multi-page TIFFs (scanner IR, Photoshop layers). Does NOT cap workers |
 | `-SkipLzwAsCompressed` | bool | `$false` | Treat LZW as already compressed (skip re-compression) |
 | `-Overwrite` | switch | off | Overwrite existing ZIP files |
 | `-DeleteSource` | switch | off | Delete source TIFF after successful compression (mode 8 only) |

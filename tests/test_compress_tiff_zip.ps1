@@ -22,6 +22,16 @@ Describe "compress_tiff_zip_v2.ps1 - Parameter Validation" {
         $content | Should -Match '\$Mode\s*=\s*-1'
         $content | Should -Match '\$Workers\s*=\s*8'
     }
+
+    It "SafeMode no longer caps workers; -CapWorkers is the opt-in cap" {
+        $content = Get-Content $script:ScriptPath -Raw
+        # the hardcoded SafeMode -> 8 cap is gone
+        $content | Should -Not -Match 'Min\(\$script:Workers, 8\)'
+        $content | Should -Not -Match 'Min\(\$Workers, 8\)'
+        $content | Should -Match '\[int\]\$CapWorkers = 0'
+        $content | Should -Match 'Min\(\$script:Workers, \$CapWorkers\)'
+        $content | Should -Match 'Min\(\$Workers, \$CapWorkers\)'
+    }
 }
 
 Describe "compress_tiff_zip_v2.ps1 - StagingDir Check" {

@@ -537,8 +537,15 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         workflow["dry_run"] = Confirm.ask("Dry-run mode?", default=False)
         
         # SafeMode and SkipLzw options
-        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs, cap workers)", default=True)
+        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs)", default=True)
         workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as already compressed?[/cyan] (LZW files will be ignored)", default=False)
+
+        cap_str = Prompt.ask("[cyan]Cap workers?[/cyan] (0 = no cap)", default="0")
+        try:
+            workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS))
+        except ValueError:
+            console.print(f"[yellow]Invalid cap '{cap_str}', no cap applied[/yellow]")
+            workflow["cap_workers"] = 0
 
         # ForceParallel/ForceSequential: offer to toggle detected behavior
         if cfg.config.ps_major >= 7:
@@ -561,10 +568,16 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         cfg.config.last_staging = staging
         dry = input("Dry-run? [y/N]: ").strip().lower()
         workflow["dry_run"] = (dry == "y")
-        safe = input("Safe mode? (skip multi-page TIFFs, cap workers) [Y/n]: ").strip().lower()
+        safe = input("Safe mode? (skip multi-page TIFFs) [Y/n]: ").strip().lower()
         workflow["safe_mode"] = (safe != "n")
         skip_lzw = input("Skip LZW as already compressed? (LZW files will be ignored) [y/N]: ").strip().lower()
         workflow["skip_lzw"] = (skip_lzw == "y")
+        cap_str = input("Cap workers? (0 = no cap) [0]: ").strip()
+        try:
+            workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS)) if cap_str else 0
+        except ValueError:
+            print(f"Invalid cap '{cap_str}', no cap applied")
+            workflow["cap_workers"] = 0
         if cfg.config.ps_major >= 7:
             fp = input("Force sequential? (y/N): ").strip().lower()
             if fp == "y":
@@ -610,6 +623,8 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
             table.add_row("Folder:", workflow.get("folders", [workflow.get("input_dir")])[0].name if workflow.get("folders") else workflow.get("input_dir", "?"))
 
         table.add_row("Workers:", str(workflow.get("workers", 8)))
+        if workflow.get("cap_workers"):
+            table.add_row("Cap workers:", str(workflow["cap_workers"]))
         table.add_row("Staging:", workflow.get("staging") or "disabled")
         table.add_row("Dry-run:", dry)
         if workflow.get("force_parallel"):
@@ -634,6 +649,8 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
             print(f"  Pattern: {workflow.get('pattern', '?')}")
             print(f"  Sessions: {folders_count} folder(s)")
         print(f"  Workers: {workflow.get('workers', 8)}")
+        if workflow.get("cap_workers"):
+            print(f"  Cap workers: {workflow['cap_workers']}")
         print(f"  Staging: {workflow.get('staging') or 'disabled'}")
         print(f"  Dry-run: {dry}")
         if workflow.get("force_parallel"):
@@ -700,6 +717,8 @@ def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: 
         cmd += ["-StagingDir", workflow["staging"]]
     if workflow.get("workers"):
         cmd += ["-Workers", str(clamp_workers(workflow["workers"]))]
+    if workflow.get("cap_workers"):
+        cmd += ["-CapWorkers", str(workflow["cap_workers"])]
     if workflow.get("dry_run"):
         cmd += ["-DryRun"]
     if workflow.get("safe_mode") is False:

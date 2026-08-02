@@ -14,6 +14,7 @@ param(
 
     # Behavior
     [ValidateRange(1, 64)][int]$Workers = 8,
+    [ValidateRange(0, 64)][int]$CapWorkers = 0,  # 0 = no cap; >0 = clamp parallel workers to this value
     [switch]$DryRun,
     [bool]$SafeMode = $true,            # true = skip multi-page TIFFs
     [bool]$SkipLzwAsCompressed = $false, # true = treat LZW as already compressed
@@ -1053,7 +1054,7 @@ if ($Mode -lt 0) {
             $runStagingId = $script:runStagingId
 
             $script:stagingMap = @{}
-            $effectiveWorkersLegacy = if ($script:SafeMode) { [Math]::Min($script:Workers, 8) } else { $script:Workers }
+            $effectiveWorkersLegacy = if ($CapWorkers -gt 0) { [Math]::Min($script:Workers, $CapWorkers) } else { $script:Workers }
 
             if ($script:IS_PS7) {
                 $results = $groupFiles | ForEach-Object -Parallel {
@@ -1786,9 +1787,9 @@ foreach ($group in $groupedTasks) {
     }
 
     $script:stagingMap = @{}
-    $effectiveWorkers = if ($SafeMode) { [Math]::Min($Workers, 8) } else { $Workers }
-    if ($SafeMode -and $Workers -gt 8) {
-        Write-Log "Workers capped to $effectiveWorkers (SafeMode limit)"
+    $effectiveWorkers = if ($CapWorkers -gt 0) { [Math]::Min($Workers, $CapWorkers) } else { $Workers }
+    if ($CapWorkers -gt 0 -and $Workers -gt $CapWorkers) {
+        Write-Log "Workers capped to $effectiveWorkers (CapWorkers limit)"
     }
 
     # Enable parallel processing for all modes including thumbnail generation

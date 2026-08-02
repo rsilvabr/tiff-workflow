@@ -129,6 +129,17 @@ class TestBuildCompressCommand:
         cmd = build_compress_command(workflow, folders=[tmp_path])
         assert "-SafeMode:$false" in cmd
 
+    def test_cap_workers(self, tmp_path):
+        workflow = {"cap_workers": 4}
+        cmd = build_compress_command(workflow, folders=[tmp_path])
+        assert "-CapWorkers" in cmd
+        assert "4" in cmd
+
+    def test_cap_workers_zero_omitted(self, tmp_path):
+        workflow = {"cap_workers": 0}
+        cmd = build_compress_command(workflow, folders=[tmp_path])
+        assert "-CapWorkers" not in cmd
+
     def test_skip_lzw(self, tmp_path):
         workflow = {"skip_lzw": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
