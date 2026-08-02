@@ -128,9 +128,9 @@ Process many folders in one run, each with its own mode, driven by a CSV you edi
 
 ```csv
 Source,Destination,Mode
-F:\2025\Tokyo\TIFF,F:\2025\Tokyo\ZIP_flat,2
-F:\2025\Kyoto\TIFF,F:\2025\Kyoto\TIFF,0
-# F:\2025\Osaka\TIFF,F:\2025\Osaka\TIFF,3
+F:\2025\Recife\TIFF,F:\2025\Recife\ZIP_flat,2
+F:\2025\São Paulo\TIFF,F:\2025\São Paulo\TIFF,0
+# F:\2025\横浜\TIFF,F:\2025\横浜\TIFF,3
 ```
 
 **Workflow:**

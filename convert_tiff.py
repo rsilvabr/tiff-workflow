@@ -3437,6 +3437,16 @@ def run_repeat_last(cfg) -> bool:
 
 
 def main():
+    # Plain print() on a legacy Windows console (cp850/cp1252) raises
+    # UnicodeEncodeError on non-ANSI paths (e.g. 横浜) -- a crash in the middle of a
+    # workflow. Rich's console handles this itself; the plain-text path needs it here.
+    for stream in (sys.stdout, sys.stderr):
+        if stream and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="replace")
+            except Exception:
+                pass
+
     parser = argparse.ArgumentParser(
         description="TIFF Workflow Manager -- interactive wizard for TIFF compression, "
                     "EXIF copy, diagnostics and cleanup.",
