@@ -122,6 +122,32 @@ tiff-workflow/
 
 ---
 
+## Manifest System
+
+Process many folders in one run, each with its own mode, driven by a CSV you edit in Excel:
+
+```csv
+Source,Destination,Mode
+F:\2025\Tokyo\TIFF,F:\2025\Tokyo\ZIP_flat,2
+F:\2025\Kyoto\TIFF,F:\2025\Kyoto\TIFF,0
+# F:\2025\Osaka\TIFF,F:\2025\Osaka\TIFF,3
+```
+
+**Workflow:**
+1. Start workflow **[1] Compress TIFFs**, pick mode and folder
+2. When asked, generate a manifest CSV instead of running (saved to `manifests/`)
+3. Edit paths/modes in Excel, delete rows, comment with `#` to skip
+4. Main menu **[3] Run from manifest** → pick the CSV → confirm → run
+
+- **One entry per folder.** Modes 0/1 (non-recursive) generate one row per folder containing TIFFs; recursive modes (2-9) generate a single row for the root.
+- **Destination column:** only mode **2** honors it (`-OutputDir`). All other modes compute their own output locations — the wrapper prints a warning when a Destination is ignored.
+- **Rerun anytime:** main menu **[2] Repeat last workflow** re-reads the CSV (with all validation) and runs it again.
+- **Encoding:** manifests are written as UTF-8 with BOM so Excel opens them correctly. A manifest re-saved by Excel in ANSI is *refused* (not guessed) — save as "CSV UTF-8".
+- **Safety guards:** paths with `..` refuse the whole manifest; `Mode` accepts Excel floats (`7.0` → 7) but refuses fractions/text/out-of-range; nested or duplicate Source folders warn and require confirmation; mode 2/4/5 entries are scanned for cross-entry output collisions (abort on conflict); mode-8 entries (delete sources) require an explicit confirmation before anything runs.
+- **Manifest compatibility:** manifests are guaranteed to work with the version that generated them. Regenerate after upgrading.
+
+---
+
 ## Requirements
 
 ```
@@ -233,14 +259,14 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ### Latest release
 
-**v2.4** — Audit round 5, data-loss prevention and a 36% speed-up:
-- `copy_exif_to_TIFF_ps5.ps1` did not even parse on PowerShell 5.1 (BOM-less UTF-8 read as ANSI turned `—`/`─` into string delimiters); all scripts are now pure ASCII
-- Modes 0/9 no longer move multi-page TIFFs to `OLD_TIFFs/` before rejecting them — SafeMode now runs before the move
+**v2.2** - Manifest system and five audit rounds of data-loss prevention:
+- **Manifest system:** process many folders in one run from a CSV edited in Excel - one entry per folder, each with its own mode, with fail-closed guards (BOM/ANSI encoding, `..` traversal, cross-entry output collisions, mode-8 delete gate). Generate from workflow [1], run from main menu [3], repeat from [2]
+- `copy_exif_to_TIFF_ps5.ps1` did not even parse on PowerShell 5.1 (BOM-less UTF-8 read as ANSI); all scripts are now pure ASCII
+- Legacy in-place compression silently stripped all EXIF; modes 0/9 no longer strand multi-page TIFFs in `OLD_TIFFs/`
 - `photo.tif` + `photo.tiff` no longer overwrite each other; collision numbering (`_v2`, `_v3`) now covers every mode
-- Mode 8 always runs its ZIP integrity check, including the `[no thumb]` and exiftool-WARN paths
+- Mode 8 always runs its ZIP integrity check, and its abort no longer exits 0
 - Wizard mode 2 finally asks for an output folder (it used to flatten everything into the input root)
-- `copy_exif -OutputDir` numbers same-named files from different sessions instead of silently skipping them
-- Modes 6/7 write inside the `_EXPORT` tree the file came from
+- Modes 6/7 write inside the `_EXPORT` tree the file came from; cross-`_EXPORT` collisions are numbered
 - `Start-Job` (one PowerShell process per file) replaced by in-process runspaces: **5.66 s → 3.60 s** on 24 files / 8 workers
 
 See [`docs/bugs_fixed.md`](docs/bugs_fixed.md) for the complete list.

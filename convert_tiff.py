@@ -24,7 +24,9 @@ COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
 
 import argparse
 import concurrent.futures
+import csv
 import hashlib
+import io
 import json
 import locale
 import os
@@ -38,7 +40,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     from rich.console import Console
@@ -75,6 +77,17 @@ class ToolConfig:
     last_pattern: Optional[str] = None
     last_mode: Optional[int] = None
     last_origin: Optional[str] = None
+    # Journal of the last executed workflow (for "Repeat last workflow").
+    # Stores the fully built command lines -- repeating re-runs them verbatim
+    # (with the PowerShell executable swapped for the currently detected one),
+    # so no wizard state has to be reconstructed. Dry-run is never stored.
+    last_run_kind: Optional[str] = None
+    last_run_label: Optional[str] = None
+    last_run_commands: Optional[List[List[str]]] = None
+    last_run_time: Optional[str] = None
+    # Path of the last manifest CSV run (menu option 3). Only the path is
+    # kept -- a repeat re-reads the CSV through the same loader guards.
+    last_manifest_path: Optional[str] = None
     ps_major: int = 0  # detected at startup, not persisted
     ps_name: str = "powershell"  # "pwsh" or "powershell", not persisted
 
@@ -143,6 +156,72 @@ def detect_powershell_version():
         except Exception:
             pass
     return 0, "powershell", "unknown"
+
+
+# --- Dependency check ----------------------------------------------
+
+BACKEND_SCRIPTS = [
+    "compress_tiff_zip.ps1",
+    "generate_thumbnails.ps1",
+    "copy_exif_to_TIFF_ps7.ps1",
+    "copy_exif_to_TIFF_ps5.ps1",
+]
+
+
+def _probe_version(cmd: List[str], timeout: int = 10) -> Optional[str]:
+    """Run a version probe, return the first non-empty output line or None."""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0:
+            return None
+        for line in (result.stdout or "").splitlines():
+            if line.strip():
+                return line.strip()
+    except Exception:
+        pass
+    return None
+
+
+def check_dependencies(cfg) -> List[Tuple[str, bool, str]]:
+    """Probe external tools. Returns [(name, ok, detail), ...]. Read-only."""
+    results = []
+    magick_ver = _probe_version(["magick", "-version"]) if shutil.which("magick") else None
+    results.append(("magick", magick_ver is not None, magick_ver or "not found on PATH"))
+    exif_ver = _probe_version(["exiftool", "-ver"]) if shutil.which("exiftool") else None
+    results.append(("exiftool", exif_ver is not None, exif_ver or "not found on PATH"))
+    ps_major = cfg.config.ps_major
+    if ps_major > 0:
+        ps_detail = f"PS{ps_major} ({cfg.config.ps_name})"
+        if ps_major < 7:
+            ps_detail += " -- sequential only, parallelism DISABLED"
+        results.append(("PowerShell", True, ps_detail))
+    else:
+        results.append(("PowerShell", False, "not found on PATH"))
+    missing = [s for s in BACKEND_SCRIPTS if not (SCRIPT_DIR / s).exists()]
+    results.append(("backend scripts", not missing,
+                    "all present" if not missing else "missing: " + ", ".join(missing)))
+    results.append(("rich", RICH_AVAILABLE,
+                    "installed" if RICH_AVAILABLE else "plain-text UI (pip install rich)"))
+    return results
+
+
+def show_environment_panel(cfg) -> None:
+    """Print the dependency status panel shown at startup (jxl_photo style)."""
+    checks = check_dependencies(cfg)
+    if RICH_AVAILABLE and console:
+        parts = []
+        for name, ok, _ in checks:
+            mark = "[green][[OK]][/green]" if ok else "[red][[!!]][/red]"
+            parts.append(f"{mark} {name}")
+        console.print(Panel(" | ".join(parts), title="TIFF Workflow Environment", border_style="cyan"))
+        for name, ok, detail in checks:
+            if not ok:
+                console.print(f"[yellow]  {name}: {escape(detail)}[/yellow]")
+    else:
+        print("--- Environment ---")
+        for name, ok, detail in checks:
+            mark = "[OK]" if ok else "[!!]"
+            print(f"  {mark} {name}: {detail}")
 
 
 # --- Helpers ------------------------------------------------------
@@ -1822,6 +1901,22 @@ def _format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.1f}TB"
 
+def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]]) -> None:
+    """Record the last executed workflow for the 'Repeat last workflow' menu entry.
+
+    Only command-driven workflows (1-4, 8) are journaled: the interactive
+    Python workflows (5/6/7) re-ask their own questions and are not repeatable.
+    Commands are stored with dry-run stripped -- a repeat always runs for real.
+    Manifest runs store no commands (None): a repeat re-reads the CSV through
+    the loader guards instead of replaying command lines.
+    """
+    cfg.config.last_run_kind = kind
+    cfg.config.last_run_label = label
+    cfg.config.last_run_commands = [[str(a) for a in cmd] for cmd in (commands or [])] or None
+    cfg.config.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    cfg.save_config()
+
+
 WORKFLOW_OPTIONS = [
     ("1", "Compress TIFFs", "To Zip/Deflate, modes 0-9 (any folder)"),
     ("2", "Fuji: Copy EXIF", "From JPEG to TIFF (AutoFind, S3/S5 Pro)"),
@@ -1835,27 +1930,824 @@ WORKFLOW_OPTIONS = [
 
 
 def show_menu() -> Optional[str]:
-    """Show main menu, return choice."""
+    """Show workflow submenu (option 1 of the main menu), return choice or "0" for back."""
+    valid = [k for k, _, _ in WORKFLOW_OPTIONS] + ["0"]
     if RICH_AVAILABLE and console:
         console.print()
-        table = Table(title="TIFF Workflow Manager -- convert_tiff", box=BOX_SIMPLE, header_style="bold cyan")
+        table = Table(title="New Workflow -- select type", box=BOX_SIMPLE, header_style="bold cyan")
         table.add_column("#", justify="center", style="cyan", width=4)
         table.add_column("Workflow", style="green")
         table.add_column("Description", style="dim")
         for key, name, desc in WORKFLOW_OPTIONS:
             table.add_row(key, name, desc)
+        table.add_row("0", "Back", "Return to main menu")
         console.print(table)
-        choice = Prompt.ask("\n[cyan]Select workflow[/cyan]", choices=["1", "2", "3", "4", "5", "6", "7", "8"], default="1")
+        choice = Prompt.ask("\n[cyan]Select workflow[/cyan]", choices=valid)
     else:
         print("\n============================================")
-        print("  TIFF Workflow Manager -- convert_tiff")
+        print("  New Workflow -- select type")
         print("============================================")
         for key, name, desc in WORKFLOW_OPTIONS:
             print(f"  [{key}] {name:<16} -- {desc}")
+        print("  [0] Back             -- return to main menu")
         print("============================================")
-        choice = input("Select [1]: ").strip() or "1"
+        while True:
+            choice = input("Select: ").strip()
+            if choice in valid:
+                break
+            print(f"Invalid choice. Valid options: {', '.join(valid)}")
 
-    return choice if choice in ("1", "2", "3", "4", "5", "6", "7", "8") else None
+    return choice
+
+
+def show_main_menu(cfg) -> str:
+    """Display main menu - NO DEFAULT (jxl_photo style)."""
+    last_label = cfg.config.last_run_label
+    last_time = cfg.config.last_run_time
+    has_last_run = bool(last_label and (cfg.config.last_run_commands
+                                        or cfg.config.last_run_kind == "manifest"))
+    if has_last_run:
+        repeat_text = f"Repeat last workflow ({last_label} -- {last_time})"
+        if len(repeat_text) > 100:
+            repeat_text = repeat_text[:97] + "..."
+    else:
+        repeat_text = "Repeat last workflow (none saved)"
+
+    has_manifests = get_latest_manifest() is not None
+
+    options = [
+        ("1", "New workflow", True),
+        ("2", repeat_text, has_last_run),
+        ("3", "Run from manifest (CSV)", has_manifests),
+        ("4", "Check dependencies again", True),
+        ("0", "Exit", True),
+    ]
+
+    if RICH_AVAILABLE and console:
+        table = Table(show_header=False, box=None)
+        table.add_column("Key", style="bold cyan")
+        table.add_column("Option")
+        table.add_column("Status", justify="center")
+        for key, desc, available in options:
+            status_str = "" if available else "[dim](unavailable)[/dim]"
+            table.add_row(key, desc, status_str)
+        console.print(Panel(table, title="Main Menu", border_style="green"))
+        return Prompt.ask("Select option", choices=[o[0] for o in options if o[2]])
+
+    print("\n--- Main Menu ---")
+    for key, desc, available in options:
+        status_str = "" if available else " [UNAVAILABLE]"
+        print(f"[{key}] {desc}{status_str}")
+    valid_choices = [o[0] for o in options if o[2]]
+    while True:
+        choice = input("\nSelect option: ").strip()
+        if choice in valid_choices:
+            return choice
+        print(f"Invalid choice. Valid options: {', '.join(valid_choices)}")
+
+
+# --- Manifest System -------------------------------------------------
+
+TIFF_EXTS = {".tif", ".tiff"}
+
+# Modes 2/4/5 can land two entries in the same folder (shared flat Destination,
+# shared rename target, shared sibling ZIP/). Every other mode writes only
+# inside each entry's own Source tree, so the collision scan is skipped there.
+_COLLISION_SCAN_MODES = {2, 4, 5}
+
+# Non-recursive modes: the manifest generator writes one entry per folder
+# containing TIFFs. Recursive modes get a single entry for the root.
+_PER_FOLDER_MODES = {0, 1}
+
+
+def _manifest_error(msg: str) -> None:
+    if RICH_AVAILABLE and console:
+        console.print(f"[red]{escape(msg)}[/red]")
+    else:
+        print(f"ERROR: {msg}")
+
+
+def _is_manifest_header_row(row) -> bool:
+    """True only when the first row really is the CSV header -- not when a
+    data folder happens to be named 'source'. A header names at least one of
+    the other columns."""
+    if not row or row[0].strip().lower() != "source":
+        return False
+    return any(cell.strip().lower() == expected
+               for cell, expected in zip(row[1:3], ("destination", "mode")))
+
+
+def _open_manifest_for_read(manifest_path):
+    """Open a manifest CSV. Returns a text stream, or None if undecodable.
+
+    'utf-8-sig' reads both what we write (UTF-8 with BOM, see
+    generate_manifest) and a plain UTF-8 file, and strips the BOM.
+
+    If the file is not valid UTF-8 at all, Excel re-saved it in the system
+    ANSI codepage. We deliberately do NOT guess an encoding here: guessing
+    wrong yields a path that looks plausible and points somewhere else, and
+    these paths drive a converter that can delete sources in mode 8. Refuse
+    and tell the user how to fix it. (Pure-ASCII manifests are valid UTF-8,
+    so this only ever triggers when there really are non-ASCII paths.)
+    """
+    try:
+        with open(manifest_path, 'r', encoding='utf-8-sig') as f:
+            return io.StringIO(f.read())
+    except UnicodeDecodeError:
+        return None
+
+
+def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Optional[int]]]]:
+    """Parse and validate a manifest CSV. Returns (source, dest, mode) entries
+    -- mode is None for rows without a Mode cell -- or None (with an
+    explanation already printed) when the file cannot be trusted.
+
+    Shared by the wizard and by "Repeat last workflow" so both get the same
+    Mode/traversal guards -- mode 8 deletes sources, so a repeat must never
+    take a laxer path than the wizard did."""
+    entries = []
+    stream = _open_manifest_for_read(manifest_path)
+    if stream is None:
+        _manifest_error(
+            f"Manifest is not UTF-8: {manifest_path}\n"
+            f"Excel re-saved it in the system ANSI codepage, so the paths cannot be "
+            f"decoded reliably -- and a wrongly-decoded path is worse than no run at all. "
+            f"Re-open it in Excel and use 'Save As' -> 'CSV UTF-8 (comma delimited)', "
+            f"or re-generate the manifest.")
+        return None
+    with stream as f:
+        reader = csv.reader(f)
+        first_row = next(reader, None)
+        # Only skip the first row if it really is the header; a manifest
+        # whose header line was deleted must not silently lose entry #1.
+        rows = []
+        if first_row is not None:
+            if _is_manifest_header_row(first_row):
+                rows = list(reader)
+            else:
+                rows = [first_row] + list(reader)
+        for row in rows:
+            if row and len(row) >= 1:
+                source = row[0].strip()
+                is_comment = not source or source.startswith('#')
+                # Empty Destination cell must fall back to Source, not to
+                # "" -- Path("") becomes "." (the CWD) downstream.
+                dest = (row[1].strip() or source) if len(row) > 1 else source
+                # Mode cell: Excel often formats integers as "7.0" -- a
+                # naive isdigit() check would silently turn that into
+                # mode 0 and scatter outputs next to the sources. For the
+                # same reason a FRACTION ("7.5") is refused outright rather
+                # than truncated to 7.
+                entry_mode = None
+                if len(row) > 2 and row[2].strip():
+                    try:
+                        _mode_f = float(row[2].strip())
+                        if not _mode_f.is_integer():
+                            raise ValueError
+                        entry_mode = int(_mode_f)
+                    except ValueError:
+                        _manifest_error(f"Invalid Mode value in manifest: {row[2].strip()!r} (row: {source})")
+                        return None
+                    if not 0 <= entry_mode <= 9:
+                        _manifest_error(f"Mode out of range (0-9) in manifest: {entry_mode} (row: {source})")
+                        return None
+                if not is_comment:
+                    # Validate paths to prevent directory traversal. Check
+                    # path PARTS (not a substring match, which false-
+                    # positives on legitimate names like "2024..final").
+                    if '..' in Path(source).parts or '..' in Path(dest).parts:
+                        # Refuse the whole manifest, do not skip the row.
+                        # Skipping shrank the run silently: the summary
+                        # counts only the entries that LOADED, so a
+                        # dropped folder looks exactly like a folder that
+                        # compressed cleanly. Same fail-closed rule as the
+                        # Mode checks above.
+                        _manifest_error(
+                            f"Path traversal in manifest entry: {source} -> {dest}\n"
+                            f"Use absolute paths (or paths without '..') and run it again.")
+                        return None
+                    entries.append((source, dest, entry_mode))
+
+    if not entries:
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]Manifest is empty or only has comments.[/yellow]")
+        else:
+            print("Manifest is empty or only has comments.")
+        return None
+
+    return entries
+
+
+def generate_manifest(root: Path, mode: int) -> Optional[str]:
+    """Generate a manifest CSV for `root` and return its path.
+
+    Modes 0/1 are non-recursive, so they get one entry per folder containing
+    TIFFs; recursive modes get a single entry for the root. Mode 2 pre-fills
+    the Destination column with <root>/ZIP_flat; every other mode writes
+    Destination == Source (ignored by the backend, edited by hand if needed).
+    """
+    from datetime import datetime
+
+    root = Path(root)
+    tiff_dirs = set()
+    for p in root.rglob("*"):
+        try:
+            if p.is_file() and p.suffix.lower() in TIFF_EXTS:
+                tiff_dirs.add(p.parent)
+        except OSError:
+            continue
+    if not tiff_dirs:
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]No TIFF files found -- nothing to add to the manifest.[/yellow]")
+        else:
+            print("No TIFF files found -- nothing to add to the manifest.")
+        return None
+
+    if mode in _PER_FOLDER_MODES:
+        folders = sorted(tiff_dirs, key=lambda d: str(d).lower())
+    else:
+        folders = [root]
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    manifest_dir = SCRIPT_DIR / "manifests"
+    manifest_dir.mkdir(exist_ok=True)
+    manifest_path = manifest_dir / f"manifest_{timestamp}.csv"
+
+    # utf-8-sig, not plain utf-8: without the BOM, Excel opens a .csv using
+    # the system ANSI codepage, so a path with non-ASCII characters comes out
+    # as mojibake -- and saving from there would write those broken bytes
+    # back. The BOM costs 3 bytes and makes Excel detect UTF-8 correctly.
+    with open(manifest_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(["Source", "Destination", "Mode"])
+        for folder in folders:
+            dest = str(root / "ZIP_flat") if mode == 2 else str(folder)
+            writer.writerow([str(folder), dest, mode])
+
+    return str(manifest_path)
+
+
+def get_latest_manifest() -> Optional[str]:
+    """Get the most recent manifest file."""
+    manifest_dir = SCRIPT_DIR / "manifests"
+    if not manifest_dir.exists():
+        return None
+    manifests = list(manifest_dir.glob("manifest_*.csv"))
+    if not manifests:
+        return None
+    return str(sorted(manifests, key=lambda p: p.stat().st_mtime, reverse=True)[0])
+
+
+def pick_manifest() -> Optional[str]:
+    """Pick a manifest from manifests/ (newest first). With several files
+    the user chooses; with one it is used directly."""
+    manifest_dir = SCRIPT_DIR / "manifests"
+    if not manifest_dir.exists():
+        return None
+    manifests = sorted(manifest_dir.glob("manifest_*.csv"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
+    if not manifests:
+        return None
+    if len(manifests) == 1:
+        return str(manifests[0])
+    shown = manifests[:10]
+    if RICH_AVAILABLE and console:
+        console.print("[bold]Available manifests (newest first):[/bold]")
+        for i, m in enumerate(shown, 1):
+            console.print(f"  [{i}] {m.name}")
+        choice = Prompt.ask("Which manifest?",
+                            choices=[str(i) for i in range(1, len(shown) + 1)], default="1")
+        return str(shown[int(choice) - 1])
+    print("Available manifests (newest first):")
+    for i, m in enumerate(shown, 1):
+        print(f"  [{i}] {m.name}")
+    raw = input("Which manifest? [1]: ").strip() or "1"
+    try:
+        idx = max(1, min(int(raw), len(shown))) - 1
+    except ValueError:
+        idx = 0
+    return str(shown[idx])
+
+
+def view_manifest(manifest_path) -> None:
+    """View manifest contents in a table."""
+    if not Path(manifest_path).exists():
+        return
+
+    entries = []
+    stream = _open_manifest_for_read(manifest_path)
+    if stream is None:
+        _manifest_error(
+            f"Manifest is not UTF-8: {manifest_path}\n"
+            f"Excel re-saved it in the system ANSI codepage. Re-open it and use "
+            f"'Save As' -> 'CSV UTF-8 (comma delimited)', or re-generate it.")
+        return
+    with stream as f:
+        reader = csv.reader(f)
+        first_row = next(reader, None)
+        rows = []
+        if first_row is not None:
+            if _is_manifest_header_row(first_row):
+                rows = list(reader)
+            else:
+                rows = [first_row] + list(reader)
+        for row in rows:
+            if row and not (len(row) == 1 and row[0].strip().startswith('#')):
+                source = row[0].strip()
+                dest = row[1].strip() if len(row) > 1 else source
+                mode = row[2].strip() if len(row) > 2 else "?"
+                if not source.startswith('#'):
+                    entries.append((source, dest, mode))
+
+    if not entries:
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]Manifest is empty.[/yellow]")
+        else:
+            print("Manifest is empty.")
+        return
+
+    if RICH_AVAILABLE and console:
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Source", style="red")
+        table.add_column("Destination", style="green")
+        table.add_column("Mode", style="magenta")
+        for i, (src, dst, mode) in enumerate(entries, 1):
+            table.add_row(str(i), truncate_path(Path(src)), truncate_path(Path(dst)), mode)
+        console.print(Panel(table, title=f"[bold]Manifest[/bold] -- {manifest_path}", border_style="blue"))
+        console.print(f"[dim]Total: {len(entries)} entry(ies)[/dim]")
+    else:
+        print(f"\n=== Manifest: {manifest_path} ===")
+        print(f"Total: {len(entries)} entry(ies)\n")
+        for i, (src, dst, mode) in enumerate(entries, 1):
+            print(f"  {i}. {src}")
+            print(f"     -> {dst} (mode {mode})")
+            print()
+
+
+def confirm_manifest_entries(manifest_path: str, entries: List[Tuple]) -> bool:
+    """Preview the entries and ask for a go-ahead."""
+    if RICH_AVAILABLE and console:
+        console.print(f"\n[bold cyan]Manifest:[/bold cyan] {escape(manifest_path)}")
+        console.print(f"[bold]Entries to process:[/bold] {len(entries)}")
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("#", justify="right", style="dim")
+        table.add_column("Source", style="red")
+        table.add_column("Destination", style="green")
+        table.add_column("Mode", style="magenta")
+        for i, (src, dst, mode) in enumerate(entries[:15], 1):
+            table.add_row(str(i), truncate_path(Path(src)), truncate_path(Path(dst)), str(mode))
+        console.print(table)
+        if len(entries) > 15:
+            console.print(f"[dim]... and {len(entries) - 15} more entries[/dim]")
+        console.print()
+        return Confirm.ask("Proceed with manifest?", default=True)
+
+    print(f"\nManifest: {manifest_path}")
+    print(f"Entries to process: {len(entries)}\n")
+    for i, (src, dst, mode) in enumerate(entries[:15], 1):
+        print(f"  {i}. {src}")
+        print(f"     -> {dst} (mode {mode})")
+    if len(entries) > 15:
+        print(f"  ... and {len(entries) - 15} more entries")
+    print()
+    return not input("Proceed with manifest? [Y/n]: ").strip().lower().startswith('n')
+
+
+def manifest_source_overlaps(entries: List[Tuple]) -> List[Tuple[str, str]]:
+    """Find manifest entries whose Source folders are equal or nested.
+
+    Two entries covering the same tree re-process the same files as two
+    SEPARATE child processes: same outputs written twice, and the collision
+    guard deliberately ignores a file compared with itself, so it cannot see
+    this. Returns a list of (source_a, source_b) tuples."""
+    roots = [(source, os.path.normcase(os.path.abspath(source)))
+             for source, _dest, _mode in entries]
+    overlaps = []
+    for i, (src_a, a) in enumerate(roots):
+        for src_b, b in roots[i + 1:]:
+            if a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep):
+                overlaps.append((src_a, src_b))
+    return overlaps
+
+
+def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
+    """Mirror of Resolve-Output in compress_tiff_zip.ps1, returning only the
+    output FOLDER. Only modes 2/4/5 are resolved -- every other mode writes
+    inside the Source tree and never reaches the collision scan."""
+    parent = f.parent
+    if mode == 2:
+        # Mode 2 is recursive-FLAT: every file under the source lands in the
+        # Destination (or the input root when the cell is empty).
+        return Path(dest_cell) if dest_cell else src_root
+    if mode == 4:
+        name = parent.name
+        if re.search(r"_tiff$", name, re.IGNORECASE):
+            new_name = re.sub(r"_tiff$", "_ZIP", name, flags=re.IGNORECASE)
+        elif re.search(r"tiff$", name, re.IGNORECASE):
+            new_name = re.sub(r"tiff$", "_ZIP", name, flags=re.IGNORECASE)
+        else:
+            new_name = name + "_ZIP"
+        return parent.parent / new_name
+    if mode == 5:
+        grandparent = parent.parent
+        # Never climb above the input root (same rule as the backend).
+        if not str(grandparent).lower().startswith(str(src_root).rstrip("/\\").lower()):
+            grandparent = src_root
+        return grandparent / "ZIP"
+    return None
+
+
+def manifest_output_collisions(entries: List[Tuple]) -> List[Tuple]:
+    """Find files from DIFFERENT manifest entries that would be written to
+    the same output folder with the same stem.
+
+    Each manifest entry runs as a SEPARATE child process, so no child can see
+    a conflict that spans two entries. Only modes 2/4/5 are scanned -- the
+    others write inside each Source's own tree (and overlapping Sources were
+    already refused/warned by manifest_source_overlaps).
+
+    Returns a list of (file_a, file_b, dest_folder) tuples."""
+    by_dest: Dict[str, Dict[str, Path]] = {}
+    collisions = []
+    for source, dest_path, mode in entries:
+        if mode not in _COLLISION_SCAN_MODES:
+            continue
+        src_root = Path(source)
+        try:
+            if not src_root.is_dir():
+                continue
+        except OSError:
+            continue
+        # This walk is the slow part on large trees (recursive glob + per-file
+        # stat) -- say so.
+        if RICH_AVAILABLE and console:
+            console.print(f"[dim]Collision check: scanning {escape(str(src_root))} ...[/dim]")
+        else:
+            print(f"Collision check: scanning {src_root} ...")
+        try:
+            files = sorted(src_root.rglob("*"))
+        except OSError:
+            continue
+        for f in files:
+            try:
+                if not f.is_file() or f.suffix.lower() not in TIFF_EXTS:
+                    continue
+            except OSError:
+                continue
+            out_folder = _resolve_output_folder(f, mode, src_root, dest_path)
+            if out_folder is None:
+                continue
+            key = os.path.normcase(str(out_folder))
+            seen = by_dest.setdefault(key, {})
+            # Outputs are named from the stem, so a stem clash is a clash.
+            # normcase (not .lower()): case-sensitive filesystems treat
+            # Foto.tif/foto.tif as distinct files and must NOT collide.
+            stem = os.path.normcase(f.stem)
+            prev = seen.get(stem)
+            if prev is None:
+                seen[stem] = f
+            elif os.path.normcase(str(prev)) != os.path.normcase(str(f)):
+                collisions.append((prev, f, out_folder))
+    return collisions
+
+
+def build_manifest_entry_cmd(source: str, dest_path: str, mode: int,
+                             workflow: Dict, ps_name: str = "pwsh") -> List[str]:
+    """Build the compress command for a single manifest entry, reusing
+    build_compress_command with a per-entry workflow dict.
+
+    The Destination column is only honored by mode 2 (-OutputDir); every
+    other mode computes its own output location. -DeleteSource goes only to
+    mode-8 entries, and never in a dry run."""
+    entry_wf = dict(workflow)
+    entry_wf["mode"] = mode
+    entry_wf["output_dir"] = dest_path if mode == 2 else None
+    entry_wf["delete_source"] = (mode == 8 and not workflow.get("dry_run"))
+    return build_compress_command(entry_wf, folders=[Path(source)], ps_name=ps_name)
+
+
+def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict) -> bool:
+    """Execute a compress workflow from manifest entries.
+
+    `entries` must be mode-resolved (no None modes -- the caller replaced
+    them with the run's default mode). One child process per entry; a failed
+    entry does not stop the rest. Returns True only when every entry exited
+    cleanly."""
+    if not entries:
+        _manifest_error("No manifest entries found!")
+        return False
+
+    dry_run = workflow.get("dry_run", False)
+    ps_name = cfg.config.ps_name
+
+    # The Destination column is only honored by mode 2 -- every other mode
+    # computes its own output location from the backend's rules.
+    ignored_dests = [(s, d, m) for s, d, m in entries
+                     if m != 2 and d and Path(d) != Path(s)]
+    if ignored_dests:
+        warn = (f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
+                f"Destination column (only mode 2 honors it) -- outputs follow the mode rules.")
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{warn}[/yellow]")
+        else:
+            print(f"WARNING: {warn}")
+        for s, d, m in ignored_dests[:5]:
+            print(f"  mode {m}: {d} (ignored)")
+
+    # Mode 2 with Destination == Source flattens every TIFF into the input
+    # root, mixing outputs with sources (same caveat as the wizard's mode 2).
+    root_mix = [s for s, d, m in entries if m == 2 and Path(d) == Path(s)]
+    if root_mix:
+        warn = (f"Note: {len(root_mix)} mode-2 entry(ies) have Destination == Source: "
+                f"all TIFFs land flattened in the input folder itself.")
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{warn}[/yellow]")
+        else:
+            print(f"WARNING: {warn}")
+
+    # Overlapping source trees: one entry's Source inside another's means the
+    # same files are processed twice by SEPARATE child processes.
+    overlaps = manifest_source_overlaps(entries)
+    if overlaps:
+        head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
+                f"Source folders -- the same files would be processed twice:")
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{head}[/yellow]")
+        else:
+            print(f"WARNING: {head}")
+        for a, b in overlaps[:10]:
+            print(f"  {a}  <->  {b}")
+        if RICH_AVAILABLE and console:
+            ok_overlap = Confirm.ask("Run anyway?", default=False)
+        else:
+            ok_overlap = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+        if not ok_overlap:
+            return False
+
+    # Cross-entry duplicate outputs: refuse loudly instead of silently
+    # compressing only one of the two sources.
+    entry_modes = {m for _, _, m in entries}
+    if entry_modes & _COLLISION_SCAN_MODES:
+        collisions = manifest_output_collisions(entries)
+        if collisions:
+            _manifest_error(
+                "Aborting: manifest entries would write different files to the same output.")
+            for a, b, d in collisions[:10]:
+                msg = f"  {a} + {b}  ->  same name in {d}"
+                if RICH_AVAILABLE and console:
+                    console.print(f"[red]{escape(msg)}[/red]")
+                else:
+                    print(msg)
+            if len(collisions) > 10:
+                print(f"  ... and {len(collisions) - 10} more")
+            _manifest_error(
+                "Rename the inputs, pick another mode, or run the folder directly.")
+            return False
+    else:
+        if RICH_AVAILABLE and console:
+            console.print("[dim]Collision check: skipped (per-source output modes).[/dim]")
+        else:
+            print("Collision check: skipped (per-source output modes).")
+
+    # A missing Source must fail closed: a folder that silently vanishes from
+    # the run looks exactly like a folder that compressed cleanly.
+    missing = [s for s, _, _ in entries if not Path(s).is_dir()]
+    if missing:
+        _manifest_error(f"{len(missing)} manifest Source folder(s) do not exist:")
+        for s in missing[:10]:
+            print(f"  {s}")
+        if len(missing) > 10:
+            print(f"  ... and {len(missing) - 10} more")
+        return False
+
+    # Mode 8 deletes sources. Gate the whole run with the same confirmation
+    # the wizard enforces, ONCE, before anything runs. Without it,
+    # build_manifest_entry_cmd never emits -DeleteSource.
+    if not dry_run and any(m == 8 for _, _, m in entries):
+        if RICH_AVAILABLE and console:
+            if not Confirm.ask("[red]Manifest contains mode-8 entries: source TIFFs will be DELETED after compression. Are you sure?[/red]", default=False):
+                console.print("[dim]Cancelled.[/dim]")
+                return False
+        else:
+            confirm = input("Manifest contains mode-8 entries: source TIFFs will be DELETED. Confirm? [y/N]: ").strip().lower()
+            if confirm != "y":
+                print("Cancelled.")
+                return False
+
+    total_entries = len(entries)
+    ok_count = 0
+    error_count = 0
+    entry_reports: List[Dict] = []
+
+    if RICH_AVAILABLE and console:
+        console.print(f"\n[bold cyan]Executing manifest: {total_entries} entry(ies)[/bold cyan]")
+        if dry_run:
+            console.print("[yellow]DRY RUN MODE[/yellow]")
+        console.print()
+    else:
+        print(f"\nExecuting manifest: {total_entries} entry(ies)")
+        if dry_run:
+            print("DRY RUN MODE")
+        print()
+
+    for i, (source, dest_path, mode) in enumerate(entries, 1):
+        if RICH_AVAILABLE and console:
+            console.print(f"[{i}/{total_entries}] [bold]Mode {mode}[/bold] | {escape(truncate_path(Path(source), 40))} -> {escape(truncate_path(Path(dest_path), 40))}")
+        else:
+            print(f"[{i}/{total_entries}] Mode {mode} | {source} -> {dest_path}")
+
+        cmd = build_manifest_entry_cmd(source, dest_path, mode, workflow, ps_name)
+        rc = run_subprocess(cmd)
+        if rc == 0:
+            ok_count += 1
+            state = "ok"
+        else:
+            error_count += 1
+            state = "failed"
+
+        entry_reports.append({
+            "index": i, "mode": mode, "source": source, "dest": dest_path,
+            "state": state, "rc": rc,
+        })
+
+    _render_manifest_summary(entry_reports, ok_count, error_count, dry_run)
+
+    return error_count == 0
+
+
+def _render_manifest_summary(entry_reports: List[Dict], ok_count: int,
+                             error_count: int, dry_run: bool) -> None:
+    """Print the end-of-manifest block and write the combined wrapper log.
+
+    A manifest can run for hours and the user walks away -- coming back to a
+    single "3 OK" line meant opening N child logs to learn whether anything
+    broke in the middle."""
+    from datetime import datetime
+
+    width = 75
+    rule = "-" * width
+    lines = ["=" * width]
+
+    head = (f"Manifest complete: {len(entry_reports)} entries - "
+            f"{ok_count} ok, {error_count} with failures")
+    if dry_run:
+        head = "[DRY RUN] " + head
+    lines.append(head)
+    lines.append(rule)
+    lines.append(f"  {'#':<3}{'mode':<5}{'state':<8}folder")
+    for rep in entry_reports:
+        folder = rep["source"]
+        max_folder = width - 18
+        if len(folder) > max_folder:
+            folder = "..." + folder[-(max_folder - 3):]
+        lines.append(f"  {rep['index']:<3}{rep['mode']:<5}{rep['state']:<8}{folder}")
+
+    failed = [r for r in entry_reports if r["state"] == "failed"]
+    if failed:
+        lines.append(rule)
+        lines.append("Failed entries:")
+        for r in failed:
+            lines.append(f"  [{r['index']}] {r['source']} (exit {r['rc']})")
+    lines.append("=" * width)
+
+    print()
+    for line in lines:
+        print(line)
+
+    # Combined wrapper log: the per-entry child logs live in
+    # Logs/compress_tiff_zip/, so before this file there was no single place
+    # holding the run's per-entry outcome.
+    try:
+        log_dir = SCRIPT_DIR / "Logs" / "convert_tiff"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"manifest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        with open(log_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(lines))
+            f.write("\n\nChild logs: Logs/compress_tiff_zip/ (one per entry)\n")
+        print(f"Combined log: {log_path}")
+    except OSError:
+        pass
+
+
+def run_manifest_workflow(cfg) -> bool:
+    """Menu option 3: run the compress workflow from a manifest CSV."""
+    manifest_path = pick_manifest()
+    if not manifest_path or not Path(manifest_path).exists():
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]No manifest found. Generate one from workflow [1] (Compress TIFFs).[/yellow]")
+        else:
+            print("No manifest found. Generate one from workflow [1] (Compress TIFFs).")
+        return False
+
+    entries = load_manifest_entries(manifest_path)
+    if entries is None:
+        return False
+
+    # Rows without a Mode cell inherit a default mode asked once per run.
+    default_mode = None
+    if any(m is None for _, _, m in entries):
+        if RICH_AVAILABLE and console:
+            raw = Prompt.ask(
+                "[cyan]Default mode for manifest rows without a Mode cell[/cyan]",
+                choices=[str(m) for m in MODE_NAMES],
+                default=str(cfg.config.last_mode or 0))
+            default_mode = int(raw)
+        else:
+            raw = input(f"Default mode for rows without a Mode cell [{cfg.config.last_mode or 0}]: ").strip()
+            try:
+                default_mode = int(raw) if raw else (cfg.config.last_mode or 0)
+            except ValueError:
+                default_mode = cfg.config.last_mode or 0
+            if not 0 <= default_mode <= 9:
+                default_mode = 0
+    if default_mode is not None:
+        entries = [(s, d, m if m is not None else default_mode) for s, d, m in entries]
+
+    workflow = {
+        "origin": "free_compress",
+        "dest": "zip",
+        "workers": cfg.config.default_workers,
+        "staging": "",
+        "dry_run": False,
+    }
+    step_basic_params(cfg, workflow)
+
+    # Collision policy for mode-2 (flattened) entries, same as the wizard.
+    if any(m == 2 for _, _, m in entries):
+        if RICH_AVAILABLE and console:
+            workflow["duplicate_action"] = Prompt.ask(
+                "[cyan]Duplicate filenames (mode 2)[/cyan]",
+                choices=["Numbered", "Skip", "Overwrite"],
+                default="Numbered",
+            )
+        else:
+            dup = input("Duplicate filenames (Numbered/Skip/Overwrite) [Numbered]: ").strip() or "Numbered"
+            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else "Numbered"
+
+    if not confirm_manifest_entries(manifest_path, entries):
+        return False
+
+    cfg.config.last_workers = workflow["workers"]
+    cfg.config.last_manifest_path = manifest_path
+    cfg.save_config()
+
+    label = f"Manifest: {Path(manifest_path).name} ({len(entries)} entries)"
+    if any(m == 8 for _, _, m in entries):
+        label += " [DELETES SOURCES]"
+    _save_last_run(cfg, "manifest", label, None)
+
+    return execute_manifest_workflow(cfg, entries, workflow)
+
+
+def _repeat_manifest(cfg) -> bool:
+    """Repeat path for a manifest run: re-read the CSV through the same
+    loader guards the wizard used, then re-execute with saved settings.
+    Never replays journaled commands blindly -- the CSV may have been edited
+    (or replaced) since the last run."""
+    manifest_path = cfg.config.last_manifest_path
+    if not manifest_path or not Path(manifest_path).exists():
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]Manifest CSV no longer available.[/yellow]")
+        else:
+            print("Manifest CSV no longer available.")
+        return False
+
+    entries = load_manifest_entries(manifest_path)
+    if entries is None:
+        return False
+
+    default_mode = cfg.config.last_mode or 0
+    entries = [(s, d, m if m is not None else default_mode) for s, d, m in entries]
+
+    workflow = {
+        "origin": "free_compress",
+        "dest": "zip",
+        "workers": clamp_workers(cfg.config.last_workers or cfg.config.default_workers),
+        "staging": cfg.config.last_staging or "",
+        "dry_run": False,
+    }
+    if any(m == 2 for _, _, m in entries):
+        workflow["duplicate_action"] = "Numbered"
+
+    if RICH_AVAILABLE and console:
+        console.print(f"\n[bold cyan]Repeat manifest[/bold cyan]: {escape(Path(manifest_path).name)}")
+        console.print(f"  {len(entries)} entry(ies)")
+        if any(m == 8 for _, _, m in entries):
+            console.print("[red]WARNING: manifest contains mode-8 entries (DELETES sources).[/red]")
+        if not Confirm.ask("Run it now?", default=False):
+            console.print("[dim]Cancelled.[/dim]")
+            return False
+    else:
+        print(f"\n--- Repeat manifest: {Path(manifest_path).name} ---")
+        print(f"  {len(entries)} entry(ies)")
+        if any(m == 8 for _, _, m in entries):
+            print("WARNING: manifest contains mode-8 entries (DELETES sources).")
+        if input("Run it now? [y/N]: ").strip().lower() != "y":
+            print("Cancelled.")
+            return False
+
+    return execute_manifest_workflow(cfg, entries, workflow)
 
 
 # --- Workflow Runners -----------------------------------------------
@@ -1884,6 +2776,27 @@ def run_free_compress(cfg: ToolConfig) -> bool:
     if folder is None:
         return False
     workflow["input_dir"] = str(folder)
+
+    # Offer to generate a manifest CSV of subfolders instead of running now.
+    # The user edits it in Excel, then runs it from the main menu option [3].
+    if RICH_AVAILABLE and console:
+        gen_manifest = Confirm.ask(
+            "[cyan]Generate a manifest CSV for this folder instead of running now?[/cyan]",
+            default=False)
+    else:
+        gen_manifest = input("Generate a manifest CSV for this folder instead of running now? [y/N]: ").strip().lower() == "y"
+    if gen_manifest:
+        manifest_path = generate_manifest(folder, mode)
+        if manifest_path:
+            cfg.config.last_manifest_path = manifest_path
+            cfg.save_config()
+            if RICH_AVAILABLE and console:
+                console.print(f"[green]Manifest saved to:[/green] {escape(manifest_path)}")
+                console.print("[dim]Edit in Excel, then run it from the main menu: [3] Run from manifest[/dim]")
+            else:
+                print(f"Manifest saved to: {manifest_path}")
+                print("Edit in Excel, then run it from the main menu: [3] Run from manifest")
+        return True
 
     # Mode 2 flattens every TIFF into one folder. Without an explicit output folder the
     # backend falls back to the input root, mixing outputs with sources and recompressing
@@ -1994,6 +2907,13 @@ def run_free_compress(cfg: ToolConfig) -> bool:
     cfg.save_config()
 
     cmd = build_compress_command(workflow, folders=[folder], ps_name=cfg.config.ps_name)
+    journal_wf = dict(workflow)
+    journal_wf["dry_run"] = False
+    journal_cmd = build_compress_command(journal_wf, folders=[folder], ps_name=cfg.config.ps_name)
+    label = f"Compress TIFFs -- mode {mode} -- {truncate_path(folder, 60)}"
+    if workflow.get("delete_source"):
+        label += " [DELETES SOURCES]"
+    _save_last_run(cfg, "compress", label, [journal_cmd])
     if RICH_AVAILABLE and console:
         console.print(f"\n[dim]Running: {' '.join(cmd)}[/dim]\n")
     else:
@@ -2106,6 +3026,24 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                     run_subprocess(real_cmd)
                 else:
                     print("Skipped.")
+
+    journal_wf = dict(workflow)
+    journal_wf["dry_run"] = False
+    wf_names = {"copy_exif": "Fuji: Copy EXIF", "compress": "Fuji: Compress", "both": "Fuji: Copy + Compress"}
+    label = (f"{wf_names[workflow_type]} -- pattern '{';'.join(patterns)}' under "
+             f"{truncate_path(root, 60)} ({len(found_folders)} folders)")
+    if workflow_type == "copy_exif":
+        journal_cmds = [build_copy_exif_command(journal_wf, folders=found_folders, ps_name=cfg.config.ps_name)]
+    elif workflow_type == "compress":
+        journal_cmds = [build_compress_command(journal_wf, folders=found_folders, ps_name=cfg.config.ps_name)]
+    else:
+        journal_step1 = dict(journal_wf)
+        journal_step1["compress_zip"] = False
+        journal_cmds = [
+            build_copy_exif_command(journal_step1, folders=found_folders, ps_name=cfg.config.ps_name),
+            build_compress_command(journal_wf, folders=found_folders, ps_name=cfg.config.ps_name),
+        ]
+    _save_last_run(cfg, workflow_type, label, journal_cmds)
 
     if workflow_type == "copy_exif":
         cmd = build_copy_exif_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
@@ -2278,6 +3216,8 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
             cmd += ["-Recursive"]
         if dry_run:
             cmd += ["-DryRun"]
+        _save_last_run(cfg, "thumbnails_remove", f"Thumbnails: REMOVE under {truncate_path(p, 60)}",
+                       [[a for a in cmd if a != "-DryRun"]])
         if RICH_AVAILABLE and console:
             console.print(f"\n[dim]Running: {escape(' '.join(cmd))}[/dim]\n")
         else:
@@ -2353,6 +3293,8 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
     if dry_run:
         cmd += ["-DryRun"]
 
+    _save_last_run(cfg, "thumbnails", f"Thumbnails: {size}px {fmt} under {truncate_path(p, 60)}",
+                   [[a for a in cmd if a != "-DryRun"]])
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[dim]Running: {escape(' '.join(cmd))}[/dim]\n")
@@ -2361,8 +3303,91 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
 
     return run_subprocess(cmd) == 0
 
-
 # --- Main ---------------------------------------------------------
+
+
+def run_repeat_last(cfg) -> bool:
+    """Re-run the journaled commands of the last workflow (menu option 2).
+
+    The stored commands were built with dry-run stripped, so a repeat always
+    runs for real. The PowerShell executable is swapped for the currently
+    detected one, and the backend script path is re-validated before running.
+    Manifest runs take their own path: the CSV is re-read through the loader
+    guards and re-executed, never replayed blind.
+    """
+    if cfg.config.last_run_kind == "manifest":
+        return _repeat_manifest(cfg)
+
+    label = cfg.config.last_run_label
+    commands = cfg.config.last_run_commands
+    if not label or not commands:
+        if RICH_AVAILABLE and console:
+            console.print("[yellow]No saved workflow to repeat.[/yellow]")
+        else:
+            print("No saved workflow to repeat.")
+        return False
+
+    run_cmds = [list(c) for c in commands]
+    for c in run_cmds:
+        if c:
+            c[0] = cfg.config.ps_name
+
+    for c in run_cmds:
+        try:
+            script = Path(c[c.index("-File") + 1])
+        except (ValueError, IndexError):
+            continue
+        if not script.exists():
+            msg = f"Backend script no longer exists: {script}"
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]{escape(msg)}[/red]")
+            else:
+                print(f"ERROR: {msg}")
+            return False
+
+    deletes_sources = any("-DeleteSource" in c for c in run_cmds)
+
+    if RICH_AVAILABLE and console:
+        console.print(f"\n[bold cyan]Repeat last workflow[/bold cyan]")
+        console.print(f"  {escape(label)}")
+        console.print(f"  [dim]saved {cfg.config.last_run_time}[/dim]")
+        for c in run_cmds:
+            console.print(f"\n[dim]{escape(' '.join(c))}[/dim]")
+        console.print("[yellow]Note: dry-run is never inherited -- this runs for real.[/yellow]")
+        if deletes_sources:
+            console.print("[red]WARNING: this workflow DELETES source files (-DeleteSource).[/red]")
+        if not Confirm.ask("Run it now?", default=False):
+            console.print("[dim]Cancelled.[/dim]")
+            return False
+    else:
+        print("\n--- Repeat last workflow ---")
+        print(f"  {label}")
+        print(f"  saved {cfg.config.last_run_time}")
+        for c in run_cmds:
+            print(f"\n  {' '.join(c)}")
+        print("Note: dry-run is never inherited -- this runs for real.")
+        if deletes_sources:
+            print("WARNING: this workflow DELETES source files (-DeleteSource).")
+        if input("Run it now? [y/N]: ").strip().lower() != "y":
+            print("Cancelled.")
+            return False
+
+    for i, c in enumerate(run_cmds):
+        if len(run_cmds) > 1:
+            if RICH_AVAILABLE and console:
+                console.print(f"\n[cyan]=== Step {i + 1}/{len(run_cmds)} ===[/cyan]")
+            else:
+                print(f"\n=== Step {i + 1}/{len(run_cmds)} ===")
+        result = run_subprocess(c)
+        if result != 0:
+            msg = f"Step {i + 1} failed (exit {result}). Remaining steps skipped."
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]{msg}[/red]")
+            else:
+                print(f"ERROR: {msg}")
+            return False
+    return True
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -2377,59 +3402,57 @@ def main():
 
     # Detect PowerShell version at startup
     ps_major, ps_name, ps_version = detect_powershell_version()
-    ps_label = f"PS{ps_major} ({ps_name})" if ps_major > 0 else "Unknown"
     cfg.config.ps_major = ps_major
     cfg.config.ps_name = ps_name  # store for use in command builders
 
-    while True:
-        if RICH_AVAILABLE and console:
-            console.print("\n[bold cyan]========================================[/bold cyan]")
-            console.print("[bold cyan]  TIFF Workflow Manager -- convert_tiff  [/bold cyan]")
-            console.print("[bold cyan]========================================[/bold cyan]")
-            # Show PS version
-            ps_color = "green" if ps_major >= 7 else "yellow"
-            console.print(f"[dim]PowerShell: [bold {ps_color}]{ps_label}[/bold {ps_color}] -- "
-                          f"{'parallelism ENABLED' if ps_major >= 7 else 'sequential (PS5.1) -- parallelism DISABLED'}[/dim]")
-        else:
-            print("\n========================================")
-            print("  TIFF Workflow Manager -- convert_tiff")
-            print("========================================")
-            print(f"PowerShell: {ps_label} -- {'parallelism ENABLED' if ps_major >= 7 else 'sequential -- parallelism DISABLED'}")
+    show_environment_panel(cfg)
 
-        choice = show_menu()
-        if choice is None:
+    while True:
+        choice = show_main_menu(cfg)
+
+        if choice == "0":
             if RICH_AVAILABLE and console:
-                console.print("[red]Invalid choice.[/red]")
+                console.print("[dim]Done.[/dim]")
             else:
-                print("Invalid choice.")
+                print("Done.")
+            break
+
+        if choice == "4":
+            ps_major, ps_name, ps_version = detect_powershell_version()
+            cfg.config.ps_major = ps_major
+            cfg.config.ps_name = ps_name
+            show_environment_panel(cfg)
             continue
 
-        if choice == "1":
-            run_free_compress(cfg)
-        elif choice == "2":
-            _run_exif_or_compress(cfg, "copy_exif")
-        elif choice == "3":
-            _run_exif_or_compress(cfg, "compress")
-        elif choice == "4":
-            _run_exif_or_compress(cfg, "both")
-        elif choice == "5":
-            run_undo_old_tiffs(cfg)
-        elif choice == "6":
-            run_purge_old_tiffs(cfg)
-        elif choice == "7":
-            run_diagnose_tiffs(cfg)
-        elif choice == "8":
-            run_generate_thumbnails(cfg)
+        if choice == "3":
+            run_manifest_workflow(cfg)
+            continue
 
-        if RICH_AVAILABLE and console:
-            if not Confirm.ask("\n[cyan]Run another workflow?[/cyan]", default=False):
-                console.print("[dim]Done.[/dim]")
-                break
-        else:
-            again = input("\nRun another workflow? [y/N]: ").strip().lower()
-            if not again.startswith("y"):
-                print("Done.")
-                break
+        if choice == "2":
+            run_repeat_last(cfg)
+            continue
+
+        # choice == "1": New workflow -- pick the type
+        wf = show_menu()
+        if wf == "0":
+            continue
+
+        if wf == "1":
+            run_free_compress(cfg)
+        elif wf == "2":
+            _run_exif_or_compress(cfg, "copy_exif")
+        elif wf == "3":
+            _run_exif_or_compress(cfg, "compress")
+        elif wf == "4":
+            _run_exif_or_compress(cfg, "both")
+        elif wf == "5":
+            run_undo_old_tiffs(cfg)
+        elif wf == "6":
+            run_purge_old_tiffs(cfg)
+        elif wf == "7":
+            run_diagnose_tiffs(cfg)
+        elif wf == "8":
+            run_generate_thumbnails(cfg)
 
 
 if __name__ == "__main__":

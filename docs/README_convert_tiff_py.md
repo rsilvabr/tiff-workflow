@@ -124,6 +124,60 @@ value falls back to the default instead of aborting at PowerShell parameter bind
 
 ---
 
+## Manifest System (main menu option 3)
+
+Run the Compress workflow (modes 0-9) over many folders in one pass, driven by a
+CSV edited in Excel.
+
+**Generate:** start workflow [1] (Compress TIFFs), pick mode and folder, and answer
+"yes" when asked to generate a manifest instead of running. The CSV is saved to
+`manifests/manifest_<timestamp>.csv`:
+
+- Modes 0/1 (non-recursive): one row per folder containing TIFFs.
+- Modes 2-9 (recursive): a single row for the root folder.
+- Mode 2 pre-fills `Destination` with `<root>/ZIP_flat`.
+
+**Format:**
+
+```csv
+Source,Destination,Mode
+F:\2025\Tokyo\TIFF,F:\2025\Tokyo\ZIP_flat,2
+# F:\2025\Osaka\TIFF,F:\2025\Osaka\TIFF,3
+```
+
+- Written as UTF-8 **with BOM** so Excel detects the encoding. A manifest re-saved
+  by Excel in ANSI is refused, not guessed (paths drive a tool that can delete
+  sources in mode 8).
+- Rows starting with `#` are skipped. An empty `Destination` falls back to `Source`.
+- An empty `Mode` cell inherits a default mode asked once per run.
+- `Mode` accepts Excel floats (`7.0` → 7) but refuses fractions, text, and values
+  outside 0-9 — any invalid row refuses the whole manifest.
+- Only mode **2** honors the `Destination` column; other modes compute their own
+  outputs (a warning lists ignored Destinations).
+
+**Run:** main menu [3] lists manifests (newest first), shows a preview table, asks
+for workers/staging/dry-run (and the duplicate policy when mode 2 is present), then
+executes **one child process per entry**. A failed entry does not stop the rest;
+the end-of-run summary lists every entry's state and is written to
+`Logs/convert_tiff/manifest_<timestamp>.log`.
+
+**Safety guards (fail closed):**
+
+- Paths containing `..` refuse the whole manifest.
+- Duplicate or nested Source folders warn and require confirmation (default: no).
+- Mode 2/4/5 entries are scanned for cross-entry output collisions before anything
+  runs; a conflict aborts the run.
+- Missing Source folders refuse the run.
+- Mode-8 entries (delete sources) require an explicit confirmation once, before any
+  entry starts; `-DeleteSource` is passed only to mode-8 entries, and never in a
+  dry run.
+
+**Repeat:** main menu [2] ("Repeat last workflow") re-reads the manifest CSV through
+the same loader guards and re-executes it — it never replays stored command lines,
+so edits to the CSV between runs are honored.
+
+---
+
 ## AutoFind
 
 Recursively scans a root folder for sessions matching the chosen pattern. Shows a table with session name, TIFF count, and truncated path. Prompts for confirmation before processing.
@@ -141,6 +195,7 @@ Config saved to `~/.convert_tiff_config.json`:
 - `last_pattern` -- last AutoFind pattern
 - `last_mode` -- last mode selected
 - `last_origin` -- last workflow used
+- `last_manifest_path` -- last manifest CSV run (repeat re-reads it via the loader)
 
 ---
 
