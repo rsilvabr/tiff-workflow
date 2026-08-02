@@ -140,13 +140,14 @@ In modes 0 and 9 this check runs **before** the original is moved to `OLD_TIFFs/
 MULTI (2 pages - skipped, original untouched) | scan_ir.tif
 ```
 
-A TIFF with extra pages is only treated as "single-page with thumbnail" when every extra page reports one of these `tiff:subfiletype` values:
+A TIFF with extra pages is treated as "single-page with thumbnail(s)" when every extra page is either:
 
-- `REDUCEDIMAGE` / `REDUCED`
+- tagged `REDUCEDIMAGE` / `REDUCED`, **or**
+- **strictly smaller than the main image** -- a thumbnail is a thumbnail even when the tag lies. ImageMagick rewrites multi-page files and stamps `PAGE` on every page, so a previously recompressed Capture One file (small thumbnail marked `PAGE`) would otherwise be skipped as genuinely multi-page.
 
-If any extra page has an empty, missing, or other subfiletype value, SafeMode marks the file as multi-page and skips it. This is **fail-closed** behavior: when in doubt, the file is not touched.
+If any extra page is full-size without a whitelisted tag (scanner IR, Photoshop layer, real second photo), SafeMode marks the file as multi-page and skips it. This is **fail-closed** behavior: when in doubt, the file is not touched.
 
-> **Note:** `copy_exif_to_TIFF_ps*.ps1` uses a broader whitelist (`REDUCEDIMAGE`/`REDUCED`/`MASK`/`PAGE`) because those scripts preserve all existing pages while copying metadata. `compress_tiff_zip.ps1` only trusts `REDUCEDIMAGE`/`REDUCED` because `-GenerateThumbnail` discards extra pages and replaces them with a generated thumbnail.
+> **Note:** `copy_exif_to_TIFF_ps*.ps1` uses a broader tag whitelist (`REDUCEDIMAGE`/`REDUCED`/`MASK`/`PAGE`) because those scripts preserve all existing pages while copying metadata. `compress_tiff_zip.ps1` only trusts `REDUCEDIMAGE`/`REDUCED` (plus the size rule) because `-GenerateThumbnail` discards extra pages and replaces them with a generated thumbnail.
 
 ```
 SKIP Multi-page TIFFs: SafeMode=$true

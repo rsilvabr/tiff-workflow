@@ -172,8 +172,11 @@ function Get-TiffPageCount {
 function Test-TiffHasOnlySubfilePages {
     <#
     .SYNOPSIS
-        Checks whether all pages beyond IFD[0] are non-independent subfile pages.
-        Empty/missing subfiletype is treated as non-thumbnail (fail-closed).
+        Checks whether all pages beyond IFD[0] are non-independent subfile pages
+        (thumbnails/previews). An extra page counts as a thumbnail when its subfiletype
+        is in $AllowedSubfileTypes OR when it is strictly smaller than the main image.
+        A full-size extra page with an empty/missing/unlisted tag is treated as a real
+        page (fail-closed).
 
     .PARAMETER Path
         Path to the TIFF file.
@@ -203,18 +206,37 @@ function Test-TiffHasOnlySubfilePages {
 
     if ($PageCount -le 1) { return $true }
 
-    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $Path) -TimeoutSec $TimeoutSec
+    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]|%w|%h`n", $Path) -TimeoutSec $TimeoutSec
     if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
 
-    $subfileTypes = @($r.Output)
+    $lines = @($r.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
     # Fewer lines than pages means we could not classify every extra page -> fail closed
-    if ($subfileTypes.Count -lt $PageCount) { return $false }
+    if ($lines.Count -lt $PageCount) { return $false }
+
+    # A page is a thumbnail when its tag says so -- or when it is strictly smaller than
+    # the main image. The tag alone is unreliable: ImageMagick rewrites multi-page files
+    # and stamps PAGE on every page, so a Capture One file whose thumbnail lost its
+    # REDUCEDIMAGE marker (e.g. after an earlier magick rewrite) was skipped as
+    # genuinely multi-page. A full-size extra page (scanner IR, Photoshop layer, real
+    # second photo) is never a thumbnail regardless of this rule.
+    $mainW = 0; $mainH = 0
+    $mainParts = "$($lines[0])".Trim() -split '\|'
+    if ($mainParts.Count -ge 3) {
+        [void][int]::TryParse($mainParts[1], [ref]$mainW)
+        [void][int]::TryParse($mainParts[2], [ref]$mainH)
+    }
 
     for ($i = 1; $i -lt $PageCount; $i++) {
-        $st = if ($subfileTypes[$i]) { "$($subfileTypes[$i])".Trim() } else { "" }
-        if ($st -notin $AllowedSubfileTypes) {
-            return $false
+        $parts = "$($lines[$i])".Trim() -split '\|'
+        $st = "$($parts[0])".Trim()
+        if ($st -in $AllowedSubfileTypes) { continue }
+        $w = 0; $h = 0
+        if ($parts.Count -ge 3) {
+            [void][int]::TryParse($parts[1], [ref]$w)
+            [void][int]::TryParse($parts[2], [ref]$h)
         }
+        $isReducedSize = ($mainW -gt 0 -and $mainH -gt 0 -and $w -gt 0 -and $h -gt 0 -and $w -lt $mainW -and $h -lt $mainH)
+        if (-not $isReducedSize) { return $false }
     }
     return $true
 }

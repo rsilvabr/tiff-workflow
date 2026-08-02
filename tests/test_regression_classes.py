@@ -307,14 +307,18 @@ def test_legacy_mode_leaves_old_tiffs_untouched(tmp_path, shell):
     )
 
 
-def make_multipage_tiff(path, subfiletypes):
+def make_multipage_tiff(path, subfiletypes, sizes=None):
     """Multi-page TIFF (main + reduced preview + optional MASK page) with the
     given NewSubfileType markers written per IFD, e.g. [None, 1, 4] for a
-    scanner RGB + preview + IR file."""
+    scanner RGB + preview + IR file. `sizes` overrides the default geometry
+    (main large, REDUCEDIMAGE small, others large)."""
     pages = []
     for i, st in enumerate(subfiletypes):
         p = path.parent / f"_pg{i}_{path.name}"
-        size = "64x48" if i == 0 else ("16x12" if st == 1 else "64x48")
+        if sizes is not None:
+            size = sizes[i]
+        else:
+            size = "64x48" if i == 0 else ("16x12" if st == 1 else "64x48")
         subprocess.run(
             ["magick", "-size", size, "plasma:fractal", "-depth", "16", str(p)],
             capture_output=True, check=True, timeout=120,
@@ -392,6 +396,33 @@ class TestMultiPageCompressE2E:
         assert sts[1] in ("REDUCEDIMAGE", "REDUCED"), f"thumbnail marker lost: {sts[1]!r}"
         assert rmse_pages(tmp_path / "OLD_TIFFs" / "c1_style.tif",
                           tmp_path / "c1_style.tif") == "0 (0)"
+
+    def test_page_tagged_thumbnail_compresses_anyway(self, tmp_path, shell):
+        """A thumbnail is a thumbnail even when the tag lies: ImageMagick stamps
+        PAGE on every page it rewrites, so a previously recompressed Capture One
+        file (small thumbnail marked PAGE) was skipped as genuinely multi-page.
+        Size, not just the tag, classifies the page."""
+        make_multipage_tiff(tmp_path / "rewritten_c1.tif", [2, 2], sizes=["64x48", "16x12"])
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "OK" in result.stdout, result.stdout
+        assert "MULTI" not in result.stdout, result.stdout
+        assert (tmp_path / "OLD_TIFFs" / "rewritten_c1.tif").exists()
+
+    def test_full_size_second_page_still_skips(self, tmp_path, shell):
+        """The dimension rule must not open the gate for real pages: a full-size
+        untagged extra page (second photo, Photoshop layer) is still MULTI."""
+        make_multipage_tiff(tmp_path / "two_photos.tif", [None, None], sizes=["64x48", "64x48"])
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+
+        assert "MULTI" in result.stdout, result.stdout
+        assert not (tmp_path / "OLD_TIFFs").exists(), \
+            "a skipped file must never be moved to OLD_TIFFs"
 
 
 @requires_shell
