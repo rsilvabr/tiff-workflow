@@ -1761,7 +1761,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             return (old_file, new_file, detail)
         return None
 
-    workers = cfg.config.last_workers or cfg.config.default_workers
+    workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         for result in executor.map(_verify, items):
             if result:
@@ -2389,21 +2389,30 @@ def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -
         return parent.parent / new_name
     if mode == 5:
         grandparent = parent.parent
-        # Never climb above the input root (same rule as the backend).
-        if not str(grandparent).lower().startswith(str(src_root).rstrip("/\\").lower()):
+        # Never climb above the input root (same rule as the backend). A plain
+        # startswith() matches "C:\database" for root "C:\data" -- compare on
+        # path parts instead of raw prefixes.
+        try:
+            inside = os.path.commonpath([str(grandparent), str(src_root)]).lower() == str(src_root).rstrip("/\\").lower()
+        except ValueError:
+            inside = False  # different drives
+        if not inside:
             grandparent = src_root
         return grandparent / "ZIP"
     return None
 
 
 def manifest_output_collisions(entries: List[Tuple]) -> List[Tuple]:
-    """Find files from DIFFERENT manifest entries that would be written to
-    the same output folder with the same stem.
+    """Find files that would be written to the same output folder with the
+    same stem -- across different manifest entries OR within a single entry
+    (mode 2 flattens recursively, so <src>/a/foto.tif and <src>/b/foto.tif
+    share one destination). Within one entry the backend would apply
+    DuplicateAction, but with Skip/Overwrite that means a silently dropped
+    or overwritten image, so flagging is deliberate.
 
-    Each manifest entry runs as a SEPARATE child process, so no child can see
-    a conflict that spans two entries. Only modes 2/4/5 are scanned -- the
-    others write inside each Source's own tree (and overlapping Sources were
-    already refused/warned by manifest_source_overlaps).
+    Only modes 2/4/5 are scanned -- the others write inside each Source's
+    own tree (and overlapping Sources were already refused/warned by
+    manifest_source_overlaps).
 
     Returns a list of (file_a, file_b, dest_folder) tuples."""
     by_dest: Dict[str, Dict[str, Path]] = {}

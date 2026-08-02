@@ -78,6 +78,25 @@ def no_subprocess(monkeypatch):
     return calls
 
 
+def _confirm(monkeypatch, value):
+    """Confirm.ask exists only when rich is importable; the plain-text path
+    uses input(). Patching Confirm unconditionally breaks the suite without rich."""
+    if convert_tiff.RICH_AVAILABLE:
+        monkeypatch.setattr(convert_tiff.Confirm, "ask",
+                            staticmethod(lambda *a, **k: value))
+    else:
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "y" if value else "n")
+
+
+def _prompt(monkeypatch, value):
+    """Prompt.ask exists only when rich is importable (see _confirm)."""
+    if convert_tiff.RICH_AVAILABLE:
+        monkeypatch.setattr(convert_tiff.Prompt, "ask",
+                            staticmethod(lambda *a, **k: value))
+    else:
+        monkeypatch.setattr("builtins.input", lambda *a, **k: str(value))
+
+
 # --- Encoding / parsing (tests 1-8) ----------------------------------
 
 
@@ -291,9 +310,12 @@ class TestOutputCollisions:
 
         assert manifest_output_collisions(entries)
 
-    def test_mode4_rename_target_collides(self, tmp_path):
-        """session1/photo_TIFF + session2/photo_TIFF renamed _TIFF->_ZIP under
-        the same parent must collide."""
+    def test_mode4_rename_targets_do_not_collide(self, tmp_path):
+        """Negative cases for mode 4 (_TIFF -> _ZIP rename). A positive
+        cross-entry mode-4 collision cannot exist on a case-insensitive
+        filesystem: colliding outputs require two source folders renaming to
+        the SAME _ZIP under the same grandparent, which is already refused as
+        a source overlap."""
         pa = tmp_path / "s1" / "photo_TIFF"
         pb = tmp_path / "s2" / "photo_TIFF"
         pa.mkdir(parents=True)
@@ -330,13 +352,11 @@ class TestExecuteGuards:
         src.mkdir()
         entries = [(str(src), str(src), 8)]
 
-        monkeypatch.setattr(convert_tiff.Confirm, "ask",
-                            staticmethod(lambda *a, **k: False))
+        _confirm(monkeypatch, False)
         assert execute_manifest_workflow(_cfg(), entries, _workflow()) is False
         assert no_subprocess == [], "gate declined -> nothing may run"
 
-        monkeypatch.setattr(convert_tiff.Confirm, "ask",
-                            staticmethod(lambda *a, **k: True))
+        _confirm(monkeypatch, True)
         assert execute_manifest_workflow(_cfg(), entries, _workflow()) is True
         assert len(no_subprocess) == 1
         assert "-DeleteSource" in no_subprocess[0]
@@ -347,8 +367,7 @@ class TestExecuteGuards:
         a.mkdir()
         b.mkdir()
         entries = [(str(a), str(a), 0), (str(b), str(b), 8)]
-        monkeypatch.setattr(convert_tiff.Confirm, "ask",
-                            staticmethod(lambda *a, **k: True))
+        _confirm(monkeypatch, True)
 
         assert execute_manifest_workflow(_cfg(), entries, _workflow()) is True
         assert "-DeleteSource" not in no_subprocess[0]
@@ -372,8 +391,7 @@ class TestExecuteGuards:
     def test_overlap_declined_refuses_the_run(self, tmp_path, monkeypatch, no_subprocess):
         entries = [(str(tmp_path), str(tmp_path), 3),
                    (str(tmp_path / "sub"), str(tmp_path / "sub"), 3)]
-        monkeypatch.setattr(convert_tiff.Confirm, "ask",
-                            staticmethod(lambda *a, **k: False))
+        _confirm(monkeypatch, False)
 
         assert execute_manifest_workflow(_cfg(), entries, _workflow()) is False
         assert no_subprocess == []
@@ -442,7 +460,10 @@ class TestExecution:
         def boom(*a, **k):
             raise AssertionError("mode-8 gate must not fire on a dry run")
 
-        monkeypatch.setattr(convert_tiff.Confirm, "ask", staticmethod(boom))
+        if convert_tiff.RICH_AVAILABLE:
+            monkeypatch.setattr(convert_tiff.Confirm, "ask", staticmethod(boom))
+        else:
+            monkeypatch.setattr("builtins.input", boom)
 
         assert execute_manifest_workflow(_cfg(), entries, _workflow(dry_run=True)) is True
         assert "-DryRun" in no_subprocess[0]
@@ -457,7 +478,7 @@ class TestExecution:
         monkeypatch.setattr(convert_tiff, "pick_manifest", lambda: str(manifest))
         monkeypatch.setattr(convert_tiff, "step_basic_params", lambda cfg, wf: True)
         monkeypatch.setattr(convert_tiff, "confirm_manifest_entries", lambda p, e: True)
-        monkeypatch.setattr(convert_tiff.Prompt, "ask", staticmethod(lambda *a, **k: "3"))
+        _prompt(monkeypatch, "3")
 
         assert run_manifest_workflow(_cfg()) is True
         assert no_subprocess[0][no_subprocess[0].index("-Mode") + 1] == "3"
@@ -499,8 +520,7 @@ class TestRepeat:
             return real_loader(path)
 
         monkeypatch.setattr(convert_tiff, "load_manifest_entries", tracking_loader)
-        monkeypatch.setattr(convert_tiff.Confirm, "ask",
-                            staticmethod(lambda *a, **k: True))
+        _confirm(monkeypatch, True)
 
         assert run_repeat_last(cfg) is True
         assert loader_calls == [str(manifest)], "repeat must re-read the CSV via the loader"

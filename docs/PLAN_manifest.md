@@ -1,6 +1,8 @@
 # Plano: Sistema de Manifest (port do jxl-photo)
 
-Status: **planejado, não implementado**. Referência: `jxl-photo/jxl_photo.py`
+Status: **implementado** (v2.2) — ver `README.md` seção "Manifest System" e
+`tests/test_manifest.py`. Este documento é o plano original, mantido para
+referência histórica. Referência: `jxl-photo/jxl_photo.py`
 (funções `_load_manifest_entries`, `_execute_manifest_workflow`,
 `_generate_manifest`, `_manifest_output_collisions`, `_manifest_source_overlaps`)
 e seus testes (`tests/test_audit_priority2.py`,

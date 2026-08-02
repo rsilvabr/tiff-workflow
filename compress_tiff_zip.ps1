@@ -115,14 +115,22 @@ $script:runStagingId  = [guid]::NewGuid().ToString('N')
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
 trap {
-    Write-Log "Interrupted! Cleaning up staging files..." "WARN"
+    # Every terminating error landed here, not just Ctrl+C: a real failure was logged as
+    # "Interrupted!" and `break` swallowed it, so callers (wizard, CI) read the run as
+    # success. Only a pipeline stop counts as an interrupt; anything else exits 1.
+    $isInterrupt = $_.Exception -is [System.Management.Automation.PipelineStoppedException]
+    if ($isInterrupt) {
+        Write-Log "Interrupted! Cleaning up staging files..." "WARN"
+    } else {
+        Write-Log "FATAL (unhandled error) | $($_.Exception.Message) | cleaning up staging files..." "ERROR"
+    }
     foreach ($dir in $script:cleanupDirs) {
         if (Test-Path -LiteralPath $dir) {
             # Only remove staging files created by this run (run-scoped prefix)
-            Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -like "$($script:runStagingId)_*" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $dir -Force | Where-Object { $_.Name -like "$($script:runStagingId)_*" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
     }
-    break
+    if ($isInterrupt) { break } else { exit 1 }
 }
 
 # Detect PowerShell version for parallel execution
@@ -269,7 +277,10 @@ function Resolve-Output {
         [string]$zipSuffix,
         [string]$zipSubfolderName,
         [string]$exportMarker,
-        [string]$exportZipSubfolder
+        [string]$exportZipSubfolder,
+        # Mode 7 only; was read from the parent scope via dynamic scoping, which breaks
+        # under Set-StrictMode or dot-sourcing
+        [string]$exportTiffSubfolder = "TIFF"
     )
     $parent     = $tiff.DirectoryName
     $stem       = $tiff.BaseName
@@ -315,8 +326,15 @@ function Resolve-Output {
             $grandparent = Split-Path $parent -Parent
             # Never climb above the input root the user selected: a TIFF sitting directly
             # in the root would otherwise land in the drive root, outside the chosen tree.
-            if (-not $grandparent -or -not $grandparent.ToLowerInvariant().StartsWith($inputRootP.ToLowerInvariant())) {
+            # Prefix compare needs a separator boundary: "C:\data" also prefixes "C:\database".
+            if (-not $grandparent) {
                 $grandparent = $inputRootP
+            } else {
+                $gpL = $grandparent.TrimEnd('\', '/').ToLowerInvariant()
+                $rootL = $inputRootP.ToLowerInvariant()
+                if (-not ($gpL -eq $rootL -or $gpL.StartsWith("$rootL\"))) {
+                    $grandparent = $inputRootP
+                }
             }
             $zipFolder = Join-Path $grandparent $zipSubfolderName
             return Join-Path $zipFolder "$stem.tif"
@@ -347,7 +365,7 @@ function Resolve-Output {
             for ($i = 0; $i -lt $parts.Count; $i++) {
                 if ($exportIdx -lt 0 -and $parts[$i] -ieq $exportMarker) { $exportIdx = $i; continue }
                 # The TIFF subfolder only counts when it sits below the marker
-                if ($exportIdx -ge 0 -and $parts[$i] -ieq $ExportTiffSubfolder) { $tifIdx = $i; break }
+                if ($exportIdx -ge 0 -and $parts[$i] -ieq $exportTiffSubfolder) { $tifIdx = $i; break }
             }
             if ($exportIdx -lt 0 -or $tifIdx -lt 0) { return $null }
             $exportRoot = Get-PathPrefix $parts $exportIdx $inputRootP $exportMarker
@@ -1364,9 +1382,13 @@ Write-Log "Mode: $Mode | Workers: $Workers | OutputDir: $(if ($OutputDir) { $Out
 
 # Collect files from all input directories
 $allFiles = @()
+$seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($inputRoot in $inputRoots) {
     $dirFiles = @(Get-Files-ForMode $Mode $inputRoot)
     foreach ($df in $dirFiles) {
+        # Overlapping -InputDir roots ("dir;dir\sub" in a recursive mode) discovered the same
+        # file twice: it was compressed twice (mode 2) or moved to OLD_TIFFs twice (0/9).
+        if (-not $seenFiles.Add($df.FullName)) { continue }
         $df | Add-Member -NotePropertyName 'InputRoot' -NotePropertyValue $inputRoot -Force
         $allFiles += $df
     }
@@ -1442,7 +1464,7 @@ $collisionNotes = @{}  # Modes 6/7: rename notes appended to result lines
 foreach ($f in $files) {
     # Use the original input root provided by the user for path resolution
     $fileInputRoot = if ($f.InputRoot) { $f.InputRoot } else { $f.DirectoryName }
-    $finalDst = Resolve-Output $f $Mode $fileInputRoot $OutputDir $ZipSuffix $ZipSubfolderName $ExportMarker $ExportZipSubfolder
+    $finalDst = Resolve-Output $f $Mode $fileInputRoot $OutputDir $ZipSuffix $ZipSubfolderName $ExportMarker $ExportZipSubfolder $ExportTiffSubfolder
     if (-not $finalDst) {
         # Report instead of dropping silently, otherwise the "N/N processed" total never closes
         $script:skipTotal++

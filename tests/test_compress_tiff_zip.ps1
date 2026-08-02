@@ -65,6 +65,7 @@ Describe "compress_tiff_zip_v2.ps1 - Parallel Processing" {
         $content = Get-Content $script:ScriptPath -Raw
         # This is OK - Process-Results is called sequentially after parallel
         # The bug was in the old version that incremented inside parallel
+        $content | Should -Not -Match 'Interlocked'
     }
 }
 

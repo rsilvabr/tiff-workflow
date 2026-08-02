@@ -32,7 +32,15 @@ pytest tests --cov=..
 - `detect_powershell_version()` - PS version detection
 - `build_compress_command()` - command building
 - `build_copy_exif_command()` - command building
-- `_compare_tiff_metadata()` - TIFF comparison using magick compare RMSE
+- `_compare_tiff_metadata()` - TIFF comparison using magick compare RMSE (all pages)
+- `_is_real_16bit()` - diagnose: real 16-bit vs padded 8-bit, incl. Capture One 2-page layout
+- `_compress_padded_files()`, `run_purge_old_tiffs()` gates, `_wrap_ps5_command()`, page-count gates
+
+### `test_manifest.py` covers
+- Manifest encoding (BOM in, ANSI refused, `;`-delimited refused, `;` in paths refused)
+- Mode parsing (Excel floats, fractions/text/out-of-range refused, comment rows ignored whole)
+- Guards: `..` traversal, source overlaps, output collisions (modes 2/4/5), mode-8 delete gate
+- Generation (per-folder vs root entries, backup/output folder exclusions), repeat-last
 
 ## Regression Suite (`test_regression_classes.py`)
 
@@ -48,6 +56,7 @@ group per class, and each test was mutation-checked: revert the fix, the test fa
 | Fail-closed gates | A gate that authorises deleting or replacing data must treat "cannot read" as failure |
 | Staging / collision | A run must not touch another run's in-flight files, and a failed move must not lose both files |
 | Round-trip | What a workflow creates, the same workflow must be able to find and undo -- thumbnail generate/remove, and OLD_TIFFs restore surviving a per-file failure |
+| Multi-page | SafeMode skips MASK (scanner IR) files without moving them; REDUCEDIMAGE markers survive compression; mode 8 deletes the `.tiff` source only with pixel-identical output; copy_exif copies Make/Model end to end |
 
 The PowerShell parts run **end to end through the real shells** (`powershell` and `pwsh`) instead
 of through Pester, because the Pester suites below need Pester 5 and the dev boxes here still ship

@@ -40,18 +40,23 @@ $script:runStagingId = [guid]::NewGuid().ToString('N')
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
 trap {
+    # Every terminating error landed here, not just Ctrl+C: a real failure was logged as
+    # "Interrupted!" and `break` swallowed it, so callers read the run as success. Only a
+    # pipeline stop counts as an interrupt; anything else exits 1.
+    $isInterrupt = $_.Exception -is [System.Management.Automation.PipelineStoppedException]
     if ($logFile) {
-        Write-Log "Interrupted! Cleaning up staging files..." "WARN"
+        if ($isInterrupt) { Write-Log "Interrupted! Cleaning up staging files..." "WARN" }
+        else { Write-Log "FATAL (unhandled error) | $($_.Exception.Message) | cleaning up staging files..." "ERROR" }
     } else {
         Write-Host "Interrupted! Cleaning up..." -ForegroundColor Yellow
     }
     foreach ($dir in $script:cleanupDirs) {
         if (Test-Path -LiteralPath $dir) {
             # Only remove staging files created by this run
-            Get-ChildItem -LiteralPath $dir | Where-Object { $_.Name -like "$($script:runStagingId)_*" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+            Get-ChildItem -LiteralPath $dir -Force | Where-Object { $_.Name -like "$($script:runStagingId)_*" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
         }
     }
-    break
+    if ($isInterrupt) { break } else { exit 1 }
 }
 
 $script:counterTotal = 0

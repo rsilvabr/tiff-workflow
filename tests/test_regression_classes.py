@@ -307,6 +307,160 @@ def test_legacy_mode_leaves_old_tiffs_untouched(tmp_path, shell):
     )
 
 
+def make_multipage_tiff(path, subfiletypes):
+    """Multi-page TIFF (main + reduced preview + optional MASK page) with the
+    given NewSubfileType markers written per IFD, e.g. [None, 1, 4] for a
+    scanner RGB + preview + IR file."""
+    pages = []
+    for i, st in enumerate(subfiletypes):
+        p = path.parent / f"_pg{i}_{path.name}"
+        size = "64x48" if i == 0 else ("16x12" if st == 1 else "64x48")
+        subprocess.run(
+            ["magick", "-size", size, "plasma:fractal", "-depth", "16", str(p)],
+            capture_output=True, check=True, timeout=120,
+        )
+        pages.append(p)
+    subprocess.run(
+        ["magick"] + [str(p) for p in pages] + [str(path)],
+        capture_output=True, check=True, timeout=120,
+    )
+    args = ["exiftool", "-overwrite_original"]
+    for i, st in enumerate(subfiletypes):
+        if st is None:
+            args.append(f"-IFD{i}:SubfileType=")
+        else:
+            args.append(f"-IFD{i}:SubfileType#={st}")
+    args.append(str(path))
+    subprocess.run(args, capture_output=True, check=True, timeout=120)
+    for p in pages:
+        p.unlink()
+    return path
+
+
+def read_subfiletypes(path):
+    """Symbolic subfiletype of every page, in order."""
+    result = subprocess.run(
+        ["magick", "identify", "-format", "%[tiff:subfiletype]\n", str(path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    return [ln.strip() for ln in result.stdout.splitlines() if not ln.startswith("identify:")]
+
+
+def rmse_pages(path_a, path_b, page=0):
+    """RMSE of one page pair; '0 (0)' means pixel-identical."""
+    result = subprocess.run(
+        ["magick", "compare", "-metric", "RMSE", f"{path_a}[{page}]", f"{path_b}[{page}]", "null:"],
+        capture_output=True, text=True, timeout=120,
+    )
+    return (result.stderr or result.stdout).strip()
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestMultiPageCompressE2E:
+    """The CRITICAL v2.4 class (multi-page TIFF stranded in OLD_TIFFs) and the
+    subfiletype-preservation fix, exercised end to end with real files."""
+
+    def test_mask_page_skipped_original_untouched(self, tmp_path, shell):
+        """Scanner RGB+IR: the MASK page is not in the compress whitelist, so
+        SafeMode must skip the file WITHOUT moving it to OLD_TIFFs."""
+        scan = make_multipage_tiff(tmp_path / "scan_ir.tif", [None, 1, 4])
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+
+        assert "MULTI" in result.stdout, result.stdout
+        assert scan.exists(), "skipped multi-page TIFF vanished from its folder"
+        assert not (tmp_path / "OLD_TIFFs").exists(), \
+            "a skipped file must never be moved to OLD_TIFFs"
+
+    def test_reducedimage_markers_survive_compression(self, tmp_path, shell):
+        """Capture One layout (main + REDUCEDIMAGE thumbnail): ImageMagick drops
+        NewSubfileType on rewrite, so the backend must restore it -- otherwise the
+        next run sees a 'genuine' multi-page file and thumbnail detection breaks."""
+        make_multipage_tiff(tmp_path / "c1_style.tif", [None, 1])
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "OK" in result.stdout
+        sts = read_subfiletypes(tmp_path / "c1_style.tif")
+        assert len(sts) == 2, f"page count changed: {sts}"
+        assert sts[0] == "", f"IFD0 must stay untagged, got {sts[0]!r}"
+        assert sts[1] in ("REDUCEDIMAGE", "REDUCED"), f"thumbnail marker lost: {sts[1]!r}"
+        assert rmse_pages(tmp_path / "OLD_TIFFs" / "c1_style.tif",
+                          tmp_path / "c1_style.tif") == "0 (0)"
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestMode8DeleteE2E:
+    def test_mode8_deletes_tiff_source_output_pixel_identical(self, tmp_path, shell):
+        """The only end-to-end run of the delete path: .tiff source must be gone,
+        .tif output must exist, and pixels must match the original exactly."""
+        work = tmp_path / "work"
+        work.mkdir()
+        src = make_tiff(work / "photo.tiff")
+        reference = tmp_path / "reference.tif"
+        shutil.copy2(src, reference)
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
+                         "-StagingDir", str(tmp_path / "staging")], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert not src.exists(), ".tiff source was not deleted"
+        out = work / "photo.tif"
+        assert out.exists(), "compressed .tif output missing"
+        assert read_compression(out).lower() in ("zip", "adobe deflate")
+        assert rmse_pages(reference, out) == "0 (0)", "pixels differ from the deleted source"
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestCopyExifE2E:
+    def test_exif_copied_from_jpeg_to_tiff(self, tmp_path, shell):
+        """First behavioral test of the actual copy: Make/Model from the JPEG
+        must land on the TIFF, and the exit code must be 0."""
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        work = tmp_path / "S5pro"
+        work.mkdir()
+        make_tiff(work / "photo.tif")
+        subprocess.run(
+            ["magick", "-size", "64x48", "gradient:", "-depth", "8", str(work / "photo.jpg")],
+            capture_output=True, check=True, timeout=120,
+        )
+        subprocess.run(
+            ["exiftool", "-overwrite_original", "-Make=FUJIFILM", "-Model=FinePix S5Pro",
+             str(work / "photo.jpg")],
+            capture_output=True, check=True, timeout=120,
+        )
+
+        result = run_ps(shell, script, ["-InputDir", str(work)], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert read_tag(work / "photo.tif", "EXIF:Make") == "FUJIFILM"
+        assert read_tag(work / "photo.tif", "EXIF:Model") == "FinePix S5Pro"
+
+    def test_miss_exits_0_but_failonwarn_exits_1(self, tmp_path, shell):
+        """A TIFF without a JPEG pair is a MISS (warning class): default contract
+        keeps exit 0, -FailOnWarn turns it into a gateable failure."""
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        work = tmp_path / "S5pro"
+        work.mkdir()
+        make_tiff(work / "lonely.tif")
+
+        ok = run_ps(shell, script, ["-InputDir", str(work)], tmp_path)
+        assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
+
+        strict = run_ps(shell, script, ["-InputDir", str(work), "-FailOnWarn"], tmp_path)
+        assert strict.returncode == 1, f"{strict.stdout}\n{strict.stderr}"
+
+
 @requires_shell
 @requires_tools
 @pytest.mark.skipif("pwsh" not in SHELLS, reason="thumbnail backend is exercised under pwsh")
