@@ -120,6 +120,8 @@ tiff-workflow/
 
 **Safe Mode** (default: ON) automatically skips multi-page TIFFs (scanner IR files, Photoshop layers) to protect proprietary IFD structures.
 
+**Folder exclusion** (`-ExcludeFolders "_EXPORT;temp"`): skips whole folder trees by name during discovery, in every mode. Segment match only (`_EXPORT` never touches `My_EXPORT_photos`), and every run logs what was excluded. The wizard offers your last list as the default (stored in your local config) — a fresh install defaults to nothing excluded.
+
 ---
 
 ## Manifest System

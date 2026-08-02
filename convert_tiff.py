@@ -77,6 +77,10 @@ class ToolConfig:
     last_pattern: Optional[str] = None
     last_mode: Optional[int] = None
     last_origin: Optional[str] = None
+    # Per-machine default for -ExcludeFolders (';'-separated folder NAMES).
+    # Lives in the local config, never hardcoded: a fresh install defaults to
+    # empty so nobody silently skips folders they did not choose to skip.
+    last_exclude_folders: Optional[str] = None
     # Journal of the last executed workflow (for "Repeat last workflow").
     # Stores the fully built command lines -- repeating re-runs them verbatim
     # (with the PowerShell executable swapped for the currently detected one),
@@ -547,6 +551,18 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
             console.print(f"[yellow]Invalid cap '{cap_str}', no cap applied[/yellow]")
             workflow["cap_workers"] = 0
 
+        excl_default = cfg.config.last_exclude_folders or ""
+        excl = Prompt.ask(
+            "[cyan]Exclude folders?[/cyan] (';'-separated folder names, '-' = none)",
+            default=excl_default or "-"
+        ).strip()
+        if excl in ("-", "", "none"):
+            workflow["exclude_folders"] = ""
+            cfg.config.last_exclude_folders = None
+        else:
+            workflow["exclude_folders"] = excl
+            cfg.config.last_exclude_folders = excl
+
         # ForceParallel/ForceSequential: offer to toggle detected behavior
         if cfg.config.ps_major >= 7:
             if Confirm.ask("[yellow]Force sequential? (override parallelism)[/yellow]", default=False):
@@ -578,6 +594,16 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         except ValueError:
             print(f"Invalid cap '{cap_str}', no cap applied")
             workflow["cap_workers"] = 0
+        excl_default = cfg.config.last_exclude_folders or ""
+        excl = input(f"Exclude folders? (';'-separated names, '-' = none) [{excl_default or '-'}]: ").strip()
+        if excl == "":
+            excl = excl_default
+        if excl in ("-", "none"):
+            workflow["exclude_folders"] = ""
+            cfg.config.last_exclude_folders = None
+        else:
+            workflow["exclude_folders"] = excl
+            cfg.config.last_exclude_folders = excl
         if cfg.config.ps_major >= 7:
             fp = input("Force sequential? (y/N): ").strip().lower()
             if fp == "y":
@@ -625,6 +651,8 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
         table.add_row("Workers:", str(workflow.get("workers", 8)))
         if workflow.get("cap_workers"):
             table.add_row("Cap workers:", str(workflow["cap_workers"]))
+        if workflow.get("exclude_folders"):
+            table.add_row("[yellow]Excluding:[/yellow]", workflow["exclude_folders"])
         table.add_row("Staging:", workflow.get("staging") or "disabled")
         table.add_row("Dry-run:", dry)
         if workflow.get("force_parallel"):
@@ -651,6 +679,8 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
         print(f"  Workers: {workflow.get('workers', 8)}")
         if workflow.get("cap_workers"):
             print(f"  Cap workers: {workflow['cap_workers']}")
+        if workflow.get("exclude_folders"):
+            print(f"  Excluding: {workflow['exclude_folders']}")
         print(f"  Staging: {workflow.get('staging') or 'disabled'}")
         print(f"  Dry-run: {dry}")
         if workflow.get("force_parallel"):
@@ -719,6 +749,8 @@ def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: 
         cmd += ["-Workers", str(clamp_workers(workflow["workers"]))]
     if workflow.get("cap_workers"):
         cmd += ["-CapWorkers", str(workflow["cap_workers"])]
+    if workflow.get("exclude_folders"):
+        cmd += ["-ExcludeFolders", workflow["exclude_folders"]]
     if workflow.get("dry_run"):
         cmd += ["-DryRun"]
     if workflow.get("safe_mode") is False:

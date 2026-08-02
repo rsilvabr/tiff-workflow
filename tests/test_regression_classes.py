@@ -453,6 +453,63 @@ class TestMode8DeleteE2E:
 @requires_shell
 @requires_tools
 @pytest.mark.parametrize("shell", SHELLS)
+class TestExcludeFoldersE2E:
+    """-ExcludeFolders '_EXPORT': the _EXPORT tree is never scanned, everything
+    else in the hierarchy is processed, and the exclusion is logged."""
+
+    def _tree(self, tmp_path):
+        photoset = tmp_path / "PhotoSet"
+        export_tiff = photoset / "_EXPORT" / "TIFF"
+        selecao = photoset / "Selecao"
+        export_tiff.mkdir(parents=True)
+        selecao.mkdir()
+        make_tiff(photoset / "img.tif")
+        make_tiff(selecao / "img2.tif")
+        make_tiff(export_tiff / "edit.tif")
+        return photoset
+
+    def test_export_tree_never_touched(self, tmp_path, shell):
+        photoset = self._tree(tmp_path)
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "9", "-InputDir", str(photoset),
+                         "-ExcludeFolders", "_EXPORT"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "Excluded" in result.stdout
+        assert read_compression(photoset / "img.tif").lower() in ("zip", "adobe deflate")
+        assert read_compression(photoset / "Selecao" / "img2.tif").lower() in ("zip", "adobe deflate")
+        assert read_compression(photoset / "_EXPORT" / "TIFF" / "edit.tif").lower() != "zip", (
+            "a file inside _EXPORT was processed despite -ExcludeFolders"
+        )
+        assert not (photoset / "_EXPORT" / "TIFF" / "OLD_TIFFs").exists()
+
+    def test_exclusion_is_segment_match_not_substring(self, tmp_path, shell):
+        photoset = tmp_path / "PhotoSet"
+        lookalike = photoset / "My_EXPORT_photos"
+        lookalike.mkdir(parents=True)
+        make_tiff(lookalike / "keep.tif")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "9", "-InputDir", str(photoset),
+                         "-ExcludeFolders", "_EXPORT"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert read_compression(lookalike / "keep.tif").lower() in ("zip", "adobe deflate"), (
+            "'My_EXPORT_photos' was excluded by a substring match -- only exact segments may match"
+        )
+
+    def test_path_entry_rejected_with_exit_1(self, tmp_path, shell):
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "9", "-InputDir", str(tmp_path),
+                         "-ExcludeFolders", r"foo\bar"], tmp_path)
+        assert result.returncode == 1
+        assert "not paths" in result.stdout
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
 class TestCopyExifE2E:
     def test_exif_copied_from_jpeg_to_tiff(self, tmp_path, shell):
         """First behavioral test of the actual copy: Make/Model from the JPEG

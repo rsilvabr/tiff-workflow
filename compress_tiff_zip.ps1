@@ -25,6 +25,7 @@ param(
     [string]$StagingDir = "",
     [ValidateSet("Skip", "Numbered", "Overwrite")][string]$DuplicateAction = "Numbered",
     [int]$MagickTimeout = 30,
+    [string]$ExcludeFolders = "",        # ';'-separated folder NAMES to skip during discovery (any mode)
 
     # Thumbnail generation
     [switch]$GenerateThumbnail,     # Generate embedded thumbnail in TIFF
@@ -55,6 +56,22 @@ $script:ThumbQuality = $ThumbQuality
 $script:ThumbPage = $ThumbPage
 $script:SkipCompressedWithThumb = $SkipCompressedWithThumb.IsPresent
 $script:DuplicateAction = $DuplicateAction
+
+# -- Excluded folder names ------------------------------------------
+# ';'-separated folder NAMES (not paths): any file whose directory contains a
+# segment matching one of these (case-insensitive) is skipped during discovery,
+# in every mode. Segment match only, so "_EXPORT" never touches "My_EXPORT_photos".
+$script:excludeNames = @()
+foreach ($entry in ($ExcludeFolders -split ';')) {
+    $entry = $entry.Trim()
+    if (-not $entry) { continue }
+    if ($entry -match '[\\/]') {
+        Write-Host "ERROR: -ExcludeFolders takes folder NAMES, not paths: '$entry'" -ForegroundColor Red
+        Write-Host "       Use a ';'-separated list of bare names, e.g. -ExcludeFolders '_EXPORT;temp'" -ForegroundColor Yellow
+        exit 1
+    }
+    $script:excludeNames += $entry
+}
 
 # -----------------------------------------------------------------
 
@@ -1406,18 +1423,29 @@ Write-Log "Mode: $Mode | Workers: $Workers | OutputDir: $(if ($OutputDir) { $Out
 # Collect files from all input directories
 $allFiles = @()
 $seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$excludedCount = 0
 foreach ($inputRoot in $inputRoots) {
     $dirFiles = @(Get-Files-ForMode $Mode $inputRoot)
     foreach ($df in $dirFiles) {
         # Overlapping -InputDir roots ("dir;dir\sub" in a recursive mode) discovered the same
         # file twice: it was compressed twice (mode 2) or moved to OLD_TIFFs twice (0/9).
         if (-not $seenFiles.Add($df.FullName)) { continue }
+        if ($script:excludeNames.Count -gt 0) {
+            $segHit = $false
+            foreach ($seg in ($df.DirectoryName -split '[\\/]')) {
+                if ($seg -in $script:excludeNames) { $segHit = $true; break }
+            }
+            if ($segHit) { $excludedCount++; continue }
+        }
         $df | Add-Member -NotePropertyName 'InputRoot' -NotePropertyValue $inputRoot -Force
         $allFiles += $df
     }
     if ($inputRoots.Count -gt 1 -and $dirFiles.Count -gt 0) {
         Write-Log "  Found $($dirFiles.Count) TIFF(s) in: $inputRoot"
     }
+}
+if ($script:excludeNames.Count -gt 0) {
+    Write-Log "Excluded $excludedCount file(s) under: $($script:excludeNames -join '; ')"
 }
 
 $files = $allFiles

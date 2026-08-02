@@ -32,6 +32,17 @@ Describe "compress_tiff_zip_v2.ps1 - Parameter Validation" {
         $content | Should -Match 'Min\(\$script:Workers, \$CapWorkers\)'
         $content | Should -Match 'Min\(\$Workers, \$CapWorkers\)'
     }
+
+    It "-ExcludeFolders filters by path segment and rejects paths" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\[string\]\$ExcludeFolders = ""'
+        # segment match (never substring), applied centrally during collection
+        $content | Should -Match '\$seg -in \$script:excludeNames'
+        # entries containing a path separator are rejected with exit 1
+        $content | Should -Match "-ExcludeFolders takes folder NAMES, not paths"
+        # and every run logs what was excluded -- an exclusion is never invisible
+        $content | Should -Match 'Excluded \$excludedCount file\(s\) under:'
+    }
 }
 
 Describe "compress_tiff_zip_v2.ps1 - StagingDir Check" {

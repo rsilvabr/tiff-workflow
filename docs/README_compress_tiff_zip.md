@@ -67,6 +67,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-ForceSequential` | switch | off | Force parallelism OFF (use if PS7 detected but want sequential) |
 | `-StagingDir` | string | `""` | SSD staging folder for faster I/O. Files moved to final destination after each group |
 | `-DuplicateAction` | string | `"Numbered"` | Mode 2 collision handling: `Skip`, `Numbered` (v2, v3...), or `Overwrite` |
+| `-ExcludeFolders` | string | `""` | `';'`-separated folder **names** skipped during discovery, in every mode. Segment match (case-insensitive): `_EXPORT` skips any `...\_EXPORT\...` tree but never `My_EXPORT_photos`. Entries containing `\` or `/` are rejected -- names only, no paths. Every run logs `Excluded N file(s) under: ...` so an exclusion is never invisible |
 
 ### Thumbnail Generation (v1.2+)
 

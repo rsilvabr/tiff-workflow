@@ -140,6 +140,17 @@ class TestBuildCompressCommand:
         cmd = build_compress_command(workflow, folders=[tmp_path])
         assert "-CapWorkers" not in cmd
 
+    def test_exclude_folders(self, tmp_path):
+        workflow = {"exclude_folders": "_EXPORT;temp"}
+        cmd = build_compress_command(workflow, folders=[tmp_path])
+        assert "-ExcludeFolders" in cmd
+        assert "_EXPORT;temp" in cmd
+
+    def test_exclude_folders_empty_omitted(self, tmp_path):
+        workflow = {"exclude_folders": ""}
+        cmd = build_compress_command(workflow, folders=[tmp_path])
+        assert "-ExcludeFolders" not in cmd
+
     def test_skip_lzw(self, tmp_path):
         workflow = {"skip_lzw": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
