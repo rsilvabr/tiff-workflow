@@ -13,7 +13,8 @@ param(
     [switch]$Overwrite,
     [switch]$AutoFind,
     [string]$FolderPattern = "S5pro",
-    [int]$MagickTimeout = 30
+    [int]$MagickTimeout = 30,
+    [switch]$FailOnWarn
 )
 # ------------------------------------------------------------------
 
@@ -420,8 +421,16 @@ function Invoke-S5ProFolder {
                 return @{ Result = "MISS | $($p.TifName) | no matching JPEG (base: $($p.TifBase))"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
+            # The _\d{3,4}$ strip in Find-JpegPair can match an unrelated JPEG
+            # (foto_2024.tif -> foto.jpg): EXIF copied from the wrong file must be loud.
+            $heurMatch = ($p.UsedBase -and $p.UsedBase -cne $p.TifBase)
+            $okPrefix = if ($heurMatch) { "WARN (heuristic JPEG match)" } else { "OK" }
+            $heurSuffix = if ($heurMatch) { " | TIFF base '$($p.TifBase)' matched JPEG base '$($p.UsedBase)'" } else { "" }
+
             if ($skipExifL) {
                 $firstExif = exiftool -q -q -G1 -s -EXIF:all $p.Tiff 2>$null | Select-Object -First 1
+                # Fail-closed: an unreadable TIFF must not be overwritten by the copy below
+                if ($LASTEXITCODE -ne 0) { return @{ Result = "ERROR (exiftool EXIF check) | $($p.TifName) | cannot inspect TIFF, not overwriting"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false } }
                 if ($firstExif) { return @{ Result = "SKIP (already has EXIF) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false } }
             }
 
@@ -493,7 +502,7 @@ function Invoke-S5ProFolder {
 
             if (-not $compressL) {
                 $copyNote = if ($tiffCopied) { " -> $finalDirL" } else { "" }
-                return @{ Result = "OK | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
+                return @{ Result = "$okPrefix | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote$heurSuffix"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
             $comp = exiftool -s -s -s -Compression $tiffTarget 2>$null
@@ -502,7 +511,7 @@ function Invoke-S5ProFolder {
                 return @{ Result = "ERROR (exiftool check) | $($p.TifName) | cannot detect compression"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-                return @{ Result = "OK+SKIP-ZIP ($comp) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
+                return @{ Result = "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = $false }
             }
 
             $runIdL = $using:runStagingIdCapture
@@ -534,7 +543,7 @@ function Invoke-S5ProFolder {
             }
 
             if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-            return @{ Result = "OK+ZIP | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
+            return @{ Result = "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { 'OK+ZIP' }) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$heurSuffix"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
         }
 
         # Process results and build staging map
@@ -565,6 +574,10 @@ function Invoke-S5ProFolder {
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
                         Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
                         if ((Test-Path -LiteralPath $destPath) -and ((Get-Item -LiteralPath $destPath).Length -eq $stageSize)) {
+                            # The staged ZIP is a new file with "now" as mtime; the plain
+                            # EXIF-only path preserves the source date via exiftool -P, so
+                            # the ZIP path does the same for consistency.
+                            try { (Get-Item -LiteralPath $destPath).LastWriteTime = (Get-Item -LiteralPath $tif.FullName).LastWriteTime } catch { }
                             $moved++
                         } else {
                             $script:errTotal++
@@ -653,4 +666,4 @@ if ($script:multiTotal -gt 0) {
 }
 Write-Log "Log: $logFile"
 
-if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
+if ($script:errTotal -gt 0 -or ($FailOnWarn -and ($script:warnTotal + $script:missTotal) -gt 0)) { exit 1 } else { exit 0 }

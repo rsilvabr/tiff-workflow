@@ -72,7 +72,18 @@ Describe "copy_exif_to_TIFF_ps7.ps1 - CopiedTiffPath" {
 Describe "copy_exif_to_TIFF_ps7.ps1 - Error Handling" {
     It "Exits 1 when errors occurred" {
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match 'if \(\$script:errTotal -gt 0\) \{ exit 1 \}'
+        $content | Should -Match 'if \(\$script:errTotal -gt 0 -or \(\$FailOnWarn -and \(\$script:warnTotal \+ \$script:missTotal\) -gt 0\)\) \{ exit 1 \}'
+    }
+
+    It "-SkipIfTiffHasExif fails closed when exiftool cannot read the TIFF" {
+        $content = Get-Content $script:ScriptPath -Raw
+        # an unreadable TIFF must be an ERROR, not silently overwritten
+        $content | Should -Match 'ERROR \(exiftool EXIF check\).*\| cannot inspect TIFF, not overwriting'
+    }
+
+    It "Heuristic JPEG match (stripped _NNN suffix) surfaces as WARN, not silent OK" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'WARN \(heuristic JPEG match\)'
     }
 }
 

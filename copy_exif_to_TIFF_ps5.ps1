@@ -13,7 +13,8 @@ param(
     [switch]$Overwrite,
     [switch]$AutoFind,
     [string]$FolderPattern = "S5pro",
-    [int]$MagickTimeout = 30
+    [int]$MagickTimeout = 30,
+    [switch]$FailOnWarn
 )
 # ------------------------------------------------------------------
 
@@ -393,8 +394,16 @@ function Invoke-S5ProFolder {
                 continue
             }
 
+            # The _\d{3,4}$ strip in Find-JpegPair can match an unrelated JPEG
+            # (foto_2024.tif -> foto.jpg): EXIF copied from the wrong file must be loud.
+            $heurMatch = ($p.UsedBase -and $p.UsedBase -cne $p.TifBase)
+            $okPrefix = if ($heurMatch) { "WARN (heuristic JPEG match)" } else { "OK" }
+            $heurSuffix = if ($heurMatch) { " | TIFF base '$($p.TifBase)' matched JPEG base '$($p.UsedBase)'" } else { "" }
+
             if ($skipExifL) {
                 $firstExif = exiftool -q -q -G1 -s -EXIF:all $p.Tiff 2>$null | Select-Object -First 1
+                # Fail-closed: an unreadable TIFF must not be overwritten by the copy below
+                if ($LASTEXITCODE -ne 0) { "ERROR (exiftool EXIF check) | $($p.TifName) | cannot inspect TIFF, not overwriting"; continue }
                 if ($firstExif) { "SKIP (already has EXIF) | $($p.TifName)"; continue }
             }
 
@@ -448,6 +457,9 @@ function Invoke-S5ProFolder {
                         $tiffTarget = $destTiff
                         $tiffCopied = $true
                     } catch {
+                        # A partial copy must not stay behind: a later run without -Overwrite
+                        # would skip it as "exists in OutputDir" and the truncated TIFF persists
+                        if (Test-Path -LiteralPath $destTiff) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                         "ERROR (copy to OutputDir failed) | $($p.TifName): $($_.Exception.Message)"
                         continue
                     }
@@ -469,7 +481,7 @@ function Invoke-S5ProFolder {
 
             if (-not $compressL) {
                 $copyNote = if ($tiffCopied) { " -> $finalDirL" } else { "" }
-                "OK | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote"
+                "$okPrefix | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote$heurSuffix"
                 continue
             }
 
@@ -480,7 +492,7 @@ function Invoke-S5ProFolder {
                 continue
             }
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-                "OK+SKIP-ZIP ($comp) | $($p.TifName)"; continue
+                "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix"; continue
             }
 
             # Run-scoped prefix so the interrupt trap only cleans up this run's staged files
@@ -513,7 +525,7 @@ function Invoke-S5ProFolder {
             }
 
             if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-            "OK+ZIP | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"
+            "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { 'OK+ZIP' }) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$heurSuffix"
         }
 
         foreach ($line in $results) { Process-Results @($line) }
@@ -537,6 +549,10 @@ function Invoke-S5ProFolder {
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
                         Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
                         if ((Test-Path -LiteralPath $destPath) -and ((Get-Item -LiteralPath $destPath).Length -eq $stageSize)) {
+                            # The staged ZIP is a new file with "now" as mtime; the plain
+                            # EXIF-only path preserves the source date via exiftool -P, so
+                            # the ZIP path does the same for consistency.
+                            try { (Get-Item -LiteralPath $destPath).LastWriteTime = (Get-Item -LiteralPath $tif.FullName).LastWriteTime } catch { }
                             $moved++
                         } else {
                             $script:errTotal++
@@ -627,4 +643,4 @@ if ($script:multiTotal -gt 0) {
 }
 Write-Log "Log: $logFile"
 
-if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
+if ($script:errTotal -gt 0 -or ($FailOnWarn -and ($script:warnTotal + $script:missTotal) -gt 0)) { exit 1 } else { exit 0 }

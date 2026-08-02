@@ -84,7 +84,10 @@ function Test-ThumbExists {
     if (-not $d -or -not (Test-Path -LiteralPath $d)) { return $false }
     $b = [System.IO.Path]::GetFileNameWithoutExtension($destPath)
     $e = [System.IO.Path]::GetExtension($destPath)
-    return (@(Get-ChildItem -LiteralPath $d -Filter "$b-*$e" -File -ErrorAction SilentlyContinue).Count -gt 0)
+    # -Filter parses [] and * as wildcards: a basename containing them would silently
+    # match the wrong files (or none). Escape the literal parts only.
+    $pattern = "$([System.Management.Automation.WildcardPattern]::Escape($b))-*$([System.Management.Automation.WildcardPattern]::Escape($e))"
+    return (@(Get-ChildItem -LiteralPath $d -Filter $pattern -File -ErrorAction SilentlyContinue).Count -gt 0)
 }
 $script:ThumbExistsFnDef = ${function:Test-ThumbExists}.ToString()
 
@@ -108,7 +111,7 @@ $allFiles = foreach ($root in $inputRoots) {
     }
 }
 
-$files = @($allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and $_.BaseName -notmatch $script:ThumbNamePattern })
+$files = @($allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$|[\\/]ZIP[\\/]|[\\/]ZIP$|[\\/]converted_zip[\\/]|[\\/]converted_zip$|[\\/]_EXPORT[\\/]' -and $_.BaseName -notmatch $script:ThumbNamePattern })
 $total = $files.Count
 
 # -- Statistics ----------------------------------------------------
@@ -325,7 +328,8 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 } else {
                     $destBase = [System.IO.Path]::GetFileNameWithoutExtension($t.DestPath)
                     $destExt = [System.IO.Path]::GetExtension($t.DestPath)
-                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter "$destBase-*$destExt" -File -ErrorAction SilentlyContinue)
+                    $framePattern = "$([System.Management.Automation.WildcardPattern]::Escape($destBase))-*$([System.Management.Automation.WildcardPattern]::Escape($destExt))"
+                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter $framePattern -File -ErrorAction SilentlyContinue)
                     if ($frames.Count -gt 0) {
                         "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"
                     } else {
@@ -391,7 +395,8 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 } else {
                     $destBase = [System.IO.Path]::GetFileNameWithoutExtension($t.DestPath)
                     $destExt = [System.IO.Path]::GetExtension($t.DestPath)
-                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter "$destBase-*$destExt" -File -ErrorAction SilentlyContinue)
+                    $framePattern = "$([System.Management.Automation.WildcardPattern]::Escape($destBase))-*$([System.Management.Automation.WildcardPattern]::Escape($destExt))"
+                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter $framePattern -File -ErrorAction SilentlyContinue)
                     if ($frames.Count -gt 0) {
                         $result = "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"
                     } else {

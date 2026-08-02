@@ -46,8 +46,16 @@ Describe "generate_thumbnails.ps1 - Input Scan" {
 
 Describe "generate_thumbnails.ps1 - Suffixed-Frame Fallback" {
     It "Checks for suffixed frames (-Filter with -*) when exact dest not created" {
-        $matches = Select-String -Path $script:ScriptPath -Pattern '-Filter "\$destBase-\*\$destExt"'
+        # The filter pattern is built from wildcard-escaped parts so basenames
+        # containing [] or * cannot silently match the wrong files
+        $matches = Select-String -Path $script:ScriptPath -Pattern '-Filter \$framePattern'
         $matches.Count | Should -BeGreaterOrEqual 2  # parallel + sequential paths
+    }
+
+    It "Escapes wildcards in the frame/exists filter basenames" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'WildcardPattern]::Escape\(\$destBase\)'
+        $content | Should -Match 'WildcardPattern]::Escape\(\$b\)'
     }
 
     It "Reports frame count in OK result for multi-page output" {
