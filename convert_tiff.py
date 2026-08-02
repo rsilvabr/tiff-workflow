@@ -1207,8 +1207,11 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
 
         t0 = time.time() if DEBUG_TIMING else None
         try:
+            # [0] on every step: multi-page TIFFs (Capture One main+thumbnail, scanner
+            # RGB+IR) made the whole-file compare return garbage RMSE (~27%) even for
+            # pixel-identical data, so padded files were misclassified as real 16-bit.
             result = subprocess.run(
-                ["magick", str(tiff_path), "-depth", "8"] + (compress_8.split() if compress_8 else []) + [str(tmp8)],
+                ["magick", f"{tiff_path}[0]", "-depth", "8"] + (compress_8.split() if compress_8 else []) + [str(tmp8)],
                 capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -1219,7 +1222,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
 
         try:
             result = subprocess.run(
-                ["magick", str(tmp8), "-depth", "16"] + (compress_16.split() if compress_16 else []) + [str(tmp16)],
+                ["magick", f"{tmp8}[0]", "-depth", "16"] + (compress_16.split() if compress_16 else []) + [str(tmp16)],
                 capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -1233,7 +1236,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
 
         try:
             result = subprocess.run(
-                ["magick", "compare", "-metric", "RMSE", str(tiff_path), str(tmp16), "null:"],
+                ["magick", "compare", "-metric", "RMSE", f"{tiff_path}[0]", f"{tmp16}[0]", "null:"],
                 capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -2078,6 +2081,16 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
     with stream as f:
         reader = csv.reader(f)
         first_row = next(reader, None)
+        # Excel in pt-BR/de-DE locales saves "CSV" delimited by ';'. Parsed with ','
+        # each line collapses into one cell: the header check fails and the whole
+        # line becomes a "source" path containing ';' -- which the PowerShell backend
+        # then SPLITS into two roots (it splits -InputDir on ';'). Detect and refuse.
+        if first_row is not None and len(first_row) == 1 and ';' in first_row[0]:
+            _manifest_error(
+                f"Manifest appears to be ';'-delimited: {manifest_path}\n"
+                f"This Excel locale saves CSV with ';' instead of ','. Re-save it as "
+                f"'CSV UTF-8 (comma delimited)' or re-generate the manifest.")
+            return None
         # Only skip the first row if it really is the header; a manifest
         # whose header line was deleted must not silently lose entry #1.
         rows = []
@@ -2090,6 +2103,11 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
             if row and len(row) >= 1:
                 source = row[0].strip()
                 is_comment = not source or source.startswith('#')
+                # Comment rows are ignored whole: parse NOTHING on them. An invalid
+                # Mode cell on a line that would be skipped anyway used to refuse
+                # the entire manifest.
+                if is_comment:
+                    continue
                 # Empty Destination cell must fall back to Source, not to
                 # "" -- Path("") becomes "." (the CWD) downstream.
                 dest = (row[1].strip() or source) if len(row) > 1 else source
@@ -2111,22 +2129,30 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
                     if not 0 <= entry_mode <= 9:
                         _manifest_error(f"Mode out of range (0-9) in manifest: {entry_mode} (row: {source})")
                         return None
-                if not is_comment:
-                    # Validate paths to prevent directory traversal. Check
-                    # path PARTS (not a substring match, which false-
-                    # positives on legitimate names like "2024..final").
-                    if '..' in Path(source).parts or '..' in Path(dest).parts:
-                        # Refuse the whole manifest, do not skip the row.
-                        # Skipping shrank the run silently: the summary
-                        # counts only the entries that LOADED, so a
-                        # dropped folder looks exactly like a folder that
-                        # compressed cleanly. Same fail-closed rule as the
-                        # Mode checks above.
-                        _manifest_error(
-                            f"Path traversal in manifest entry: {source} -> {dest}\n"
-                            f"Use absolute paths (or paths without '..') and run it again.")
-                        return None
-                    entries.append((source, dest, entry_mode))
+                # ';' is legal in Windows folder names, but the backend splits
+                # -InputDir on ';', so one entry would arrive as two roots --
+                # and in mode 8 the wrong root gets its sources deleted.
+                if ';' in source or ';' in dest:
+                    _manifest_error(
+                        f"';' is not allowed in manifest paths: {source} -> {dest}\n"
+                        f"The backend splits folder lists on ';', so this path would be "
+                        f"processed as two different folders.")
+                    return None
+                # Validate paths to prevent directory traversal. Check
+                # path PARTS (not a substring match, which false-
+                # positives on legitimate names like "2024..final").
+                if '..' in Path(source).parts or '..' in Path(dest).parts:
+                    # Refuse the whole manifest, do not skip the row.
+                    # Skipping shrank the run silently: the summary
+                    # counts only the entries that LOADED, so a
+                    # dropped folder looks exactly like a folder that
+                    # compressed cleanly. Same fail-closed rule as the
+                    # Mode checks above.
+                    _manifest_error(
+                        f"Path traversal in manifest entry: {source} -> {dest}\n"
+                        f"Use absolute paths (or paths without '..') and run it again.")
+                    return None
+                entries.append((source, dest, entry_mode))
 
     if not entries:
         if RICH_AVAILABLE and console:
@@ -2150,9 +2176,15 @@ def generate_manifest(root: Path, mode: int) -> Optional[str]:
 
     root = Path(root)
     tiff_dirs = set()
+    # Same exclusions as run_diagnose_tiffs: OLD_TIFFs holds the pristine originals the
+    # compression modes archived -- a manifest entry pointing there would recompress the
+    # backups, and in mode 8 DELETE them.
+    _excluded_parts = {"old_tiffs", "old_padded", "logs", "zip", "_export", "converted_zip"}
     for p in root.rglob("*"):
         try:
             if p.is_file() and p.suffix.lower() in TIFF_EXTS:
+                if any(part.lower() in _excluded_parts for part in p.relative_to(root).parts):
+                    continue
                 tiff_dirs.add(p.parent)
         except OSError:
             continue

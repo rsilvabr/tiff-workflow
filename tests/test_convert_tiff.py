@@ -24,6 +24,7 @@ from convert_tiff import (
     build_copy_exif_command,
     _compare_tiff_metadata,
     _compress_padded_files,
+    _is_real_16bit,
     run_purge_old_tiffs,
     step_folder,
     main,
@@ -245,6 +246,54 @@ class TestCompareTiffMetadata:
         match, detail = _compare_tiff_metadata(file1, file2)
         assert match is True
         assert "IDENTICAL" in detail
+
+
+@pytest.mark.skipif(not MAGICK_AVAILABLE, reason="ImageMagick (magick) not on PATH")
+class TestIsReal16Bit:
+    def _make_c1_style(self, tmp_path, real_16bit):
+        """TIFF with Capture One structure: main page + reduced thumbnail page."""
+        import subprocess
+
+        main8 = tmp_path / "main8.tif"
+        main = tmp_path / "main.tif"
+        thumb = tmp_path / "thumb.tif"
+        out = tmp_path / "out.tif"
+
+        base = ["magick", "-size", "64x64"]
+        if real_16bit:
+            subprocess.run(base + ["plasma:fractal", "-depth", "16", str(main)], capture_output=True)
+        else:
+            subprocess.run(base + ["gradient:red-blue", "-depth", "8", str(main8)], capture_output=True)
+            subprocess.run(["magick", str(main8), "-depth", "16", str(main)], capture_output=True)
+        subprocess.run(base + ["gradient:red-blue", "-resize", "16x16", str(thumb)], capture_output=True)
+        subprocess.run(["magick", str(main), str(thumb), str(out)], capture_output=True)
+        return out
+
+    def test_padded_single_page_detected(self, tmp_path):
+        import subprocess
+
+        main8 = tmp_path / "m8.tif"
+        padded = tmp_path / "padded.tif"
+        subprocess.run(["magick", "-size", "64x64", "gradient:red-blue", "-depth", "8", str(main8)], capture_output=True)
+        subprocess.run(["magick", str(main8), "-depth", "16", str(padded)], capture_output=True)
+
+        is_real, rmse, msg = _is_real_16bit(padded, tmp_path)
+        assert is_real is False
+        assert "padded" in msg
+
+    def test_padded_two_page_capture_one_style_detected(self, tmp_path):
+        """Regression: whole-file RMSE on multi-page TIFFs returned garbage (~27%), so a
+        padded 8-bit file with a thumbnail page was misclassified as real 16-bit."""
+        padded = self._make_c1_style(tmp_path, real_16bit=False)
+        is_real, rmse, msg = _is_real_16bit(padded, tmp_path)
+        assert is_real is False
+        assert "padded" in msg
+
+    def test_real_16bit_two_page_detected(self, tmp_path):
+        real = self._make_c1_style(tmp_path, real_16bit=True)
+        is_real, rmse, msg = _is_real_16bit(real, tmp_path)
+        assert is_real is True
+        assert rmse > 0
 
 
 class TestSaveConfig:

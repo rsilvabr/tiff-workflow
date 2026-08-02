@@ -580,12 +580,68 @@ function Test-TiffHasOnlySubfilePages {
     return $true
 }
 
+function Restore-TiffSubfileTypes {
+    <#
+    .SYNOPSIS
+        Re-applies the source per-page NewSubfileType markers to a freshly magick-written TIFF.
+        ImageMagick rewrites every page on `-compress zip` but does not preserve the tag: a
+        REDUCEDIMAGE thumbnail page comes back as PAGE/untagged, which breaks thumbnail
+        detection (-SkipCompressedWithThumb) and SafeMode semantics on later runs, and turns
+        an IR MASK page into what viewers treat as a regular image.
+        Returns $true when nothing needed restoring or every marker was written.
+
+    .NOTES
+        Inside ForEach-Object -Parallel runspaces, re-inject with:
+            ${function:Restore-TiffSubfileTypes} = $using:RestoreSubfileFnDef
+        (Invoke-MagickWithTimeout must be injected too.)
+    #>
+    param(
+        [string]$SrcPath,
+        [string]$DstPath,
+        [int]$TimeoutSec = 30
+    )
+
+    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $SrcPath) -TimeoutSec $TimeoutSec
+    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
+
+    $subfileTypes = @($r.Output)
+    if ($subfileTypes.Count -le 1) { return $true }
+
+    $tags = @()
+    for ($i = 0; $i -lt $subfileTypes.Count; $i++) {
+        $st = if ($subfileTypes[$i]) { "$($subfileTypes[$i])".Trim() } else { "" }
+        $n = switch -Regex ($st) {
+            '^(REDUCEDIMAGE|REDUCED)$' { 1; break }
+            '^PAGE$'                   { 2; break }
+            '^MASK$'                   { 4; break }
+            default                    { 0 }
+        }
+        if ($i -eq 0) {
+            # magick stamps PAGE on IFD0 of multi-page output; clear it when the source had none
+            if ($n -eq 0) { $tags += "-IFD0:SubfileType=" } elseif ($n -ne 0) { $tags += "-IFD0:SubfileType#=$n" }
+        } elseif ($n -gt 0) {
+            $tags += "-IFD${i}:SubfileType#=$n"
+        }
+    }
+    if ($tags.Count -eq 0) { return $true }
+
+    $argFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argFile, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n$($tags -join "`n")`n$DstPath`n")
+        $out = exiftool -@ $argFile 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Capture function definitions once so they can be re-injected into -Parallel runspaces
 $script:MagickTimeoutFnDef = ${function:Invoke-MagickWithTimeout}.ToString()
 $script:PageCountFnDef     = ${function:Get-TiffPageCount}.ToString()
 $script:ZipIntegrityFnDef  = ${function:Test-ZipIntegrity}.ToString()
 $script:TestSubfileFnDef   = ${function:Test-TiffHasOnlySubfilePages}.ToString()
 $script:MetaBackupFnDef    = ${function:Backup-TiffMetadata}.ToString()
+$script:RestoreSubfileFnDef = ${function:Restore-TiffSubfileTypes}.ToString()
 
 # -- Process one TIFF -> ZIP job ------------------------------------
 
@@ -780,6 +836,12 @@ function Process-TiffJob {
     }
     if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
 
+    if (-not $generateThumb) {
+        if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $script:MagickTimeout)) {
+            Write-Log "WARN (subfiletype restore failed) | $name" "WARN"
+        }
+    }
+
     $canDeleteSource = $false
     $integrityFailed = $false
     if ($mode -eq 8) {
@@ -887,6 +949,7 @@ if ($Mode -lt 0) {
                     ${function:Test-ZipIntegrity}            = $using:ZipIntegrityFnDef
                     ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
                     ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
+                    ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
                     $writeDirL = $using:writeDir
                     $finalDirL = $using:finalDir
                     $dryL      = $using:DryRun
@@ -982,6 +1045,7 @@ if ($Mode -lt 0) {
                     $noThumbNote = ""
                     $exifWarn = $false
                     $thumbMarkerFailed = $false
+                    $subfileRestoreFailed = $false
                     if ($genThumbL) {
                         # Always read the main image from page 0; thumbnail will be placed at $thumbPageL
                         $mainPage = "$src[0]"
@@ -1063,9 +1127,16 @@ if ($Mode -lt 0) {
                     }
                     if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
 
+                    if (-not $genThumbL) {
+                        if (-not (Restore-TiffSubfileTypes -SrcPath $src -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
+                            $subfileRestoreFailed = $true
+                        }
+                    }
+
                     $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
-                    $resultText = if ($exifWarn -or $thumbMarkerFailed) {
-                        "WARN (exiftool failed, ZIP ok)$noThumbNote$markerNote | $name"
+                    $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
+                    $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
+                        "WARN (exiftool failed, ZIP ok)$noThumbNote$markerNote$subfileNote | $name"
                     } else {
                         "OK ($comp -> ZIP)$noThumbNote | $name"
                     }
@@ -1449,6 +1520,18 @@ foreach ($f in $files) {
             $safeChecked = $true
         }
 
+        # "Destination exists" must be decided HERE too, before the original is moved to
+        # OLD_TIFFs/: the worker checks it as well, but by then the source already sits in
+        # OLD_TIFFs/ and SKIP is not an ERROR, so the rollback never restored it (same class
+        # as the MULTI bug above). A .tiff source whose .tif sibling already exists was the
+        # concrete case: original stranded in OLD_TIFFs, log saying "skipped".
+        if ((Test-Path -LiteralPath $finalDst) -and -not $Overwrite -and ($finalDst -ne $f.FullName)) {
+            $script:skipTotal++
+            $script:counterTotal++
+            Write-Log "SKIP (exists) | $($f.Name)"
+            continue
+        }
+
         # In dry-run, do not move -- just queue with original path
         if (-not $DryRun) {
             $oldTiffDir = Join-Path $f.DirectoryName "OLD_TIFFs"
@@ -1569,6 +1652,7 @@ foreach ($group in $groupedTasks) {
             ${function:Test-ZipIntegrity}            = $using:ZipIntegrityFnDef
             ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
             ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
+            ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
             $srcPath = $t.Src
             $writeDst = $t.WriteDst
             $finalDst = $t.FinalDst
@@ -1657,6 +1741,7 @@ foreach ($group in $groupedTasks) {
             $noThumbNote = ""
             $exifWarn = $false
             $thumbMarkerFailed = $false
+            $subfileRestoreFailed = $false
             if ($generateThumb) {
                 # Always read the main image from page 0; thumbnail will be placed at $thumbPage
                 $mainPage = "$srcPath[0]"
@@ -1740,6 +1825,11 @@ foreach ($group in $groupedTasks) {
                 if ($LASTEXITCODE -ne 0) { $exifWarn = $true }
             }
             if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
+            if (-not $generateThumb) {
+                if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $magickTimeout)) {
+                    $subfileRestoreFailed = $true
+                }
+            }
             $canDeleteSource = $false
             $integrityFailed = $false
             if ($mode -eq 8) {
@@ -1753,8 +1843,9 @@ foreach ($group in $groupedTasks) {
                 }
             }
             $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
-            $resultText = if ($exifWarn -or $thumbMarkerFailed) {
-                "WARN (exiftool failed, ZIP ok)$noThumbNote$markerNote | $name"
+            $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
+            $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
+                "WARN (exiftool failed, ZIP ok)$noThumbNote$markerNote$subfileNote | $name"
             } else {
                 "OK ($comp -> ZIP)$noThumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
             }

@@ -195,6 +195,38 @@ class TestParsing:
 
         assert entries == [(str(src), str(src), None)]
 
+    def test_semicolon_in_path_refused(self, tmp_path):
+        """';' is legal in folder names, but the backend splits -InputDir on ';'
+        -- one entry would arrive as two roots, and mode 8 would delete sources
+        in a folder that was never validated."""
+        src = tmp_path / "a;b"
+        path = _write_manifest(tmp_path / "m.csv", [(str(src), str(src), 0)])
+
+        assert load_manifest_entries(str(path)) is None
+
+    def test_semicolon_delimited_manifest_refused(self, tmp_path):
+        """Excel in pt-BR/de-DE locales saves CSV delimited by ';'. Parsed with
+        ',' every line collapses into one cell -- detect and refuse with a clear
+        message instead of treating the whole line as a path."""
+        path = tmp_path / "m_semicolon.csv"
+        path.write_text("Source;Destination;Mode\r\nF:\\fotos;F:\\fotos;0\r\n",
+                        encoding="utf-8-sig")
+
+        assert load_manifest_entries(str(path)) is None
+
+    def test_comment_row_with_invalid_mode_cell_ignored(self, tmp_path):
+        """Comment rows are ignored whole: an invalid Mode cell on a line that
+        would be skipped anyway must not refuse the manifest."""
+        src = tmp_path / "a"
+        path = _write_manifest(tmp_path / "m.csv", [
+            ("# lembrete", "revisar", "abc"),
+            (str(src), str(src), 0),
+        ])
+
+        entries = load_manifest_entries(str(path))
+
+        assert entries == [(str(src), str(src), 0)]
+
 
 # --- Guards (tests 9-13) ----------------------------------------------
 
@@ -529,6 +561,24 @@ class TestGeneration:
         monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
 
         assert generate_manifest(tmp_path, 0) is None
+
+    def test_generation_excludes_backup_and_output_folders(self, tmp_path, monkeypatch):
+        """OLD_TIFFs holds the archived originals -- a manifest entry pointing
+        there would recompress the backups (and mode 8 would delete them)."""
+        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        good = tmp_path / "photos"
+        good.mkdir()
+        (good / "x.tif").write_bytes(b"x")
+        for name in ("OLD_TIFFs", "old_padded", "ZIP", "converted_zip"):
+            d = tmp_path / name
+            d.mkdir()
+            (d / "y.tif").write_bytes(b"y")
+
+        path = Path(generate_manifest(tmp_path, 0))
+
+        entries = load_manifest_entries(str(path))
+        sources = {s for s, _, _ in entries}
+        assert sources == {str(good)}, f"backup/output folders must not become entries: {sources}"
 
     def test_get_latest_manifest(self, tmp_path, monkeypatch):
         import os

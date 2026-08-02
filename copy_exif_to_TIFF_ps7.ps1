@@ -213,10 +213,68 @@ function Test-TiffHasOnlySubfilePages {
     return $true
 }
 
+function Restore-TiffSubfileTypes {
+    <#
+    .SYNOPSIS
+        Re-applies the source per-page NewSubfileType markers to a freshly magick-written TIFF.
+        ImageMagick rewrites every page on `-compress zip` but does not preserve the tag: a
+        REDUCEDIMAGE thumbnail or MASK (scanner IR) page comes back as PAGE/untagged, so
+        viewers and SafeMode heuristics no longer recognise those pages.
+        Returns $true when nothing needed restoring or every marker was written.
+
+    .NOTES
+        This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1 scripts.
+        Keep implementations identical. If you change one, change all three.
+
+        Inside ForEach-Object -Parallel runspaces, re-inject with:
+            ${function:Restore-TiffSubfileTypes} = $using:RestoreSubfileFnDef
+        (Invoke-MagickWithTimeout must be injected too.)
+    #>
+    param(
+        [string]$SrcPath,
+        [string]$DstPath,
+        [int]$TimeoutSec = 30
+    )
+
+    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $SrcPath) -TimeoutSec $TimeoutSec
+    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
+
+    $subfileTypes = @($r.Output)
+    if ($subfileTypes.Count -le 1) { return $true }
+
+    $tags = @()
+    for ($i = 0; $i -lt $subfileTypes.Count; $i++) {
+        $st = if ($subfileTypes[$i]) { "$($subfileTypes[$i])".Trim() } else { "" }
+        $n = switch -Regex ($st) {
+            '^(REDUCEDIMAGE|REDUCED)$' { 1; break }
+            '^PAGE$'                   { 2; break }
+            '^MASK$'                   { 4; break }
+            default                    { 0 }
+        }
+        if ($i -eq 0) {
+            # magick stamps PAGE on IFD0 of multi-page output; clear it when the source had none
+            if ($n -eq 0) { $tags += "-IFD0:SubfileType=" } elseif ($n -ne 0) { $tags += "-IFD0:SubfileType#=$n" }
+        } elseif ($n -gt 0) {
+            $tags += "-IFD${i}:SubfileType#=$n"
+        }
+    }
+    if ($tags.Count -eq 0) { return $true }
+
+    $argFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argFile, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n$($tags -join "`n")`n$DstPath`n")
+        $out = exiftool -@ $argFile 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # Capture function definitions once so they can be re-injected into -Parallel runspaces
 $script:MagickTimeoutFnDef = ${function:Invoke-MagickWithTimeout}.ToString()
 $script:PageCountFnDef     = ${function:Get-TiffPageCount}.ToString()
 $script:TestSubfileFnDef   = ${function:Test-TiffHasOnlySubfilePages}.ToString()
+$script:RestoreSubfileFnDef = ${function:Restore-TiffSubfileTypes}.ToString()
 
 function Invoke-S5ProFolder {
     param([string]$RootPath, [bool]$IsRecurse)
@@ -345,6 +403,7 @@ function Invoke-S5ProFolder {
             ${function:Invoke-MagickWithTimeout}      = $using:MagickTimeoutFnDef
             ${function:Get-TiffPageCount}            = $using:PageCountFnDef
             ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
+            ${function:Restore-TiffSubfileTypes}     = $using:RestoreSubfileFnDef
             $skipExifL = $using:skipExifCapture
             $dryL      = $using:dryCapture
             $compressL = $using:compressCapture
@@ -467,6 +526,11 @@ function Invoke-S5ProFolder {
             if ($LASTEXITCODE -ne 0) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 return @{ Result = "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
+            }
+
+            if (-not (Restore-TiffSubfileTypes -SrcPath $tiffTarget -DstPath $writeDst)) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                return @{ Result = "WARN (subfiletype restore failed, ZIP ok) | $($p.TifName)"; StagingName = $stagingName; OriginalName = $p.TifName; FinalDst = $finalDst; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }
             }
 
             if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
