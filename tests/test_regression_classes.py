@@ -1534,5 +1534,377 @@ class TestPartialCopyIsCleanedUp:
         )
 
 
+# -- ROUND 13 -------------------------------------------------------
+
+
+def numeric_subfiletypes(path):
+    """Per-IFD SubfileType as exiftool reports it -- numeric, and absent when the tag is
+    absent. `magick %[tiff:subfiletype]` cannot tell "no tag" from an explicit 0."""
+    result = subprocess.run(
+        ["exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    return [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+
+
+class TestThumbnailPathKeepsPageMarkers:
+    """-GenerateThumbnail wrote only `-IFD1:SubfileType#=1` and skipped the restore that
+    every other write path runs, so magick's PAGE (2) stamp stayed on the MAIN image: every
+    thumbnail-generated file claimed page 0 was one page of a multi-page document."""
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_explicit_zero_on_the_main_page_survives(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        src = work / "scan.tif"
+        make_multipage_tiff(src, [0, 1])
+        assert "[IFD0] SubfileType: 0" in numeric_subfiletypes(src)
+
+        run_ps_switched(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
+                         "-SafeMode:$false", "-GenerateThumbnail", "-ThumbSize", "16"], work)
+
+        after = numeric_subfiletypes(work / "ZIP" / "scan.tif")
+        assert "[IFD0] SubfileType: 0" in after, f"main page lost its marker: {after}"
+        assert "[IFD1] SubfileType: 1" in after, f"thumbnail not marked: {after}"
+        assert "[IFD0] SubfileType: 2" not in after, "magick's PAGE stamp was left on page 0"
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_source_without_a_marker_gets_none_back(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "photo.tif")
+
+        run_ps(shell, "compress_tiff_zip.ps1",
+               ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
+                "-GenerateThumbnail", "-ThumbSize", "16"], work)
+
+        after = numeric_subfiletypes(work / "ZIP" / "photo.tif")
+        assert not any(ln.startswith("[IFD0]") for ln in after), (
+            f"a source with no marker must not gain one: {after}"
+        )
+        assert "[IFD1] SubfileType: 1" in after
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_generated_file_is_not_multi_page_on_a_later_run(self, tmp_path, shell):
+        """The round trip that matters: whatever -GenerateThumbnail writes must still be
+        touchable by SafeMode afterwards, or the toolkit refuses its own output forever."""
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "photo.tif")
+        run_ps(shell, "compress_tiff_zip.ps1",
+               ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
+                "-GenerateThumbnail", "-ThumbSize", "16"], work)
+
+        second = work / "second"
+        second.mkdir()
+        shutil.copy2(work / "ZIP" / "photo.tif", second / "photo.tif")
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(second), "-Workers", "1",
+                         "-SkipCompressedWithThumb"], second)
+
+        assert "MULTI" not in result.stdout, (
+            "SafeMode classified our own thumbnail output as a real multi-page file:\n"
+            + result.stdout
+        )
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_thumb_page_zero_is_refused(self, tmp_path, shell):
+        """A thumbnail-first file has a full-size page 1, which every classifier here reads
+        as a real extra page -- the file came back MULTI on every later run."""
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "photo.tif")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
+                         "-GenerateThumbnail", "-ThumbPage", "0"], work)
+
+        assert result.returncode == 1, result.stdout
+        assert "-ThumbPage 0 is not supported" in result.stdout
+        assert not (work / "ZIP").exists(), "a refused run must not write anything"
+
+    def test_all_three_workers_restore_both_markers(self):
+        raw = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        # Both comment forms mention the injection line verbatim (that is how the runspace
+        # convention is documented in this repo), so count code only.
+        code = re.sub(r"<#.*?#>", "", raw, flags=re.S)
+        code = "\n".join(ln for ln in code.splitlines() if not ln.lstrip().startswith("#"))
+        assert code.count("Set-TiffThumbMarkers -SrcPath") == 3, (
+            "every worker must restore the main page's marker, not just stamp the thumbnail"
+        )
+        assert "-${thumbIfd}:SubfileType#=1" not in raw, (
+            "the thumbnail-only marker write is back"
+        )
+        assert code.count("${function:Set-TiffThumbMarkers} ") == 2, (
+            "the helper must be injected into BOTH parallel runspaces"
+        )
+        assert "$script:ThumbMarkerFnDef   = ${function:Set-TiffThumbMarkers}.ToString()" in code
+
+
+class TestSequentialWorkerReportsLikeTheParallelOnes:
+    """Process-TiffJob logged a bare WARN for a failed subfiletype/thumbnail-marker write
+    while the two -Parallel workers folded it into the result string. The same event was a
+    counted warning on PS7 and a clean OK on PS5, and the PS5 line printed without the
+    [n/total] prefix every other result line carries."""
+
+    def test_every_worker_folds_the_failure_into_its_result(self):
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        assert source.count("$subfileRestoreFailed = $true") == 3
+        assert source.count("$thumbMarkerFailed = $true") == 3
+        assert source.count("$exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed") == 3
+        assert 'Write-Log "WARN (subfiletype restore failed)' not in source, (
+            "the sequential worker is bypassing Process-Results again"
+        )
+        assert 'Write-Log "WARN (thumbnail SubfileType marker failed)' not in source
+
+
+class TestLongPathsAreRefusedLoudly:
+    """Staged names used to prepend two full GUIDs (66 characters) and mode 8's default
+    staging folder another 55, inside the user's own tree. On a normally nested archive the
+    result blew past Windows' 260-character limit and EVERY file failed with magick's bare
+    "No such file or directory" -- naming neither the cause nor the limit."""
+
+    def test_staging_names_are_short(self):
+        for script in PS_SCRIPTS:
+            source = (REPO / script).read_text(encoding="ascii")
+            for m in re.finditer(r"\[guid\]::NewGuid\(\)\.ToString\('N'\)(?!\.Substring)", source):
+                line = source[:m.start()].count("\n") + 1
+                pytest.fail(f"{script}:{line} uses a full 32-char GUID in a path")
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_over_long_output_is_reported_with_the_number(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "photo.tif")
+        # Long enough that <out>\photo.tif passes 259 characters without creating it first
+        long_out = str(tmp_path / ("d" * 200))
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "2", "-InputDir", str(work), "-Workers", "1",
+                         "-OutputDir", long_out], work)
+
+        assert "path too long" in result.stdout, result.stdout
+        assert result.returncode == 1
+        assert not Path(long_out).exists(), (
+            "a refused file must not have its output directory created"
+        )
+
+
+class TestRepeatLastRebuildsForTheCurrentShell:
+    """run_repeat_last swapped argv[0] and ran the journalled command unchanged. Replayed
+    under powershell.exe, `-File ... -SafeMode:$false` binds the STRING '$false' (truthy),
+    so the repeat silently ran with SafeMode ON -- the trap _wrap_ps5_command exists to
+    avoid -- and a Copy EXIF command kept pointing at the other shell's backend."""
+
+    def _compress_cmd(self, ps_name):
+        return convert_tiff.build_compress_command(
+            {"mode": 9, "workers": 8, "safe_mode": False},
+            folders=[Path(r"C:\Fotos\x")], ps_name=ps_name)
+
+    @pytest.mark.parametrize("origin", ["pwsh", "powershell"])
+    @pytest.mark.parametrize("target", ["pwsh", "powershell"])
+    def test_journal_round_trip_is_shell_neutral(self, origin, target):
+        parts = convert_tiff._journal_parts(self._compress_cmd(origin))
+        assert parts and parts[0].endswith("compress_tiff_zip.ps1")
+        rebuilt = convert_tiff._rebuild_journaled_command(parts, target)
+        assert convert_tiff._journal_parts(rebuilt) == parts
+
+    def test_ps5_replay_goes_through_the_command_wrapper(self):
+        parts = convert_tiff._journal_parts(self._compress_cmd("pwsh"))
+        rebuilt = convert_tiff._rebuild_journaled_command(parts, "powershell")
+        assert "-Command" in rebuilt and "-File" not in rebuilt, (
+            "a PS5 replay must not pass -SafeMode:$false through -File"
+        )
+        assert "-SafeMode:$false" in rebuilt[-1]
+
+    def test_copy_exif_backend_follows_the_shell(self):
+        cmd = convert_tiff.build_copy_exif_command(
+            {"workers": 4}, folders=[Path(r"C:\a")], ps_name="powershell")
+        parts = convert_tiff._journal_parts(cmd)
+        assert parts[0].endswith("copy_exif_to_TIFF_ps5.ps1")
+        rebuilt = convert_tiff._rebuild_journaled_command(parts, "pwsh")
+        assert any(a.endswith("copy_exif_to_TIFF_ps7.ps1") for a in rebuilt), rebuilt
+
+    def test_quotes_in_a_path_survive_the_round_trip(self):
+        cmd = convert_tiff.build_compress_command(
+            {"mode": 0}, folders=[Path("C:\\it's here\\x")], ps_name="powershell")
+        parts = convert_tiff._journal_parts(cmd)
+        assert "C:\\it's here\\x" in parts
+
+    def test_unrecognised_journal_is_refused(self, monkeypatch, capsys):
+        cfg = SimpleNamespace(config=ToolConfig())
+        cfg.config.last_run_kind = "compress"
+        cfg.config.last_run_label = "something"
+        cfg.config.last_run_commands = [["pwsh", "-NoProfile", "-EncodedCommand", "AAA="]]
+        cfg.config.ps_name = "pwsh"
+        assert convert_tiff.run_repeat_last(cfg) is False
+
+
+class TestPythonSubfileRestoreMatchesPowerShell:
+    """The Python mirror read the markers with `magick %[tiff:subfiletype]`, which prints an
+    EMPTY string both for an absent tag and for an explicit 0 -- so the padded-file
+    conversion DELETED the explicit 0 every scanner TIFF carries on IFD0. The PowerShell
+    twin was fixed for exactly this; the mirror had been left behind."""
+
+    @requires_tools
+    def test_explicit_zero_is_preserved(self, tmp_path):
+        src = tmp_path / "photo.tif"
+        make_multipage_tiff(src, [0, 1])
+        before = numeric_subfiletypes(src)
+        assert "[IFD0] SubfileType: 0" in before
+        staging = tmp_path / "stg"
+        staging.mkdir()
+
+        _, _, status, _, _, _, _, _, tmp8 = _process_single_padded(src, staging)
+
+        assert status == "ok", status
+        assert numeric_subfiletypes(tmp8) == before, (
+            f"markers changed: {before} -> {numeric_subfiletypes(tmp8)}"
+        )
+
+    def test_restore_does_not_use_the_ambiguous_magick_property(self):
+        source = (REPO / "convert_tiff.py").read_text(encoding="utf-8")
+        body = source[source.index("def _restore_subfile_types"):]
+        body = body[:body.index("\ndef ", 1)]
+        assert '"%[tiff:subfiletype]' not in body, (
+            "the restore is reading the property that cannot tell 'absent' from 0 again"
+        )
+        assert '"exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType"' in body
+
+
+class TestCopyExifProbesTheMainImage:
+    """compress_tiff_zip.ps1 collapses the -Compression probe to IFD0 in four places; the
+    two Copy EXIF backends were the copies left behind, so an uncompressed main image whose
+    thumbnail page happened to be compressed would be reported "already ZIP"."""
+
+    @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
+    def test_probe_reads_page_zero_only(self, script):
+        source = (REPO / script).read_text(encoding="ascii")
+        assert "-IFD0:Compression" in source, f"{script}: probe still reads every IFD"
+        assert '$comp = "$(@($comp)[0])".Trim()' in source, (
+            f"{script}: -match on the raw array is truthy for ANY page"
+        )
+
+    @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
+    def test_exif_gate_does_not_read_a_stale_exit_code(self, script):
+        """`native | Select-Object -First 1` stops the upstream pipeline, so $LASTEXITCODE
+        may still hold an earlier command's value -- and that gate decides whether the TIFF
+        may be overwritten."""
+        source = (REPO / script).read_text(encoding="ascii")
+        assert "-EXIF:all $p.Tiff 2>$null | Select-Object -First 1" not in source, (
+            f"{script}: the fail-closed EXIF check can read a stale exit code again"
+        )
+        assert "$exifProbeExit = $LASTEXITCODE" in source
+
+
+class TestPurgeKeepsOrphansInsteadOfAborting:
+    """A backup whose parent counterpart is absent is not a mismatch: there is nothing to
+    compare and nothing that may be deleted. Lumping it in with real mismatches blocked the
+    whole purge -- which a healthy folder reaches routinely, because modes 0/9 rename a
+    backup when one of that name exists and a .tiff source produces a .tif output."""
+
+    def _run_purge(self, tmp_path, monkeypatch, answers=True):
+        folder = tmp_path / "root"
+        old_dir = folder / "OLD_TIFFs"
+        old_dir.mkdir(parents=True)
+        (old_dir / "img.tif").write_bytes(b"tiffdata")
+        (old_dir / "img_20260101_010101.tif").write_bytes(b"orphan")
+        (folder / "img.tif").write_bytes(b"tiffdata")
+
+        def fake_run(cmd, **kwargs):
+            cmd = [str(a) for a in cmd]
+            if "compare" in cmd:
+                return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt == "%n\n":
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="10 10", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, prompt: folder)
+        if convert_tiff.RICH_AVAILABLE:
+            monkeypatch.setattr(convert_tiff.Confirm, "ask",
+                                classmethod(lambda cls, *a, **k: answers))
+            monkeypatch.setattr(convert_tiff.Prompt, "ask", classmethod(
+                lambda cls, *a, **k: __import__("datetime").datetime.now().strftime("%H:%M")))
+        else:
+            monkeypatch.setattr(
+                "builtins.input",
+                lambda *a, **k: ("y" if answers else "n")
+                if "Delete" in (a[0] if a else "") else
+                __import__("datetime").datetime.now().strftime("%H:%M"))
+        cfg = SimpleNamespace(config=ToolConfig())
+        convert_tiff.run_purge_old_tiffs(cfg)
+        return folder, old_dir
+
+    def test_verified_files_are_purged_and_the_orphan_is_kept(self, tmp_path, monkeypatch):
+        folder, old_dir = self._run_purge(tmp_path, monkeypatch, answers=True)
+        assert not (old_dir / "img.tif").exists(), "the verified backup should have been purged"
+        assert (old_dir / "img_20260101_010101.tif").exists(), (
+            "a backup with no parent counterpart is the only copy left -- it must be kept"
+        )
+        assert (folder / "img.tif").exists()
+
+
+class TestGenerateThumbnailSaysWhyItSkipped:
+    """The already-compressed SKIP runs before the thumbnail step, so -GenerateThumbnail on
+    a Deflate library produced nothing at all and still reported a clean run."""
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_skip_line_points_at_the_flag(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        src = work / "photo.tif"
+        make_tiff(src)
+        subprocess.run(["magick", str(src), "-compress", "zip", str(src)],
+                       capture_output=True, check=True, timeout=120)
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
+                         "-GenerateThumbnail", "-ThumbSize", "16"], work)
+
+        assert "no thumbnail added" in result.stdout, result.stdout
+        assert "SkipCompressedWithThumb" in result.stdout
+
+
+class TestGroupHeaderNamesTheOutputFolder:
+    """Tasks were grouped by the PARENT of the output folder, so the "-- Group:" header and
+    the "-> Moved N file(s) -> <dir>" line named a folder the run never wrote to -- the
+    drive root for TIFFs sitting directly under the input root."""
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_moved_line_names_the_real_destination(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "photo.tif")
+        staging = tmp_path / "stg"
+        staging.mkdir()
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
+                         "-StagingDir", str(staging)], work)
+
+        moved = [ln for ln in result.stdout.splitlines() if "-> Moved" in ln]
+        assert moved, result.stdout
+        assert str(work / "ZIP").lower() in moved[0].lower(), (
+            f"the move line names the wrong folder: {moved[0]}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

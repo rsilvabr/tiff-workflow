@@ -122,7 +122,7 @@ tiff-workflow/
 
 **Thumbnails are colour-managed.** Wide-gamut sources (ProPhoto, AdobeRGB) are converted through their embedded ICC profile before the profile is stripped, so a Capture One ProPhoto export produces a thumbnail that actually looks like the photo. The sRGB profile is auto-detected on Windows; override it with `-SrgbProfile <path.icc>` if needed.
 
-**`-GenerateThumbnail` never drops pages.** It rebuilds the file from page 0 plus a new thumbnail, so it replaces an existing embedded preview but refuses any file whose extra pages are real (scanner IR, layers) instead of discarding them.
+**`-GenerateThumbnail` never drops pages.** It rebuilds the file from page 0 plus a new thumbnail, so it replaces an existing embedded preview but refuses any file whose extra pages are real (scanner IR, layers) instead of discarding them. The main image keeps the `SubfileType` marker the source carried, and the thumbnail is always appended *after* it — `-ThumbPage 0` is refused, because a thumbnail-first file is read as genuinely multi-page by SafeMode and would be skipped by every later run. On a library that is already Deflate the file is skipped before the thumbnail step; add `-SkipCompressedWithThumb` to add thumbnails there.
 
 **Folder exclusion** (`-ExcludeFolders "_EXPORT;temp"`): skips whole folder trees by name during discovery, in every mode. Segment match only (`_EXPORT` never touches `My_EXPORT_photos`), and every run logs what was excluded. The wizard offers your last list as the default (stored in your local config) — a fresh install defaults to nothing excluded.
 

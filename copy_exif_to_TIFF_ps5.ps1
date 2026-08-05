@@ -55,7 +55,9 @@ $script:cleanupDirs  = @()
 # Run-scoped prefix: a bare GUID pattern matched EVERY run's staged files, so Ctrl-C in one
 # session destroyed the in-flight output of any other session sharing -StagingDir.
 # Same fix as compress_tiff_zip.ps1.
-$script:runStagingId = [guid]::NewGuid().ToString('N')
+# 8 hex chars, not 32: the prefix plus a per-file id is prepended to every staged file name
+# and Windows still refuses paths over 260 characters. Same change as compress_tiff_zip.ps1.
+$script:runStagingId = [guid]::NewGuid().ToString('N').Substring(0, 8)
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
 trap {
@@ -519,9 +521,15 @@ function Invoke-S5ProFolder {
             $heurSuffix = if ($heurMatch) { " | TIFF base '$($p.TifBase)' matched JPEG base '$($p.UsedBase)'" } else { "" }
 
             if ($skipExifL) {
-                $firstExif = exiftool -q -q -G1 -s -EXIF:all $p.Tiff 2>$null | Select-Object -First 1
+                # No `| Select-Object -First 1` on the native call: -First stops the upstream
+                # pipeline, so $LASTEXITCODE could still hold an earlier command's value --
+                # and the check right below is the fail-closed gate that decides whether this
+                # TIFF may be overwritten. Read it all, check the exit code, then take [0].
+                $exifProbe = exiftool -q -q -G1 -s -EXIF:all $p.Tiff 2>$null
+                $exifProbeExit = $LASTEXITCODE
+                $firstExif = @($exifProbe | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })[0]
                 # Fail-closed: an unreadable TIFF must not be overwritten by the copy below
-                if ($LASTEXITCODE -ne 0) { "ERROR (exiftool EXIF check) | $($p.TifName) | cannot inspect TIFF, not overwriting"; continue }
+                if ($exifProbeExit -ne 0) { "ERROR (exiftool EXIF check) | $($p.TifName) | cannot inspect TIFF, not overwriting"; continue }
                 if ($firstExif) { "SKIP (already has EXIF) | $($p.TifName)"; continue }
             }
 
@@ -611,18 +619,24 @@ function Invoke-S5ProFolder {
                 continue
             }
 
-            $comp = exiftool -s -s -s -Compression $tiffTarget 2>$null
+            # -IFD0:Compression, and collapsed to the first line below: exiftool can print one
+            # line per IFD and `-match` on an ARRAY is truthy when ANY element matches, so an
+            # uncompressed main image whose thumbnail page happened to be compressed was
+            # reported "already ZIP" and never compressed. compress_tiff_zip.ps1 fixed this in
+            # four places; these two backends were the copies left behind.
+            $comp = exiftool -s -s -s -IFD0:Compression $tiffTarget 2>$null
             if ($LASTEXITCODE -ne 0 -or -not $comp) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "ERROR (exiftool check) | $($p.TifName) | cannot detect compression"
                 continue
             }
+            $comp = "$(@($comp)[0])".Trim()
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
                 "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix"; continue
             }
 
             # Run-scoped prefix so the interrupt trap only cleans up this run's staged files
-            $stagingName = "$($script:runStagingId)_$([guid]::NewGuid().ToString('N'))_$($p.DestName)"
+            $stagingName = "$($script:runStagingId)_$([guid]::NewGuid().ToString('N').Substring(0, 12))_$($p.DestName)"
             $writeDst = Join-Path $writeDirL $stagingName
             $finalDst = Join-Path $finalDirL $p.DestName
 
@@ -656,7 +670,7 @@ function Invoke-S5ProFolder {
                 "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; continue
             }
 
-            if (-not (Restore-TiffSubfileTypes -SrcPath $tiffTarget -DstPath $writeDst)) {
+            if (-not (Restore-TiffSubfileTypes -SrcPath $tiffTarget -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "WARN (subfiletype restore failed, ZIP ok) | $($p.TifName)"; continue
             }

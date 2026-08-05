@@ -32,7 +32,7 @@ param(
     [int]$ThumbSize = 256,          # Thumbnail size in pixels
     [string]$ThumbQuality = "85",   # JPEG quality for thumbnail
     [string]$ThumbFormat = "jpg",   # Thumbnail format (jpg, png, etc.)
-    [int]$ThumbPage = 1,            # Output page position for the embedded thumbnail (0=first, 1=after main, etc.)
+    [int]$ThumbPage = 1,            # Output page position for the embedded thumbnail; must be >= 1 (after the main image)
     [switch]$SkipCompressedWithThumb, # Skip TIFFs that are already compressed AND have thumbnail
     [string]$SrgbProfile = ""       # ICC profile used to convert wide-gamut sources; "" = auto-detect
 )
@@ -72,6 +72,23 @@ foreach ($entry in ($ExcludeFolders -split ';')) {
         exit 1
     }
     $script:excludeNames += $entry
+}
+
+# -- Thumbnail page position ----------------------------------------
+# Only "thumbnail AFTER the main image" is supported. With the thumbnail first the output
+# is [thumb, main], and every page classifier in this project -- SafeMode's
+# Test-TiffHasOnlySubfilePages, Test-ThumbnailSafeSource, both copy_exif backends and the
+# Python mirror in convert_tiff.py -- treats page 0 as the main image and measures the other
+# pages against it. A full-size main image sitting at page 1 therefore read as a real extra
+# page: the file came back MULTI and was refused by every later run of this toolkit,
+# -GenerateThumbnail included. Refuse the flag instead of writing a file we will not touch
+# again.
+if ($GenerateThumbnail -and $ThumbPage -lt 1) {
+    Write-Host "ERROR: -ThumbPage $ThumbPage is not supported: the thumbnail must come AFTER the main image." -ForegroundColor Red
+    Write-Host "       Page 0 has to stay the full-resolution image -- SafeMode classifies a" -ForegroundColor Yellow
+    Write-Host "       thumbnail-first file as multi-page, so every later run would skip it." -ForegroundColor Yellow
+    Write-Host "       Use -ThumbPage 1 (the default)." -ForegroundColor Yellow
+    exit 1
 }
 
 # -----------------------------------------------------------------
@@ -186,7 +203,14 @@ function Process-Results {
 
 # -- Cleanup on interrupt -----------------------------------------
 $script:cleanupDirs   = @()
-$script:runStagingId  = [guid]::NewGuid().ToString('N')
+# 8 hex chars, not 32: this prefix and a per-file id are prepended to every staged file
+# name, and Windows still refuses paths over 260 characters (magick.exe is not long-path
+# aware). The old <32 hex>_<32 hex>_<name> form added 66 characters to a path that already
+# had to fit a photo archive's own folder depth -- a mode 8 run on a normally-nested tree
+# failed on EVERY file with a bare "No such file or directory" from magick. 8 hex is still
+# 4 billion values, which is all this needs: it only has to separate concurrent runs
+# sharing one -StagingDir.
+$script:runStagingId  = [guid]::NewGuid().ToString('N').Substring(0, 8)
 if (-not [string]::IsNullOrWhiteSpace($StagingDir)) { $script:cleanupDirs += $StagingDir }
 
 trap {
@@ -315,7 +339,10 @@ function Get-Files-Mode8 {
         Where-Object {
             $_.Extension -match '^\.(tif|tiff)$' -and
             $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$' -and
-            $_.DirectoryName -notmatch '(?i)[\\/]compress_staging(_mode8)?_[0-9a-f]{32}[\\/]?'
+            # Both spellings: `_cs8_<8 hex>` is the short form (see the mode 8 staging block);
+            # the long `compress_staging*_<32 hex>` form is still matched so a directory left
+            # behind by an older version is not picked up as input.
+            $_.DirectoryName -notmatch '(?i)[\\/](compress_staging(_mode8)?_[0-9a-f]{32}|_cs8_[0-9a-f]{8})([\\/]|$)'
         }
 }
 
@@ -556,6 +583,18 @@ function Invoke-MagickWithTimeout {
 
         ExitCode -1 means "could not determine" -- every caller must treat it as failure
         (fail-closed), never as success.
+
+        Scope, deliberately: this wraps the PROBES (identify, compare, decode checks), not
+        the conversions. -MagickTimeout defaults to 30 s, which is right for a probe and far
+        too short for writing a 500 MB scan (measured: ~20-35 s for a single file), so
+        wrapping `magick ... -compress zip` in it would abort real work. A conversion that
+        hangs therefore hangs the run -- visible, interruptible, and non-destructive, since
+        the interrupt trap cleans this run's staged files.
+
+        Known limitation on timeout: BeginStop is asynchronous, so this returns without
+        disposing $ps, leaking one runspace per timeout (released when the process exits).
+        Disposing here would block on the native magick.exe child -- which PowerShell cannot
+        signal anyway -- and that block is exactly what the timeout exists to avoid.
 
         Duplicated across compress_tiff_zip.ps1 and copy_exif_to_TIFF_ps*.ps1 so each
         script stays self-contained. Keep the implementations identical.
@@ -869,6 +908,58 @@ function Restore-TiffSubfileTypes {
     }
 }
 
+function Set-TiffThumbMarkers {
+    <#
+    .SYNOPSIS
+        Writes the per-page SubfileType markers of a -GenerateThumbnail output: page 0 keeps
+        the marker the SOURCE carried on its main image, page 1 is stamped REDUCEDIMAGE (1).
+        Returns $true when both markers were written.
+
+        Restore-TiffSubfileTypes cannot serve here: the thumbnail path builds a NEW page
+        layout (source page 0 + a freshly generated thumbnail), not a page-for-page copy of
+        the source, so a positional restore would copy the wrong markers.
+
+        Writing only `-IFD1:SubfileType#=1` (as this path used to) left whatever ImageMagick
+        stamped on page 0, and magick stamps PAGE (2) on every page of a multi-page write. So
+        EVERY thumbnail-generated file came out claiming its main image was one page of a
+        multi-page document instead of a full-resolution image -- the exact tag damage
+        Restore-TiffSubfileTypes exists to undo on the non-thumbnail path.
+
+    .NOTES
+        Re-inject into ForEach-Object -Parallel runspaces with:
+            ${function:Set-TiffThumbMarkers} = $using:ThumbMarkerFnDef
+    #>
+    param([string]$SrcPath, [string]$DstPath)
+
+    # Read numerically with exiftool, never `%[tiff:subfiletype]`: that prints an EMPTY string
+    # both when the tag is ABSENT and when it is an explicit 0, and every scanner TIFF carries
+    # an explicit 0 on IFD0. Absent stays absent (clear whatever magick stamped), 0 stays 0.
+    $mainTag = "-IFD0:SubfileType="
+    $argRead = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SubfileType`n$SrcPath`n")
+        $readOut = exiftool -@ $argRead 2>$null
+        if ($LASTEXITCODE -ne 0) { return $false }
+    } finally {
+        Remove-Item $argRead -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($line in @($readOut)) {
+        if ("$line" -match '^\[IFD0\]\s+SubfileType:\s*(\d+)\s*$') {
+            $mainTag = "-IFD0:SubfileType#=$($Matches[1])"
+            break
+        }
+    }
+
+    $argFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argFile, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n$mainTag`n-IFD1:SubfileType#=1`n$DstPath`n")
+        $out = exiftool -@ $argFile 2>&1
+        return ($LASTEXITCODE -eq 0)
+    } finally {
+        Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-ThumbnailSafeSource {
     <#
     .SYNOPSIS
@@ -917,6 +1008,7 @@ $script:PixelCompareFnDef  = ${function:Test-PixelIdentical}.ToString()
 $script:TestSubfileFnDef   = ${function:Test-TiffHasOnlySubfilePages}.ToString()
 $script:MetaBackupFnDef    = ${function:Backup-TiffMetadata}.ToString()
 $script:RestoreSubfileFnDef = ${function:Restore-TiffSubfileTypes}.ToString()
+$script:ThumbMarkerFnDef   = ${function:Set-TiffThumbMarkers}.ToString()
 $script:ThumbSafeFnDef     = ${function:Test-ThumbnailSafeSource}.ToString()
 
 # -- Process one TIFF -> ZIP job ------------------------------------
@@ -977,7 +1069,10 @@ function Process-TiffJob {
                 return @{ Result = "SKIP (compressed+thumb) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
         } else {
-            return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+            # Say WHY nothing was produced when a thumbnail was asked for: this SKIP runs
+            # before the thumbnail step, so -GenerateThumbnail on an already-Deflate library
+            # silently did nothing at all and reported a clean run.
+            return @{ Result = "SKIP ($comp) | $name$(if ($generateThumb) { ' [no thumbnail added: pass -SkipCompressedWithThumb]' } else { '' })"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
         }
     }
 
@@ -1039,16 +1134,22 @@ function Process-TiffJob {
     $inPlaceFinalDst = $null
     if ($mode -lt 0 -and $writeDst -eq $srcPath) {
         $inPlaceFinalDst = $writeDst
-        $writeDst = "$writeDst.$($script:runStagingId)_$([guid]::NewGuid().ToString('N')).tif"
+        $writeDst = "$writeDst.$($script:runStagingId)_$([guid]::NewGuid().ToString('N').Substring(0, 12)).tif"
     }
 
     # Build compression command.
     # $noThumbNote / $exifWarn accumulate degraded outcomes instead of returning early:
     # every success path must reach the mode 8 integrity gate below.
+    # $thumbMarkerFailed / $subfileRestoreFailed used to be plain Write-Log calls here while
+    # the two -Parallel workers folded them into the result string. Same event therefore
+    # counted as a warning on PS7 and as a clean OK on PS5, and the PS5 line printed without
+    # the [n/total] prefix every other result line carries. Accumulate like the other workers.
     $noThumbNote = ""
     $exifWarn = $false
+    $thumbMarkerFailed = $false
+    $subfileRestoreFailed = $false
     if ($generateThumb) {
-        # Always read the main image from page 0; thumbnail will be placed at $thumbPage
+        # Always read the main image from page 0; the thumbnail is appended after it
         $mainPage = "$srcPath[0]"
         $thumbExt = if ($thumbFormat) { $thumbFormat.ToLowerInvariant() } else { "jpg" }
         $tempTiffBase = [System.IO.Path]::GetTempFileName()
@@ -1082,12 +1183,9 @@ function Process-TiffJob {
             }
 
             if (-not $noThumbNote) {
-                # Combine: main TIFF + thumbnail at configured page position
-                if ($thumbPage -le 0) {
-                    $out = magick -quiet "$thumbExt`:$thumbTemp" $tempTiff -compress zip $writeDst 2>&1
-                } else {
-                    $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
-                }
+                # Main image first, thumbnail after it. -ThumbPage 0 is refused at startup:
+                # a thumbnail-first file is read as multi-page by every classifier here.
+                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
                 if ($LASTEXITCODE -ne 0) {
                     # Fallback: just use compressed main
                     Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
@@ -1096,19 +1194,10 @@ function Process-TiffJob {
             }
 
             if (-not $noThumbNote) {
-                # Mark thumbnail page as ReducedResolution (subfiletype=1)
-                # When thumbPage <= 0 the thumbnail is page 0; otherwise it's page 1
-                $thumbIfd = if ($thumbPage -le 0) { "IFD0" } else { "IFD1" }
-                $argThumb = [System.IO.Path]::GetTempFileName()
-                try {
-                    [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
-                    $thumbExifOut = exiftool -@ $argThumb 2>&1
-                    $thumbExifExit = $LASTEXITCODE
-                } finally {
-                    Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
-                }
-                if ($thumbExifExit -ne 0) {
-                    Write-Log "WARN (thumbnail SubfileType marker failed) | $name | $thumbExifOut" "WARN"
+                # Both markers, not just the thumbnail's: magick stamps PAGE on page 0 of any
+                # multi-page write, so the main image has to get the source's marker back.
+                if (-not (Set-TiffThumbMarkers -SrcPath $srcPath -DstPath $writeDst)) {
+                    $thumbMarkerFailed = $true
                 }
             }
         } finally {
@@ -1142,7 +1231,7 @@ function Process-TiffJob {
 
     if (-not $generateThumb) {
         if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $script:MagickTimeout)) {
-            Write-Log "WARN (subfiletype restore failed) | $name" "WARN"
+            $subfileRestoreFailed = $true
         }
     }
 
@@ -1186,8 +1275,10 @@ function Process-TiffJob {
         }
     }
 
-    $resultText = if ($exifWarn) {
-        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote | $name"
+    $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
+    $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
+    $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
+        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote | $name"
     } else {
         "OK ($comp -> ZIP)$noThumbNote$thumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
     }
@@ -1282,6 +1373,7 @@ if ($Mode -lt 0) {
                     ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
                     ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
                     ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
+                    ${function:Set-TiffThumbMarkers}       = $using:ThumbMarkerFnDef
                     ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
                     $writeDirL = $using:writeDir
                     $finalDirL = $using:finalDir
@@ -1307,7 +1399,7 @@ if ($Mode -lt 0) {
                     $finalDst = Join-Path $finalDirL $finalName
                     # Only use staging name if staging dir is different from final dir
                     if ($writeDirL -ne $finalDirL) {
-                        $stagingName = "${runIdL}_$([guid]::NewGuid().ToString('N'))_${stem}${ext}"
+                        $stagingName = "${runIdL}_$([guid]::NewGuid().ToString('N').Substring(0, 12))_${stem}${ext}"
                         $writeDst = Join-Path $writeDirL $stagingName
                     } else {
                         $stagingName = $finalName
@@ -1341,7 +1433,7 @@ if ($Mode -lt 0) {
                             }
                             # Compressed but no thumbnail: fall through to reprocess
                         } else {
-        return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
+        return @{ Result = "SKIP ($comp) | $name$(if ($genThumbL) { ' [no thumbnail added: pass -SkipCompressedWithThumb]' } else { '' })"; StagingName = $null; OriginalName = $name; FinalDst = $finalDst }
                         }
                     }
 
@@ -1399,7 +1491,7 @@ if ($Mode -lt 0) {
                     $inPlaceFinalDst = $null
                     if ($writeDst -eq $src) {
                         $inPlaceFinalDst = $writeDst
-                        $writeDst = "$writeDst.${runIdL}_$([guid]::NewGuid().ToString('N')).tif"
+                        $writeDst = "$writeDst.${runIdL}_$([guid]::NewGuid().ToString('N').Substring(0, 12)).tif"
                     }
 
                     $noThumbNote = ""
@@ -1407,7 +1499,7 @@ if ($Mode -lt 0) {
                     $thumbMarkerFailed = $false
                     $subfileRestoreFailed = $false
                     if ($genThumbL) {
-                        # Always read the main image from page 0; thumbnail will be placed at $thumbPageL
+                        # Always read the main image from page 0; the thumbnail is appended after it
                         $mainPage = "$src[0]"
                         $thumbExt = if ($thumbFormatL) { $thumbFormatL.ToLowerInvariant() } else { "jpg" }
                         $tempTiffBase = [System.IO.Path]::GetTempFileName()
@@ -1435,28 +1527,18 @@ if ($Mode -lt 0) {
                                 $noThumbNote = " [no thumb]"
                             }
                             if (-not $noThumbNote) {
-                                if ($thumbPageL -le 0) {
-                                    $out = magick -quiet "$thumbExt`:$thumbTemp" $tempTiff -compress zip $writeDst 2>&1
-                                } else {
-                                    $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
-                                }
+                                # Main image first, thumbnail after it (-ThumbPage 0 is refused at startup)
+                                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
                                 if ($LASTEXITCODE -ne 0) {
                                     Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
                                     $noThumbNote = " [no thumb]"
                                 }
                             }
                             if (-not $noThumbNote) {
-                                $argThumb = [System.IO.Path]::GetTempFileName()
-                                $thumbIfd = if ($thumbPageL -le 0) { "IFD0" } else { "IFD1" }
-                                try {
-                                    [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
-                                    $thumbExifOut = exiftool -@ $argThumb 2>&1
-                                    $thumbExifExit = $LASTEXITCODE
-                                } finally {
-                                    Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
-                                }
-                                if ($thumbExifExit -ne 0) {
-                                    # Cannot log via Write-Log inside -Parallel; surface as warning in result string later
+                                # Both markers: magick stamps PAGE on page 0 of a multi-page write,
+                                # so the main image needs the source's marker restored too.
+                                if (-not (Set-TiffThumbMarkers -SrcPath $src -DstPath $writeDst)) {
+                                    # Cannot log via Write-Log inside -Parallel; surfaced in the result string
                                     $thumbMarkerFailed = $true
                                 }
                             }
@@ -1536,7 +1618,7 @@ if ($Mode -lt 0) {
                     if (-not $ext) { $ext = ".tif" }
                     $tifName = "${stem}${ext}"
                     # Prefix staged names with the run id so the interrupt trap can clean them up
-                    $writeName = if ($writeDir -ne $finalDir) { "$($script:runStagingId)_$([guid]::NewGuid().ToString('N'))_$tifName" } else { $tifName }
+                    $writeName = if ($writeDir -ne $finalDir) { "$($script:runStagingId)_$([guid]::NewGuid().ToString('N').Substring(0, 12))_$tifName" } else { $tifName }
                     $result = Process-TiffJob $f.FullName $(Join-Path $writeDir $writeName) $(Join-Path $finalDir $tifName) `
                                 $script:DryRun $script:Overwrite $script:SafeMode `
                                 $script:SkipLzwAsCompressed $script:DeleteSource $script:Mode `
@@ -1705,9 +1787,11 @@ if ($Mode -eq 8 -and -not $DryRun -and [string]::IsNullOrWhiteSpace($StagingDir)
     # a truncated file at the destination. With several input roots there is no single
     # same-volume choice, so fall back to %TEMP% (the post-move integrity gate applies).
     if ($inputRoots.Count -eq 1) {
-        $defaultStaging = Join-Path $inputRoots[0] "compress_staging_mode8_$([guid]::NewGuid().ToString('N'))"
+        # Short name on purpose: this folder sits INSIDE the user's tree and every staged
+        # path is built under it, so a long name is charged against the 260-char limit twice.
+        $defaultStaging = Join-Path $inputRoots[0] "_cs8_$([guid]::NewGuid().ToString('N').Substring(0, 8))"
     } else {
-        $defaultStaging = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "compress_tiff_zip_mode8_$([guid]::NewGuid().ToString('N'))")
+        $defaultStaging = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "_cs8_$([guid]::NewGuid().ToString('N').Substring(0, 8))")
     }
     $msg = "Mode 8 deletes source files after compression. A staging directory is required to avoid overwriting originals before verification."
     Write-Log $msg "WARN"
@@ -1755,6 +1839,16 @@ foreach ($f in $files) {
         # Routed through Process-Results so it gets the same [n/total] prefix and the same
         # counter bookkeeping as every other result line (it used to bypass both).
         Process-Results @("SKIP (mode $Mode cannot resolve an output path) | $($f.Name)")
+        continue
+    }
+
+    # Windows refuses paths longer than 259 characters and magick.exe is not long-path
+    # aware, so an over-long output path used to fail deep inside the worker with a bare
+    # "No such file or directory" naming neither the cause nor the limit -- and in modes 0/9
+    # that error arrives only AFTER the original was moved to OLD_TIFFs. Refuse here, before
+    # any directory is created and before anything is moved.
+    if ($finalDst.Length -gt 259) {
+        Process-Results @("ERROR (path too long: $($finalDst.Length) chars, Windows allows 259) | $($f.Name) | $finalDst")
         continue
     }
 
@@ -1845,13 +1939,21 @@ foreach ($f in $files) {
             Process-Results @("ERROR (StagingDir exists as a file) | $($f.Name) | $StagingDir")
             continue
         }
-        $stagingName = "$($script:runStagingId)_$([guid]::NewGuid().ToString('N'))_$($f.Name)"
+        $stagingName = "$($script:runStagingId)_$([guid]::NewGuid().ToString('N').Substring(0, 12))_$($f.Name)"
         if (-not (Test-Path -LiteralPath $StagingDir)) {
             [System.IO.Directory]::CreateDirectory($StagingDir) | Out-Null
         }
         Join-Path $StagingDir $stagingName
     } else {
         $finalDst
+    }
+
+    # Same guard for the staged path (the collision rename above can also have lengthened
+    # $finalDst since it was checked).
+    $tooLong = @($writeDst, $finalDst) | Where-Object { $_ -and $_.Length -gt 259 } | Select-Object -First 1
+    if ($tooLong) {
+        Process-Results @("ERROR (path too long: $($tooLong.Length) chars, Windows allows 259) | $($f.Name) | $tooLong")
+        continue
     }
 
     # Mode 0 and 9: pre-check compression and move source to OLD_TIFFs/ before queuing
@@ -1901,7 +2003,7 @@ foreach ($f in $files) {
                 $skipCompressed = $hasThumb
             }
             if ($skipCompressed) {
-                Process-Results @("SKIP ($compMain) | $($f.Name)")
+                Process-Results @("SKIP ($compMain) | $($f.Name)$(if ($GenerateThumbnail) { ' [no thumbnail added: pass -SkipCompressedWithThumb]' } else { '' })")
                 continue
             }
         }
@@ -2029,14 +2131,14 @@ if ($tasks.Count -eq 0) {
     if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
 }
 
+# Group by the folder the outputs actually land in, not by its PARENT. The parent made the
+# "-- Group: <dir>" header and the "  -> Moved N file(s) -> <dir>" line name a folder the run
+# never wrote to -- for TIFFs sitting directly under the input root that was the drive root,
+# so a correct run read as if it had written to C:\. It also meant the pre-create below made
+# the parent instead of the output folder.
 $groupedTasks = $tasks | Group-Object {
     $dir = [System.IO.Path]::GetDirectoryName($_.FinalDst)
-    $parent = Split-Path $dir
-    if ([string]::IsNullOrWhiteSpace($parent)) {
-        $dir.ToLowerInvariant()
-    } else {
-        $parent.ToLowerInvariant()
-    }
+    if ([string]::IsNullOrWhiteSpace($dir)) { "" } else { $dir.ToLowerInvariant() }
 }
 
 foreach ($group in $groupedTasks) {
@@ -2073,6 +2175,7 @@ foreach ($group in $groupedTasks) {
             ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
             ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
             ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
+            ${function:Set-TiffThumbMarkers}       = $using:ThumbMarkerFnDef
             ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
             $srcPath = $t.Src
             $writeDst = $t.WriteDst
@@ -2128,7 +2231,7 @@ foreach ($group in $groupedTasks) {
                     }
                     # Compressed but no thumbnail: fall through to reprocess
                 } else {
-                    return @{ Result = "SKIP ($comp) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+                    return @{ Result = "SKIP ($comp) | $name$(if ($generateThumb) { ' [no thumbnail added: pass -SkipCompressedWithThumb]' } else { '' })"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                 }
             }
             if ((Test-Path -LiteralPath $finalDst) -and -not $overWrite -and ($finalDst -ne $srcPath)) {
@@ -2184,7 +2287,7 @@ foreach ($group in $groupedTasks) {
             $thumbMarkerFailed = $false
             $subfileRestoreFailed = $false
             if ($generateThumb) {
-                # Always read the main image from page 0; thumbnail will be placed at $thumbPage
+                # Always read the main image from page 0; the thumbnail is appended after it
                 $mainPage = "$srcPath[0]"
                 $thumbExt = if ($thumbFormat) { $thumbFormat.ToLowerInvariant() } else { "jpg" }
                 $tempTiffBase = [System.IO.Path]::GetTempFileName()
@@ -2212,28 +2315,18 @@ foreach ($group in $groupedTasks) {
                         $noThumbNote = " [no thumb]"
                     }
                     if (-not $noThumbNote) {
-                        if ($thumbPage -le 0) {
-                            $out = magick -quiet "$thumbExt`:$thumbTemp" $tempTiff -compress zip $writeDst 2>&1
-                        } else {
-                            $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
-                        }
+                        # Main image first, thumbnail after it (-ThumbPage 0 is refused at startup)
+                        $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDst 2>&1
                         if ($LASTEXITCODE -ne 0) {
                             Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
                             $noThumbNote = " [no thumb]"
                         }
                     }
                     if (-not $noThumbNote) {
-                        $argThumb = [System.IO.Path]::GetTempFileName()
-                        $thumbIfd = if ($thumbPage -le 0) { "IFD0" } else { "IFD1" }
-                        try {
-                            [System.IO.File]::WriteAllText($argThumb, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n-${thumbIfd}:SubfileType#=1`n$writeDst`n")
-                            $thumbExifOut = exiftool -@ $argThumb 2>&1
-                            $thumbExifExit = $LASTEXITCODE
-                        } finally {
-                            Remove-Item $argThumb -Force -ErrorAction SilentlyContinue
-                        }
-                        if ($thumbExifExit -ne 0) {
-                            # Cannot log via Write-Log inside -Parallel; surface as warning in result string later
+                        # Both markers: magick stamps PAGE on page 0 of a multi-page write,
+                        # so the main image needs the source's marker restored too.
+                        if (-not (Set-TiffThumbMarkers -SrcPath $srcPath -DstPath $writeDst)) {
+                            # Cannot log via Write-Log inside -Parallel; surfaced in the result string
                             $thumbMarkerFailed = $true
                         }
                     }

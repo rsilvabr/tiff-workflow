@@ -146,7 +146,10 @@ $allFiles = foreach ($root in $inputRoots) {
 }
 
 $files = @($allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$|[\\/]ZIP[\\/]|[\\/]ZIP$|[\\/]converted_zip[\\/]|[\\/]converted_zip$|[\\/]_EXPORT[\\/]' -and $_.BaseName -notmatch $script:ThumbNamePattern })
-$total = $files.Count
+# $script:, not a bare $total: Process-Results reads it, and a function only sees a bare
+# script variable through dynamic scoping -- which stops working under Set-StrictMode or if
+# the function is ever dot-sourced or injected into a runspace.
+$script:total = $files.Count
 
 # -- Statistics ----------------------------------------------------
 $script:okTotal     = 0
@@ -205,9 +208,9 @@ if ($Remove) {
     # enumerated twice -- deleting it twice would count a phantom error.
     $thumbs = @($thumbs | Sort-Object -Property FullName -Unique)
 
-    $total = $thumbs.Count
-    Write-Log "Found: $total thumbnail(s) to remove"
-    if ($total -eq 0) {
+    $script:total = $thumbs.Count
+    Write-Log "Found: $($script:total) thumbnail(s) to remove"
+    if ($script:total -eq 0) {
         Write-Log "No thumbnails found in: $(($searchRoots | Select-Object -Unique) -join '; ')" "WARN"
         Write-Log "Log: $logFile"
         if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
@@ -217,32 +220,32 @@ if ($Remove) {
         $script:counterTotal++
         if ($DryRun) {
             $script:skipTotal++
-            Write-Log "[$($script:counterTotal)/$total] DRY-RUN (would remove) | $($thumb.Name)"
+            Write-Log "[$($script:counterTotal)/$($script:total)] DRY-RUN (would remove) | $($thumb.Name)"
             continue
         }
         try {
             Remove-Item -LiteralPath $thumb.FullName -Force
             $script:okTotal++
-            Write-Log "[$($script:counterTotal)/$total] REMOVED | $($thumb.Name)"
+            Write-Log "[$($script:counterTotal)/$($script:total)] REMOVED | $($thumb.Name)"
         } catch {
             $script:errTotal++
-            Write-Log "[$($script:counterTotal)/$total] ERROR (remove failed) | $($thumb.Name) | $($_.Exception.Message)" "ERROR"
+            Write-Log "[$($script:counterTotal)/$($script:total)] ERROR (remove failed) | $($thumb.Name) | $($_.Exception.Message)" "ERROR"
         }
     }
 
     Write-Log ""
-    Write-Log "Done: $($script:okTotal) removed | $($script:skipTotal) skipped | $($script:errTotal) errors | $($script:counterTotal)/$total processed"
+    Write-Log "Done: $($script:okTotal) removed | $($script:skipTotal) skipped | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
     Write-Log "Log: $logFile"
     if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
 }
 
-if ($total -eq 0) {
+if ($script:total -eq 0) {
     Write-Log "No TIFF files found in: $($inputRoots -join '; ')" "WARN"
     Write-Log "Log: $logFile"
     if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }
 }
 
-Write-Log "Found: $total TIFF(s)"
+Write-Log "Found: $($script:total) TIFF(s)"
 Write-Log "Size: ${Size}px | Format: $Format | Quality: $Quality | Page: $Page"
 Write-Log "Mode: $(if ($Remove) { 'REMOVE thumbnails' } else { 'GENERATE thumbnails' })"
 # -----------------------------------------------------------------
@@ -252,15 +255,15 @@ function Process-Results($lines) {
         $script:counterTotal++
         if ($line -match '^OK') {
             $script:okTotal++
-            Write-Log "[$($script:counterTotal)/$total] $line"
+            Write-Log "[$($script:counterTotal)/$($script:total)] $line"
         } elseif ($line -match '^SKIP') {
             $script:skipTotal++
-            Write-Log "[$($script:counterTotal)/$total] $line"
+            Write-Log "[$($script:counterTotal)/$($script:total)] $line"
         } elseif ($line -match '^ERROR') {
             $script:errTotal++
-            Write-Log "[$($script:counterTotal)/$total] $line" "ERROR"
+            Write-Log "[$($script:counterTotal)/$($script:total)] $line" "ERROR"
         } else {
-            Write-Log "[$($script:counterTotal)/$total] $line"
+            Write-Log "[$($script:counterTotal)/$($script:total)] $line"
         }
     }
 }
@@ -340,12 +343,14 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $magickArgs += @(
                     "-colorspace", "sRGB",
                     "-strip",
-                    "-thumbnail", "$($t.Size)x$($t.Size)>",
-                    "-quality", $t.Quality
+                    "-thumbnail", "$($t.Size)x$($t.Size)>"
                 )
-                
+
+                # -quality only where it means JPEG quality. ImageMagick reinterprets it for
+                # PNG as zlib level + filter (85 -> level 8, filter 5), so -Quality 85 was
+                # quietly choosing a worse PNG compression than the default; TIFF ignores it.
                 if ($t.Format -in @("jpg", "jpeg")) {
-                    $magickArgs += @("-interlace", "Plane")
+                    $magickArgs += @("-quality", $t.Quality, "-interlace", "Plane")
                 } elseif ($t.Format -in @("tif", "tiff")) {
                     $magickArgs += @("-compress", "zip")
                 }
@@ -411,12 +416,14 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $magickArgs += @(
                     "-colorspace", "sRGB",
                     "-strip",
-                    "-thumbnail", "$($t.Size)x$($t.Size)>",
-                    "-quality", $t.Quality
+                    "-thumbnail", "$($t.Size)x$($t.Size)>"
                 )
-                
+
+                # -quality only where it means JPEG quality. ImageMagick reinterprets it for
+                # PNG as zlib level + filter (85 -> level 8, filter 5), so -Quality 85 was
+                # quietly choosing a worse PNG compression than the default; TIFF ignores it.
                 if ($t.Format -in @("jpg", "jpeg")) {
-                    $magickArgs += @("-interlace", "Plane")
+                    $magickArgs += @("-quality", $t.Quality, "-interlace", "Plane")
                 } elseif ($t.Format -in @("tif", "tiff")) {
                     $magickArgs += @("-compress", "zip")
                 }
@@ -457,6 +464,6 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
 }
 
 Write-Log ""
-Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:errTotal) errors | $($script:counterTotal)/$total processed"
+Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
 Write-Log "Log: $logFile"
 if ($script:errTotal -gt 0) { exit 1 } else { exit 0 }

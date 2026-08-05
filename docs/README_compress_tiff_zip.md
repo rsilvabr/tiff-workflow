@@ -78,7 +78,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-GenerateThumbnail` | switch | off | Embed thumbnail as additional page in TIFF |
 | `-ThumbSize` | int | `256` | Thumbnail size in pixels (max width/height) |
 | `-ThumbQuality` | string | `"85"` | JPEG quality for thumbnail (JPEG only) |
-| `-ThumbPage` | int | `1` | Output page position for embedded thumbnail (`0`=first, `1`=after main image) |
+| `-ThumbPage` | int | `1` | Output page position for the embedded thumbnail. Must be **>= 1** -- `0` (thumbnail first) is refused at startup, see below |
 | `-ThumbFormat` | string | `"jpg"` | Thumbnail format: `jpg`, `png`, or `tif` |
 | `-SkipCompressedWithThumb` | switch | off | Skip TIFFs that are already compressed AND have thumbnail |
 
@@ -89,10 +89,22 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -Th
 ```
 
 **Thumbnail format:**
-- Page 0: Original image (compressed with ZIP/Deflate)
-- Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved)
-- Thumbnail page marked with `subfiletype=1` (reduced resolution flag)
-- The main image is always read from page 0; `-ThumbPage` controls where the thumbnail is inserted in the output.
+- Page 0: Original image (compressed with ZIP/Deflate), keeping the `SubfileType` marker the source carried
+- Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved), marked `subfiletype=1` (reduced resolution flag)
+- The main image is always read from page 0, and the thumbnail is always appended after it.
+
+**`-ThumbPage 0` is refused.** Every page classifier in this toolkit -- SafeMode, the
+thumbnail-safety gate, both Copy EXIF backends and the Python mirror -- treats page 0 as the
+main image and measures the other pages against it. A thumbnail-first file therefore has a
+*full-size* page 1, which reads as a real extra page: the file came back `MULTI` and was
+skipped by every later run, `-GenerateThumbnail` included. The flag now exits 1 with an
+explanation instead of writing such a file.
+
+**Already-compressed files are skipped before the thumbnail step.** `-GenerateThumbnail`
+alone on a library that is already Deflate produces nothing, because the "already
+compressed" check runs first; the skip line says so (`[no thumbnail added: pass
+-SkipCompressedWithThumb]`). Add `-SkipCompressedWithThumb` to reprocess compressed files
+that have no thumbnail yet.
 
 ---
 

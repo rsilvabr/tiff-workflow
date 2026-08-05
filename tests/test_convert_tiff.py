@@ -562,7 +562,15 @@ class TestComparePageCount:
 
 
 class TestPurgeSidecarVerification:
-    def test_sidecar_without_parent_blocks_purge(self, tmp_path, monkeypatch):
+    def test_sidecar_without_parent_is_never_deleted(self, tmp_path, monkeypatch, capsys):
+        """The property that matters is that the file survives: with no counterpart in the
+        parent folder it is the only copy left.
+
+        Round 13 changed only HOW that is enforced. It used to be reported as a mismatch,
+        which aborted the whole purge -- a dead end a healthy folder reaches routinely,
+        because modes 0/9 rename a backup when one of that name already exists and a .tiff
+        source produces a .tif output. It is now kept and reported; here it is the only
+        entry, so there is simply nothing left to purge."""
         old_dir = tmp_path / "OLD_TIFFs"
         old_dir.mkdir()
         (old_dir / "notes.txt").write_text("sidecar without parent copy")
@@ -571,8 +579,10 @@ class TestPurgeSidecarVerification:
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         cfg = SimpleNamespace(config=ToolConfig())
         result = run_purge_old_tiffs(cfg)
-        assert result is False  # mismatch blocks purge, nothing deleted
-        assert (old_dir / "notes.txt").exists()
+        assert (old_dir / "notes.txt").exists(), "the only copy of the sidecar was deleted"
+        assert result is True
+        out = capsys.readouterr().out
+        assert "KEPT" in out and "Nothing can be purged" in out, out
 
     def test_sidecar_with_matching_parent_does_not_block(self, tmp_path, monkeypatch):
         old_dir = tmp_path / "OLD_TIFFs"

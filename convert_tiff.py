@@ -737,6 +737,94 @@ def _wrap_ps5_command(cmd: List[str]) -> List[str]:
     return [exe] + prefix + ["-Command", invocation]
 
 
+def _unwrap_ps5_invocation(invocation: str) -> Optional[List[str]]:
+    """Exact inverse of the quoting _wrap_ps5_command applies.
+
+    Returns [script, *args], or None when the string does not have the shape that
+    function produces (never guess: a mis-parsed argument list drives a converter that
+    can delete sources in mode 8)."""
+    s = invocation.strip()
+    if not s.startswith("& "):
+        return None
+    s = s[2:]
+    out: List[str] = []
+    i, n = 0, len(s)
+    while i < n:
+        if s[i] == " ":
+            i += 1
+            continue
+        if s[i] == "'":
+            i += 1
+            buf = []
+            closed = False
+            while i < n:
+                if s[i] == "'":
+                    # '' is an escaped single quote inside a single-quoted PowerShell string
+                    if i + 1 < n and s[i + 1] == "'":
+                        buf.append("'")
+                        i += 2
+                        continue
+                    i += 1
+                    closed = True
+                    break
+                buf.append(s[i])
+                i += 1
+            if not closed:
+                return None
+            out.append("".join(buf))
+        else:
+            j = s.find(" ", i)
+            if j < 0:
+                j = n
+            out.append(s[i:j])
+            i = j
+    return out or None
+
+
+def _journal_parts(cmd: List[str]) -> Optional[List[str]]:
+    """Reduce a built PowerShell command line to its shell-neutral [script, *args].
+
+    A journalled command has to survive the PowerShell available changing between the run
+    and the repeat. Replaying a `-File ... -SafeMode:$false` command under powershell.exe
+    5.1 silently binds the STRING '$false' -- which is truthy -- so the repeat ran with
+    SafeMode ON, the exact trap _wrap_ps5_command exists to avoid; and a Copy EXIF command
+    kept pointing at the backend written for the other shell. Stripping the wrapper here
+    lets run_repeat_last rebuild the invocation for whatever PowerShell is detected now.
+
+    Returns None when the shape is not recognised, so the caller can refuse instead of
+    running something it does not understand."""
+    if not cmd:
+        return None
+    if "-File" in cmd:
+        i = cmd.index("-File")
+        return cmd[i + 1:] if i + 1 < len(cmd) else None
+    if "-Command" in cmd:
+        i = cmd.index("-Command")
+        return _unwrap_ps5_invocation(cmd[i + 1]) if i + 1 < len(cmd) else None
+    return None
+
+
+def _journaled_script_path(parts: List[str], ps_name: str) -> Path:
+    """The backend a journalled command will actually run under `ps_name`.
+
+    The two Copy EXIF backends are not interchangeable -- one is the PS5 sequential
+    implementation, the other drives PS7 runspaces -- so the script follows the shell we
+    are about to run, not the shell that happened to record the journal."""
+    script = Path(parts[0])
+    if script.name in ("copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"):
+        return SCRIPT_DIR / ("copy_exif_to_TIFF_ps5.ps1" if ps_name == "powershell"
+                             else "copy_exif_to_TIFF_ps7.ps1")
+    return script
+
+
+def _rebuild_journaled_command(parts: List[str], ps_name: str) -> List[str]:
+    """Turn a shell-neutral [script, *args] back into a command for `ps_name`."""
+    cmd = [ps_name, "-NoProfile", "-File", str(_journaled_script_path(parts, ps_name))] + list(parts[1:])
+    if ps_name == "powershell":
+        cmd = _wrap_ps5_command(cmd)
+    return cmd
+
+
 def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: str = "pwsh") -> List[str]:
     """Build powershell command for compress_tiff_zip.ps1."""
     script = SCRIPT_DIR / "compress_tiff_zip.ps1"
@@ -1146,6 +1234,23 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
     return failed == 0
 
 
+def _strip_magick_noise(text: str) -> str:
+    """Remove ImageMagick's own warning lines before a metric is parsed out of the text.
+
+    `magick compare -metric RMSE ... null:` prints the metric on stderr and mixes its TIFF
+    warnings into the same stream. On real scanner files that reads:
+
+        0 (0)compare: Wrong data type 3 for "PixelXDimension"; tag ignored. ... @ warning/...
+
+    The metric happens to come first, so the regex below still finds it -- but this text
+    feeds the gate that authorises permanently deleting an original, and a warning emitted
+    while READING (before the metric) would be parsed as the metric instead. Drop anything
+    that is tool chatter and parse only what is left.
+    """
+    cleaned = re.sub(r"(?:compare|magick|identify|convert)\s*:.*?(?:\n|$)", " ", text or "")
+    return re.sub(r"@\s+(?:warning|error)/\S+", " ", cleaned)
+
+
 def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     """
     Compare two TIFFs pixel-by-pixel using RMSE.
@@ -1220,6 +1325,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
                 return False, f"compare failed on page {page}: {output}"
 
             import re
+            output = _strip_magick_noise(output).strip()
             # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
             # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
             # it matched "06" as the RMSE.
@@ -1333,6 +1439,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             return False, 0.0, f"ERROR: compare failed (exit={result.returncode}): {output}"
 
         import re
+        output = _strip_magick_noise(output).strip()
         match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
         if not match:
             return False, 0.0, f"ERROR: RMSE parse failed: '{output}'"
@@ -1580,37 +1687,68 @@ def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
     return True
 
 
+def _tiff_page_count(path) -> Optional[int]:
+    """Number of IFDs in a TIFF, or None when it cannot be read (never a silent 0).
+
+    `%n` prints once per frame, so "%n\\n" plus the first line is the only reliable form."""
+    try:
+        r = subprocess.run(
+            ["magick", "identify", "-format", "%n\n", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return None
+        return int(r.stdout.splitlines()[0].strip())
+    except Exception:
+        return None
+
+
 def _restore_subfile_types(src_path, dst_path) -> bool:
     """Re-apply the source per-page SubfileType markers to a magick-written TIFF.
 
     Python mirror of Restore-TiffSubfileTypes: `-depth 8` rewrites every page and drops the
     tag, so a Capture One thumbnail came back stamped PAGE. This was the only rewrite path
     in the project without the restore.
+
+    Markers are read with exiftool, NOT with `magick %[tiff:subfiletype]`. That property
+    prints an EMPTY string both when the tag is ABSENT and when it is an explicit 0
+    ("full-resolution image"), so a source carrying an explicit 0 -- every scanner TIFF does
+    -- had the tag DELETED from the output instead of preserved; and the symbolic names only
+    covered four values, so anything else silently became "no tag". exiftool prints one line
+    per IFD that really has the tag, with its numeric value, which tells the cases apart.
+    The PowerShell twin was fixed for exactly this; the mirror had been left behind.
     """
     try:
         r = subprocess.run(
-            ["magick", "identify", "-format", "%[tiff:subfiletype]\n", str(src_path)],
+            ["exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(src_path)],
             capture_output=True, text=True, timeout=30,
         )
         if r.returncode != 0:
             return False
-        types = r.stdout.splitlines()
     except Exception:
         return False
 
-    if len(types) <= 1:
+    src_types = {}
+    for line in (r.stdout or "").splitlines():
+        m = re.match(r"^\[IFD(\d+)\]\s+SubfileType:\s*(\d+)\s*$", line.strip())
+        if m:
+            src_types[int(m.group(1))] = int(m.group(2))
+
+    pages = _tiff_page_count(src_path)
+    if pages is None:
+        return False
+    # Single-page sources need no restore: magick only stamps PAGE when it writes a
+    # multi-page file, and an absent NewSubfileType means 0 per the TIFF spec anyway.
+    if pages <= 1:
         return True
 
-    mapping = {"REDUCEDIMAGE": 1, "REDUCED": 1, "PAGE": 2, "MASK": 4}
     tags = []
-    for i, raw in enumerate(types):
-        n = mapping.get(raw.strip().upper(), 0)
-        if i == 0:
-            # magick stamps PAGE on IFD0 of multi-page output; clear it when the source
-            # had none. exiftool writes an explicit 0 as "full-resolution image".
-            tags.append("-IFD0:SubfileType#=%d" % n if n else "-IFD0:SubfileType=")
-        elif n:
-            tags.append("-IFD%d:SubfileType#=%d" % (i, n))
+    for i in range(pages):
+        if i in src_types:
+            tags.append("-IFD%d:SubfileType#=%d" % (i, src_types[i]))
+        else:
+            # Source had no marker on this page: clear whatever magick stamped on it.
+            tags.append("-IFD%d:SubfileType=" % i)
     if not tags:
         return True
     try:
@@ -1920,12 +2058,20 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             print("No files found in OLD_TIFFs folders.")
         return True
 
+    # A backup whose parent counterpart is simply ABSENT is not a mismatch: there is nothing
+    # to compare and nothing that may be deleted, so it is kept and reported. It used to be
+    # lumped in with real mismatches and blocked the whole purge -- which a healthy folder
+    # reaches routinely, because modes 0/9 rename a backup when one of that name already
+    # exists (photo_20260805_101500.tif) and a photo.tiff source produces a photo.tif output.
+    orphans = []
+    MISSING_PARENT = "parent file missing"
+
     # Verify each image file; non-TIFF sidecars must at least have an identical-size copy in the parent
     def _verify(item):
         old_file, new_file, _ = item
         if old_file.suffix.lower() not in (".tif", ".tiff"):
             if not new_file.exists():
-                return (old_file, new_file, "parent file missing")
+                return (old_file, new_file, MISSING_PARENT)
             # Compare content, not just size: this gate authorises permanent deletion, and a
             # same-size sidecar with different content used to pass.
             try:
@@ -1937,7 +2083,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
                 return (old_file, new_file, f"read failed: {e}")
             return None
         if not new_file.exists():
-            return (old_file, new_file, "parent file missing")
+            return (old_file, new_file, MISSING_PARENT)
         match, detail = _compare_tiff_metadata(old_file, new_file)
         if not match:
             return (old_file, new_file, detail)
@@ -1947,10 +2093,13 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         for result in executor.map(_verify, items):
             if result:
-                mismatches.append(result)
+                (orphans if result[2] == MISSING_PARENT else mismatches).append(result)
+
+    orphan_keys = {(o[0], o[1]) for o in orphans}
+    deletable = [it for it in items if (it[0], it[1]) not in orphan_keys]
 
     # Display results
-    total_old_size = sum(s for _, _, s in items)
+    total_old_size = sum(s for _, _, s in deletable)
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[cyan]OLD_TIFFs review -- {len(items)} file(s) in {len(old_dirs)} folder(s)[/cyan]")
@@ -1966,6 +2115,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
 
     for old_file, new_file, old_size in items:
         is_mismatch = (old_file, new_file) in mismatch_set
+        is_orphan = (old_file, new_file) in orphan_keys
         if new_file.exists():
             new_size = new_file.stat().st_size
             size_info = f"{_format_size(old_size)} -> {_format_size(new_size)}"
@@ -1975,12 +2125,16 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
         if is_mismatch:
             status = "[red]MISMATCH[/red]"
             detail = "  <- " + mismatch_detail.get((old_file, new_file), "")
+        elif is_orphan:
+            status = "[yellow]KEPT[/yellow]"
+            detail = "  <- no counterpart in the parent folder, nothing to verify against"
         else:
             status = "OK"
         if RICH_AVAILABLE and console:
             console.print(f"  [{status}] {escape(str(old_file.relative_to(folder)))}  {size_info}{escape(detail)}")
         else:
-            status_str = status.replace("[red]", "").replace("[/red]", "")
+            status_str = (status.replace("[red]", "").replace("[/red]", "")
+                                .replace("[yellow]", "").replace("[/yellow]", ""))
             print(f"  [{status_str}] {old_file.relative_to(folder)}  {size_info}{detail}")
 
     if mismatches:
@@ -1994,12 +2148,33 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
                 print(f"  ! {old_file.relative_to(folder)}: {reason}")
         return False
 
+    if orphans:
+        note = (f"{len(orphans)} file(s) have no counterpart in the parent folder and will be "
+                f"KEPT (a mode 0/9 backup is renamed when one of that name already exists, and "
+                f"a .tiff source produces a .tif output, so the names need not line up).")
+        if RICH_AVAILABLE and console:
+            console.print(f"\n[yellow]{escape(note)}[/yellow]")
+            for old_file, _new_file, _reason in orphans:
+                console.print(f"  [yellow]= {escape(str(old_file.relative_to(folder)))}[/yellow]")
+        else:
+            print(f"\n{note}")
+            for old_file, _new_file, _reason in orphans:
+                print(f"  = {old_file.relative_to(folder)}")
+
+    if not deletable:
+        msg = "Nothing can be purged: no OLD_TIFFs file has a verified copy in its parent folder."
+        if RICH_AVAILABLE and console:
+            console.print(f"\n[yellow]{escape(msg)}[/yellow]")
+        else:
+            print(f"\n{msg}")
+        return True
+
     # Summary
     if RICH_AVAILABLE and console:
-        console.print(f"\n[green]All {len(items)} file(s) verified OK.[/green]")
+        console.print(f"\n[green]{len(deletable)} of {len(items)} file(s) verified OK.[/green]")
         console.print(f"[dim]Total to delete: {_format_size(total_old_size)}[/dim]")
     else:
-        print(f"\nAll {len(items)} file(s) verified OK.")
+        print(f"\n{len(deletable)} of {len(items)} file(s) verified OK.")
         print(f"Total to delete: {_format_size(total_old_size)}")
 
     # Confirm
@@ -2045,8 +2220,10 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             print(f"Error validating time: {e}")
         return False
 
+    # `deletable`, never `items`: an orphaned backup is the only copy of that image left,
+    # so it is kept even when everything else in the folder verified clean.
     deleted = 0
-    for old_file, _, _ in items:
+    for old_file, _, _ in deletable:
         if not old_file.exists():
             continue
         try:
@@ -3560,16 +3737,29 @@ def run_repeat_last(cfg) -> bool:
             print("No saved workflow to repeat.")
         return False
 
-    run_cmds = [list(c) for c in commands]
-    for c in run_cmds:
-        if c:
-            c[0] = cfg.config.ps_name
+    # Rebuild for the PowerShell detected NOW instead of swapping argv[0]: the journal may
+    # have been written by the other shell, and the two invocation forms are not
+    # interchangeable (see _journal_parts).
+    run_cmds = []
+    journal_parts = []
+    for c in commands:
+        parts = _journal_parts([str(a) for a in c])
+        if not parts:
+            msg = ("Saved workflow cannot be replayed: its command line was recorded in a "
+                   "form this version does not recognise. Run the workflow again from the "
+                   "menu -- replaying it as-is could bind switches the wrong way.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]{escape(msg)}[/red]")
+            else:
+                print(f"ERROR: {msg}")
+            return False
+        journal_parts.append(parts)
+        run_cmds.append(_rebuild_journaled_command(parts, cfg.config.ps_name))
 
-    for c in run_cmds:
-        try:
-            script = Path(c[c.index("-File") + 1])
-        except (ValueError, IndexError):
-            continue
+    for parts in journal_parts:
+        # Validate the script that will actually run, which _journaled_script_path may have
+        # swapped for the other Copy EXIF backend.
+        script = _journaled_script_path(parts, cfg.config.ps_name)
         if not script.exists():
             msg = f"Backend script no longer exists: {script}"
             if RICH_AVAILABLE and console:
@@ -3578,7 +3768,10 @@ def run_repeat_last(cfg) -> bool:
                 print(f"ERROR: {msg}")
             return False
 
-    deletes_sources = any("-DeleteSource" in c for c in run_cmds)
+    # Read the flag from the neutral parts: under powershell.exe every argument is folded
+    # into one -Command string, so a membership test on the command list never matched and
+    # the DELETES-SOURCES warning was silently skipped on PS5.
+    deletes_sources = any("-DeleteSource" in p for p in journal_parts)
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[bold cyan]Repeat last workflow[/bold cyan]")

@@ -2,6 +2,188 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## Audit Round 13
+
+Driven by the same real files as round 12 (`raw_scan`, `raw_scan_2`, `tiff_scan`, `TIFF16`), with
+every finding reproduced on disk before it was fixed and pinned by a test that fails when the fix
+is reverted (13 targeted mutations, all caught). Round 12's suite of 243 tests passed against
+every bug below -- they all sat outside its coverage.
+
+The recurring theme this round: **the toolkit was not checked against its own output.** Two of the
+three serious findings only appear on the *second* run over a file the toolkit itself wrote, and
+one whole mode failed on nothing but the length of the names it generates.
+
+### 🔴 HIGH - `-GenerateThumbnail` Left ImageMagick's `PAGE` Stamp on the Main Image
+**Issue:** The thumbnail path is deliberately exempt from `Restore-TiffSubfileTypes` (it builds a
+new page layout rather than copying the source's), and the only marker it wrote was
+`-IFD1:SubfileType#=1`. ImageMagick stamps `PAGE` (2) on page 0 of every multi-page write, so that
+stamp survived: **every** thumbnail-generated file claimed its main image was one page of a
+multi-page document instead of a full-resolution image. On `tiff_scan/000001-rescan.tif`:
+
+```
+source: [IFD0] SubfileType: 0   [IFD1] SubfileType: 1
+output: [IFD0] SubfileType: 2   [IFD1] SubfileType: 1
+```
+
+This is the same tag damage `Restore-TiffSubfileTypes` exists to undo on the normal path, and
+`convert_tiff.py` already documented the behaviour ("magick stamps PAGE on IFD0 of multi-page
+output; clear it when the source had none") -- the thumbnail path never acted on it.
+- **Fix:** New `Set-TiffThumbMarkers` writes **both** markers: the thumbnail page gets
+  `REDUCEDIMAGE`, the main page gets back the numeric marker the source carried (or has the tag
+  cleared when the source had none). It reads the source with `exiftool -n -SubfileType`, never
+  `%[tiff:subfiletype]`, which cannot tell an absent tag from an explicit 0. Called from all three
+  workers and injected into both `-Parallel` runspaces.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 HIGH - `-ThumbPage 0` Produced Files the Toolkit Then Refused Forever
+**Issue:** With the thumbnail first, the output is `[thumb, main]`. Every page classifier in the
+project -- `Test-TiffHasOnlySubfilePages` (SafeMode), `Test-ThumbnailSafeSource`, both `copy_exif`
+backends and the Python mirror -- treats page 0 as the main image and measures the other pages
+against it, so the *full-size* main image at page 1 read as a real extra page:
+
+```
+-ThumbPage 0 output:  IFD0 SubfileType 1 (128x96)   IFD1 SubfileType 2 (800x600)
+next run:             [1/1] MULTI (2 IFDs - skipped) | thumbfirst.tif
+```
+
+From then on the file was skipped by every compress and copy_exif run, and refused by
+`-GenerateThumbnail` itself. Round 7 fixed which IFD the marker went to; the consequence was never
+followed through.
+- **Fix:** `-ThumbPage 0` is refused at startup (exit 1) with an explanation, and the now
+  unreachable thumbnail-first branches were removed from the three workers. Documented in
+  `README.md` and `docs/README_compress_tiff_zip.md`.
+- **Files:** `compress_tiff_zip.ps1`, `README.md`, `docs/README_compress_tiff_zip.md`
+
+### 🟠 MEDIUM - Mode 8 Failed on Every File Because of the Names It Generates
+**Issue:** Staged files were named `<32 hex>_<32 hex>_<name>` (+66 characters) and mode 8's
+default staging folder `compress_staging_mode8_<32 hex>` (+55) is created **inside the input
+tree**. Windows still refuses paths over 260 characters and `magick.exe` is not long-path aware,
+so on a normally nested archive every file failed with a bare, causeless error:
+
+```
+ERROR (magick) | p2.tif | magick.exe: unable to open image '...' : No such file or directory
+Done: 0 OK | ... | 4 errors            (the same run at C:\tw_t: 4 OK [SOURCE DELETED])
+```
+
+Measured staged path: 275 characters. The failure was safe -- sources were preserved and the run
+exited 1 -- but the whole run was lost and nothing said why.
+- **Fix:** Run id shortened to 8 hex and the per-file id to 12 (66 -> 22 characters) in all three
+  backends; mode 8's staging folder is now `_cs8_<8 hex>` (`Get-Files-Mode8` still excludes the old
+  long form so a leftover directory is not picked up as input). A fail-closed guard now refuses an
+  over-long path *before* any directory is created and before modes 0/9 move anything, reporting
+  `ERROR (path too long: N chars, Windows allows 259)`.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟠 MEDIUM - `Repeat last workflow` Could Flip SafeMode Back On
+**Issue:** `run_repeat_last` swapped `argv[0]` for the currently detected PowerShell and replayed
+the journalled command otherwise unchanged. A command recorded under `pwsh` is in `-File` form, and
+`powershell.exe` 5.1 cannot bind `-SafeMode:$false` through `-File` -- the argument arrives as the
+**string** `'$false'`, which is truthy. The repeat therefore ran with SafeMode **ON** when the user
+had turned it off: exactly the trap `_wrap_ps5_command` was written to avoid. The same swap left a
+`copy_exif_to_TIFF_ps7.ps1` command pointing at the PS7 backend while running it under PS5 (and
+vice versa), and `deletes_sources` never matched under PS5, where every argument is folded into one
+`-Command` string -- so the "this DELETES sources" warning was silently skipped.
+- **Fix:** The journal is reduced to its shell-neutral `[script, *args]` (`_journal_parts`, with
+  `_unwrap_ps5_invocation` as the exact inverse of the `-Command` quoting) and rebuilt for the shell
+  detected now, re-applying `_wrap_ps5_command` and picking the `copy_exif` backend that matches.
+  An unrecognisable journal is refused rather than guessed at.
+- **Files:** `convert_tiff.py`
+
+### 🟠 MEDIUM - Sequential Worker Reported Marker Failures Differently From the Parallel Ones
+**Issue:** `Process-TiffJob` (the PS5 worker, and the legacy PS5 path) logged a bare
+`Write-Log "WARN (subfiletype restore failed)"` and returned `OK`, while both `-Parallel` workers
+folded the same event into the result string as `WARN (...) [subfiletype restore failed]`. The same
+failure was therefore a counted warning on PS7 and a clean `OK` on PS5, and the PS5 line printed
+without the `[n/total]` prefix every other result line carries -- the project's own PS5/PS7
+divergence class.
+- **Fix:** `Process-TiffJob` accumulates `$thumbMarkerFailed` / `$subfileRestoreFailed` and builds
+  its result exactly like the parallel workers.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 LOW - Python Mirror Deleted the Explicit `SubfileType 0` Every Scanner TIFF Carries
+**Issue:** `_restore_subfile_types` read the markers with `magick %[tiff:subfiletype]`, which prints
+an empty string both for an absent tag and for an explicit `0`, and mapped only four symbolic
+names. The padded-file conversion (workflow 7) therefore deleted the tag instead of preserving it:
+
+```
+before: [IFD0] SubfileType: 0   [IFD1] SubfileType: 1
+after:                          [IFD1] SubfileType: 1
+```
+
+The PowerShell twin was fixed for exactly this in round 12; the mirror was left behind, and the
+test that covers it used a fixture whose IFD0 had no marker at all, so it could not fail.
+- **Fix:** Rewritten to read `exiftool -a -G1 -n -SubfileType` and rewrite the numeric values,
+  clearing pages the source did not mark -- a faithful mirror of `Restore-TiffSubfileTypes`. New
+  helper `_tiff_page_count`.
+- **Files:** `convert_tiff.py`
+
+### 🟡 LOW - `-GenerateThumbnail` Was a Silent No-Op on an Already-Compressed Library
+**Issue:** The "already compressed" SKIP runs before the thumbnail step, so `-GenerateThumbnail`
+on a Deflate library produced nothing at all and still reported a clean run
+(`SKIP (Adobe Deflate) | already.tif`, no output file). Nothing in the docs said
+`-SkipCompressedWithThumb` was also required.
+- **Fix:** The skip line now says `[no thumbnail added: pass -SkipCompressedWithThumb]` in all four
+  decision points, and both READMEs document it.
+- **Files:** `compress_tiff_zip.ps1`, `README.md`, `docs/README_compress_tiff_zip.md`
+
+### 🟡 LOW - Purge Was Blocked Whole by a Backup With No Counterpart
+**Issue:** `run_purge_old_tiffs` treated "parent file missing" as a mismatch, which aborts the
+entire purge. A healthy folder reaches that routinely: modes 0/9 rename a backup when one of that
+name already exists (`photo_20260805_101500.tif`) and a `photo.tiff` source produces `photo.tif`,
+so the names need not line up. The result was a dead end with a misleading reason.
+- **Fix:** Such a file is now classified as an orphan: never deleted (it is the only copy left),
+  reported as `KEPT` with the reason, and no longer blocking the files that did verify. Real
+  mismatches still abort the whole purge. When nothing is deletable the run says so.
+- **Files:** `convert_tiff.py`
+
+### 🟡 LOW - Copy EXIF Backends Kept Three Shapes the Compression Backend Had Fixed
+**Issue:** (a) the compression probe read `-Compression` for every IFD and `-match` on an array is
+truthy when **any** page matches, so an uncompressed main image with a compressed thumbnail page
+would be reported "already ZIP"; (b) the `-SkipIfTiffHasExif` gate read `$LASTEXITCODE` after
+`... | Select-Object -First 1`, which stops the upstream pipeline and can leave a stale value in a
+gate that decides whether a TIFF may be overwritten; (c) `Restore-TiffSubfileTypes` was called
+without `-TimeoutSec`, ignoring `-MagickTimeout`.
+- **Fix:** `-IFD0:Compression` plus `"$(@($comp)[0])".Trim()`, the exit code captured before any
+  pipeline-stopping operator, and the timeout passed through.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 LOW - Log Named a Folder the Run Never Wrote To
+**Issue:** Tasks were grouped by the **parent** of the output folder, so `-- Group:` and
+`-> Moved N file(s) -> <dir>` named the wrong directory -- for TIFFs directly under the input root
+that was the drive root (`-> Moved 3 file(s) -> c:\` for files written to `C:\tw_t`), which reads
+like the run scattered files into the root. The pre-create step also created the parent instead of
+the output folder.
+- **Fix:** Group by `GetDirectoryName($_.FinalDst)`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 LOW - RMSE Was Parsed Out of a Stream That Also Carries Warnings
+**Issue:** `magick compare -metric RMSE ... null:` prints the metric on **stderr**, and mixes its
+TIFF warnings into the same stream. On the real scan files that reads
+`0 (0)compare: Wrong data type 3 for "PixelXDimension"; ...`. The metric happens to come first, so
+the regex found it -- but this text feeds the gate that authorises permanently deleting an
+original, and a warning emitted while *reading* would be parsed as the metric.
+- **Fix:** `_strip_magick_noise` removes tool chatter before either parse. The absolute-RMSE
+  format is deliberately kept (switching to `%[distortion]` on stdout would change the number the
+  diagnose workflow reports).
+- **Files:** `convert_tiff.py`
+
+### 🟢 INFO - Two Limitations Documented Rather Than "Fixed"
+- **Conversions are deliberately not under `-MagickTimeout`.** Wrapping them was in the plan and
+  then dropped: the default is 30 s, and a single 500 MB scan takes 20-35 s to compress, so the
+  timeout would abort real work. The probes stay wrapped; a hanging conversion hangs the run,
+  which is visible, interruptible and non-destructive.
+- **`Invoke-MagickWithTimeout` leaks one runspace per timeout.** `BeginStop` is asynchronous;
+  disposing there would block on the native `magick.exe` child, which is precisely what the
+  timeout exists to avoid. Both are now stated in the function's `.NOTES`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟢 LOW - `generate_thumbnails.ps1` Cosmetics
+**Issue:** `Process-Results` read `$total` through dynamic scoping (breaks under `Set-StrictMode`),
+and `-quality` was passed for every format -- ImageMagick reinterprets it for PNG as zlib level +
+filter, so `-Quality 85` quietly chose a worse PNG compression than the default.
+- **Fix:** `$script:total` throughout; `-quality` only for `jpg`/`jpeg`.
+- **Files:** `generate_thumbnails.ps1`
+
 ## Audit Round 12
 
 > Rounds 8-11 shipped as commits (`83c08af`, `bdac2c1`, `22a763f`, `f78c9d5`) without a section
