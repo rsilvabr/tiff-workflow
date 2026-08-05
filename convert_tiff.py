@@ -463,7 +463,9 @@ def step_mode(cfg: ToolConfig) -> Optional[int]:
             print(f"[{m}] {name}{warning}")
             print(f"    {MODE_DESCS[m]}\n")
         valid = [str(m) for m in MODE_NAMES]
-        choice = input(f"Mode [0]: ").strip() or "0"
+        # Same default as the Rich path, which offers the last mode used
+        _default_mode = str(cfg.config.last_mode or 0)
+        choice = input(f"Mode [{_default_mode}]: ").strip() or _default_mode
 
     try:
         mode = int(choice)
@@ -512,6 +514,16 @@ def step_folder(cfg: ToolConfig, prompt_text: str = "Input folder") -> Optional[
 
 # --- Basic Parameters ---------------------------------------------
 
+def _supports_cap_workers(workflow: Dict) -> bool:
+    """True only for workflows whose backend is compress_tiff_zip.ps1.
+
+    The Copy EXIF backends have no -CapWorkers parameter (they take -Workers directly),
+    so asking the question there produced an answer nothing could act on. -ExcludeFolders
+    is the opposite call: it now exists on all three backends and is emitted for all of them.
+    """
+    return workflow.get("origin") in ("free_compress", "compress", "both")
+
+
 def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
     """Workers, DryRun, Staging."""
     if RICH_AVAILABLE and console:
@@ -544,12 +556,15 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs)", default=True)
         workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as already compressed?[/cyan] (LZW files will be ignored)", default=False)
 
-        cap_str = Prompt.ask("[cyan]Cap workers?[/cyan] (0 = no cap)", default="0")
-        try:
-            workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS))
-        except ValueError:
-            console.print(f"[yellow]Invalid cap '{cap_str}', no cap applied[/yellow]")
-            workflow["cap_workers"] = 0
+        # -CapWorkers only exists on compress_tiff_zip.ps1; asking it for a Copy EXIF
+        # workflow produced an answer that was silently dropped by the command builder.
+        if _supports_cap_workers(workflow):
+            cap_str = Prompt.ask("[cyan]Cap workers?[/cyan] (0 = no cap)", default="0")
+            try:
+                workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS))
+            except ValueError:
+                console.print(f"[yellow]Invalid cap '{cap_str}', no cap applied[/yellow]")
+                workflow["cap_workers"] = 0
 
         excl_default = cfg.config.last_exclude_folders or ""
         excl = Prompt.ask(
@@ -588,12 +603,13 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         workflow["safe_mode"] = (safe != "n")
         skip_lzw = input("Skip LZW as already compressed? (LZW files will be ignored) [y/N]: ").strip().lower()
         workflow["skip_lzw"] = (skip_lzw == "y")
-        cap_str = input("Cap workers? (0 = no cap) [0]: ").strip()
-        try:
-            workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS)) if cap_str else 0
-        except ValueError:
-            print(f"Invalid cap '{cap_str}', no cap applied")
-            workflow["cap_workers"] = 0
+        if _supports_cap_workers(workflow):
+            cap_str = input("Cap workers? (0 = no cap) [0]: ").strip()
+            try:
+                workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS)) if cap_str else 0
+            except ValueError:
+                print(f"Invalid cap '{cap_str}', no cap applied")
+                workflow["cap_workers"] = 0
         excl_default = cfg.config.last_exclude_folders or ""
         excl = input(f"Exclude folders? (';'-separated names, '-' = none) [{excl_default or '-'}]: ").strip()
         if excl == "":
@@ -818,6 +834,11 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
         cmd += ["-SkipLzwAsCompressed:$true"]
     if workflow.get("overwrite"):
         cmd += ["-Overwrite"]
+    # step_basic_params asks this for every workflow. It used to be dropped here, so in
+    # workflow 4 the exclusion applied to the Compress step and silently not to the
+    # Copy EXIF step of the same run.
+    if workflow.get("exclude_folders"):
+        cmd += ["-ExcludeFolders", workflow["exclude_folders"]]
 
     if extra_flags:
         cmd += extra_flags
@@ -1518,6 +1539,90 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
     return True
 
 
+def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
+    """Python mirror of Test-TiffHasOnlySubfilePages (compress_tiff_zip.ps1).
+
+    True when every page beyond IFD0 is a thumbnail -- tagged REDUCEDIMAGE/REDUCED, or
+    strictly smaller than the main image. False when any extra page is a real page
+    (scanner IR MASK, Photoshop layer, second photo). None when it cannot be determined.
+
+    MASK and PAGE are deliberately NOT accepted, exactly like the four PowerShell call
+    sites: a full-size IR channel is a real page, not a preview.
+    """
+    try:
+        r = subprocess.run(
+            ["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n", str(tiff_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return None
+        lines = [l for l in r.stdout.splitlines() if l.strip()]
+    except Exception:
+        return None
+
+    if len(lines) <= 1:
+        return True
+
+    def _wh(parts):
+        try:
+            return int(parts[1]), int(parts[2])
+        except (IndexError, ValueError):
+            return 0, 0
+
+    main_w, main_h = _wh(lines[0].strip().split("|"))
+    for line in lines[1:]:
+        parts = line.strip().split("|")
+        if parts[0].strip().upper() in ("REDUCEDIMAGE", "REDUCED"):
+            continue
+        w, h = _wh(parts)
+        if not (main_w > 0 and main_h > 0 and 0 < w < main_w and 0 < h < main_h):
+            return False
+    return True
+
+
+def _restore_subfile_types(src_path, dst_path) -> bool:
+    """Re-apply the source per-page SubfileType markers to a magick-written TIFF.
+
+    Python mirror of Restore-TiffSubfileTypes: `-depth 8` rewrites every page and drops the
+    tag, so a Capture One thumbnail came back stamped PAGE. This was the only rewrite path
+    in the project without the restore.
+    """
+    try:
+        r = subprocess.run(
+            ["magick", "identify", "-format", "%[tiff:subfiletype]\n", str(src_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            return False
+        types = r.stdout.splitlines()
+    except Exception:
+        return False
+
+    if len(types) <= 1:
+        return True
+
+    mapping = {"REDUCEDIMAGE": 1, "REDUCED": 1, "PAGE": 2, "MASK": 4}
+    tags = []
+    for i, raw in enumerate(types):
+        n = mapping.get(raw.strip().upper(), 0)
+        if i == 0:
+            # magick stamps PAGE on IFD0 of multi-page output; clear it when the source
+            # had none. exiftool writes an explicit 0 as "full-resolution image".
+            tags.append("-IFD0:SubfileType#=%d" % n if n else "-IFD0:SubfileType=")
+        elif n:
+            tags.append("-IFD%d:SubfileType#=%d" % (i, n))
+    if not tags:
+        return True
+    try:
+        r = subprocess.run(
+            ["exiftool", "-q", "-q", "-overwrite_original"] + tags + [str(dst_path)],
+            capture_output=True, timeout=30,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _process_single_padded(tiff_path, staging):
     """Process a single padded file. Returns (name, parent, status, size_orig, size_zip, ratio, exif_ok, error_msg, tmp8_path)."""
     name = tiff_path.name
@@ -1526,6 +1631,16 @@ def _process_single_padded(tiff_path, staging):
     tmp8 = staging / f"tmp8_{unique_id}_{name}"
     final_dst = parent / name
     status = None
+
+    # _is_real_16bit judges page [0] only, but the conversion below rewrites the WHOLE file.
+    # On a scanner RGB+IR scan whose RGB is padded, that would down-convert an IR channel
+    # that may hold real 16-bit data and was never diagnosed. Refuse those files; a Capture
+    # One main+thumbnail pair is still converted (the thumbnail is already 8-bit).
+    # Fail-closed: an undeterminable page layout is refused too.
+    extras_ok = _tiff_extra_pages_are_thumbnails(tiff_path)
+    if extras_ok is not True:
+        status = "multi_page_refused" if extras_ok is False else "page_layout_unreadable"
+        return (name, parent, status, None, None, None, False, None, tmp8)
 
     try:
         try:
@@ -1555,6 +1670,12 @@ def _process_single_padded(tiff_path, staging):
             exif_ok = exif_result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             exif_ok = False
+
+        # magick drops the per-page SubfileType markers on rewrite, so a Capture One
+        # thumbnail came back stamped PAGE and stopped being recognised as a thumbnail by
+        # SafeMode and -SkipCompressedWithThumb on later runs. The three PowerShell
+        # backends all restore them; this path was the only one that did not.
+        _restore_subfile_types(tiff_path, tmp8)
 
         if not tmp8.exists():
             status = "missing"
@@ -1691,6 +1812,16 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 console.print(f"    [red]FAILED: output missing[/red]")
             else:
                 print(f"    FAILED: output missing")
+        elif status in ("multi_page_refused", "page_layout_unreadable"):
+            reason = ("multi-page TIFF with non-thumbnail pages (scanner IR / layers): the "
+                      "diagnosis only looked at page 0, so converting the whole file could "
+                      "down-convert pages that were never checked"
+                      if status == "multi_page_refused"
+                      else "page layout unreadable")
+            if RICH_AVAILABLE and console:
+                console.print(f"    [yellow]SKIPPED: {escape(reason)} -- original preserved[/yellow]")
+            else:
+                print(f"    SKIPPED: {reason} -- original preserved")
         elif status in ("integrity_error", "dimension_mismatch",
                         "dimension_unreadable", "page_count_mismatch"):
             if RICH_AVAILABLE and console:
@@ -2433,7 +2564,11 @@ def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -
         name = parent.name
         if re.search(r"_tiff$", name, re.IGNORECASE):
             new_name = re.sub(r"_tiff$", "_ZIP", name, flags=re.IGNORECASE)
-        elif re.search(r"tiff$", name, re.IGNORECASE):
+        elif name.lower() == "tiff":
+            # Mirrors Resolve-Output: a folder named exactly "TIFF" has no stem, so the
+            # suffix rule would produce a leading-underscore "_ZIP".
+            new_name = "ZIP"
+        elif re.search(r".tiff$", name, re.IGNORECASE):
             new_name = re.sub(r"tiff$", "_ZIP", name, flags=re.IGNORECASE)
         else:
             new_name = name + "_ZIP"

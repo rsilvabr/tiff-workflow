@@ -118,7 +118,11 @@ tiff-workflow/
 | `8` | In-place + delete | Directory (recursive) | In-place. Originals deleted after confirm | `photo.tif` → deleted after compression |
 | `9` | In-place recursive + OLD_TIFFs | Directory (recursive) | In-place. Originals → `OLD_TIFFs/` | `photo.tif` → compressed in place |
 
-**Safe Mode** (default: ON) automatically skips multi-page TIFFs (scanner IR files, Photoshop layers) to protect proprietary IFD structures.
+**Safe Mode** (default: ON) automatically skips multi-page TIFFs (scanner IR files, Photoshop layers) to protect proprietary IFD structures. A page counts as a thumbnail only when it is marked `REDUCEDIMAGE`/`REDUCED` or is strictly smaller than the main image — a full-size IR `MASK` page is a real page. All three backends apply the same rule.
+
+**Thumbnails are colour-managed.** Wide-gamut sources (ProPhoto, AdobeRGB) are converted through their embedded ICC profile before the profile is stripped, so a Capture One ProPhoto export produces a thumbnail that actually looks like the photo. The sRGB profile is auto-detected on Windows; override it with `-SrgbProfile <path.icc>` if needed.
+
+**`-GenerateThumbnail` never drops pages.** It rebuilds the file from page 0 plus a new thumbnail, so it replaces an existing embedded preview but refuses any file whose extra pages are real (scanner IR, layers) instead of discarding them.
 
 **Folder exclusion** (`-ExcludeFolders "_EXPORT;temp"`): skips whole folder trees by name during discovery, in every mode. Segment match only (`_EXPORT` never touches `My_EXPORT_photos`), and every run logs what was excluded. The wizard offers your last list as the default (stored in your local config) — a fresh install defaults to nothing excluded.
 

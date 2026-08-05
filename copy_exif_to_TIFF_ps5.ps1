@@ -14,9 +14,28 @@ param(
     [switch]$AutoFind,
     [string]$FolderPattern = "S5pro",
     [int]$MagickTimeout = 30,
-    [switch]$FailOnWarn
+    [switch]$FailOnWarn,
+    [string]$ExcludeFolders = ""     # ';'-separated folder NAMES to skip during discovery
 )
 # ------------------------------------------------------------------
+
+
+# -- Excluded folder names ------------------------------------------
+# ';'-separated folder NAMES (not paths): any TIFF whose directory contains a segment
+# matching one of these (case-insensitive) is skipped during discovery. Segment match only,
+# so "_EXPORT" never touches "My_EXPORT_photos". Kept identical to compress_tiff_zip.ps1 --
+# the wizard asks this question once and applies it to every step of a workflow.
+$script:excludeNames = @()
+foreach ($entry in ($ExcludeFolders -split ';')) {
+    $entry = $entry.Trim()
+    if (-not $entry) { continue }
+    if ($entry -match '[\\/]') {
+        Write-Host "ERROR: -ExcludeFolders takes folder NAMES, not paths: '$entry'" -ForegroundColor Red
+        Write-Host "       Use a ';'-separated list of bare names, e.g. -ExcludeFolders '_EXPORT;temp'" -ForegroundColor Yellow
+        exit 1
+    }
+    $script:excludeNames += $entry
+}
 
 # -- Logging -----------------------------------------------------------
 $scriptName = "Copy-S5Pro-Exif"
@@ -164,6 +183,49 @@ function Get-TiffPageCount {
     return @{ Ok = $true; PageCount = $n; Error = "" }
 }
 
+function Test-PixelIdentical {
+    <#
+    .SYNOPSIS
+        Returns $true only when two TIFFs hold pixel-identical data: same page count and
+        per-page RMSE == 0. A decode check (Test-ZipIntegrity) cannot see a truncated page,
+        a wrong bit depth or a colorspace shift -- all of those still decode -- so this is
+        the gate that authorises destroying the source (mode 8, in-place replace).
+
+        `%[distortion]` goes to stdout, which the timeout wrapper captures (the RMSE metric
+        itself prints to stderr, which the wrapper drops). `magick compare A B` on
+        multi-page files pairs pages across the two lists and returns nonsense, so pages
+        are compared one by one. Anything unreadable fails CLOSED.
+
+    .NOTES
+        This function is duplicated across compress_tiff_zip.ps1 and the copy_exif_to_TIFF_ps*.ps1
+        scripts. Keep implementations identical. If you change one, change all three.
+
+        Re-inject into -Parallel runspaces with:
+            ${function:Test-PixelIdentical} = $using:PixelCompareFnDef
+        (Invoke-MagickWithTimeout and Get-TiffPageCount must be injected too.)
+    #>
+    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30)
+
+    $ps = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
+    $pd = Get-TiffPageCount -Path $DstPath -TimeoutSec $TimeoutSec
+    if (-not $ps.Ok -or -not $pd.Ok) { return $false }
+    if ($ps.PageCount -ne $pd.PageCount) { return $false }
+
+    for ($i = 0; $i -lt $ps.PageCount; $i++) {
+        $r = Invoke-MagickWithTimeout -Arguments @("compare", "-metric", "RMSE", "$SrcPath[$i]", "$DstPath[$i]", "-format", "%[distortion]`n", "info:") -TimeoutSec $TimeoutSec
+        # compare exits 1 when images differ -- that is data, not an error. Only a
+        # timeout or an undetermined/error exit code fails here directly; the parsed
+        # distortion value below has the final word.
+        if ($r.TimedOut -or $r.ExitCode -lt 0 -or $r.ExitCode -gt 1) { return $false }
+        $lines = @($r.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+        if ($lines.Count -eq 0) { return $false }
+        $val = 0.0
+        if (-not [double]::TryParse("$($lines[0])".Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$val)) { return $false }
+        if ($val -ne 0) { return $false }
+    }
+    return $true
+}
+
 function Test-TiffHasOnlySubfilePages {
     <#
     .SYNOPSIS
@@ -250,26 +312,40 @@ function Restore-TiffSubfileTypes {
         [int]$TimeoutSec = 30
     )
 
-    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $SrcPath) -TimeoutSec $TimeoutSec
-    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
+    # Single-page sources need no restore: magick only stamps PAGE when it writes a
+    # multi-page file, and an absent NewSubfileType means 0 per the TIFF spec anyway.
+    $pcSrc = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
+    if (-not $pcSrc.Ok) { return $false }
+    if ($pcSrc.PageCount -le 1) { return $true }
 
-    $subfileTypes = @($r.Output)
-    if ($subfileTypes.Count -le 1) { return $true }
+    # Markers are read with exiftool, not magick. `%[tiff:subfiletype]` prints an EMPTY
+    # string both when the tag is ABSENT and when it is 0 ("full-resolution image"), so a
+    # source carrying an explicit 0 -- every scanner TIFF does -- had the tag DELETED from
+    # the output instead of preserved. exiftool prints one line per IFD that really has the
+    # tag, with its numeric value, which tells the two cases apart.
+    $argRead = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SubfileType`n$SrcPath`n")
+        $readOut = exiftool -@ $argRead 2>$null
+        if ($LASTEXITCODE -ne 0) { return $false }
+    } finally {
+        Remove-Item $argRead -Force -ErrorAction SilentlyContinue
+    }
+
+    $srcTypes = @{}
+    foreach ($line in @($readOut)) {
+        if ("$line" -match '^\[IFD(\d+)\]\s+SubfileType:\s*(\d+)\s*$') {
+            $srcTypes[[int]$Matches[1]] = [int]$Matches[2]
+        }
+    }
 
     $tags = @()
-    for ($i = 0; $i -lt $subfileTypes.Count; $i++) {
-        $st = if ($subfileTypes[$i]) { "$($subfileTypes[$i])".Trim() } else { "" }
-        $n = switch -Regex ($st) {
-            '^(REDUCEDIMAGE|REDUCED)$' { 1; break }
-            '^PAGE$'                   { 2; break }
-            '^MASK$'                   { 4; break }
-            default                    { 0 }
-        }
-        if ($i -eq 0) {
-            # magick stamps PAGE on IFD0 of multi-page output; clear it when the source had none
-            if ($n -eq 0) { $tags += "-IFD0:SubfileType=" } elseif ($n -ne 0) { $tags += "-IFD0:SubfileType#=$n" }
-        } elseif ($n -gt 0) {
-            $tags += "-IFD${i}:SubfileType#=$n"
+    for ($i = 0; $i -lt $pcSrc.PageCount; $i++) {
+        if ($srcTypes.ContainsKey($i)) {
+            $tags += "-IFD${i}:SubfileType#=$($srcTypes[$i])"
+        } else {
+            # Source had no marker on this page: clear whatever magick stamped on it.
+            $tags += "-IFD${i}:SubfileType="
         }
     }
     if ($tags.Count -eq 0) { return $true }
@@ -290,7 +366,22 @@ function Invoke-S5ProFolder {
     $allFiles  = Get-ChildItem -LiteralPath $RootPath -File -Recurse:$IsRecurse
     # JPEG index is always built recursively so JPEG/JPG subfolders can be found by Find-JpegPair
     $jpgFiles  = Get-ChildItem -LiteralPath $RootPath -File -Recurse | Where-Object { $_.Extension -match '^\.(jpg|jpeg)$' }
-    $tiffFiles = $allFiles | Where-Object { $_.Extension -match '^\.(tif|tiff)$' }
+    $tiffFiles = @($allFiles | Where-Object { $_.Extension -match '^\.(tif|tiff)$' })
+
+    if ($script:excludeNames.Count -gt 0) {
+        $beforeExclude = $tiffFiles.Count
+        $tiffFiles = @($tiffFiles | Where-Object {
+            $segHit = $false
+            foreach ($seg in ($_.DirectoryName -split '[\\/]')) {
+                if ($seg -in $script:excludeNames) { $segHit = $true; break }
+            }
+            -not $segHit
+        })
+        $excluded = $beforeExclude - $tiffFiles.Count
+        if ($excluded -gt 0) {
+            Write-Log "Excluded $excluded file(s) under: $($script:excludeNames -join '; ')"
+        }
+    }
 
     if ($tiffFiles.Count -eq 0) {
         Write-Log "No TIFFs found in: $RootPath" "WARN"
@@ -440,8 +531,11 @@ function Invoke-S5ProFolder {
                 continue
             }
 
+            # Hoisted out of the SafeMode block: the ZIP pixel gate below needs it even when
+            # -SafeMode:$false skipped the page-count check.
+            $magickTimeoutSec = if ($MagickTimeout -gt 0) { $MagickTimeout } else { 30 }
+
             if ($safeModeL) {
-                $magickTimeoutSec = if ($MagickTimeout -gt 0) { $MagickTimeout } else { 30 }
                 $pc = Get-TiffPageCount -Path $p.Tiff -TimeoutSec $magickTimeoutSec
                 if (-not $pc.Ok) {
                     switch -Wildcard ($pc.Error) {
@@ -452,7 +546,12 @@ function Invoke-S5ProFolder {
                     continue
                 }
                 if ($pc.PageCount -gt 1) {
-                    if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pc.PageCount -TimeoutSec $magickTimeoutSec)) {
+                    # -AllowedSubfileTypes is passed explicitly, exactly like the four call
+                    # sites in compress_tiff_zip.ps1. Falling back to the parameter default
+                    # (which also allows MASK and PAGE) made SafeMode accept scanner RGB+IR
+                    # files that the compression backend skips -- the opposite of what the
+                    # README promises for "scanner IR files".
+                    if (-not (Test-TiffHasOnlySubfilePages -Path $p.Tiff -PageCount $pc.PageCount -AllowedSubfileTypes @("REDUCEDIMAGE", "REDUCED") -TimeoutSec $magickTimeoutSec)) {
                         $bagL.Add($p.Tiff) | Out-Null
                         "MULTI ($($pc.PageCount) IFDs -- skipped) | $($p.TifName)"
                         continue
@@ -536,6 +635,17 @@ function Invoke-S5ProFolder {
             if ($LASTEXITCODE -ne 0) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "ERROR (magick ZIP) | $($p.TifName) | $magickErr"; continue
+            }
+
+            # The staged ZIP is moved ON TOP of the TIFF it came from (see the move loop
+            # below) and there is no OLD_TIFFs backup on this path, so it must be proven
+            # pixel-identical first. A zero exit from magick is not proof: a page-short or
+            # truncated file still exits 0 and still decodes. Same fail-closed gate that
+            # compress_tiff_zip.ps1 requires before a mode 8 delete.
+            if (-not (Test-PixelIdentical -SrcPath $tiffTarget -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
+                Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "ERROR (ZIP pixel verification failed - original untouched) | $($p.TifName)"; continue
             }
 
             exiftool -q -q -overwrite_original -tagsfromfile $tiffTarget -all:all -unsafe $writeDst | Out-Null

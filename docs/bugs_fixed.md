@@ -2,6 +2,171 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
+## Audit Round 12
+
+> Rounds 8-11 shipped as commits (`83c08af`, `bdac2c1`, `22a763f`, `f78c9d5`) without a section
+> here; the version numbers below stop at v2.6 for that reason. This section is numbered by
+> audit round, which matches the commit history.
+
+Driven by real scanner files (`raw_scan`, `raw_scan_2`: RGB + reduced preview + **full-size IR
+`MASK` page**; `tiff_scan`: RGB + preview; `TIFF16`/`TIFF16_Z8`: Capture One ProPhoto exports with
+an embedded thumbnail). Every finding was reproduced on disk first, and every fix is pinned by a
+test that fails when the fix is reverted (17 of 18 targeted mutations are caught; the 18th is a
+provably redundant defensive line, noted in the source).
+
+The recurring theme this round is different from rounds 6-7: not "a fix that was never
+generalised", but **gates that only checked what was cheap to check**. Three separate paths
+authorised destroying data on a decode check alone, and a decode check cannot see a missing page.
+
+### 🔴 CRITICAL - `-GenerateThumbnail` Silently Dropped Every Page But the First
+**Issue:** The thumbnail path rebuilds the output from page 0 only (`"$srcPath[0]"`) and writes
+main + freshly generated thumbnail. Every other source page was discarded, and the result line was
+a clean `OK`. On a 3-page scanner file:
+
+```
+pages before: 3    [1/1] OK (Uncompressed -> ZIP) | scan3.tif    pages after: 2
+```
+
+In **legacy mode (no `-Mode`, in-place)** the loss was irreversible: the only gate there was
+`Test-ZipIntegrity`, a decode check, and a page-short TIFF decodes perfectly. Modes 0/9 kept the
+original in `OLD_TIFFs/` but still reported `OK`; mode 8 was already safe because its gate
+pixel-compares page counts.
+- **Fix:** New `Test-ThumbnailSafeSource` (fail-closed) runs in all three workers before any
+  write. A source whose extra pages are all `REDUCEDIMAGE`/`REDUCED` is processed and reported as
+  `[thumb replaced]`; anything else -- scanner IR, Photoshop layers, a second photo -- is refused
+  with `ERROR (-GenerateThumbnail refused) | ... | would drop N extra page(s)`. The check runs
+  before the dry-run return, so a dry run reports the refusal too.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 CRITICAL - Legacy In-Place Replacement Was Authorised by a Decode Check Alone
+**Issue:** Both legacy workers replaced the original with the temp sibling after
+`Test-ZipIntegrity` only. That is the same class as the bug above and the reason it was silent:
+truncated pages, a wrong bit depth and a colorspace shift all still decode.
+- **Fix:** In-place replacement now requires `Test-ZipIntegrity` **and** `Test-PixelIdentical`
+  (the gate mode 8 already used), skipped only on the thumbnail path, which legitimately rewrites
+  the pages. Verified by sabotaging `magick` to emit a page-short file: both hosts now report
+  `ERROR (in-place verification failed - original untouched)` and leave the source at 3 pages.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔴 HIGH - `copy_exif` SafeMode Did Not Protect the Files the README Promises
+**Issue:** `README.md` says Safe Mode "skips multi-page TIFFs (**scanner IR files**, Photoshop
+layers)". The `copy_exif` call site omitted `-AllowedSubfileTypes` and fell back to the parameter
+default, which also allows `MASK` and `PAGE` -- so a full-size IR channel counted as a thumbnail:
+
+```
+Image2.tif  pages=3  copy_exif_says_safe=True   compress_says_safe=False
+```
+
+`compress_tiff_zip.ps1` passes the restricted list explicitly at all four of its call sites.
+- **Fix:** Both `copy_exif` scripts now pass `@("REDUCEDIMAGE", "REDUCED")` explicitly. The three
+  backends give the same verdict for the same file, pinned by a test.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🔴 HIGH - `copy_exif -CompressZip` Overwrote the Original With No Pixel Check
+**Issue:** The staged ZIP is moved on top of the TIFF it came from and there is no `OLD_TIFFs`
+backup on that path, yet the only thing authorising the move was `magick`'s exit code.
+- **Fix:** `Test-PixelIdentical` ported into both scripts (with the `PixelCompareFnDef` capture
+  and runspace re-injection PS7 needs) and applied before the metadata copy; on failure the staged
+  file is dropped and the original is left untouched. Verified by mutation on both hosts.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🔴 HIGH - Mode 5 Collapsed the Whole Tree When `-InputDir` Used Forward Slashes
+**Issue:** The "never climb above the input root" guard compared with a hardcoded backslash
+(`$gpL.StartsWith("$rootL\")`). `-InputDir` is used verbatim, and `/` is a legal Windows
+separator, so the compare failed for every nested file and the fallback fired every time:
+
+```
+-InputDir "...\M5b"   ->  M5b/other/ZIP/a.tif      (correct)
+-InputDir ".../M5"    ->  M5/ZIP/a_v2.tif          (collapsed + spurious rename)
+```
+
+Two different photos ended up as `a.tif` and `a_v2.tif` in one folder. This was the only
+hardcoded separator left in the repo; every other path test already used `[\\/]`.
+- **Fix:** `$inputRootP` is normalised once at the top of `Resolve-Output`. Both path forms now
+  produce byte-identical output trees on both hosts.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - Thumbnails Ignored the Source ICC Profile
+**Issue:** `-colorspace sRGB` converts between *colorspaces*, not between *ICC profiles*. On a
+TIFF ImageMagick already reads as RGB it is a no-op, and `-strip` then discarded the source
+profile, so a ProPhoto export was reinterpreted as sRGB. The tagged and untagged versions of the
+same image produced **byte-identical** thumbnails (2159 bytes), 10.0% RMSE from a colour-managed
+conversion. This affected the whole Capture One workflow, which exports ProPhoto.
+- **Fix:** New `-SrgbProfile` parameter (auto-detects the Windows sRGB ICC, warns once and keeps
+  the old behaviour if none is found) and `-profile <icc>` applied before `-strip` in all five
+  thumbnail command sites. Untagged sources are unaffected -- ImageMagick treats `-profile` as
+  "assign" there. Result now matches the colour-managed reference exactly (RMSE 0).
+- **Files:** `generate_thumbnails.ps1`, `compress_tiff_zip.ps1`
+
+### 🟡 MEDIUM - The Wizard Asked Two Questions It Then Threw Away
+**Issue:** `step_basic_params` asks `-ExcludeFolders` and `-CapWorkers` for **every** workflow, but
+`build_copy_exif_command` emitted neither and the `copy_exif` backends declared neither. In
+workflow 4 ("Copy + Compress") the exclusion applied to the Compress step and silently not to the
+Copy EXIF step of the same run.
+- **Fix:** `-ExcludeFolders` implemented in both `copy_exif` backends with the same
+  segment-match semantics as `compress_tiff_zip.ps1` (`_EXPORT` never matches
+  `My_EXPORT_photos`; a path instead of a name is refused) and emitted by the builder.
+  `-CapWorkers`, which has no equivalent there, is no longer asked for those workflows.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`, `convert_tiff.py`
+
+### 🟡 MEDIUM - A Partial Copy Into `-OutputDir` Was Left Behind on PS7
+**Issue:** `$copiedTiffPath` was assigned only *after* `Copy-Item` returned, so a copy that threw
+mid-write returned `CopiedTiffPath = $null`, the cleanup found nothing, and the truncated file
+stayed. A later run without `-Overwrite` then skipped it as "exists in OutputDir". PS5 already
+guarded this inline and carried the comment explaining why; the fix was never ported.
+- **Fix:** The destination is recorded before the copy and the `catch` reports it as an
+  intermediate. Verified by simulating a disk-full copy: HEAD leaves a 1024-byte file, the fixed
+  version leaves nothing.
+- **Files:** `copy_exif_to_TIFF_ps7.ps1`
+
+### 🟡 MEDIUM - The Padded-File Converter Judged Page 0 and Rewrote Every Page
+**Issue:** `_is_real_16bit` diagnoses `[0]` only, but `_process_single_padded` ran
+`magick <file> -depth 8` on the whole file. On a scanner RGB+IR scan whose RGB is padded, the IR
+channel -- which may hold real 16-bit data and was never diagnosed -- was down-converted with it.
+This was also the only rewrite path in the project that did not restore `SubfileType` markers.
+- **Fix:** New `_tiff_extra_pages_are_thumbnails` (a Python mirror of
+  `Test-TiffHasOnlySubfilePages`, fail-closed) refuses files with non-thumbnail extra pages; a
+  Capture One main+thumbnail pair still converts. New `_restore_subfile_types` re-applies the
+  markers after `-depth 8`.
+- **Files:** `convert_tiff.py`
+
+### 🔵 LOW - An Explicit `SubfileType = 0` Was Deleted Instead of Preserved
+**Issue:** `%[tiff:subfiletype]` prints an empty string both when the tag is **absent** and when
+it is **0** ("full-resolution image"), and the restore treated both as absent -- so every scanner
+TIFF (all of which carry an explicit 0 on IFD0) lost the tag.
+- **Fix:** The markers are now read with `exiftool -a -G1 -s -s -n -SubfileType`, which prints one
+  line per IFD that really has the tag, telling the two cases apart. Single-page sources return
+  early (magick does not stamp them), and pages the source did not mark are now cleared rather
+  than left with magick's `PAGE`.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### 🔵 LOW - No `Done:` Line When Every File Was Filtered
+**Issue:** Modes 0/9 filter in a pre-check loop; when it filtered everything the run exited before
+the summary. Re-running mode 9 on an already-compressed folder -- the expected outcome -- ended on
+a bare `WARN` with no tally, and any log parser keyed on `Done:` saw nothing.
+- **Fix:** The summary is extracted into `Write-RunSummary` and called from the normal end and
+  both early exits; the message is `INFO` when nothing actually failed.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔵 LOW - Pre-Check Results Bypassed the Counter
+**Issue:** The `SKIP`/`MULTI`/`ERROR` lines emitted by the modes 0/9 pre-check called `Write-Log`
+directly and incremented the counters by hand, so they printed without the `[n/total]` prefix
+every other result line carries.
+- **Fix:** All eight sites routed through `Process-Results`, which does both.
+- **Files:** `compress_tiff_zip.ps1`
+
+### 🔵 LOW - A Folder Named Exactly `TIFF` Became `_ZIP`
+**Issue:** Mode 4's suffix rule matched an empty stem, so `other/TIFF/` produced `other/_ZIP/`
+instead of `other/ZIP/`. The Python mirror used by the manifest collision scanner had the same
+rule, so both agreed on the wrong answer.
+- **Fix:** A folder named exactly `TIFF` maps to the plain subfolder name in both.
+- **Files:** `compress_tiff_zip.ps1`, `convert_tiff.py`
+
+### 🔵 LOW - Plain-Text `step_mode` Ignored the Remembered Mode
+**Issue:** The Rich path offers `last_mode` as the default; the plain-text path hardcoded `0`.
+- **Fix:** Both use the same default.
+- **Files:** `convert_tiff.py`
+
 ## v2.6 - Audit Round 7
 
 A full read of all five files. Ten findings; the five that mattered were reproduced on disk

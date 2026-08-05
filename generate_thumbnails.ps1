@@ -11,7 +11,8 @@ param(
     [string]$Page = "0",
     [ValidatePattern('^(100|[1-9][0-9]?)$')]
     [string]$Quality = "85",
-    [string]$Format = "jpg"
+    [string]$Format = "jpg",
+    [string]$SrgbProfile = ""   # ICC profile used to convert wide-gamut sources; "" = auto-detect
 )
 # -----------------------------------------------------------------
 
@@ -52,6 +53,39 @@ if ($Size -lt 32 -or $Size -gt 4096) {
 if ($Format -notin @("jpg", "jpeg", "png", "tif", "tiff")) {
     Write-Log "Invalid format: $Format. Must be jpg, png, tif, or tiff." "ERROR"
     exit 1
+}
+
+# -- sRGB profile for colour-managed thumbnails --------------------
+# `-colorspace sRGB` converts between COLORSPACES, not between ICC profiles: on a TIFF that
+# ImageMagick already reads as RGB it is a no-op, and `-strip` then throws the source profile
+# away. A ProPhoto/AdobeRGB export therefore produced a thumbnail whose numbers were
+# reinterpreted as sRGB -- oversaturated and hue-shifted (measured 10% RMSE against a
+# colour-managed conversion; the tagged and untagged sources gave byte-identical output).
+# `-profile <icc>` does the real conversion. On a source with no embedded profile ImageMagick
+# treats it as "assign", so untagged files behave exactly as before.
+function Resolve-SrgbProfile {
+    param([string]$Explicit)
+    if ($Explicit) {
+        if (Test-Path -LiteralPath $Explicit -PathType Leaf) { return (Resolve-Path -LiteralPath $Explicit).Path }
+        return $null   # caller reports it; an explicit bad path must not be silently ignored
+    }
+    $winDir = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
+    foreach ($cand in @(
+        (Join-Path $winDir "System32\spool\drivers\color\sRGB Color Space Profile.icm"),
+        (Join-Path $winDir "System32\spool\drivers\color\sRGB_ICC_v4_Appearance.icc")
+    )) {
+        if (Test-Path -LiteralPath $cand -PathType Leaf) { return $cand }
+    }
+    return $null
+}
+
+$script:SrgbProfilePath = Resolve-SrgbProfile -Explicit $SrgbProfile
+if ($SrgbProfile -and -not $script:SrgbProfilePath) {
+    Write-Log "ERROR: -SrgbProfile not found: $SrgbProfile" "ERROR"
+    exit 1
+}
+if (-not $script:SrgbProfilePath) {
+    Write-Log "WARN: no sRGB ICC profile found -- wide-gamut sources (ProPhoto, AdobeRGB) will produce thumbnails with shifted colours. Pass -SrgbProfile <path.icc> to fix." "WARN"
 }
 # -----------------------------------------------------------------
 
@@ -272,6 +306,7 @@ $tasks = foreach ($f in $files) {
         Format = $Format
         Page = $Page
         DryRun = $DryRun.IsPresent
+        SrgbProfile = $script:SrgbProfilePath
     }
 }
 
@@ -298,7 +333,11 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $pageSuffix = if ($t.Page -eq "all") { "" } else { "[$($t.Page)]" }
                 $inputWithPage = "$($t.SrcPath)$pageSuffix"
                 
-                $magickArgs = @(
+                # -profile converts wide-gamut sources through their embedded ICC; -colorspace
+                # after it is a no-op for RGB but still normalises grayscale/CMYK sources.
+                $magickArgs = @()
+                if ($t.SrgbProfile) { $magickArgs += @("-profile", $t.SrgbProfile) }
+                $magickArgs += @(
                     "-colorspace", "sRGB",
                     "-strip",
                     "-thumbnail", "$($t.Size)x$($t.Size)>",
@@ -365,7 +404,11 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 $pageSuffix = if ($t.Page -eq "all") { "" } else { "[$($t.Page)]" }
                 $inputWithPage = "$($t.SrcPath)$pageSuffix"
                 
-                $magickArgs = @(
+                # -profile converts wide-gamut sources through their embedded ICC; -colorspace
+                # after it is a no-op for RGB but still normalises grayscale/CMYK sources.
+                $magickArgs = @()
+                if ($t.SrgbProfile) { $magickArgs += @("-profile", $t.SrgbProfile) }
+                $magickArgs += @(
                     "-colorspace", "sRGB",
                     "-strip",
                     "-thumbnail", "$($t.Size)x$($t.Size)>",

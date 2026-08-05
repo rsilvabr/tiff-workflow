@@ -33,7 +33,8 @@ param(
     [string]$ThumbQuality = "85",   # JPEG quality for thumbnail
     [string]$ThumbFormat = "jpg",   # Thumbnail format (jpg, png, etc.)
     [int]$ThumbPage = 1,            # Output page position for the embedded thumbnail (0=first, 1=after main, etc.)
-    [switch]$SkipCompressedWithThumb  # Skip TIFFs that are already compressed AND have thumbnail
+    [switch]$SkipCompressedWithThumb, # Skip TIFFs that are already compressed AND have thumbnail
+    [string]$SrgbProfile = ""       # ICC profile used to convert wide-gamut sources; "" = auto-detect
 )
 # -----------------------------------------------------------------
 
@@ -75,6 +76,36 @@ foreach ($entry in ($ExcludeFolders -split ';')) {
 
 # -----------------------------------------------------------------
 
+# -- sRGB profile for colour-managed embedded thumbnails ------------
+# `-colorspace sRGB` converts between COLORSPACES, not between ICC profiles: on a TIFF that
+# ImageMagick already reads as RGB it is a no-op, and `-strip` then throws the source profile
+# away, so a ProPhoto/AdobeRGB export produced a thumbnail whose numbers were reinterpreted as
+# sRGB. `-profile <icc>` does the real conversion; on an untagged source ImageMagick treats it
+# as "assign", so those files behave exactly as before. Kept identical to generate_thumbnails.ps1.
+function Resolve-SrgbProfile {
+    param([string]$Explicit)
+    if ($Explicit) {
+        if (Test-Path -LiteralPath $Explicit -PathType Leaf) { return (Resolve-Path -LiteralPath $Explicit).Path }
+        return $null   # caller reports it; an explicit bad path must not be silently ignored
+    }
+    $winDir = if ($env:SystemRoot) { $env:SystemRoot } else { "C:\Windows" }
+    foreach ($cand in @(
+        (Join-Path $winDir "System32\spool\drivers\color\sRGB Color Space Profile.icm"),
+        (Join-Path $winDir "System32\spool\drivers\color\sRGB_ICC_v4_Appearance.icc")
+    )) {
+        if (Test-Path -LiteralPath $cand -PathType Leaf) { return $cand }
+    }
+    return $null
+}
+
+# Plain (non-$script:) variable: ForEach-Object -Parallel can only capture with $using:<name>.
+$srgbProfileResolved = Resolve-SrgbProfile -Explicit $SrgbProfile
+if ($SrgbProfile -and -not $srgbProfileResolved) {
+    Write-Host "ERROR: -SrgbProfile not found: $SrgbProfile" -ForegroundColor Red
+    exit 1
+}
+$script:SrgbProfilePath = $srgbProfileResolved
+
 # -- Prerequisite checks -------------------------------------------
 $missingTools = @()
 if (-not (Get-Command exiftool -ErrorAction SilentlyContinue)) { $missingTools += "exiftool" }
@@ -110,6 +141,32 @@ $script:warnTotal      = 0
 $script:errTotal       = 0
 $script:total          = 0
 $script:multiPagePaths = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
+
+if ($GenerateThumbnail -and -not $srgbProfileResolved) {
+    Write-Log "WARN: no sRGB ICC profile found -- embedded thumbnails from wide-gamut sources (ProPhoto, AdobeRGB) will have shifted colours. Pass -SrgbProfile <path.icc> to fix." "WARN"
+}
+
+function Write-RunSummary {
+    <#
+    .SYNOPSIS
+        Prints the end-of-run tally plus the multi-page list. Called from BOTH the normal end
+        of the run and the early "nothing to do" exits: those used to leave the run with no
+        `Done:` line at all, so a mode 0/9 folder where every file was correctly skipped as
+        already-Deflate ended on a bare WARN that reads like a failure -- and any log parser
+        keyed on `Done:` saw nothing.
+    #>
+    Write-Log ""
+    Write-Log ("-" * 50)
+    Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:multiTotal) multi-page (not touched) | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
+
+    if ($script:multiTotal -gt 0) {
+        Write-Log ""
+        Write-Log "-- Multi-page TIFFs found (not compressed - review manually):"
+        foreach ($p in ($script:multiPagePaths | Sort-Object)) {
+            Write-Log "   $p" "WARN"
+        }
+    }
+}
 
 function Process-Results {
     param($lines)
@@ -302,7 +359,10 @@ function Resolve-Output {
     )
     $parent     = $tiff.DirectoryName
     $stem       = $tiff.BaseName
-    $inputRootP  = $inputRoot.TrimEnd('/', '\')
+    # Normalise to a single separator: '/' is a legal path separator on Windows, and
+    # -InputDir given that way (direct PowerShell use, hand-edited manifest) used to defeat
+    # the mode 5 prefix compare below and collapse the whole tree into <root>\ZIP.
+    $inputRootP  = $inputRoot.Replace('/', '\').TrimEnd('\')
 
     switch ($mode) {
         0 {
@@ -332,7 +392,11 @@ function Resolve-Output {
             # Replace TIFF suffix with ZIP, handling _TIFF -> _ZIP and TIFF -> ZIP
             if ($parentFolder -match '(?i)_(TIFF)$') {
                 $newFolderName = $parentFolder -replace '(?i)_(TIFF)$', "$zipSuffix"
-            } elseif ($parentFolder -match '(?i)^(.*)(TIFF)$') {
+            } elseif ($parentFolder -ieq 'TIFF') {
+                # A folder named exactly "TIFF" has no stem, so the suffix rule below turned
+                # it into "_ZIP" (leading underscore). Use the plain subfolder name instead.
+                $newFolderName = $zipSubfolderName
+            } elseif ($parentFolder -match '(?i)^(.+)(TIFF)$') {
                 $newFolderName = $parentFolder -replace '(?i)(TIFF)$', $zipSuffix
             } else {
                 $newFolderName = $parentFolder + "$zipSuffix"
@@ -348,7 +412,13 @@ function Resolve-Output {
             if (-not $grandparent) {
                 $grandparent = $inputRootP
             } else {
-                $gpL = $grandparent.TrimEnd('\', '/').ToLowerInvariant()
+                # The load-bearing normalisation is on $inputRootP above: it comes straight
+                # from the -InputDir string, so a '/'-form path never matched the "$root\"
+                # prefix and this fallback fired for EVERY nested file, collapsing the whole
+                # tree into <root>\ZIP. $grandparent derives from FileInfo.DirectoryName,
+                # which .NET always hands back with backslashes -- normalising it too is
+                # belt-and-braces for any future caller that does not come from FileInfo.
+                $gpL = $grandparent.Replace('/', '\').TrimEnd('\').ToLowerInvariant()
                 $rootL = $inputRootP.ToLowerInvariant()
                 if (-not ($gpL -eq $rootL -or $gpL.StartsWith("$rootL\"))) {
                     $grandparent = $inputRootP
@@ -751,26 +821,40 @@ function Restore-TiffSubfileTypes {
         [int]$TimeoutSec = 30
     )
 
-    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[tiff:subfiletype]\n", $SrcPath) -TimeoutSec $TimeoutSec
-    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
+    # Single-page sources need no restore: magick only stamps PAGE when it writes a
+    # multi-page file, and an absent NewSubfileType means 0 per the TIFF spec anyway.
+    $pcSrc = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
+    if (-not $pcSrc.Ok) { return $false }
+    if ($pcSrc.PageCount -le 1) { return $true }
 
-    $subfileTypes = @($r.Output)
-    if ($subfileTypes.Count -le 1) { return $true }
+    # Markers are read with exiftool, not magick. `%[tiff:subfiletype]` prints an EMPTY
+    # string both when the tag is ABSENT and when it is 0 ("full-resolution image"), so a
+    # source carrying an explicit 0 -- every scanner TIFF does -- had the tag DELETED from
+    # the output instead of preserved. exiftool prints one line per IFD that really has the
+    # tag, with its numeric value, which tells the two cases apart.
+    $argRead = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SubfileType`n$SrcPath`n")
+        $readOut = exiftool -@ $argRead 2>$null
+        if ($LASTEXITCODE -ne 0) { return $false }
+    } finally {
+        Remove-Item $argRead -Force -ErrorAction SilentlyContinue
+    }
+
+    $srcTypes = @{}
+    foreach ($line in @($readOut)) {
+        if ("$line" -match '^\[IFD(\d+)\]\s+SubfileType:\s*(\d+)\s*$') {
+            $srcTypes[[int]$Matches[1]] = [int]$Matches[2]
+        }
+    }
 
     $tags = @()
-    for ($i = 0; $i -lt $subfileTypes.Count; $i++) {
-        $st = if ($subfileTypes[$i]) { "$($subfileTypes[$i])".Trim() } else { "" }
-        $n = switch -Regex ($st) {
-            '^(REDUCEDIMAGE|REDUCED)$' { 1; break }
-            '^PAGE$'                   { 2; break }
-            '^MASK$'                   { 4; break }
-            default                    { 0 }
-        }
-        if ($i -eq 0) {
-            # magick stamps PAGE on IFD0 of multi-page output; clear it when the source had none
-            if ($n -eq 0) { $tags += "-IFD0:SubfileType=" } elseif ($n -ne 0) { $tags += "-IFD0:SubfileType#=$n" }
-        } elseif ($n -gt 0) {
-            $tags += "-IFD${i}:SubfileType#=$n"
+    for ($i = 0; $i -lt $pcSrc.PageCount; $i++) {
+        if ($srcTypes.ContainsKey($i)) {
+            $tags += "-IFD${i}:SubfileType#=$($srcTypes[$i])"
+        } else {
+            # Source had no marker on this page: clear whatever magick stamped on it.
+            $tags += "-IFD${i}:SubfileType="
         }
     }
     if ($tags.Count -eq 0) { return $true }
@@ -785,6 +869,46 @@ function Restore-TiffSubfileTypes {
     }
 }
 
+function Test-ThumbnailSafeSource {
+    <#
+    .SYNOPSIS
+        Decides whether -GenerateThumbnail is allowed to rewrite $Path.
+        Returns @{ Ok = [bool]; PageCount = [int]; Reason = [string] }.
+
+        The thumbnail path rebuilds the output from page 0 only ("$src[0]") and writes
+        main + freshly generated thumbnail, so EVERY other page of the source is dropped.
+        Replacing an existing REDUCEDIMAGE thumbnail is the intent; dropping a scanner IR
+        (MASK) page, a Photoshop layer or a second photo is data loss -- and the in-place
+        integrity gate cannot see it, because a page-short file still decodes cleanly.
+
+        Reason is "thumb-replaced" when the source already carried thumbnail-only extra
+        pages (caller should note it), "" for a single-page source.
+
+        FAIL-CLOSED: an unreadable page count or an unclassifiable page returns Ok = $false,
+        so the caller refuses the file instead of silently dropping pages.
+
+    .NOTES
+        Re-inject into -Parallel runspaces with:
+            ${function:Test-ThumbnailSafeSource} = $using:ThumbSafeFnDef
+        (Invoke-MagickWithTimeout, Get-TiffPageCount and Test-TiffHasOnlySubfilePages
+        must be injected too.)
+    #>
+    param([string]$Path, [int]$TimeoutSec = 30)
+
+    $pc = Get-TiffPageCount -Path $Path -TimeoutSec $TimeoutSec
+    if (-not $pc.Ok) {
+        return @{ Ok = $false; PageCount = 0; Reason = "page count unreadable ($($pc.Error))" }
+    }
+    if ($pc.PageCount -le 1) {
+        return @{ Ok = $true; PageCount = $pc.PageCount; Reason = "" }
+    }
+    # Same restricted list SafeMode uses everywhere else: MASK/PAGE are real pages here.
+    if (Test-TiffHasOnlySubfilePages -Path $Path -PageCount $pc.PageCount -AllowedSubfileTypes @("REDUCEDIMAGE", "REDUCED") -TimeoutSec $TimeoutSec) {
+        return @{ Ok = $true; PageCount = $pc.PageCount; Reason = "thumb-replaced" }
+    }
+    return @{ Ok = $false; PageCount = $pc.PageCount; Reason = "would drop $($pc.PageCount - 1) extra page(s), not all of them thumbnails (scanner IR / layers)" }
+}
+
 # Capture function definitions once so they can be re-injected into -Parallel runspaces
 $script:MagickTimeoutFnDef = ${function:Invoke-MagickWithTimeout}.ToString()
 $script:PageCountFnDef     = ${function:Get-TiffPageCount}.ToString()
@@ -793,6 +917,7 @@ $script:PixelCompareFnDef  = ${function:Test-PixelIdentical}.ToString()
 $script:TestSubfileFnDef   = ${function:Test-TiffHasOnlySubfilePages}.ToString()
 $script:MetaBackupFnDef    = ${function:Backup-TiffMetadata}.ToString()
 $script:RestoreSubfileFnDef = ${function:Restore-TiffSubfileTypes}.ToString()
+$script:ThumbSafeFnDef     = ${function:Test-ThumbnailSafeSource}.ToString()
 
 # -- Process one TIFF -> ZIP job ------------------------------------
 
@@ -879,8 +1004,21 @@ function Process-TiffJob {
         }
     }
 
+    # -GenerateThumbnail rebuilds the file from page 0 only, so every other source page is
+    # dropped. Refuse when that would lose a real page; the in-place gate below cannot catch
+    # it (a page-short TIFF still decodes). Runs before the dry-run return on purpose, so a
+    # dry run reports the refusal instead of promising an OK the real run would not deliver.
+    $thumbNote = ""
+    if ($generateThumb) {
+        $ts = Test-ThumbnailSafeSource -Path $srcPath -TimeoutSec $script:MagickTimeout
+        if (-not $ts.Ok) {
+            return @{ Result = "ERROR (-GenerateThumbnail refused) | $name | $($ts.Reason)"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+        }
+        if ($ts.Reason -eq "thumb-replaced") { $thumbNote = " [thumb replaced]" }
+    }
+
     if ($dryRun) {
-        return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+        return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
     }
 
     # When the output overwrites the input (in-place: no -StagingDir and no separate output
@@ -929,7 +1067,11 @@ function Process-TiffJob {
             }
 
             # Generate thumbnail: convert to sRGB, strip ICC, resize
-            $thumbCmd = @("-quiet", $mainPage, "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSize}x${thumbSize}>")
+            # -profile converts wide-gamut sources through their embedded ICC before -strip
+            # discards it; -colorspace after it still normalises grayscale/CMYK sources.
+            $thumbCmd = @("-quiet", $mainPage)
+            if ($script:SrgbProfilePath) { $thumbCmd += "-profile", $script:SrgbProfilePath }
+            $thumbCmd += "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSize}x${thumbSize}>"
             if ($thumbExt -eq "jpg") { $thumbCmd += "-quality", $thumbQuality }
             $thumbCmd += "$thumbExt`:$thumbTemp"
             $thumbResult = magick @thumbCmd 2>&1
@@ -1005,9 +1147,16 @@ function Process-TiffJob {
     }
 
     if ($inPlaceFinalDst) {
-        # Only a fully decoded, verified ZIP may replace the original; on any failure the
+        # Only a fully decoded, pixel-verified ZIP may replace the original; on any failure the
         # temp sibling is dropped and the source stays untouched.
-        if (Test-ZipIntegrity -Path $writeDst -TimeoutSec $script:MagickTimeout) {
+        # Decode alone is not enough -- exactly the mode 8 reasoning: a page-short or truncated
+        # file still decodes cleanly, and in-place destroys the ONLY copy. Skipped when the
+        # thumbnail path ran, which legitimately rewrites page 0 and replaces the thumbnail.
+        $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $script:MagickTimeout
+        if ($inPlaceOk -and -not $generateThumb) {
+            $inPlaceOk = Test-PixelIdentical -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $script:MagickTimeout
+        }
+        if ($inPlaceOk) {
             try {
                 Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst -Force -ErrorAction Stop
             } catch {
@@ -1016,7 +1165,7 @@ function Process-TiffJob {
             }
         } else {
             Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
-            return @{ Result = "ERROR (ZIP integrity check failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+            return @{ Result = "ERROR (in-place verification failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
         }
     }
 
@@ -1038,9 +1187,9 @@ function Process-TiffJob {
     }
 
     $resultText = if ($exifWarn) {
-        "WARN (exiftool failed, ZIP ok)$noThumbNote | $name"
+        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote | $name"
     } else {
-        "OK ($comp -> ZIP)$noThumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
+        "OK ($comp -> ZIP)$noThumbNote$thumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
     }
 
     return @{
@@ -1133,6 +1282,7 @@ if ($Mode -lt 0) {
                     ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
                     ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
                     ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
+                    ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
                     $writeDirL = $using:writeDir
                     $finalDirL = $using:finalDir
                     $dryL      = $using:DryRun
@@ -1148,6 +1298,7 @@ if ($Mode -lt 0) {
                     $thumbFormatL = $using:ThumbFormat
                     $thumbPageL = $using:ThumbPage
                     $skipCompThumbL = $using:SkipCompressedWithThumb
+                    $srgbProfileL = $using:srgbProfileResolved
 
                     $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
                     $ext = [System.IO.Path]::GetExtension($name)
@@ -1215,7 +1366,19 @@ if ($Mode -lt 0) {
                         }
                     }
 
-                    if ($dryL) { return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
+                    # -GenerateThumbnail rebuilds the file from page 0 only, so every other
+                    # source page is dropped. Legacy writes IN PLACE, so refusing here is the
+                    # only thing standing between a scanner IR page and permanent loss.
+                    $thumbNote = ""
+                    if ($genThumbL) {
+                        $ts = Test-ThumbnailSafeSource -Path $src -TimeoutSec $magickTimeoutSec
+                        if (-not $ts.Ok) {
+                            return @{ Result = "ERROR (-GenerateThumbnail refused) | $name | $($ts.Reason)"; StagingName = $null; OriginalName = $name; SrcPath = $src }
+                        }
+                        if ($ts.Reason -eq "thumb-replaced") { $thumbNote = " [thumb replaced]" }
+                    }
+
+                    if ($dryL) { return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
 
                     # $noThumbNote accumulates the degraded outcome instead of returning early:
                     # returning here used to skip the EXIF restore block below, so a failed
@@ -1259,7 +1422,11 @@ if ($Mode -lt 0) {
                                 if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                                 return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src }
                             }
-                            $thumbCmd = @("-quiet", $mainPage, "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSizeL}x${thumbSizeL}>")
+                            # -profile converts wide-gamut sources through their embedded ICC
+                            # before -strip discards it (see Resolve-SrgbProfile).
+                            $thumbCmd = @("-quiet", $mainPage)
+                            if ($srgbProfileL) { $thumbCmd += "-profile", $srgbProfileL }
+                            $thumbCmd += "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSizeL}x${thumbSizeL}>"
                             if ($thumbExt -eq "jpg") { $thumbCmd += "-quality", $thumbQualityL }
                             $thumbCmd += "$thumbExt`:$thumbTemp"
                             $thumbResult = magick @thumbCmd 2>&1
@@ -1324,9 +1491,16 @@ if ($Mode -lt 0) {
                     }
 
                     if ($inPlaceFinalDst) {
-                        # Only a fully decoded, verified ZIP may replace the original; on any
-                        # failure the temp sibling is dropped and the source stays untouched.
-                        if (Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeoutSec) {
+                        # Only a fully decoded, pixel-verified ZIP may replace the original; on
+                        # any failure the temp sibling is dropped and the source stays untouched.
+                        # Decode alone is not enough -- same reasoning as mode 8: a page-short or
+                        # truncated file still decodes, and in-place destroys the ONLY copy.
+                        # Skipped for the thumbnail path, which legitimately rewrites the pages.
+                        $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeoutSec
+                        if ($inPlaceOk -and -not $genThumbL) {
+                            $inPlaceOk = Test-PixelIdentical -SrcPath $src -DstPath $writeDst -TimeoutSec $magickTimeoutSec
+                        }
+                        if ($inPlaceOk) {
                             try {
                                 Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst -Force -ErrorAction Stop
                             } catch {
@@ -1335,16 +1509,16 @@ if ($Mode -lt 0) {
                             }
                         } else {
                             Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
-                            return @{ Result = "ERROR (ZIP integrity check failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
+                            return @{ Result = "ERROR (in-place verification failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
                         }
                     }
 
                     $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
                     $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
                     $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
-                        "WARN (exiftool failed, ZIP ok)$noThumbNote$markerNote$subfileNote | $name"
+                        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote | $name"
                     } else {
-                        "OK ($comp -> ZIP)$noThumbNote | $name"
+                        "OK ($comp -> ZIP)$noThumbNote$thumbNote | $name"
                     }
                     return @{ Result = $resultText; StagingName = $stagingName; OriginalName = $name; FinalDst = $finalDst }
 
@@ -1501,6 +1675,7 @@ $script:total = $files.Count
 
 if ($script:total -eq 0) {
     Write-Log "No TIFF files found for mode $Mode in: $($inputRoots -join '; ')" "WARN"
+    Write-RunSummary
     Write-Log "Log: $logFile"
     # `return` at script scope always exits 0, which silently discarded errors already
     # counted above (a bad path in a ';' list) and made the wizard read the run as a success.
@@ -1576,10 +1751,10 @@ foreach ($f in $files) {
     $fileInputRoot = if ($f.InputRoot) { $f.InputRoot } else { $f.DirectoryName }
     $finalDst = Resolve-Output $f $Mode $fileInputRoot $OutputDir $ZipSuffix $ZipSubfolderName $ExportMarker $ExportZipSubfolder $ExportTiffSubfolder
     if (-not $finalDst) {
-        # Report instead of dropping silently, otherwise the "N/N processed" total never closes
-        $script:skipTotal++
-        $script:counterTotal++
-        Write-Log "SKIP (mode $Mode cannot resolve an output path) | $($f.Name)"
+        # Report instead of dropping silently, otherwise the "N/N processed" total never closes.
+        # Routed through Process-Results so it gets the same [n/total] prefix and the same
+        # counter bookkeeping as every other result line (it used to bypass both).
+        Process-Results @("SKIP (mode $Mode cannot resolve an output path) | $($f.Name)")
         continue
     }
 
@@ -1667,9 +1842,7 @@ foreach ($f in $files) {
 
     $writeDst = if ($StagingDir -and -not $DryRun) {
         if (Test-Path -LiteralPath $StagingDir -PathType Leaf) {
-            Write-Log "ERROR: StagingDir exists as a file: $StagingDir" "ERROR"
-            $script:errTotal++
-            $script:counterTotal++
+            Process-Results @("ERROR (StagingDir exists as a file) | $($f.Name) | $StagingDir")
             continue
         }
         $stagingName = "$($script:runStagingId)_$([guid]::NewGuid().ToString('N'))_$($f.Name)"
@@ -1686,8 +1859,7 @@ foreach ($f in $files) {
     if ($Mode -eq 0 -or $Mode -eq 9) {
         # Skip OLD_TIFFs folder itself (it's where we move originals to)
         if ($f.DirectoryName -match '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$') {
-            $script:skipTotal++
-            $script:counterTotal++
+            Process-Results @("SKIP (inside OLD_TIFFs) | $($f.Name)")
             continue
         }
         # Batched probe first; per-file exiftool only when the map has no answer
@@ -1707,9 +1879,7 @@ foreach ($f in $files) {
             }
         }
         if ($exifExit -ne 0 -or -not $comp) {
-            $script:errTotal++
-            $script:counterTotal++
-            Write-Log "ERROR (exiftool check) | $($f.Name) | cannot detect compression" "ERROR"
+            Process-Results @("ERROR (exiftool check) | $($f.Name) | cannot detect compression")
             continue
         }
         # exiftool prints one -Compression line per IFD, so $comp is an ARRAY on a TIFF that
@@ -1731,9 +1901,7 @@ foreach ($f in $files) {
                 $skipCompressed = $hasThumb
             }
             if ($skipCompressed) {
-                $script:skipTotal++
-                $script:counterTotal++
-                Write-Log "SKIP ($compMain) | $($f.Name)"
+                Process-Results @("SKIP ($compMain) | $($f.Name)")
                 continue
             }
         }
@@ -1747,22 +1915,18 @@ foreach ($f in $files) {
         if ($SafeMode) {
             $pc = Get-TiffPageCount -Path $f.FullName -TimeoutSec $MagickTimeout
             if (-not $pc.Ok) {
-                $script:errTotal++
-                $script:counterTotal++
                 $detail = switch -Wildcard ($pc.Error) {
                     "timeout" { "ERROR (magick timeout) | $($f.Name) | possibly corrupted" }
                     "parse:*" { "ERROR (magick page count parse) | $($f.Name) | unexpected identify output: $($pc.Error.Substring(6))" }
                     default   { "ERROR (magick page count failed) | $($f.Name) | possibly corrupted" }
                 }
-                Write-Log $detail "ERROR"
+                Process-Results @($detail)
                 continue
             }
             if ($pc.PageCount -gt 1 -and
                 -not (Test-TiffHasOnlySubfilePages -Path $f.FullName -PageCount $pc.PageCount -AllowedSubfileTypes @("REDUCEDIMAGE", "REDUCED") -TimeoutSec $MagickTimeout)) {
-                $script:multiTotal++
-                $script:counterTotal++
                 $script:multiPagePaths.Add($f.FullName) | Out-Null
-                Write-Log "MULTI ($($pc.PageCount) pages - skipped, original untouched) | $($f.Name)" "WARN"
+                Process-Results @("MULTI ($($pc.PageCount) pages - skipped, original untouched) | $($f.Name)")
                 continue
             }
             $safeChecked = $true
@@ -1774,9 +1938,7 @@ foreach ($f in $files) {
         # as the MULTI bug above). A .tiff source whose .tif sibling already exists was the
         # concrete case: original stranded in OLD_TIFFs, log saying "skipped".
         if ((Test-Path -LiteralPath $finalDst) -and -not $Overwrite -and ($finalDst -ne $f.FullName)) {
-            $script:skipTotal++
-            $script:counterTotal++
-            Write-Log "SKIP (exists) | $($f.Name)"
+            Process-Results @("SKIP (exists) | $($f.Name)")
             continue
         }
 
@@ -1799,9 +1961,7 @@ foreach ($f in $files) {
             }
             Move-Item -LiteralPath $f.FullName -Destination $oldSrc -Force
             if (-not (Test-Path -LiteralPath $oldSrc)) {
-                $script:errTotal++
-                $script:counterTotal++
-                Write-Log "ERROR (move to OLD_TIFFs failed) | $($f.Name)" "ERROR"
+                Process-Results @("ERROR (move to OLD_TIFFs failed) | $($f.Name)")
                 continue
             }
             $tasks += @{
@@ -1858,7 +2018,11 @@ foreach ($f in $files) {
 }
 
 if ($tasks.Count -eq 0) {
-    Write-Log "No tasks to process (mode $Mode may have filtered all files)" "WARN"
+    # INFO, not WARN, when nothing actually went wrong: every file being skipped as
+    # already-compressed is the expected outcome of a re-run, not a problem.
+    $noTaskLevel = if ($script:errTotal -gt 0) { "WARN" } else { "INFO" }
+    Write-Log "No tasks to process (mode $Mode filtered all $($script:total) file(s))" $noTaskLevel
+    Write-RunSummary
     Write-Log "Log: $logFile"
     # Same as above: modes 0/9 can fail every file in the pre-check loop (exiftool probe,
     # move to OLD_TIFFs) and land here with $errTotal > 0. `return` reported exit 0.
@@ -1909,6 +2073,7 @@ foreach ($group in $groupedTasks) {
             ${function:Test-TiffHasOnlySubfilePages} = $using:TestSubfileFnDef
             ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
             ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
+            ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
             $srcPath = $t.Src
             $writeDst = $t.WriteDst
             $finalDst = $t.FinalDst
@@ -1925,6 +2090,7 @@ foreach ($group in $groupedTasks) {
             $thumbFormat = $using:ThumbFormat
             $thumbPage = $using:ThumbPage
             $skipCompressedWithThumb = $using:SkipCompressedWithThumb
+            $srgbProfileL = $using:srgbProfileResolved
 
             $name = [System.IO.Path]::GetFileName($srcPath)
 
@@ -1986,8 +2152,20 @@ foreach ($group in $groupedTasks) {
                     # If only thumbnails, continue processing page 0
                 }
             }
+
+            # -GenerateThumbnail rebuilds the file from page 0 only, so every other source
+            # page is dropped. Refuse rather than lose a scanner IR / layer page silently.
+            $thumbNote = ""
+            if ($generateThumb) {
+                $ts = Test-ThumbnailSafeSource -Path $srcPath -TimeoutSec $magickTimeout
+                if (-not $ts.Ok) {
+                    return @{ Result = "ERROR (-GenerateThumbnail refused) | $name | $($ts.Reason)"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+                }
+                if ($ts.Reason -eq "thumb-replaced") { $thumbNote = " [thumb replaced]" }
+            }
+
             if ($dryRun) {
-                return @{ Result = "DRY ($comp -> ZIP) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+                return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
 
             # In-place output destroys the original before the EXIF restore runs; park the
@@ -2021,7 +2199,11 @@ foreach ($group in $groupedTasks) {
                         if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                         return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                     }
-                    $thumbCmd = @("-quiet", $mainPage, "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSize}x${thumbSize}>")
+                    # -profile converts wide-gamut sources through their embedded ICC before
+                    # -strip discards it (see Resolve-SrgbProfile).
+                    $thumbCmd = @("-quiet", $mainPage)
+                    if ($srgbProfileL) { $thumbCmd += "-profile", $srgbProfileL }
+                    $thumbCmd += "-colorspace", "sRGB", "-strip", "-thumbnail", "${thumbSize}x${thumbSize}>"
                     if ($thumbExt -eq "jpg") { $thumbCmd += "-quality", $thumbQuality }
                     $thumbCmd += "$thumbExt`:$thumbTemp"
                     $thumbResult = magick @thumbCmd 2>&1
@@ -2106,9 +2288,9 @@ foreach ($group in $groupedTasks) {
             $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
             $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
             $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
-                "WARN (exiftool failed, ZIP ok)$noThumbNote$markerNote$subfileNote | $name"
+                "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote | $name"
             } else {
-                "OK ($comp -> ZIP)$noThumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
+                "OK ($comp -> ZIP)$noThumbNote$thumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
             }
             return @{
                 Result = $resultText
@@ -2387,17 +2569,7 @@ foreach ($group in $groupedTasks) {
     }
 }
 
-Write-Log ""
-Write-Log ("-" * 50)
-Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:multiTotal) multi-page (not touched) | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
-
-if ($script:multiTotal -gt 0) {
-    Write-Log ""
-    Write-Log "-- Multi-page TIFFs found (not compressed - review manually):"
-    foreach ($p in ($script:multiPagePaths | Sort-Object)) {
-        Write-Log "   $p" "WARN"
-    }
-}
+Write-RunSummary
 
 Write-Log "Log: $logFile"
 
