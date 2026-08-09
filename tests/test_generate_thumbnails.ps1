@@ -32,7 +32,7 @@ Describe "generate_thumbnails.ps1 - Parameter Validation" {
 
 Describe "generate_thumbnails.ps1 - Input Scan" {
     It "Excludes _thumb files from input scan (no _thumb_thumb)" {
-        # v2.6 moved the literal into one $script:ThumbNamePattern shared with -Remove: the
+        # Round 7 moved the literal into one $script:ThumbNamePattern shared with -Remove: the
         # two had drifted, so the _v2 collision rename matched neither.
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match '\$_\.BaseName -notmatch \$script:ThumbNamePattern'

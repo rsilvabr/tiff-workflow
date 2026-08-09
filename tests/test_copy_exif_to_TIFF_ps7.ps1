@@ -91,7 +91,7 @@ Describe "copy_exif_to_TIFF_ps7.ps1 - Original Name" {
     It "Destination name comes from the file, never from an undefined variable" {
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Not -Match '\$originalName(?!\s*\])'
-        # v2.4 added $destNameMap for -OutputDir collisions; it falls back to $tif.Name
+        # Round 5 added $destNameMap for -OutputDir collisions; it falls back to $tif.Name
         $content | Should -Match '\$destName = if \(\$destNameMap\.ContainsKey\(\$tif\.FullName\)\).*else \{ \$tif\.Name \}'
         $content | Should -Match '\$destPath\s+= Join-Path \$finalDir\s+\$destName'
     }

@@ -203,7 +203,7 @@ COPY_EXIF_TARGETS = [
 )
 class TestCopyExifExitCodeContract:
     """
-    The v2.5 exit-code fix landed in compress_tiff_zip.ps1 and generate_thumbnails.ps1 and was
+    The round 6 exit-code fix landed in compress_tiff_zip.ps1 and generate_thumbnails.ps1 and was
     never generalised here: a wrong path fell through to "No TIFFs found" and exited 0, so
     convert_tiff.py let Step 2 of workflow 4 run after a Copy EXIF that touched nothing.
     """
@@ -388,7 +388,7 @@ def rmse_pages(path_a, path_b, page=0):
 @requires_tools
 @pytest.mark.parametrize("shell", SHELLS)
 class TestMultiPageCompressE2E:
-    """The CRITICAL v2.4 class (multi-page TIFF stranded in OLD_TIFFs) and the
+    """The CRITICAL round 5 class (multi-page TIFF stranded in OLD_TIFFs) and the
     subfiletype-preservation fix, exercised end to end with real files."""
 
     def test_mask_page_skipped_original_untouched(self, tmp_path, shell):
@@ -930,7 +930,7 @@ class TestPs5Ps7Parity:
 def test_ps_sources_are_pure_ascii_without_bom(script):
     """
     PowerShell 5.1 decodes BOM-less files as cp1252, where a stray em-dash becomes `”` -- a
-    string delimiter. One non-ASCII character stopped a whole script from parsing (v2.4).
+    string delimiter. One non-ASCII character stopped a whole script from parsing (round 5).
     """
     raw = (REPO / script).read_bytes()
     assert not raw.startswith(b"\xef\xbb\xbf"), f"{script} has a UTF-8 BOM"

@@ -99,11 +99,11 @@ Invoke-Pester -Path tests/test_compress_tiff_zip.ps1 -Output Detailed
 - Parallel processing structure
 - Mode 8 verifies what it wrote before deleting the source
 - Integrity check fails closed (timeout / no exit code)
-- The `[no thumb]` fallback must NOT return early (v2.5)
+- The `[no thumb]` fallback must NOT return early (round 6)
 - Error handling
 
 > These assert code *shapes*, so a refactor invalidates them even when the invariant survives.
-> When one fails, check whether the invariant moved before "fixing" the script: in v2.5 all 17
+> When one fails, check whether the invariant moved before "fixing" the script: in round 6 all 17
 > failures were stale assertions and one was pinning the bug itself. Rewrite the assertion
 > against the current form rather than deleting it.
 

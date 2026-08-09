@@ -2,7 +2,16 @@
 
 This document tracks critical and significant bug fixes applied to the TIFF Workflow project.
 
-## Audit Round 13
+> **How this file is numbered.** Sections carry the version the work actually **shipped in**,
+> plus the audit round, newest first. Audit rounds are the stable identifier -- they match the
+> `fix(audit-round-N)` commits -- so cross-references in this file and in the test suite name
+> the round, not a version.
+>
+> Rounds 4-7 used to be titled `v2.3`-`v2.6`. Those versions were never released: all five of
+> rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
+> that way now. Rounds 8-13 shipped after v2.2 and make up **v2.3**.
+
+## v2.3 - Audit Round 13
 
 Driven by the same real files as round 12 (`raw_scan`, `raw_scan_2`, `tiff_scan`, `TIFF16`), with
 every finding reproduced on disk before it was fixed and pinned by a test that fails when the fix
@@ -184,11 +193,10 @@ filter, so `-Quality 85` quietly chose a worse PNG compression than the default.
 - **Fix:** `$script:total` throughout; `-quality` only for `jpg`/`jpeg`.
 - **Files:** `generate_thumbnails.ps1`
 
-## Audit Round 12
+## v2.3 - Audit Round 12
 
 > Rounds 8-11 shipped as commits (`83c08af`, `bdac2c1`, `22a763f`, `f78c9d5`) without a section
-> here; the version numbers below stop at v2.6 for that reason. This section is numbered by
-> audit round, which matches the commit history.
+> here. They are part of v2.3 as well; see the commit messages for their findings.
 
 Driven by real scanner files (`raw_scan`, `raw_scan_2`: RGB + reduced preview + **full-size IR
 `MASK` page**; `tiff_scan`: RGB + preview; `TIFF16`/`TIFF16_Z8`: Capture One ProPhoto exports with
@@ -349,14 +357,14 @@ rule, so both agreed on the wrong answer.
 - **Fix:** Both use the same default.
 - **Files:** `convert_tiff.py`
 
-## v2.6 - Audit Round 7
+## v2.2 - Audit Round 7
 
 A full read of all five files. Ten findings; the five that mattered were reproduced on disk
 before being touched, and every fix is pinned by a test that fails when reverted. Four of the
 five are the same story as round 6: **a fix that landed in one file and was never generalised**.
 
 ### 🔴 HIGH - `copy_exif` Reported Success for a Folder That Does Not Exist
-**Issue:** The v2.5 exit-code fix ("a bad path in a `;` list must exit 1") was applied to
+**Issue:** The round 6 exit-code fix ("a bad path in a `;` list must exit 1") was applied to
 `compress_tiff_zip.ps1` and `generate_thumbnails.ps1` and never to the two `copy_exif` scripts,
 which had **no input validation at all**. `Get-ChildItem` on a missing path raises a
 *non-terminating* error, so it never became an `ERROR` line and never reached `$errTotal`:
@@ -385,10 +393,10 @@ folder made Copy EXIF "succeed" without touching a file and Compress ran anyway.
 - **Files:** `generate_thumbnails.ps1`
 
 ### 🟡 MEDIUM - The Collision Rename Escaped Both the Self-Exclusion and `-Remove`
-**Issue:** The `_v2` numbering added in v2.3 produces `photo_thumb_v2.tif`, but both filters
+**Issue:** The `_v2` numbering added in round 4 produces `photo_thumb_v2.tif`, but both filters
 matched only `_thumb(-\d+)?$`. So a renamed **.tif** thumbnail was neither excluded from the
 input scan nor removable: the next run treated it as a source and produced
-`photo_thumb_v2_thumb.tif` -- the `_thumb_thumb` bug v2.3 fixed, coming back through a feature
+`photo_thumb_v2_thumb.tif` -- the `_thumb_thumb` bug round 4 fixed, coming back through a feature
 added in the same round.
 - **Fix:** One `$script:ThumbNamePattern` (`_thumb(_v\d+)?(-\d+)?$`) shared by the input scan and
   the `-Remove` filter, covering all four shapes this script can emit (`_thumb`, `_thumb-0`,
@@ -441,7 +449,7 @@ mode 8 cannot affect rollback, which only applies to modes 0/9.
 demonstrated before the fix, re-run after it, and mutation-checked: the fix was reverted in the
 working tree, the new test was confirmed to fail, and the file restored and md5-compared.
 
-## v2.5 - Audit Round 6
+## v2.2 - Audit Round 6
 
 Round 6 was a **class-directed** audit rather than a free read: the five recurring failure
 classes from rounds 1-5 (destination collision, data loss, PS5/PS7 divergence, path
@@ -587,12 +595,12 @@ now inverted: no worker may return there, and all three must accumulate `$noThum
 through to the EXIF restore.
 
 **Verification:** all four `.ps1` files parse clean under both PowerShell 5.1 and 7 and remain
-pure ASCII without BOM (the v2.4 constraint); `pytest` 111/111 (52 existing + 59 new) and
+pure ASCII without BOM (the round 5 constraint); `pytest` 111/111 (52 existing + 59 new) and
 `Invoke-Pester` 76/76; modes 0-9 swept on both shells with real TIFFs, exit 0 throughout, EXIF
 preserved in-place on every worker, and no leaked temp files. Each new regression test was
-mutation-checked by reverting the corresponding v2.5 fix and confirming the test fails.
+mutation-checked by reverting the corresponding round 6 fix and confirming the test fails.
 
-## v2.4 - Audit Round 5
+## v2.2 - Audit Round 5
 
 ### 🔴 CRITICAL - `copy_exif_to_TIFF_ps5.ps1` Did Not Run on PowerShell 5.1 At All
 **Issue:** The script is saved as UTF-8 **without BOM** but contains non-ASCII characters (`─`, `═`, `—`, `→`). Windows PowerShell 5.1 decodes BOM-less files as ANSI (cp1252), so `─` and `—` become `â”`/`â€”` — and `”` (U+201D) is a **string delimiter** for the PowerShell parser. Every affected string terminated early:
@@ -625,7 +633,7 @@ The PS5-only script — whose entire reason to exist is PowerShell 5.1 — faile
 - **Files:** `convert_tiff.py`
 
 ### 🟠 HIGH - `copy_exif` `-OutputDir` Merged Every Session Into One Folder
-**Issue:** With AutoFind (or a `;` list) all sessions share a single `-OutputDir`, so a second session holding `DSC_0001.tif` hit `SKIP (exists in OutputDir)` and silently produced nothing (or overwrote the first with `-Overwrite`). None of the numbering added to `compress_tiff_zip.ps1` in v2.2/v2.3 existed here.
+**Issue:** With AutoFind (or a `;` list) all sessions share a single `-OutputDir`, so a second session holding `DSC_0001.tif` hit `SKIP (exists in OutputDir)` and silently produced nothing (or overwrote the first with `-Overwrite`). None of the numbering added to `compress_tiff_zip.ps1` in rounds 3-4 existed here.
 - **Fix:** Destinations are claimed per run across folders; later claimants get `_v2`, `_v3`, ... with a `RENAME` log line. The staging→final move uses the same mapping.
 - **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
 
@@ -677,7 +685,7 @@ The PS5-only script — whose entire reason to exist is PowerShell 5.1 — faile
 
 ---
 
-## v2.3 - Audit Round 4
+## v2.2 - Audit Round 4
 
 ### 🔴 CRITICAL - copy_exif `-OutputDir` + `-CompressZip` Deleted Its Own Output
 **Issue:** With `-OutputDir` (different from the source dir) and `-CompressZip` (without `-Overwrite`), the script copied the TIFF to the output dir, applied EXIF, then tested `Test-Path $finalDst` — but `$finalDst` and `$destTiff` are the same path the script itself just created. It entered the "exists" branch, deleted its own output, and returned `OK+SKIP-ZIP (exists)` producing no file at all.

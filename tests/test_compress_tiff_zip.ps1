@@ -108,7 +108,7 @@ Describe "compress_tiff_zip_v2.ps1 - Page Count" {
     }
 
     It "Guards page count parsing with [int]::TryParse (fails closed)" {
-        # v2.3 replaced the raw [int] cast: unparseable identify output must yield Ok=$false,
+        # Round 4 replaced the raw [int] cast: unparseable identify output must yield Ok=$false,
         # not a silent 0 that lets SafeMode wave a multi-page TIFF through.
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match '\[int\]::TryParse\(\$val, \[ref\]\$n\)'
@@ -118,7 +118,7 @@ Describe "compress_tiff_zip_v2.ps1 - Page Count" {
 
 Describe "compress_tiff_zip_v2.ps1 - DeleteSource Logic" {
     It "Mode 8 verifies the file it actually wrote before allowing the delete" {
-        # v2.3 replaced the $stagingUsed flag: the target to verify is the staged file when
+        # Round 4 replaced the $stagingUsed flag: the target to verify is the staged file when
         # one was written, otherwise the source itself. Both workers must do this.
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match '\$verifyTarget = if \(\$writeDst -ne \$srcPath\) \{ \$writeDst \} else \{ \$srcPath \}'
@@ -178,7 +178,7 @@ Describe "compress_tiff_zip_v2.ps1 - Run-Scoped Staging" {
     }
 }
 
-Describe "compress_tiff_zip_v2.ps1 - No-Thumb Fallback (v2.5)" {
+Describe "compress_tiff_zip_v2.ps1 - No-Thumb Fallback (round 6)" {
     It "No worker returns early on '[no thumb]'" {
         # Returning there skipped the EXIF restore and the mode 8 integrity gate, which is
         # how PS7 lost metadata where PS5 kept it. The note is accumulated instead.
@@ -216,7 +216,7 @@ Describe "compress_tiff_zip_v2.ps1 - SkipCompressedWithThumb Reprocess" {
 
 Describe "compress_tiff_zip_v2.ps1 - Integrity Check Command" {
     It "Uses 'magick <file> null:' for integrity verification" {
-        # v2.4 moved every magick call into an in-process runspace (Invoke-MagickWithTimeout),
+        # Round 5 moved every magick call into an in-process runspace (Invoke-MagickWithTimeout),
         # replacing the per-file Start-Job. The full pixel decode itself is unchanged.
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match 'Invoke-MagickWithTimeout -Arguments @\(\$Path, "null:"\)'
@@ -273,7 +273,7 @@ Describe "compress_tiff_zip_v2.ps1 - Audit Round 4" {
     }
 
     It "Collision detection is not restricted to the flattening modes" {
-        # v2.4: photo.tif and photo.tiff both resolve to photo.tif, so two workers could race
+        # Round 5: photo.tif and photo.tiff both resolve to photo.tif, so two workers could race
         # on one output in ANY mode -- the 4-7 restriction was the bug, not the fix.
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Not -Match '\$Mode -ge 4 -and \$Mode -le 7'

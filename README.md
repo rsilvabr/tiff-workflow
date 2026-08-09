@@ -265,15 +265,19 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ### Latest release
 
-**v2.2** - Manifest system and five audit rounds of data-loss prevention:
-- **Manifest system:** process many folders in one run from a CSV edited in Excel - one entry per folder, each with its own mode, with fail-closed guards (BOM/ANSI encoding, `..` traversal, cross-entry output collisions, mode-8 delete gate). Generate from workflow [1], run from main menu [3], repeat from [2]
-- `copy_exif_to_TIFF_ps5.ps1` did not even parse on PowerShell 5.1 (BOM-less UTF-8 read as ANSI); all scripts are now pure ASCII
-- Legacy in-place compression silently stripped all EXIF; modes 0/9 no longer strand multi-page TIFFs in `OLD_TIFFs/`
-- `photo.tif` + `photo.tiff` no longer overwrite each other; collision numbering (`_v2`, `_v3`) now covers every mode
-- Mode 8 always runs its ZIP integrity check, and its abort no longer exits 0
-- Wizard mode 2 finally asks for an output folder (it used to flatten everything into the input root)
-- Modes 6/7 write inside the `_EXPORT` tree the file came from; cross-`_EXPORT` collisions are numbered
-- `Start-Job` (one PowerShell process per file) replaced by in-process runspaces: **5.66 s → 3.60 s** on 24 files / 8 workers
+**v2.3** - Six more audit rounds (8-13), driven by real scanner and Capture One files:
+
+- **Folder exclusion** — `-ExcludeFolders "_EXPORT;temp"` skips whole folder trees by name, in every mode and in all three backends; the wizard asks once per workflow
+- **Worker cap decoupled from Safe Mode** — `-CapWorkers` (default: no cap), so Safe Mode no longer quietly limits parallelism
+- **Discovery is much faster** — the "already compressed?" probe is batched, one `exiftool` per ~400 files instead of one process per file
+- **Colour-managed thumbnails** — wide-gamut sources are converted through their embedded ICC profile before it is stripped, so a ProPhoto export finally produces a thumbnail that looks like the photo
+- `-GenerateThumbnail` no longer silently drops pages, and no longer leaves the main image marked as a page of a multi-page document; `-ThumbPage 0` is refused, because those files were classified multi-page by the tool's own Safe Mode on every later run
+- **Mode 8 works on deeply nested archives** — staged names were long enough to blow past Windows' 260-character path limit, which failed *every* file with an unexplained error; an over-long path is now refused up front, with the number
+- In-place replacement and the mode 8 delete now require a pixel-identical check, not just "the file decodes"
+- Safe Mode classifies a thumbnail by size as well as by tag, so a full-size IR `MASK` page is always treated as a real page
+- "Repeat last workflow" rebuilds the command for the PowerShell it is about to run; it could previously turn Safe Mode back on
+
+⚠️ **Breaking:** `-ThumbPage 0` is now refused (exit 1). It only ever produced files this toolkit would not touch again.
 
 See [`docs/bugs_fixed.md`](docs/bugs_fixed.md) for the complete list.
 

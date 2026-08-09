@@ -32,7 +32,7 @@ Describe "copy_exif_to_TIFF_ps5.ps1 - Page Count" {
     }
 
     It "Uses [int]::TryParse to guard page count parsing (fails closed)" {
-        # v2.3 folded the parse into Get-TiffPageCount: unparseable identify output returns
+        # Round 4 folded the parse into Get-TiffPageCount: unparseable identify output returns
         # Ok=$false instead of a silent 0 that would let SafeMode pass a multi-page TIFF.
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match '\[int\]::TryParse\(\$val, \[ref\]\$n\)'
@@ -62,7 +62,7 @@ Describe "copy_exif_to_TIFF_ps5.ps1 - Original Name" {
     It "Destination name comes from the file, never from an undefined variable" {
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Not -Match '\$originalName(?!\s*\])'  # $originalName not followed by ] (could be array access)
-        # v2.4 added $destNameMap for -OutputDir collisions; it falls back to $tif.Name
+        # Round 5 added $destNameMap for -OutputDir collisions; it falls back to $tif.Name
         $content | Should -Match '\$destName = if \(\$destNameMap\.ContainsKey\(\$tif\.FullName\)\).*else \{ \$tif\.Name \}'
         $content | Should -Match '\$destPath\s+= Join-Path \$finalDir\s+\$destName'
     }
