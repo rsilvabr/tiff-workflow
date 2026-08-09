@@ -11,6 +11,41 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
 > that way now. Rounds 8-13 shipped after v2.2 and make up **v2.3**.
 
+## v2.3 - Audit Round 14
+
+### 🟠 MEDIUM - `-ExcludeFolders` Matched the Absolute Path, Not the Tree Below the Root
+**Issue:** The exclusion split each file's **absolute** directory and tested every segment --
+the drive letter, every folder above the one the user pointed at, and the scan root's own name.
+An entry matching any of those excluded the entire run, logged it as a normal exclusion and
+exited 0. `FileInfo.DirectoryName` is always absolute, even when `Get-ChildItem` was handed a
+relative path, so this was never visible from the call site. Reproduced on
+`%TEMP%\exclchk\TESTE` with `raw_scan\a.tif` and `_EXPORT\TIFF16\b.tif`:
+
+```
+-ExcludeFolders      kept
+(none)               a.tif, b.tif
+_EXPORT              a.tif            <- correct
+raw_scan             b.tif            <- correct
+TESTE (the root)     (NOTHING)        <- the whole run, silently
+Temp (an ancestor)   (NOTHING)        <- the whole run, silently
+```
+
+The two correct rows are the normal case, which is why it went unnoticed: you would not
+normally name an ancestor. It bites when a folder you legitimately want to exclude also
+appears above the root -- `zip`, `logs`, `old`, `temp`, `export`, a year, a client name.
+- **Fix:** New `Test-PathExcluded` in all three backends matches only segments **below** the
+  scan root, following `jxl-photo`'s `_is_tool_output_path` exactly: `p.relative_to(root)`
+  strips the root, so a folder passed *as* a root is not excluded by its own name (pointing
+  the tool at `..._EXPORT` to process it still works), and a path that is somehow not under
+  the root falls back to the whole path -- in doubt, skip. Forward slashes are normalised
+  first, so a `-InputDir` given with `/` still matches.
+- **Note:** the Copy EXIF backends read each folder non-recursively, so in practice nothing
+  sits below their roots to exclude. The flag is still accepted and applied there for
+  consistency (the wizard asks once per workflow), but it only really bites in the recursive
+  compression modes. Documented in both READMEs.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `README.md`, `docs/README_compress_tiff_zip.md`
+
 ## v2.3 - Audit Round 13
 
 Driven by the same real files as round 12 (`raw_scan`, `raw_scan_2`, `tiff_scan`, `TIFF16`), with

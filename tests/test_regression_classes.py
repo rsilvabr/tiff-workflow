@@ -1490,6 +1490,14 @@ class TestCopyExifExcludeFolders:
         ("copy_exif_to_TIFF_ps7.ps1", "pwsh"),
     ])
     def test_backend_honours_the_flag(self, tmp_path, script, shell):
+        """Round 14 changed the semantics this pins. Matching is relative to the scan root
+        (jxl-photo's `_is_tool_output_path`), so a folder passed AS a root is not excluded by
+        its own name -- only folders nested BELOW a root are. Pointing the tool directly at
+        `_EXPORT` to process it therefore still works, which is the point.
+
+        The invariant that matters -- the flag reaches this backend and drops a nested
+        `_EXPORT` tree -- is pinned below with a nested layout and -Recurse forced by giving
+        the parent as the root."""
         if shell not in SHELLS:
             pytest.skip(f"{shell} not on PATH")
         keep = tmp_path / "S5pro" / "keep"
@@ -1505,17 +1513,52 @@ class TestCopyExifExcludeFolders:
                         ["-InputDir", f"{keep};{drop}", "-DryRun",
                          "-ExcludeFolders", "_EXPORT"], tmp_path)
 
-        assert "Excluded 1 file(s)" in result.stdout, result.stdout
-        assert "a.tif" in result.stdout
-        assert "b.tif" not in result.stdout, "_EXPORT tree was not excluded"
+        # Both roots were named explicitly, so both are processed: neither has an excluded
+        # folder BELOW it. The old absolute match dropped b.tif here.
+        assert "a.tif" in result.stdout, result.stdout
+        assert "b.tif" in result.stdout, (
+            "a folder given AS a root must not be excluded by its own name"
+        )
+        assert "Excluded" not in result.stdout, result.stdout
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("script,shell", [
+        ("copy_exif_to_TIFF_ps5.ps1", "powershell"),
+        ("copy_exif_to_TIFF_ps7.ps1", "pwsh"),
+    ])
+    def test_ancestor_name_does_not_wipe_the_run(self, tmp_path, script, shell):
+        """The bug this replaced: every ancestor of the file was matched, so a name that
+        happened to appear above the root excluded everything and logged it as normal."""
+        if shell not in SHELLS:
+            pytest.skip(f"{shell} not on PATH")
+        root = tmp_path / "S5pro"
+        root.mkdir()
+        make_tiff(root / "a.tif")
+        subprocess.run(["magick", "-size", "32x32", "gradient:", str(root / "a.jpg")],
+                       capture_output=True, check=True, timeout=120)
+
+        for name in ("S5pro", tmp_path.name):
+            result = run_ps(shell, script,
+                            ["-InputDir", str(root), "-DryRun",
+                             "-ExcludeFolders", name], tmp_path)
+            assert "a.tif" in result.stdout, (
+                f"-ExcludeFolders {name!r} excluded the whole run:\n{result.stdout}"
+            )
 
     @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
     def test_segment_regex_covers_both_separators(self, script):
         """A '[\\/]' class (one backslash) matches only '/', so a Windows path would slip
-        through the "names, not paths" guard and the segment split."""
+        through the "names, not paths" guard and the segment split.
+
+        Round 14 moved the segment split into Test-PathExcluded, which normalises '/' to
+        '\\' and then splits, rather than matching a separator class -- so the half of this
+        invariant that moved is pinned on that normalisation instead of on the class."""
         source = (REPO / script).read_text(encoding="ascii")
         assert r"-match '[\\/]'" in source, f"{script}: separator class lost a backslash"
-        assert r"-split '[\\/]'" in source, f"{script}: separator class lost a backslash"
+        assert r".Replace('/', '\')" in source, (
+            f"{script}: the exclusion matcher no longer normalises forward slashes"
+        )
 
 
 class TestPartialCopyIsCleanedUp:
@@ -1903,6 +1946,99 @@ class TestGroupHeaderNamesTheOutputFolder:
         assert moved, result.stdout
         assert str(work / "ZIP").lower() in moved[0].lower(), (
             f"the move line names the wrong folder: {moved[0]}"
+        )
+
+
+# -- ROUND 14 -------------------------------------------------------
+
+
+class TestExcludeFoldersIsRelativeToTheScanRoot:
+    """-ExcludeFolders split the ABSOLUTE directory path, so every ancestor above the folder
+    the user pointed at was matched too -- the drive letter, the root's own name, and
+    whatever the archive happens to live under. An entry matching one of those excluded the
+    ENTIRE run, logged it as a normal exclusion and exited 0:
+
+        -ExcludeFolders Temp   on ...\\Temp\\TESTE   ->  kept: (nothing)
+
+    The docs promise folder TREES below the root, the parameter validation already refuses
+    paths, and the Python mirror in convert_tiff.py was already relative."""
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_nested_names_excluded_ancestors_ignored(self, tmp_path, shell):
+        root = tmp_path / "TESTE"
+        (root / "raw_scan").mkdir(parents=True)
+        (root / "_EXPORT" / "TIFF16").mkdir(parents=True)
+        make_tiff(root / "raw_scan" / "a.tif")
+        make_tiff(root / "_EXPORT" / "TIFF16" / "b.tif")
+        # Directly IN the root: the only file whose directory EQUALS the root, which is the
+        # case that tells "root's own name counts" apart from "only what is below it".
+        make_tiff(root / "c.tif")
+        names = ("a.tif", "b.tif", "c.tif")
+
+        def kept(exclude):
+            args = ["-Mode", "3", "-InputDir", str(root), "-Workers", "1", "-DryRun"]
+            if exclude is not None:
+                args += ["-ExcludeFolders", exclude]
+            out = run_ps(shell, "compress_tiff_zip.ps1", args, tmp_path).stdout
+            return sorted(n for n in names if f"| {n}" in out)
+
+        assert kept(None) == ["a.tif", "b.tif", "c.tif"], "baseline: all files are discovered"
+        # a folder nested below the root is still excluded, tree and all
+        assert kept("_EXPORT") == ["a.tif", "c.tif"]
+        assert kept("raw_scan") == ["b.tif", "c.tif"]
+        # ...but the root's own name and any ancestor must exclude nothing, including the
+        # file sitting directly in the root
+        assert kept("TESTE") == ["a.tif", "b.tif", "c.tif"], (
+            "the scan root's own name excluded the run"
+        )
+        assert kept(tmp_path.name) == ["a.tif", "b.tif", "c.tif"], (
+            "an ancestor folder above the scan root excluded the run"
+        )
+
+    @requires_shell
+    @requires_tools
+    @pytest.mark.parametrize("shell", SHELLS)
+    def test_forward_slash_input_root_still_matches(self, tmp_path, shell):
+        """-InputDir given with '/' separators must not defeat the relative compare -- the
+        same normalisation bug mode 5 already had. Without the normalisation the root prefix
+        never matches, every file falls into the "not under the root" fallback, and the
+        matcher is back to reading the absolute path."""
+        root = tmp_path / "TESTE"
+        (root / "_EXPORT").mkdir(parents=True)
+        make_tiff(root / "keep.tif")
+        make_tiff(root / "_EXPORT" / "drop.tif")
+        slashed = str(root).replace("\\", "/")
+
+        def out_for(exclude):
+            return run_ps(shell, "compress_tiff_zip.ps1",
+                          ["-Mode", "3", "-InputDir", slashed, "-Workers", "1",
+                           "-DryRun", "-ExcludeFolders", exclude], tmp_path).stdout
+
+        out = out_for("_EXPORT")
+        assert "| keep.tif" in out, out
+        assert "| drop.tif" not in out, "the _EXPORT tree was not excluded"
+
+        # An ancestor name still must not exclude anything -- this is what fails when the
+        # prefix compare silently degrades to the absolute-path fallback.
+        out = out_for(tmp_path.name)
+        assert "| keep.tif" in out and "| drop.tif" in out, (
+            f"an ancestor excluded files when -InputDir used '/':\n{out}"
+        )
+
+    @pytest.mark.parametrize("script", ["compress_tiff_zip.ps1",
+                                        "copy_exif_to_TIFF_ps5.ps1",
+                                        "copy_exif_to_TIFF_ps7.ps1"])
+    def test_no_backend_matches_the_absolute_path(self, script):
+        source = (REPO / script).read_text(encoding="ascii")
+        for offender in (r"$_.DirectoryName -split '[\\/]'",
+                         r"$df.DirectoryName -split '[\\/]'"):
+            assert offender not in source, (
+                f"{script}: exclusion is matching the absolute path again"
+            )
+        assert "Test-PathExcluded -Directory" in source, (
+            f"{script}: exclusion no longer goes through the relative matcher"
         )
 
 

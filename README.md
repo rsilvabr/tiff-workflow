@@ -126,6 +126,8 @@ tiff-workflow/
 
 **Folder exclusion** (`-ExcludeFolders "_EXPORT;temp"`): skips whole folder trees by name during discovery, in every mode. Segment match only (`_EXPORT` never touches `My_EXPORT_photos`), and every run logs what was excluded. The wizard offers your last list as the default (stored in your local config) — a fresh install defaults to nothing excluded.
 
+Matching is **relative to the folder you point at**: only folders *below* it count, so a name that happens to appear higher up the path (`Temp`, `Users`, your drive, the selected folder's own name) never excludes anything. Pointing the tool directly at a folder named `_EXPORT` to process it still works. Note that the Copy EXIF backends read each folder non-recursively, so there is nothing below their roots to exclude — the flag only really bites in the recursive compression modes.
+
 ---
 
 ## Manifest System
@@ -267,7 +269,7 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 **v2.3** - Six more audit rounds (8-13), driven by real scanner and Capture One files:
 
-- **Folder exclusion** — `-ExcludeFolders "_EXPORT;temp"` skips whole folder trees by name, in every mode and in all three backends; the wizard asks once per workflow
+- **Folder exclusion** — `-ExcludeFolders "_EXPORT;temp"` skips whole folder trees by name, in every mode and in all three backends; the wizard asks once per workflow. Matching is relative to the folder you point at, so a name appearing higher up the path never excludes anything
 - **Worker cap decoupled from Safe Mode** — `-CapWorkers` (default: no cap), so Safe Mode no longer quietly limits parallelism
 - **Discovery is much faster** — the "already compressed?" probe is batched, one `exiftool` per ~400 files instead of one process per file
 - **Colour-managed thumbnails** — wide-gamut sources are converted through their embedded ICC profile before it is stripped, so a ProPhoto export finally produces a thumbnail that looks like the photo

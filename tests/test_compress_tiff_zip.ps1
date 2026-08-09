@@ -36,8 +36,12 @@ Describe "compress_tiff_zip_v2.ps1 - Parameter Validation" {
     It "-ExcludeFolders filters by path segment and rejects paths" {
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match '\[string\]\$ExcludeFolders = ""'
-        # segment match (never substring), applied centrally during collection
-        $content | Should -Match '\$seg -in \$script:excludeNames'
+        # Segment match (never substring), applied centrally during collection. Round 14
+        # moved the match itself into Test-PathExcluded, which takes the names as a
+        # parameter and evaluates them RELATIVE to the scan root -- matching the absolute
+        # path let any ancestor's name exclude the whole run.
+        $content | Should -Match '\$seg -in \$Names'
+        $content | Should -Match 'Test-PathExcluded -Directory \$df\.DirectoryName -Root \$inputRoot'
         # entries containing a path separator are rejected with exit 1
         $content | Should -Match "-ExcludeFolders takes folder NAMES, not paths"
         # and every run logs what was excluded -- an exclusion is never invisible

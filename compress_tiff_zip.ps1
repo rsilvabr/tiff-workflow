@@ -59,9 +59,11 @@ $script:SkipCompressedWithThumb = $SkipCompressedWithThumb.IsPresent
 $script:DuplicateAction = $DuplicateAction
 
 # -- Excluded folder names ------------------------------------------
-# ';'-separated folder NAMES (not paths): any file whose directory contains a
-# segment matching one of these (case-insensitive) is skipped during discovery,
-# in every mode. Segment match only, so "_EXPORT" never touches "My_EXPORT_photos".
+# ';'-separated folder NAMES (not paths): any file with a folder of that name BELOW the
+# scan root (case-insensitive) is skipped during discovery, in every mode. Segment match
+# only, so "_EXPORT" never touches "My_EXPORT_photos", and matching is relative to the root,
+# so folders ABOVE it -- including the root's own name -- never exclude anything. See
+# Test-PathExcluded.
 $script:excludeNames = @()
 foreach ($entry in ($ExcludeFolders -split ';')) {
     $entry = $entry.Trim()
@@ -350,6 +352,58 @@ function Get-Files-Mode9 {
     param([string]$root)
     Get-ChildItem -LiteralPath $root -File -Recurse:$true |
         Where-Object { $_.Extension -match '^\.(tif|tiff)$' }
+}
+
+function Test-PathExcluded {
+    <#
+    .SYNOPSIS
+        True when any folder segment BELOW $Root matches one of $Names (case-insensitive).
+
+    .DESCRIPTION
+        Matching is relative to the scan root, never absolute. `FileInfo.DirectoryName` is
+        always absolute -- even when Get-ChildItem was handed a relative path -- so splitting
+        it yielded every ancestor as well: the drive letter, every folder above the one the
+        user pointed at, and the root's own name. An entry that happened to match one of
+        those (`Temp`, `Users`, a year, a client name, the root itself) excluded the ENTIRE
+        run, logged it as a normal exclusion and exited 0:
+
+            -ExcludeFolders Temp   on E:\...\Temp\TESTE   ->  kept: (nothing)
+
+        Relative matching is what the docs promise ("skip whole folder TREES by name during
+        discovery"), what the parameter validation implies (paths are refused, names only),
+        and what the Python mirror in convert_tiff.py already did. Pointing the tool AT a
+        folder named `_EXPORT` therefore still works -- only folders nested below the root
+        are considered.
+
+    .NOTES
+        Used from script scope only (discovery), so no runspace re-injection is needed.
+        Duplicated across compress_tiff_zip.ps1 and copy_exif_to_TIFF_ps*.ps1 so each script
+        stays self-contained. Keep the implementations identical.
+    #>
+    param([string]$Directory, [string]$Root, [string[]]$Names)
+
+    if (-not $Names -or $Names.Count -eq 0) { return $false }
+
+    $dirN  = "$Directory".Replace('/', '\').TrimEnd('\')
+    $rootN = "$Root".Replace('/', '\').TrimEnd('\')
+
+    if ($dirN -ieq $rootN) {
+        $rel = ""
+    } elseif ($dirN.StartsWith("$rootN\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $dirN.Substring($rootN.Length + 1)
+    } else {
+        # Not under the root we were given -- should not happen, discovery always enumerates
+        # from the root. Fall back to the whole path, matching jxl-photo's
+        # _is_tool_output_path (`except ValueError: rel = p`): in doubt, skip the file rather
+        # than process something from an unexpected place.
+        $rel = $dirN
+    }
+
+    if (-not $rel) { return $false }
+    foreach ($seg in ($rel -split '\\')) {
+        if ($seg -and ($seg -in $Names)) { return $true }
+    }
+    return $false
 }
 
 # -- Output Path Resolution ----------------------------------------
@@ -1734,12 +1788,11 @@ foreach ($inputRoot in $inputRoots) {
         # Overlapping -InputDir roots ("dir;dir\sub" in a recursive mode) discovered the same
         # file twice: it was compressed twice (mode 2) or moved to OLD_TIFFs twice (0/9).
         if (-not $seenFiles.Add($df.FullName)) { continue }
-        if ($script:excludeNames.Count -gt 0) {
-            $segHit = $false
-            foreach ($seg in ($df.DirectoryName -split '[\\/]')) {
-                if ($seg -in $script:excludeNames) { $segHit = $true; break }
-            }
-            if ($segHit) { $excludedCount++; continue }
+        # Relative to THIS root: see Test-PathExcluded for why an absolute match excluded
+        # entire runs.
+        if (Test-PathExcluded -Directory $df.DirectoryName -Root $inputRoot -Names $script:excludeNames) {
+            $excludedCount++
+            continue
         }
         $df | Add-Member -NotePropertyName 'InputRoot' -NotePropertyValue $inputRoot -Force
         $allFiles += $df
