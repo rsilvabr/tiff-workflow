@@ -111,11 +111,11 @@ tiff-workflow/
 | `1` | Subfolder | Directory (non-recursive) | `ZIP/` subfolder next to each TIFF | `photo.tif` → `ZIP/photo.tif` |
 | `2` | Flat | Directory (recursive) | Single output folder (flat) | `in/photo.tif` → `out/photo.tif` |
 | `3` | Recursive subfolders | Directory (recursive) | `ZIP/` inside each folder | `in/folder/photo.tif` → `in/folder/ZIP/photo.tif` |
-| `4` | Folder rename | Directory (recursive) | Parent folder renamed `_TIFF` → `_ZIP` | `photo_TIFF/` → `photo_ZIP/` |
+| `4` | Sibling `_ZIP` folder | Directory (recursive) | Sibling folder named `<parent>_ZIP` (the source folder is NOT renamed) | `photo_TIFF/a.tif` → `photo_ZIP/a.tif` |
 | `5` | Sibling folder | Directory (recursive) | `TIFF/ZIP/` → grandparent `ZIP/` | `in/2024/photo.tif` → `in/ZIP/photo.tif` |
 | `6` | Export marker | Directory (recursive) | ONLY inside `_EXPORT` trees | `_EXPORT/photo.tif` → `_EXPORT/ZIP/photo.tif` |
 | `7` | Export marker subfolder | Directory (recursive) | Only inside `_EXPORT/TIFF` trees | `_EXPORT/TIFF/photo.tif` → `_EXPORT/ZIP/photo.tif` |
-| `8` | In-place + delete | Directory (recursive) | In-place. Originals deleted after confirm | `photo.tif` → deleted after compression |
+| `8` | In-place + delete | Directory (recursive) | In-place, always: the verified output replaces each original. `-DeleteSource` additionally removes a `.tiff` source | `photo.tif` → replaced; `photo.tiff` → `photo.tif`, source deleted |
 | `9` | In-place recursive + OLD_TIFFs | Directory (recursive) | In-place. Originals → `OLD_TIFFs/` | `photo.tif` → compressed in place |
 
 **Safe Mode** (default: ON) automatically skips multi-page TIFFs (scanner IR files, Photoshop layers) to protect proprietary IFD structures. A page counts as a thumbnail only when it is marked `REDUCEDIMAGE`/`REDUCED` or is strictly smaller than the main image — a full-size IR `MASK` page is a real page. All three backends apply the same rule.
@@ -127,6 +127,10 @@ tiff-workflow/
 **Folder exclusion** (`-ExcludeFolders "_EXPORT;temp"`): skips whole folder trees by name during discovery, in every mode. Segment match only (`_EXPORT` never touches `My_EXPORT_photos`), and every run logs what was excluded. The wizard offers your last list as the default (stored in your local config) — a fresh install defaults to nothing excluded.
 
 Matching is **relative to the folder you point at**: only folders *below* it count, so a name that happens to appear higher up the path (`Temp`, `Users`, your drive, the selected folder's own name) never excludes anything. Pointing the tool directly at a folder named `_EXPORT` to process it still works. Note that the Copy EXIF backends read each folder non-recursively, so there is nothing below their roots to exclude — the flag only really bites in the recursive compression modes.
+
+`generate_thumbnails.ps1` takes the same flag. On top of it, all four backends always skip **`OLD_TIFFs/`** (and `converted_zip/` in the thumbnail generator): those hold the pristine originals modes 0/9 archived, and processing them produces a second copy of every photo under a `_v2` name. Same relative rule — pointing `-InputDir` straight at an `OLD_TIFFs` folder still processes it. Staged and temporary files left behind by an interrupted run are skipped too, and both counts are logged.
+
+**`OLD_TIFFs/` is never an input.** Every mode excludes it, so running mode 2/3/5 over a tree you already compressed with mode 0/9 re-reads only the real files.
 
 ---
 
@@ -265,9 +269,33 @@ I am sharing these scripts because getting all of this to work correctly was une
 
 Getting there required finding and fixing several bugs. The full history and technical details are documented in [`docs/bugs_fixed.md`](docs/bugs_fixed.md).
 
-### Latest release
+### Unreleased — audit round 15
 
-**v2.3** - Six more audit rounds (8-13), driven by real scanner and Capture One files:
+Two of these lose data silently; if you have file names containing `%`, this round matters.
+
+- **A `%` in a file name stripped every metadata tag** and the run still said `OK`. exiftool
+  expands printf-style filename codes in the `-tagsfromfile` argument (`50%off.tif` is read as
+  `50ff.tif`), warns, and **exits 0** — so the check every backend relied on passed. In mode 8
+  with `-DeleteSource` it was permanent. Doubling the `%` does not escape it; the metadata now
+  travels in a container whose name has none. Every `-tagsfromfile` call also fails on
+  `Error opening file` now, whatever the exit code
+- **Modes 1-7 walked into `OLD_TIFFs/` and compressed the backups.** The real file is already
+  Deflate so it was skipped, which left the *backup* to claim the output name — a mode 2 run
+  over a mode 9 tree produced a flat folder holding nothing but `_v2` copies of backups. One
+  exclusion list now covers every mode, relative to the folder you point at
+- **The thumbnail generator no longer refuses `ZIP/` and `_EXPORT/` trees** — that is where the
+  compressed library and the export trees live, and the exclusion was silent, undocumented and
+  impossible to turn off. It takes `-ExcludeFolders` now and logs what it left out
+- **`-Page all` no longer makes `-Page 0` unrunnable**: the frame set only counts as "already
+  there" when `-Page all` was actually asked for
+- Files left behind by an interrupted run are no longer discovered as photos
+- Workflows [6] and [7] work on `%` names (the Python side never got the escaping fix)
+- Mode 8 says at startup that it replaces each original in place, with or without
+  `-DeleteSource` — it always did, and the docs implied otherwise
+
+### v2.3
+
+Six audit rounds (8-13), driven by real scanner and Capture One files:
 
 - **Folder exclusion** — `-ExcludeFolders "_EXPORT;temp"` skips whole folder trees by name, in every mode and in all three backends; the wizard asks once per workflow. Matching is relative to the folder you point at, so a name appearing higher up the path never excludes anything
 - **Worker cap decoupled from Safe Mode** — `-CapWorkers` (default: no cap), so Safe Mode no longer quietly limits parallelism

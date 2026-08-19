@@ -375,10 +375,21 @@ def read_subfiletypes(path):
     return [ln.strip() for ln in result.stdout.splitlines() if not ln.startswith("identify:")]
 
 
+def magick_spec(path):
+    """Escape '%' for the filename SPECS ImageMagick expands (see ConvertTo-MagickPathSpec).
+
+    Appending '[n]' turns an argument into a spec, so this helper had the very bug the
+    TestPercentInFileNames class exists to pin: it opened `500ff.tif` and reported the PRODUCT
+    as broken while the product had written the right file.
+    """
+    return str(path).replace("%", "%%")
+
+
 def rmse_pages(path_a, path_b, page=0):
     """RMSE of one page pair; '0 (0)' means pixel-identical."""
     result = subprocess.run(
-        ["magick", "compare", "-metric", "RMSE", f"{path_a}[{page}]", f"{path_b}[{page}]", "null:"],
+        ["magick", "compare", "-metric", "RMSE",
+         f"{magick_spec(path_a)}[{page}]", f"{magick_spec(path_b)}[{page}]", "null:"],
         capture_output=True, text=True, timeout=120,
     )
     return (result.stderr or result.stdout).strip()
@@ -852,29 +863,52 @@ class TestPs5Ps7Parity:
         """
         source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
         mode8_gates = re.findall(
-            r"\(Test-PixelIdentical -SrcPath \$srcPath -DstPath \$verify\w+", source
+            r"Test-PixelIdentical -SrcPath \$srcPath -DstPath \$verify\w+", source
         )
         assert len(mode8_gates) == 2, (
             "sequential and -Parallel workers must both pixel-verify before delete, "
             f"found {len(mode8_gates)}"
+        )
+        # Round 15: -GenerateThumbnail writes a different page layout ON PURPOSE, so
+        # whole-file identity refused every file and mode 8 produced nothing at all. Both
+        # workers now branch to the page-0 gate for that case -- which must still be a
+        # gate, not a skip.
+        thumb_gates = re.findall(
+            r"Test-ThumbOutputMatchesSource -SrcPath \$srcPath -DstPath \$verify\w+", source
+        )
+        assert len(thumb_gates) == 2, (
+            "both mode 8 workers must verify a thumbnail output against source page 0, "
+            f"found {len(thumb_gates)}"
         )
         assert source.count("final ZIP failed integrity - source preserved") == 2, (
             "both delete loops must re-verify the final destination before Remove-Item"
         )
 
     def test_legacy_in_place_writes_go_through_verified_temp_sibling(self):
-        """Legacy mode (-1) wrote ZIP directly over the only copy; a magick crash destroyed
-        the image. Both legacy workers must write a temp sibling and replace atomically."""
+        """An in-place write goes over the only copy; a magick crash destroys the image.
+        Every worker must write a temp sibling and replace atomically.
+
+        Round 15 raised the count from 2 to 3: the guard used to be gated on `$mode -lt 0`,
+        as if only legacy could write onto its own source. Mode 2 with -OutputDir on the
+        input root, and mode 5 for a file already inside a ZIP/ folder, both resolve
+        finalDst == srcPath -- and the mode >= 0 -Parallel worker had no guard at all.
+        """
         source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
-        assert source.count("$inPlaceFinalDst = $writeDst") == 2, (
-            "Process-TiffJob and the legacy -Parallel worker must both redirect in-place writes"
+        assert source.count("$inPlaceFinalDst = $writeDst") == 3, (
+            "Process-TiffJob and both -Parallel workers must redirect in-place writes"
         )
-        assert source.count("Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst") == 2
+        assert "$mode -lt 0 -and $writeDst -eq $srcPath" not in source, (
+            "the in-place guard must not be limited to legacy mode again"
+        )
+        # 3, not 2, for the same reason the count above is 3: the mode >= 0 -Parallel worker
+        # is an in-place worker too now. These two assertions were left behind when the first
+        # one was raised.
+        assert source.count("Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst") == 3
         # Decode alone is not enough before replacing the ONLY copy: a page-short file still
         # decodes cleanly (that is how -GenerateThumbnail silently dropped a scanner IR page
-        # in place). Both in-place workers must pixel-compare too, like mode 8 does.
-        assert source.count("$inPlaceOk = Test-PixelIdentical") == 2, (
-            "both in-place workers must pixel-verify, not just decode-check, before replacing"
+        # in place). Every in-place worker must pixel-compare too, like mode 8 does.
+        assert source.count("$inPlaceOk = Test-PixelIdentical") == 3, (
+            "every in-place worker must pixel-verify, not just decode-check, before replacing"
         )
 
     @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
@@ -2040,6 +2074,745 @@ class TestExcludeFoldersIsRelativeToTheScanRoot:
         assert "Test-PathExcluded -Directory" in source, (
             f"{script}: exclusion no longer goes through the relative matcher"
         )
+
+
+# -- ROUND 15 -------------------------------------------------------
+#
+# Two findings that changed the outcome of a run, and four that degraded one. All six were
+# invisible to the suite because nothing combined mode 8 with -GenerateThumbnail, and no
+# fixture had ever been given a hostile FILE NAME.
+
+#: Names ImageMagick rewrites when they reach it as a filename spec. '%o', '%d', '%x' are
+#: printf conversions: "50%off.tif" is written as "500ff.tif". The last two are controls --
+#: '%%' is the escape, and a multi-page file gets split one file per page.
+PERCENT_NAMES = ["50%off", "100%dpi", "a%x", "b%2d", "g%%h", "plain"]
+
+
+def make_tiff_named(directory, name, suffix=".tif"):
+    """A TIFF whose FINAL name may contain '%'.
+
+    Created under a safe name and renamed afterwards: `magick ... "50%off.tif"` writes
+    "500ff.tif" -- the very bug these fixtures exist to pin -- so building the fixture with
+    the hostile name would silently produce a file that is not there.
+    """
+    directory = Path(directory)
+    tmp = directory / f"_fixture_{abs(hash(name)) % 10000}{suffix}"
+    if suffix.lower() in (".tif", ".tiff"):
+        make_tiff(tmp)
+    else:
+        subprocess.run(["magick", "-size", "32x32", "gradient:", str(tmp)],
+                       capture_output=True, check=True, timeout=120)
+        subprocess.run(["exiftool", "-q", "-overwrite_original", "-EXIF:Make=FujiTest", str(tmp)],
+                       capture_output=True, check=True, timeout=120)
+    final = directory / f"{name}{suffix}"
+    tmp.rename(final)
+    return final
+
+
+def page_count(path):
+    result = subprocess.run(
+        ["magick", "identify", "-format", "%n\n", str(path)],
+        capture_output=True, text=True, timeout=120,
+    )
+    return int(result.stdout.splitlines()[0].strip())
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestMode8ThumbnailGate:
+    """Mode 8 verified the staged file with whole-file pixel identity, which -GenerateThumbnail
+    can never satisfy: it writes source page 0 plus a NEW thumbnail. Every file came back
+    "ERROR (ZIP integrity check failed - source preserved)", so the combination produced no
+    output at all -- while the in-place worker had had the exemption all along."""
+
+    def test_thumbnail_output_is_accepted_and_source_deleted(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        src = make_tiff(work / "a.tif")
+        reference = tmp_path / "reference.tif"
+        shutil.copy2(src, reference)
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
+                         "-GenerateThumbnail", "-ThumbSize", "16",
+                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "integrity check failed" not in result.stdout, result.stdout
+        assert "SOURCE DELETED" in result.stdout, result.stdout
+        out = work / "a.tif"
+        assert out.exists(), "no output for a mode 8 + thumbnail run"
+        assert page_count(out) == 2, "main image + generated thumbnail expected"
+        assert rmse_pages(reference, out) == "0 (0)", (
+            "page 0 differs from the source that was deleted for it"
+        )
+
+    def test_no_thumb_fallback_is_still_verified(self, tmp_path, shell):
+        """-ThumbFormat notaformat forces the [no thumb] path: one page, and the gate must
+        still hold (expected page count 1, page 0 identical)."""
+        work = tmp_path / "work"
+        work.mkdir()
+        src = make_tiff(work / "a.tif")
+        reference = tmp_path / "reference.tif"
+        shutil.copy2(src, reference)
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
+                         "-GenerateThumbnail", "-ThumbFormat", "notaformat",
+                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "[no thumb]" in result.stdout, result.stdout
+        out = work / "a.tif"
+        assert out.exists() and page_count(out) == 1
+        assert rmse_pages(reference, out) == "0 (0)"
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestPercentInFileNames:
+    """ImageMagick expands printf-style scene specifiers in a filename spec, so a '%' in the
+    name sent the output somewhere else while magick still exited 0: mode 9 left the source
+    folder holding "500ff.tif" with the original stranded in OLD_TIFFs, reported
+    "WARN (exiftool failed, ZIP ok)" and exited 0."""
+
+    def _tree(self, tmp_path):
+        work = tmp_path / "work"
+        work.mkdir()
+        for name in PERCENT_NAMES:
+            make_tiff_named(work, name)
+        return work
+
+    def test_mode9_writes_every_name_verbatim(self, tmp_path, shell):
+        work = self._tree(tmp_path)
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "9", "-InputDir", str(work), "-Workers", "2"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        produced = sorted(p.name for p in work.glob("*.tif"))
+        assert produced == sorted(f"{n}.tif" for n in PERCENT_NAMES), (
+            f"output names were rewritten by magick: {produced}\n{result.stdout}"
+        )
+        for name in PERCENT_NAMES:
+            out = work / f"{name}.tif"
+            assert read_ifd0_compression(out).lower() in ("deflate", "adobe deflate"), (
+                f"{name}.tif was not actually compressed"
+            )
+            assert rmse_pages(work / "OLD_TIFFs" / f"{name}.tif", out) == "0 (0)"
+
+    def test_mode8_does_not_delete_when_the_name_is_rewritten(self, tmp_path, shell):
+        """The delete gate has to survive this even if the escaping is ever lost again:
+        no output at the expected path means no delete."""
+        work = self._tree(tmp_path)
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
+                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "2"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        for name in PERCENT_NAMES:
+            assert (work / f"{name}.tif").exists(), f"{name}.tif vanished"
+            assert read_ifd0_compression(work / f"{name}.tif").lower() in (
+                "deflate", "adobe deflate")
+
+    def test_thumbnail_generator_writes_the_name_it_reports(self, tmp_path, shell):
+        work = self._tree(tmp_path)
+        result = run_ps(shell, "generate_thumbnails.ps1",
+                        ["-InputDir", str(work), "-Size", "32"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        for name in PERCENT_NAMES:
+            assert (work / f"{name}_thumb.jpg").exists(), (
+                f"{name}_thumb.jpg missing\n{result.stdout}"
+            )
+
+    def test_copy_exif_zip_writes_the_name_verbatim(self, tmp_path, shell):
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff_named(work, "50%off")
+        make_tiff_named(work, "50%off", ".jpg")
+
+        result = run_ps(shell, script, ["-InputDir", str(work), "-CompressZip",
+                                        "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        out = work / "50%off.tif"
+        assert out.exists()
+        assert read_ifd0_compression(out).lower() in ("deflate", "adobe deflate")
+        assert read_tag(out, "EXIF:Make") == "FujiTest"
+        leftovers = [p.name for p in work.glob("*.tif") if p.name != "50%off.tif"]
+        assert not leftovers, f"staged/mangled files left behind: {leftovers}"
+
+
+class TestWriteLandedCheck:
+    """magick exits 0 whether or not the file it was asked to write exists. Every worker has
+    to confirm the write landed, or the next step (marker write, EXIF restore, staging move)
+    operates on a file that is not there and the run reports WARN instead of failing."""
+
+    @pytest.mark.parametrize("script,expected", [
+        ("compress_tiff_zip.ps1", 6),          # 3 workers x (thumbnail branch + normal branch)
+        ("copy_exif_to_TIFF_ps5.ps1", 1),
+        ("copy_exif_to_TIFF_ps7.ps1", 1),
+    ])
+    def test_every_worker_checks_the_output_exists(self, script, expected):
+        source = (REPO / script).read_text(encoding="ascii")
+        assert source.count("wrote no file") == expected, (
+            f"{script}: a magick write is not checked for having produced a file"
+        )
+
+    @pytest.mark.parametrize("script", PS_SCRIPTS)
+    def test_output_paths_go_through_the_escaper(self, script):
+        source = (REPO / script).read_text(encoding="ascii")
+        assert "function ConvertTo-MagickPathSpec" in source, (
+            f"{script}: no '%' escaping for magick filename specs"
+        )
+        assert "-compress zip $writeDst 2>&1" not in source, (
+            f"{script}: raw output path handed to magick again (must be escaped first)"
+        )
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestToolOutputExclusionIsRelative:
+    """Round 14 made -ExcludeFolders relative to the scan root in the three backends. The same
+    absolute match survived in generate_thumbnails.ps1 and in the diagnose workflow: an
+    archive under D:/Backup/zip/2019 reported "No TIFF files found" and exited 0, and
+    pointing the tool AT a folder named ZIP could never work."""
+
+    def test_thumbnails_work_inside_a_folder_named_zip(self, tmp_path, shell):
+        zipdir = tmp_path / "ZIP"
+        zipdir.mkdir()
+        make_tiff(zipdir / "a.tif")
+
+        result = run_ps(shell, "generate_thumbnails.ps1",
+                        ["-InputDir", str(zipdir), "-Size", "32"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert (zipdir / "a_thumb.jpg").exists(), (
+            f"a folder named ZIP hid its own contents\n{result.stdout}"
+        )
+
+    def test_nested_backups_are_still_skipped(self, tmp_path, shell):
+        root = tmp_path / "PhotoSet"
+        (root / "OLD_TIFFs").mkdir(parents=True)
+        (root / "keep").mkdir()
+        make_tiff(root / "OLD_TIFFs" / "backup.tif")
+        make_tiff(root / "keep" / "source.tif")
+
+        result = run_ps(shell, "generate_thumbnails.ps1",
+                        ["-InputDir", str(root), "-Recursive", "-Size", "32"], tmp_path)
+
+        assert result.returncode == 0, result.stdout
+        assert (root / "keep" / "source_thumb.jpg").exists(), result.stdout
+        assert not (root / "OLD_TIFFs" / "backup_thumb.jpg").exists(), (
+            "this tool's own backups are no longer skipped"
+        )
+
+    def test_zip_and_export_are_no_longer_excluded_by_default(self, tmp_path, shell):
+        """`ZIP/` is where compress modes 1/3/5/6/7 PUT the compressed library and `_EXPORT`
+        is what modes 6/7 exist to process. Excluding them by default meant "make thumbnails
+        of my compressed library" silently produced nothing, with no flag to override it."""
+        root = tmp_path / "PhotoSet"
+        (root / "ZIP").mkdir(parents=True)
+        (root / "_EXPORT").mkdir()
+        make_tiff(root / "ZIP" / "compressed.tif")
+        make_tiff(root / "_EXPORT" / "exported.tif")
+
+        result = run_ps(shell, "generate_thumbnails.ps1",
+                        ["-InputDir", str(root), "-Recursive", "-Size", "32"], tmp_path)
+
+        assert result.returncode == 0, result.stdout
+        assert (root / "ZIP" / "compressed_thumb.jpg").exists(), result.stdout
+        assert (root / "_EXPORT" / "exported_thumb.jpg").exists(), result.stdout
+
+    def test_exclude_folders_puts_them_back(self, tmp_path, shell):
+        root = tmp_path / "PhotoSet"
+        (root / "ZIP").mkdir(parents=True)
+        (root / "keep").mkdir()
+        make_tiff(root / "ZIP" / "compressed.tif")
+        make_tiff(root / "keep" / "source.tif")
+
+        result = run_ps(shell, "generate_thumbnails.ps1",
+                        ["-InputDir", str(root), "-Recursive", "-Size", "32",
+                         "-ExcludeFolders", "ZIP"], tmp_path)
+
+        assert result.returncode == 0, result.stdout
+        assert (root / "keep" / "source_thumb.jpg").exists(), result.stdout
+        assert not (root / "ZIP" / "compressed_thumb.jpg").exists(), result.stdout
+        assert "Excluded 1 file(s)" in result.stdout, (
+            f"the exclusion must be reported, not silent\n{result.stdout}"
+        )
+
+
+class TestDiagnoseExclusionIsRelative:
+    def test_folder_named_zip_is_not_its_own_exclusion(self, tmp_path):
+        root = tmp_path / "ZIP"
+        (root / "sub").mkdir(parents=True)
+        target = root / "sub" / "a.tif"
+        target.write_bytes(b"x")
+        assert convert_tiff._is_tool_output_path(target, root) is False, (
+            "the chosen folder's own name excluded everything under it"
+        )
+
+    def test_nested_tool_output_is_excluded(self, tmp_path):
+        root = tmp_path / "PhotoSet"
+        (root / "OLD_TIFFs").mkdir(parents=True)
+        target = root / "OLD_TIFFs" / "a.tif"
+        target.write_bytes(b"x")
+        assert convert_tiff._is_tool_output_path(target, root) is True
+
+    def test_ancestor_name_does_not_exclude(self, tmp_path):
+        root = tmp_path / "backup" / "zip" / "PhotoSet"
+        root.mkdir(parents=True)
+        target = root / "a.tif"
+        target.write_bytes(b"x")
+        assert convert_tiff._is_tool_output_path(target, root) is False
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestThumbnailFrameMatching:
+    """The frame lookup escaped its pattern with backticks and passed it to -Filter, which is
+    the FileSystem provider's DOS filter: it has no escape syntax, so a basename containing
+    '[' matched nothing. The frames were written, reported as "output not created", and
+    regenerated (and re-reported) on every later run."""
+
+    def test_bracket_name_with_page_all(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        safe = work / "brackets.tif"
+        make_multipage_tiff(safe, [None, 1])
+        safe.rename(work / "br[1].tif")
+
+        first = run_ps(shell, "generate_thumbnails.ps1",
+                       ["-InputDir", str(work), "-Page", "all", "-Size", "32"], tmp_path)
+        assert first.returncode == 0, f"{first.stdout}\n{first.stderr}"
+        assert "output not created" not in first.stdout, first.stdout
+        frames = sorted(p.name for p in work.glob("br[[]1[]]_thumb-*.jpg"))
+        assert len(frames) == 2, f"expected two frames, got {frames}\n{first.stdout}"
+
+        second = run_ps(shell, "generate_thumbnails.ps1",
+                        ["-InputDir", str(work), "-Page", "all", "-Size", "32"], tmp_path)
+        assert second.returncode == 0, second.stdout
+        assert "SKIP (exists)" in second.stdout, (
+            f"existing frames were not detected on the second run\n{second.stdout}"
+        )
+
+
+@requires_tools
+class TestPurgeAcceptsRegeneratedThumbnails:
+    """The purge compared every page, so a folder compressed with -GenerateThumbnail came back
+    "PAGE_COUNT_MISMATCH 1 vs 2" / "PIXEL_DIFF page 1" for every file -- and one mismatch
+    aborted the purge for the whole tree, leaving the user to delete OLD_TIFFs by hand."""
+
+    def _with_thumb(self, tmp_path, main, thumb_size="16x12"):
+        """`main` plus a tagged REDUCEDIMAGE thumbnail, the shape -GenerateThumbnail writes."""
+        thumb = tmp_path / "t.tif"
+        subprocess.run(["magick", str(main) + "[0]", "-thumbnail", thumb_size, str(thumb)],
+                       capture_output=True, check=True, timeout=120)
+        out = tmp_path / "with_thumb.tif"
+        subprocess.run(["magick", str(main) + "[0]", str(thumb), "-compress", "zip", str(out)],
+                       capture_output=True, check=True, timeout=120)
+        subprocess.run(["exiftool", "-q", "-overwrite_original", "-IFD0:SubfileType=",
+                        "-IFD1:SubfileType#=1", str(out)],
+                       capture_output=True, check=True, timeout=120)
+        thumb.unlink()
+        return out
+
+    def test_added_thumbnail_verifies(self, tmp_path):
+        old = make_tiff(tmp_path / "old.tif")
+        new = self._with_thumb(tmp_path, old)
+        match, detail = _compare_tiff_metadata(old, new)
+        assert match is True, detail
+        assert "thumbnail added" in detail
+
+    def test_regenerated_thumbnail_verifies(self, tmp_path):
+        base = make_tiff(tmp_path / "base.tif")
+        old = self._with_thumb(tmp_path, base, "16x12")
+        shutil.move(str(old), str(tmp_path / "old_with_thumb.tif"))
+        old = tmp_path / "old_with_thumb.tif"
+        new = self._with_thumb(tmp_path, base, "8x6")
+        match, detail = _compare_tiff_metadata(old, new)
+        assert match is True, detail
+        assert "thumbnail regenerated" in detail
+
+    def test_untagged_small_page_is_not_excused(self, tmp_path):
+        """Only a TAGGED thumbnail is derived data. An untagged extra page could be a real
+        image, and this verdict deletes the last backup -- so it stays a mismatch."""
+        old = make_tiff(tmp_path / "old.tif")
+        small = tmp_path / "small.tif"
+        subprocess.run(["magick", str(old) + "[0]", "-thumbnail", "16x12", str(small)],
+                       capture_output=True, check=True, timeout=120)
+        new = tmp_path / "new.tif"
+        subprocess.run(["magick", str(old) + "[0]", str(small), str(new)],
+                       capture_output=True, check=True, timeout=120)
+        match, _detail = _compare_tiff_metadata(old, new)
+        assert match is False
+
+    def test_dropped_image_page_still_blocks(self, tmp_path):
+        """A scanner RGB + preview + IR file whose IR page was lost must never verify."""
+        src = tmp_path / "scan.tif"
+        make_multipage_tiff(src, [None, 1, 4])
+        lost = tmp_path / "lost.tif"
+        subprocess.run(["magick", str(src) + "[0]", str(src) + "[1]", "-compress", "zip", str(lost)],
+                       capture_output=True, check=True, timeout=120)
+        match, detail = _compare_tiff_metadata(src, lost)
+        assert match is False, detail
+
+    def test_degraded_page_zero_still_blocks(self, tmp_path):
+        old = make_tiff(tmp_path / "old.tif")
+        new = tmp_path / "new.tif"
+        subprocess.run(["magick", str(old) + "[0]", "-modulate", "80", str(new)],
+                       capture_output=True, check=True, timeout=120)
+        match, detail = _compare_tiff_metadata(old, new)
+        assert match is False, detail
+
+    def test_one_mismatch_no_longer_blocks_the_others(self, tmp_path, monkeypatch, capsys):
+        old_dir = tmp_path / "OLD_TIFFs"
+        old_dir.mkdir()
+        good = make_tiff(old_dir / "good.tif")
+        shutil.copy2(good, tmp_path / "good.tif")
+        bad = make_tiff(old_dir / "bad.tif")
+        subprocess.run(["magick", str(bad) + "[0]", "-modulate", "80", str(tmp_path / "bad.tif")],
+                       capture_output=True, check=True, timeout=120)
+
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: "n")  # stop at the confirmation
+        cfg = SimpleNamespace(config=ToolConfig())
+
+        convert_tiff.run_purge_old_tiffs(cfg)
+        out = capsys.readouterr().out
+
+        assert "1 of 2 file(s) verified OK" in out, (
+            f"a single mismatch still blocks the whole purge\n{out}"
+        )
+        assert "will be KEPT" in out, out
+        assert (old_dir / "bad.tif").exists() and (old_dir / "good.tif").exists()
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestRound15Reporting:
+    def test_thumbpage_above_one_is_reported_as_ignored(self, tmp_path, shell):
+        """-ThumbPage was validated (>= 1) and then ignored: the thumbnail is always page 1."""
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "a.tif")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-GenerateThumbnail",
+                         "-ThumbPage", "3", "-ThumbSize", "16", "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, result.stdout
+        assert "-ThumbPage 3 is not implemented" in result.stdout, result.stdout
+        assert page_count(work / "ZIP" / "a.tif") == 2
+
+    def test_dry_run_counts_what_it_would_do(self, tmp_path, shell):
+        """Every dry run ended on "0 OK" because Process-Results had no DRY branch."""
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "a.tif")
+        make_tiff(work / "b.tif")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-DryRun"], tmp_path)
+
+        assert result.returncode == 0, result.stdout
+        assert "2 dry-run" in result.stdout, result.stdout
+
+    def test_superseded_duplicate_is_reported(self, tmp_path, shell):
+        """-DuplicateAction Overwrite dropped the earlier task without counting it, so the
+        file was missing from the N/total tally -- indistinguishable from one that worked."""
+        work = tmp_path / "work"
+        (work / "a").mkdir(parents=True)
+        (work / "b").mkdir()
+        make_tiff(work / "a" / "photo.tif")
+        make_tiff(work / "b" / "photo.tif")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "2", "-InputDir", str(work),
+                         "-OutputDir", str(tmp_path / "flat"),
+                         "-DuplicateAction", "Overwrite", "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, result.stdout
+        assert "superseded by a later duplicate" in result.stdout, result.stdout
+        assert "2/2 processed" in result.stdout, result.stdout
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestInPlaceGuardCoversEveryMode:
+    """The temp-sibling + verify guard was gated on `$mode -lt 0`. Mode 2 pointed at its own
+    input root, and mode 5 for a file already inside a ZIP/ folder, both resolve
+    finalDst == srcPath and went straight to `magick src -compress zip src`."""
+
+    def test_mode2_into_its_own_root(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        src = make_tiff(work / "a.tif")
+        reference = tmp_path / "reference.tif"
+        shutil.copy2(src, reference)
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "2", "-InputDir", str(work), "-OutputDir", str(work),
+                         "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert read_ifd0_compression(src).lower() in ("deflate", "adobe deflate")
+        assert read_tag(src) == ARTIST, "in-place rewrite lost the metadata"
+        assert rmse_pages(reference, src) == "0 (0)"
+        assert sorted(p.name for p in work.glob("*")) == ["a.tif"], (
+            "a temp sibling was left behind"
+        )
+
+    def test_mode5_file_already_in_a_zip_folder(self, tmp_path, shell):
+        work = tmp_path / "work"
+        (work / "ZIP").mkdir(parents=True)
+        src = make_tiff(work / "ZIP" / "a.tif")
+        reference = tmp_path / "reference.tif"
+        shutil.copy2(src, reference)
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "5", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert read_ifd0_compression(src).lower() in ("deflate", "adobe deflate")
+        assert rmse_pages(reference, src) == "0 (0)"
+        assert sorted(p.name for p in (work / "ZIP").glob("*")) == ["a.tif"]
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestPercentSurvivesExiftool:
+    """The '%' work in this round covered ImageMagick's filename SPECS. exiftool expands the
+    SAME kind of code in the `-tagsfromfile` ARGUMENT -- `50%off.tif` is read as `50ff.tif` --
+    and unlike magick it warns and STILL EXITS 0. Every caller checked only the exit code, so
+    the run reported OK while the output carried no metadata at all. In mode 8 the source is
+    deleted right afterwards, which made it permanent.
+
+    Doubling does not escape it (`50%%off.jpg` -> `50%ff.jpg`), so these tests assert on the
+    TAG at the destination, never on the exit code.
+    """
+
+    def test_mode9_keeps_metadata(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff_named(work, "50%off")
+        make_tiff_named(work, "plain")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "9", "-InputDir", str(work), "-Workers", "2"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        for name in ("50%off", "plain"):
+            out = work / f"{name}.tif"
+            assert read_ifd0_compression(out).lower() in ("deflate", "adobe deflate")
+            assert read_tag(out) == ARTIST, (
+                f"{name}.tif came out with no metadata\n{result.stdout}"
+            )
+
+    def test_mode8_delete_keeps_metadata(self, tmp_path, shell):
+        """The permanent case: mode 8 removes the only other copy."""
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff_named(work, "50%off", ".tiff")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
+                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        out = work / "50%off.tif"
+        assert out.exists(), result.stdout
+        assert read_tag(out) == ARTIST, (
+            f"mode 8 deleted the source and kept no metadata\n{result.stdout}"
+        )
+
+    def test_copy_exif_reads_a_percent_jpeg(self, tmp_path, shell):
+        """Same trap on the OTHER side: the JPEG is the -tagsfromfile source here."""
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff_named(work, "50%off")
+        make_tiff_named(work, "50%off", ".jpg")
+
+        result = run_ps(shell, script, ["-InputDir", str(work), "-CompressZip",
+                                        "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        out = work / "50%off.tif"
+        assert read_ifd0_compression(out).lower() in ("deflate", "adobe deflate")
+        assert read_tag(out, "EXIF:Make") == "FujiTest", (
+            f"the EXIF never made it out of the '%' JPEG\n{result.stdout}"
+        )
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestBackupsAreNeverInput:
+    """OLD_TIFFs holds the PRISTINE originals modes 0/9 archived. Only legacy, mode 8 and the
+    modes 0/9 builder ever excluded it, each with its own ABSOLUTE regex, so modes 1-7 walked
+    in and compressed the backups. The real file is already Deflate and was SKIPped, which left
+    the BACKUP as the only candidate -- it took the output name, or lost the collision and
+    landed as `photo_v2.tif`."""
+
+    @pytest.mark.parametrize("mode", ["2", "3", "5"])
+    def test_recursive_modes_ignore_old_tiffs(self, tmp_path, shell, mode):
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "a.tif")
+        run_ps(shell, "compress_tiff_zip.ps1",
+               ["-Mode", "9", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+        backup = work / "OLD_TIFFs" / "a.tif"
+        assert backup.exists(), "mode 9 did not archive the original"
+        before = backup.read_bytes()
+
+        args = ["-Mode", mode, "-InputDir", str(work), "-Workers", "1"]
+        if mode == "2":
+            args += ["-OutputDir", str(tmp_path / "flat")]
+        result = run_ps(shell, "compress_tiff_zip.ps1", args, tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert backup.read_bytes() == before, "the backup was recompressed"
+        strays = [p.name for p in work.rglob("*_v2.tif")] + \
+                 [p.name for p in (tmp_path / "flat").rglob("*_v2.tif")] if (tmp_path / "flat").exists() \
+                 else [p.name for p in work.rglob("*_v2.tif")]
+        assert not strays, f"a backup was compressed under a _v2 name: {strays}\n{result.stdout}"
+        assert not list((work / "OLD_TIFFs").glob("ZIP/*")), (
+            f"output was written INSIDE the backup folder\n{result.stdout}"
+        )
+
+    def test_pointing_at_old_tiffs_still_works(self, tmp_path, shell):
+        """Relative matching, not absolute: the round 14 rule. An explicit -InputDir wins."""
+        work = tmp_path / "work" / "OLD_TIFFs"
+        work.mkdir(parents=True)
+        make_tiff(work / "a.tif")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert (work / "ZIP" / "a.tif").exists(), (
+            f"an explicitly chosen OLD_TIFFs folder was refused\n{result.stdout}"
+        )
+
+    def test_leftovers_from_an_interrupted_run_are_not_photos(self, tmp_path, shell):
+        """Both shapes this toolkit writes and may leave behind: a staged file (copy_exif with
+        no -StagingDir stages into the source folder) and an in-place temp sibling."""
+        work = tmp_path / "work"
+        work.mkdir()
+        make_tiff(work / "a.tif")
+        make_tiff(work / "1a2b3c4d_0123456789ab_a.tif")
+        make_tiff(work / "a.tif.deadbeef_cafe12345678.tif")
+
+        result = run_ps(shell, "compress_tiff_zip.ps1",
+                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "Skipped 2 staged/temp file(s)" in result.stdout, result.stdout
+        assert sorted(p.name for p in (work / "ZIP").glob("*")) == ["a.tif"], (
+            f"a leftover was compressed as if it were a photo\n{result.stdout}"
+        )
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestThumbnailPageSwitch:
+    """`-Page all` writes name_thumb-0.jpg, name_thumb-1.jpg, ...; `-Page 0` writes
+    name_thumb.jpg. Test-ThumbExists looked for the frame set unconditionally, so once a
+    `-Page all` run had happened, `-Page 0` reported SKIP (exists) for every file forever and
+    name_thumb.jpg could only be produced by deleting the frames by hand."""
+
+    def test_page_zero_after_page_all(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        make_multipage_tiff(work / "scan.tif", [None, 1])
+
+        first = run_ps(shell, "generate_thumbnails.ps1",
+                       ["-InputDir", str(work), "-Size", "32", "-Page", "all"], tmp_path)
+        assert first.returncode == 0, first.stdout
+        assert (work / "scan_thumb-0.jpg").exists(), first.stdout
+
+        second = run_ps(shell, "generate_thumbnails.ps1",
+                        ["-InputDir", str(work), "-Size", "32", "-Page", "0"], tmp_path)
+        assert second.returncode == 0, second.stdout
+        assert (work / "scan_thumb.jpg").exists(), (
+            f"-Page 0 was skipped because the -Page all frames existed\n{second.stdout}"
+        )
+
+    def test_page_all_still_no_ops_on_a_repeat(self, tmp_path, shell):
+        work = tmp_path / "work"
+        work.mkdir()
+        make_multipage_tiff(work / "scan.tif", [None, 1])
+
+        run_ps(shell, "generate_thumbnails.ps1",
+               ["-InputDir", str(work), "-Size", "32", "-Page", "all"], tmp_path)
+        again = run_ps(shell, "generate_thumbnails.ps1",
+                       ["-InputDir", str(work), "-Size", "32", "-Page", "all"], tmp_path)
+
+        assert again.returncode == 0, again.stdout
+        assert "SKIP (exists)" in again.stdout, (
+            f"the -Page all frame set is no longer recognised\n{again.stdout}"
+        )
+
+
+class TestPythonMagickSpec:
+    """convert_tiff.py builds `path[0]` specs too, and was the copy left behind: workflow [6]
+    reported a permanent MISMATCH for any '%' file (so the backups could never be purged) and
+    workflow [7] reported an ERROR line for each one."""
+
+    def test_compare_and_diagnose_read_a_percent_name(self, tmp_path):
+        ct = convert_tiff
+        old_dir = tmp_path / "OLD_TIFFs"
+        old_dir.mkdir()
+        # make_tiff_named, not make_tiff: `magick ... "50%off.tif"` writes "500ff.tif", so
+        # building the fixture with the hostile name produces a file that is not there.
+        src = make_tiff_named(old_dir, "50%off")
+        new = tmp_path / "50%off.tif"
+        # Plain INPUT stays literal, OUTPUT is escaped -- the rule the backends follow.
+        subprocess.run(["magick", str(src), "-compress", "zip", magick_spec(new)],
+                       capture_output=True, check=True, timeout=120)
+
+        match, detail = ct._compare_tiff_metadata(src, new)
+        assert match, f"the purge gate could not read a '%' name: {detail}"
+
+        _real, _rmse, detail16 = ct._is_real_16bit(new)
+        assert "identify failed" not in detail16, detail16
+
+    def test_escaper_matches_the_powershell_rule(self):
+        ct = convert_tiff
+        assert ct._magick_spec("50%off.tif") == "50%%off.tif"
+        assert ct._magick_spec("plain.tif") == "plain.tif"
+
+    def test_safe_tag_source_containers_only_percent_names(self, tmp_path):
+        ct = convert_tiff
+        plain = make_tiff(tmp_path / "plain.tif")
+        path, temp = ct._safe_tag_source(plain)
+        assert path == str(plain) and temp is None, "a safe name must be passed straight through"
+
+        pct = make_tiff_named(tmp_path, "50%off")
+        path, temp = ct._safe_tag_source(pct)
+        try:
+            assert temp is not None and "%" not in path, "a '%' name needs a container"
+            assert Path(path).exists()
+            dest = make_tiff(tmp_path / "dest.tif", artist="OTHER")
+            subprocess.run(["exiftool", "-q", "-q", "-overwrite_original",
+                            "-tagsfromfile", path, "-all:all", "-unsafe", str(dest)],
+                           capture_output=True, check=True, timeout=120)
+            assert read_tag(dest) == ARTIST, "the container did not carry the tags"
+        finally:
+            if temp:
+                Path(temp).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

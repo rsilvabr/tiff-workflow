@@ -39,8 +39,9 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
 | `-Recursive` | switch | off | Process subdirectories recursively |
 | `-Workers` | int | `4` | Number of parallel worker threads (PS7). Range 1-64, capped at 16 |
 | `-Page` | string | `"0"` | Page number to extract (`0`=first, `all`=all pages) |
-| `-Quality` | string | `"85"` | JPEG quality (1-100) or TIFF compression level |
+| `-Quality` | string | `"85"` | JPEG quality (1-100). Ignored for `png` and `tif` -- ImageMagick reinterprets `-quality` for PNG as a zlib level + filter, so it is deliberately not passed there (TIFF output uses `-compress zip`) |
 | `-Format` | string | `"jpg"` | Output format: `jpg`, `jpeg`, `png`, `tif`, `tiff` |
+| `-ExcludeFolders` | string | `""` | `';'`-separated folder NAMES to skip during discovery, on top of the built-in list below |
 
 ---
 
@@ -57,8 +58,24 @@ the same thumbnail. The later one is renamed instead of being skipped:
 RENAME (thumbnail name already taken) | photo.tif -> photo_thumb_v2.jpg
 ```
 
-Re-running is a no-op: existing thumbnails are detected (including the `-Page all` frames)
-and reported as `SKIP (exists)`.
+Re-running with the SAME options is a no-op: existing thumbnails are detected (with `-Page all`,
+its `name_thumb-N` frames) and reported as `SKIP (exists)`.
+
+The check is by NAME, not by content: changing `-Size` or `-Quality` alone does not regenerate
+anything, because the thumbnail of that name already exists. Use `-Remove` first when you want a
+different size. (`-Page all` and `-Page <n>` write different names, so switching between them does
+produce the missing one.)
+
+### Folders skipped during discovery
+
+`OLD_TIFFs`, `OLD_TIFF` and `converted_zip` are skipped -- they hold backups and tool output
+nobody wants a thumbnail of -- matched RELATIVE to `-InputDir`, so pointing the tool straight at
+one of them still works. Every run logs how many files were left out.
+
+`ZIP` and `_EXPORT` used to be on that list and no longer are: `ZIP/` is where compress modes
+1/3/5/6/7 put the compressed library and `_EXPORT` is what modes 6/7 exist to process, so
+excluding them meant "make thumbnails of my compressed library" silently did nothing. Add them
+back per-run with `-ExcludeFolders "ZIP;_EXPORT"` if that is what you want.
 
 Logs are written to `Logs/generate_thumbnails/`.
 

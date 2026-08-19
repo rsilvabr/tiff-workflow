@@ -12,7 +12,8 @@ param(
     [ValidatePattern('^(100|[1-9][0-9]?)$')]
     [string]$Quality = "85",
     [string]$Format = "jpg",
-    [string]$SrgbProfile = ""   # ICC profile used to convert wide-gamut sources; "" = auto-detect
+    [string]$SrgbProfile = "",  # ICC profile used to convert wide-gamut sources; "" = auto-detect
+    [string]$ExcludeFolders = ""# ';'-separated folder NAMES to skip during discovery
 )
 # -----------------------------------------------------------------
 
@@ -103,6 +104,84 @@ foreach ($dir in ($InputDir -split ';')) {
 }
 $recurseFlag = [bool]$Recursive
 
+function ConvertTo-MagickPathSpec {
+    <#
+    .SYNOPSIS
+        Escapes '%' for the filename SPECS ImageMagick expands, so a path containing one
+        addresses the file the caller meant.
+
+    .DESCRIPTION
+        ImageMagick reads printf-style scene specifiers in a filename spec: `50%off.tif`
+        writes `500ff.tif` ('%o'), `100%dpi.tif` writes `1000pi.tif`. magick still exits 0,
+        so the caller sees a success while the output sits under a name nobody asked for.
+        '%%' is the escape and round-trips to a literal '%'.
+
+        WHERE THIS APPLIES, exactly:
+          - EVERY output path.
+          - An INPUT that carries a '[n]' page suffix -- appending the suffix turns the
+            argument into a filename spec.
+        And where it must NOT be used:
+          - A PLAIN input path (here: -Page all, which passes no suffix). ImageMagick opens
+            that name literally, so an escaped name is simply not found.
+
+    .NOTES
+        Re-inject into -Parallel runspaces with:
+            ${function:ConvertTo-MagickPathSpec} = $using:MagickPathFnDef
+        Duplicated across compress_tiff_zip.ps1, copy_exif_to_TIFF_ps*.ps1 and this script
+        so each stays self-contained. Keep the implementations identical.
+    #>
+    param([string]$Path)
+
+    if ([string]::IsNullOrEmpty($Path)) { return $Path }
+    return $Path.Replace('%', '%%')
+}
+$script:MagickPathFnDef = ${function:ConvertTo-MagickPathSpec}.ToString()
+
+function Test-PathExcluded {
+    <#
+    .SYNOPSIS
+        True when any folder segment BELOW $Root matches one of $Names (case-insensitive).
+
+    .DESCRIPTION
+        The tool-output filter (ZIP, OLD_TIFFs, converted_zip, _EXPORT) used to be a regex
+        over the ABSOLUTE directory, so it also matched every folder ABOVE the one the user
+        pointed at: an archive under `D:\Backup\zip\2019\` produced "No TIFF files found"
+        and exit 0, and pointing the tool straight AT a folder named `ZIP` could never work.
+        Same bug the three compression/EXIF backends fixed in audit round 14; this script
+        and the Python diagnose workflow were the copies left behind.
+
+        Matching relative to the root keeps the intent (skip the tool's own output nested
+        below the tree being scanned) and makes an explicit -InputDir win.
+
+    .NOTES
+        Used from script scope only (discovery), so no runspace re-injection is needed.
+        Duplicated across compress_tiff_zip.ps1, copy_exif_to_TIFF_ps*.ps1 and this script
+        so each stays self-contained. Keep the implementations identical.
+    #>
+    param([string]$Directory, [string]$Root, [string[]]$Names)
+
+    if (-not $Names -or $Names.Count -eq 0) { return $false }
+
+    $dirN  = "$Directory".Replace('/', '\').TrimEnd('\')
+    $rootN = "$Root".Replace('/', '\').TrimEnd('\')
+
+    if ($dirN -ieq $rootN) {
+        $rel = ""
+    } elseif ($dirN.StartsWith("$rootN\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $dirN.Substring($rootN.Length + 1)
+    } else {
+        # Not under the root we were given -- should not happen, discovery always enumerates
+        # from the root. Fall back to the whole path: in doubt, skip the file.
+        $rel = $dirN
+    }
+
+    if (-not $rel) { return $false }
+    foreach ($seg in ($rel -split '\\')) {
+        if ($seg -and ($seg -in $Names)) { return $true }
+    }
+    return $false
+}
+
 function Test-ThumbExists {
     <#
     .SYNOPSIS
@@ -110,18 +189,31 @@ function Test-ThumbExists {
         With -Page all and a single-frame format ImageMagick writes name-0.jpg,
         name-1.jpg, ... so testing only the unsuffixed path never matched and every
         run regenerated everything.
+
+    .PARAMETER FrameNames
+        Only look for the `name-0.jpg, name-1.jpg, ...` frame set when the caller asked for
+        -Page all. It used to be checked unconditionally, so a `-Page all` run left `-Page 0`
+        permanently unrunnable: the frames counted as "the thumbnail exists", every file came
+        back SKIP (exists), and `name.jpg` could only be produced by deleting the frames by hand.
     #>
-    param([string]$destPath)
+    param([string]$destPath, [bool]$FrameNames = $false)
 
     if (Test-Path -LiteralPath $destPath) { return $true }
+    if (-not $FrameNames) { return $false }
     $d = [System.IO.Path]::GetDirectoryName($destPath)
     if (-not $d -or -not (Test-Path -LiteralPath $d)) { return $false }
     $b = [System.IO.Path]::GetFileNameWithoutExtension($destPath)
     $e = [System.IO.Path]::GetExtension($destPath)
-    # -Filter parses [] and * as wildcards: a basename containing them would silently
-    # match the wrong files (or none). Escape the literal parts only.
-    $pattern = "$([System.Management.Automation.WildcardPattern]::Escape($b))-*$([System.Management.Automation.WildcardPattern]::Escape($e))"
-    return (@(Get-ChildItem -LiteralPath $d -Filter $pattern -File -ErrorAction SilentlyContinue).Count -gt 0)
+    # Enumerate and compare the names ordinally rather than passing a pattern to -Filter.
+    # -Filter is the FileSystem provider's DOS filter: it understands only '*' and '?' and
+    # has NO escape syntax, so the backtick-escaped form [WildcardPattern]::Escape produces
+    # matched nothing at all for a basename containing '[' or ']'. The frames were written,
+    # reported as "output not created", and regenerated (and re-reported) on every run.
+    $prefix = "$b-"
+    return (@(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+        $_.Name.EndsWith($e, [System.StringComparison]::OrdinalIgnoreCase)
+    }).Count -gt 0)
 }
 $script:ThumbExistsFnDef = ${function:Test-ThumbExists}.ToString()
 
@@ -135,17 +227,58 @@ $script:ThumbExistsFnDef = ${function:Test-ThumbExists}.ToString()
 # run (producing _thumb_v2_thumb) and could never be cleaned up.
 $script:ThumbNamePattern = '(?i)_thumb(_v\d+)?(-\d+)?$'
 
+# Folder names skipped during discovery, matched RELATIVE to the root each file was found
+# under -- never against the absolute path, which also matched every ancestor (see
+# Test-PathExcluded).
+#
+# `ZIP` and `_EXPORT` used to be on this list and are deliberately NOT any more. They are not
+# this tool's leavings: `_EXPORT` is what compress modes 6/7 exist to process, and `ZIP/` is
+# where modes 1/3/5/6/7 PUT the compressed library. Excluding them meant "generate thumbnails
+# for my compressed library" and "...for my _EXPORT tree" silently did nothing -- the run just
+# reported a smaller Found: count, with no flag to override and nothing in the docs.
+# What is left really is backup/output nobody wants a thumbnail of.
+$script:ToolOutputNames = @('OLD_TIFFs', 'OLD_TIFF', 'converted_zip')
+
+# ';'-separated folder NAMES the caller wants skipped as well, same contract as the other
+# three backends (segment match, relative to the root, paths refused).
+foreach ($entry in ($ExcludeFolders -split ';')) {
+    $entry = $entry.Trim()
+    if (-not $entry) { continue }
+    if ($entry -match '[\\/]') {
+        Write-Host "ERROR: -ExcludeFolders takes folder NAMES, not paths: '$entry'" -ForegroundColor Red
+        Write-Host "       Use a ';'-separated list of bare names, e.g. -ExcludeFolders '_EXPORT;temp'" -ForegroundColor Yellow
+        exit 1
+    }
+    $script:ToolOutputNames += $entry
+}
+
+# Each file carries the root it was discovered under, so the exclusion can be evaluated
+# relative to that root. A file passed directly as -InputDir is its own root: an explicit
+# path always wins.
 $allFiles = foreach ($root in $inputRoots) {
     $item = Get-Item -LiteralPath $root
     if ($item -is [System.IO.FileInfo]) {
-        if ($item.Extension -match '^\.(tif|tiff)$') { $item }
+        if ($item.Extension -match '^\.(tif|tiff)$') {
+            $item | Add-Member -NotePropertyName 'InputRoot' -NotePropertyValue $item.DirectoryName -Force -PassThru
+        }
     } else {
         Get-ChildItem -LiteralPath $root -File -Recurse:$recurseFlag |
-            Where-Object { $_.Extension -match '^\.(tif|tiff)$' }
+            Where-Object { $_.Extension -match '^\.(tif|tiff)$' } |
+            ForEach-Object { $_ | Add-Member -NotePropertyName 'InputRoot' -NotePropertyValue $root -Force -PassThru }
     }
 }
 
-$files = @($allFiles | Where-Object { $_.DirectoryName -notmatch '(?i)[\\/]OLD_TIFFS?[\\/]|[\\/]OLD_TIFFS?$|[\\/]ZIP[\\/]|[\\/]ZIP$|[\\/]converted_zip[\\/]|[\\/]converted_zip$|[\\/]_EXPORT[\\/]' -and $_.BaseName -notmatch $script:ThumbNamePattern })
+$allTiffCount = @($allFiles).Count
+$files = @($allFiles | Where-Object {
+    -not (Test-PathExcluded -Directory $_.DirectoryName -Root $_.InputRoot -Names $script:ToolOutputNames) -and
+    $_.BaseName -notmatch $script:ThumbNamePattern
+})
+# Say what was left out. The exclusion used to be silent, so a run that skipped every file in
+# an _EXPORT tree looked exactly like a folder that had no TIFFs in it.
+$excludedCount = $allTiffCount - @($files).Count
+if ($excludedCount -gt 0) {
+    Write-Log "Excluded $excludedCount file(s): existing thumbnails, or under $($script:ToolOutputNames -join '; ')"
+}
 # $script:, not a bare $total: Process-Results reads it, and a function only sees a bare
 # script variable through dynamic scoping -- which stops working under Set-StrictMode or if
 # the function is ever dot-sourced or injected into a runspace.
@@ -320,9 +453,10 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
         $t = $_
         # Functions from the parent scope are not visible inside -Parallel runspaces
         ${function:Test-ThumbExists} = $using:ThumbExistsFnDef
+        ${function:ConvertTo-MagickPathSpec} = $using:MagickPathFnDef
         $name = [System.IO.Path]::GetFileName($t.SrcPath)
 
-        if ((Test-ThumbExists $t.DestPath) -and -not $t.DryRun) {
+        if ((Test-ThumbExists $t.DestPath ($t.Page -eq "all")) -and -not $t.DryRun) {
             "SKIP (exists) | $name"
         } elseif ($t.DryRun) {
             "DRY-RUN | $name -> $([System.IO.Path]::GetFileName($t.DestPath))"
@@ -334,7 +468,9 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 }
                 
                 $pageSuffix = if ($t.Page -eq "all") { "" } else { "[$($t.Page)]" }
-                $inputWithPage = "$($t.SrcPath)$pageSuffix"
+                # A '[n]' suffix turns the input into a filename SPEC, where '%' is expanded;
+                # a plain input (-Page all) is opened literally and must stay unescaped.
+                $inputWithPage = if ($pageSuffix) { "$(ConvertTo-MagickPathSpec $t.SrcPath)$pageSuffix" } else { $t.SrcPath }
                 
                 # -profile converts wide-gamut sources through their embedded ICC; -colorspace
                 # after it is a no-op for RGB but still normalises grayscale/CMYK sources.
@@ -355,7 +491,9 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                     $magickArgs += @("-compress", "zip")
                 }
                 
-                $magickArgs += $t.DestPath
+                # Output path is always escaped: a '%' in the name would send the thumbnail
+                # somewhere else while magick still exits 0 (see ConvertTo-MagickPathSpec).
+                $magickArgs += (ConvertTo-MagickPathSpec $t.DestPath)
                 
                 $allArgs = @($inputWithPage) + $magickArgs
                 $magickOutput = & magick @allArgs 2>&1
@@ -372,8 +510,14 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 } else {
                     $destBase = [System.IO.Path]::GetFileNameWithoutExtension($t.DestPath)
                     $destExt = [System.IO.Path]::GetExtension($t.DestPath)
-                    $framePattern = "$([System.Management.Automation.WildcardPattern]::Escape($destBase))-*$([System.Management.Automation.WildcardPattern]::Escape($destExt))"
-                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter $framePattern -File -ErrorAction SilentlyContinue)
+                    # Ordinal name match, not -Filter (see Test-ThumbExists): with a '[' in the
+                    # basename the escaped pattern matched nothing, so frames that HAD been
+                    # written were reported as "output not created" on every single run.
+                    $framePrefix = "$destBase-"
+                    $frames = @(Get-ChildItem -LiteralPath $destDir -File -ErrorAction SilentlyContinue | Where-Object {
+                        $_.Name.StartsWith($framePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+                        $_.Name.EndsWith($destExt, [System.StringComparison]::OrdinalIgnoreCase)
+                    })
                     if ($frames.Count -gt 0) {
                         "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"
                     } else {
@@ -395,7 +539,7 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
     foreach ($t in $tasks) {
         $name = [System.IO.Path]::GetFileName($t.SrcPath)
 
-        if ((Test-ThumbExists $t.DestPath) -and -not $t.DryRun) {
+        if ((Test-ThumbExists $t.DestPath ($t.Page -eq "all")) -and -not $t.DryRun) {
             $result = "SKIP (exists) | $name"
         } elseif ($t.DryRun) {
             $result = "DRY-RUN | $name -> $([System.IO.Path]::GetFileName($t.DestPath))"
@@ -407,7 +551,9 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 }
                 
                 $pageSuffix = if ($t.Page -eq "all") { "" } else { "[$($t.Page)]" }
-                $inputWithPage = "$($t.SrcPath)$pageSuffix"
+                # A '[n]' suffix turns the input into a filename SPEC, where '%' is expanded;
+                # a plain input (-Page all) is opened literally and must stay unescaped.
+                $inputWithPage = if ($pageSuffix) { "$(ConvertTo-MagickPathSpec $t.SrcPath)$pageSuffix" } else { $t.SrcPath }
                 
                 # -profile converts wide-gamut sources through their embedded ICC; -colorspace
                 # after it is a no-op for RGB but still normalises grayscale/CMYK sources.
@@ -428,7 +574,9 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                     $magickArgs += @("-compress", "zip")
                 }
                 
-                $magickArgs += $t.DestPath
+                # Output path is always escaped: a '%' in the name would send the thumbnail
+                # somewhere else while magick still exits 0 (see ConvertTo-MagickPathSpec).
+                $magickArgs += (ConvertTo-MagickPathSpec $t.DestPath)
                 
                 $allArgs = @($inputWithPage) + $magickArgs
                 $magickOutput = & magick @allArgs 2>&1
@@ -445,8 +593,14 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                 } else {
                     $destBase = [System.IO.Path]::GetFileNameWithoutExtension($t.DestPath)
                     $destExt = [System.IO.Path]::GetExtension($t.DestPath)
-                    $framePattern = "$([System.Management.Automation.WildcardPattern]::Escape($destBase))-*$([System.Management.Automation.WildcardPattern]::Escape($destExt))"
-                    $frames = @(Get-ChildItem -LiteralPath $destDir -Filter $framePattern -File -ErrorAction SilentlyContinue)
+                    # Ordinal name match, not -Filter (see Test-ThumbExists): with a '[' in the
+                    # basename the escaped pattern matched nothing, so frames that HAD been
+                    # written were reported as "output not created" on every single run.
+                    $framePrefix = "$destBase-"
+                    $frames = @(Get-ChildItem -LiteralPath $destDir -File -ErrorAction SilentlyContinue | Where-Object {
+                        $_.Name.StartsWith($framePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
+                        $_.Name.EndsWith($destExt, [System.StringComparison]::OrdinalIgnoreCase)
+                    })
                     if ($frames.Count -gt 0) {
                         $result = "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"
                     } else {

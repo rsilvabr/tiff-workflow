@@ -171,6 +171,39 @@ function Invoke-MagickWithTimeout {
     }
 }
 
+function ConvertTo-MagickPathSpec {
+    <#
+    .SYNOPSIS
+        Escapes '%' for the filename SPECS ImageMagick expands, so a path containing one
+        addresses the file the caller meant.
+
+    .DESCRIPTION
+        ImageMagick reads printf-style scene specifiers in a filename spec: `50%off.tif`
+        writes `500ff.tif` ('%o'), `100%dpi.tif` writes `1000pi.tif`, and on a multi-page
+        image it writes ONE FILE PER PAGE. magick still exits 0, so the caller sees a success
+        while the output sits under a name nobody asked for. '%%' is the escape and
+        round-trips to a literal '%'.
+
+        WHERE THIS APPLIES, exactly:
+          - EVERY output path.
+          - An INPUT that carries a '[n]' page suffix -- appending the suffix turns the
+            argument into a filename spec.
+        And where it must NOT be used:
+          - A PLAIN input path. There ImageMagick opens the name literally, so an escaped
+            name is simply not found.
+
+    .NOTES
+        Re-inject into -Parallel runspaces with:
+            ${function:ConvertTo-MagickPathSpec} = $using:MagickPathFnDef
+        Duplicated across compress_tiff_zip.ps1 and copy_exif_to_TIFF_ps*.ps1 so each
+        script stays self-contained. Keep the implementations identical.
+    #>
+    param([string]$Path)
+
+    if ([string]::IsNullOrEmpty($Path)) { return $Path }
+    return $Path.Replace('%', '%%')
+}
+
 function Get-TiffPageCount {
     <#
     .SYNOPSIS
@@ -210,7 +243,8 @@ function Test-PixelIdentical {
 
         Re-inject into -Parallel runspaces with:
             ${function:Test-PixelIdentical} = $using:PixelCompareFnDef
-        (Invoke-MagickWithTimeout and Get-TiffPageCount must be injected too.)
+        (Invoke-MagickWithTimeout, Get-TiffPageCount and ConvertTo-MagickPathSpec must be
+        injected too.)
     #>
     param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30)
 
@@ -219,8 +253,14 @@ function Test-PixelIdentical {
     if (-not $ps.Ok -or -not $pd.Ok) { return $false }
     if ($ps.PageCount -ne $pd.PageCount) { return $false }
 
+    # Appending '[i]' turns these into filename SPECS, so a '%' in the path has to be
+    # escaped or magick opens a different file -- and this gate authorises overwriting the
+    # original. See ConvertTo-MagickPathSpec.
+    $srcSpec = ConvertTo-MagickPathSpec $SrcPath
+    $dstSpec = ConvertTo-MagickPathSpec $DstPath
+
     for ($i = 0; $i -lt $ps.PageCount; $i++) {
-        $r = Invoke-MagickWithTimeout -Arguments @("compare", "-metric", "RMSE", "$SrcPath[$i]", "$DstPath[$i]", "-format", "%[distortion]`n", "info:") -TimeoutSec $TimeoutSec
+        $r = Invoke-MagickWithTimeout -Arguments @("compare", "-metric", "RMSE", "$srcSpec[$i]", "$dstSpec[$i]", "-format", "%[distortion]`n", "info:") -TimeoutSec $TimeoutSec
         # compare exits 1 when images differ -- that is data, not an error. Only a
         # timeout or an undetermined/error exit code fails here directly; the parsed
         # distortion value below has the final word.
@@ -232,6 +272,73 @@ function Test-PixelIdentical {
         if ($val -ne 0) { return $false }
     }
     return $true
+}
+
+function Backup-TiffMetadata {
+    <#
+    .SYNOPSIS
+        Parks the source metadata in a temp MIE container when $SrcPath cannot serve as the
+        `-tagsfromfile` source directly. Returns @{ Needed = [bool]; Path = $null-or-mie-path }.
+
+    .DESCRIPTION
+        TWO conditions need the container, for different reasons:
+
+        1. $WriteDst overwrites $SrcPath. In-place compression destroys the original before
+           the EXIF restore step runs, so `-tagsfromfile <source>` silently read the
+           already-compressed file and every tag was lost.
+
+        2. $SrcPath contains a '%'. exiftool expands printf-style FILENAME FORMAT CODES in the
+           `-tagsfromfile` argument -- `50%off.tif` is read as `50ff.tif` ('%o' consumed),
+           `100%dpi.tif` as `100pi.tif`. exiftool then prints "Warning: Error opening file"
+           and STILL EXITS 0, so every caller's `$LASTEXITCODE -ne 0` check passed and the
+           run reported OK while the output carried no metadata at all. In mode 8 that is
+           permanent: the source is deleted right after.
+
+           Doubling the '%' does NOT escape it (verified on exiftool 13.59):
+             50%%off.jpg  -> 50%ff.jpg      50%%%off.jpg -> 50%%ff.jpg
+           Each extra '%' is emitted literally and the trailing '%o' is consumed anyway.
+           The only fix is to hand exiftool a name that has no '%' in it -- which is exactly
+           what this container is. The SOURCE FILE OPERAND is not format-expanded, only the
+           `-tagsfromfile` argument is, so dumping FROM the '%' name works.
+
+        Callers must pass the returned path as the tagsfromfile source and delete it when done.
+
+        FAIL-CLOSED: when a container was needed but could not be written, Path stays $null --
+        the caller must REFUSE the write, because going ahead would strip every metadata tag.
+
+    .NOTES
+        Re-inject into -Parallel runspaces with:
+            ${function:Backup-TiffMetadata} = $using:MetaBackupFnDef
+        Duplicated across compress_tiff_zip.ps1 and copy_exif_to_TIFF_ps*.ps1 so each script
+        stays self-contained. Keep the implementations identical.
+    #>
+    param([string]$SrcPath, [string]$WriteDst)
+
+    if ($WriteDst -ne $SrcPath -and -not "$SrcPath".Contains('%')) {
+        return @{ Needed = $false; Path = $null }
+    }
+
+    $metaBase = [System.IO.Path]::GetTempFileName()
+    Remove-Item -LiteralPath $metaBase -Force -ErrorAction SilentlyContinue
+    $metaBackup = $metaBase -replace '\.tmp$', '.mie'
+
+    # `-o` is format-expanded exactly like `-tagsfromfile`, so a '%' anywhere in %TEMP% would
+    # send the container somewhere else and leave nothing to read back. Fail closed instead.
+    if ("$metaBackup".Contains('%')) { return @{ Needed = $true; Path = $null } }
+
+    $argMeta = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
+        exiftool -@ $argMeta | Out-Null
+        if ($LASTEXITCODE -ne 0) { return @{ Needed = $true; Path = $null } }
+    } catch {
+        return @{ Needed = $true; Path = $null }
+    } finally {
+        Remove-Item $argMeta -Force -ErrorAction SilentlyContinue
+    }
+
+    if (Test-Path -LiteralPath $metaBackup) { return @{ Needed = $true; Path = $metaBackup } }
+    return @{ Needed = $true; Path = $null }
 }
 
 function Test-TiffHasOnlySubfilePages {
@@ -510,6 +617,13 @@ function Invoke-S5ProFolder {
         $finalDir = if ($OutputDir)                            { $OutputDir }  else { $groupDir }
         $writeDir = if ($StagingDir -and -not $DryRun)         { $StagingDir } else { $finalDir }
 
+        # With no -StagingDir the staged ZIP is written INTO the source folder, but only
+        # -StagingDir was ever registered for cleanup -- so an interrupted run left
+        # `<runId>_<12 hex>_photo.tif` sitting next to the photos, and the next run discovered
+        # it as an ordinary source. Register whatever folder this run actually stages into; the
+        # trap only removes names carrying THIS run's prefix.
+        if (-not $DryRun -and $script:cleanupDirs -notcontains $writeDir) { $script:cleanupDirs += $writeDir }
+
         if ($CompressZip -and $StagingDir -and -not $DryRun) { [System.IO.Directory]::CreateDirectory($StagingDir) | Out-Null }
         if ($CompressZip -and $OutputDir)                    { [System.IO.Directory]::CreateDirectory($OutputDir)  | Out-Null }
 
@@ -657,12 +771,30 @@ function Invoke-S5ProFolder {
                 }
             }
 
-            $tagsArgs = @("-tagsfromfile", $p.Jpeg, "-EXIF:All", "-XMP:All", "-IPTC:All")
+            # exiftool expands printf-style filename format codes in the -tagsfromfile
+            # ARGUMENT, so a JPEG named `50%off.jpg` is read as `50ff.jpg` -- a file that does
+            # not exist. exiftool warns and STILL EXITS 0, so the TIFF came out with no EXIF at
+            # all and the run reported OK. Park the tags in a container with a safe name first
+            # (see Backup-TiffMetadata); a name without '%' is passed through untouched.
+            $jpegMeta = Backup-TiffMetadata -SrcPath $p.Jpeg -WriteDst $tiffTarget
+            if ($jpegMeta.Needed -and -not $jpegMeta.Path) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "ERROR (metadata container failed - EXIF copy refused) | $($p.TifName)"; continue
+            }
+            $jpegTagSource = if ($jpegMeta.Path) { $jpegMeta.Path } else { $p.Jpeg }
+
+            $tagsArgs = @("-tagsfromfile", $jpegTagSource, "-EXIF:All", "-XMP:All", "-IPTC:All")
             if ($iccTag) { $tagsArgs += $iccTag }
             $tagsArgs += "-unsafe", $tiffTarget
 
-            exiftool -q -q -overwrite_original -P @tagsArgs | Out-Null
-            if ($LASTEXITCODE -ne 0) {
+            # ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
+            # exiftool gives when the tagsfromfile source could not be opened -- it still exits 0.
+            $exifOut = "$(exiftool -q -overwrite_original -P @tagsArgs 2>&1)"
+            $exifExit = $LASTEXITCODE
+            if ($jpegMeta.Path) { Remove-Item -LiteralPath $jpegMeta.Path -Force -ErrorAction SilentlyContinue }
+            # Only "Error opening file" is fatal: it means the SOURCE was never read. A JPEG that
+            # legitimately carries nothing writable reports differently and stays non-fatal.
+            if ($exifExit -ne 0 -or $exifOut -match 'Error opening file') {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "ERROR (exiftool EXIF) | $($p.TifName)"; continue
             }
@@ -686,7 +818,7 @@ function Invoke-S5ProFolder {
             }
             $comp = "$(@($comp)[0])".Trim()
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-                "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix"; continue
+                "$(if ($heurMatch) { "WARN (heuristic JPEG match, already $comp -- ZIP skipped)" } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix"; continue
             }
 
             # Run-scoped prefix so the interrupt trap only cleans up this run's staged files
@@ -699,8 +831,18 @@ function Invoke-S5ProFolder {
                 "OK+SKIP-ZIP (exists) | $($p.TifName)"; continue
             }
 
-            $magickErr = magick -quiet $tiffTarget -compress zip $writeDst 2>&1
-            if ($LASTEXITCODE -ne 0) {
+            # Input literal, OUTPUT escaped: a '%' in the name sends the output somewhere
+            # else while magick still exits 0 (see ConvertTo-MagickPathSpec).
+            $magickErr = magick -quiet $tiffTarget -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
+            $zipFailed = ($LASTEXITCODE -ne 0)
+            if (-not $zipFailed -and -not (Test-Path -LiteralPath $writeDst)) {
+                # Exit 0 with no file: the staged ZIP never landed, so there is nothing to move
+                # and nothing to verify. Report it here instead of failing later on a file that
+                # is not there.
+                $zipFailed = $true
+                $magickErr = "magick reported success but wrote no file (expected: $writeDst)"
+            }
+            if ($zipFailed) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "ERROR (magick ZIP) | $($p.TifName) | $magickErr"; continue
             }
@@ -716,10 +858,23 @@ function Invoke-S5ProFolder {
                 "ERROR (ZIP pixel verification failed - original untouched) | $($p.TifName)"; continue
             }
 
-            exiftool -q -q -overwrite_original -tagsfromfile $tiffTarget -all:all -unsafe $writeDst | Out-Null
-            # Store staging mapping BEFORE checking LASTEXITCODE so WARN files get moved too
+            # Same '%' trap as the JPEG copy above: a TIFF whose NAME carries one is read as a
+            # different file, exiftool exits 0, and the staged ZIP that replaces it carries no
+            # metadata at all. See Backup-TiffMetadata.
+            $tiffMeta = Backup-TiffMetadata -SrcPath $tiffTarget -WriteDst $writeDst
+            $tiffTagSource = if ($tiffMeta.Path) { $tiffMeta.Path } else { $tiffTarget }
+            $restoreOut = ""
+            $restoreExit = 1
+            if (-not ($tiffMeta.Needed -and -not $tiffMeta.Path)) {
+                # ONE -q: the second hides the unreadable-source warning (exiftool exits 0 anyway).
+                $restoreOut = "$(exiftool -q -overwrite_original -tagsfromfile $tiffTagSource -all:all -unsafe $writeDst 2>&1)"
+                $restoreExit = $LASTEXITCODE
+                if ($restoreOut -match 'Error opening file') { $restoreExit = 1 }
+            }
+            if ($tiffMeta.Path) { Remove-Item -LiteralPath $tiffMeta.Path -Force -ErrorAction SilentlyContinue }
+            # Store staging mapping BEFORE checking the restore result so WARN files get moved too
             if ($stagingName) { $script:stagingMap[$p.Tiff] = $stagingName }
-            if ($LASTEXITCODE -ne 0) {
+            if ($restoreExit -ne 0) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; continue
             }

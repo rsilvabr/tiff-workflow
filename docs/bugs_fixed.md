@@ -11,6 +11,190 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
 > that way now. Rounds 8-13 shipped after v2.2 and make up **v2.3**.
 
+## Audit Round 15
+
+Started from a full re-read of the four backends and the wizard, with every finding reproduced on
+disk before it was fixed and pinned by a test that fails when the fix is reverted (6 targeted
+mutations, all caught). Real files again: `tiff_scan`, `raw_scan_2`, `TIFF16`.
+
+The recurring theme this round: **a fix that stopped at the first tool.** The `%` work already in
+flight had made every ImageMagick filename *spec* escape correctly. exiftool expands the same kind
+of code in a different argument, and the Python mirror had not been touched at all -- so the same
+`%` walked straight through the half of the pipeline nobody had looked at. Two of the three tools
+that read a path were fixed; the third silently ate the metadata.
+
+### CRITICAL - A `%` in the File Name Stripped Every Metadata Tag, and exiftool Reported Success
+**Issue:** `exiftool -tagsfromfile SRCFILE` expands printf-style **filename format codes** in
+`SRCFILE`. `50%off.tif` is read as `50ff.tif` (`%o` consumed), `100%dpi.tif` as `100pi.tif`.
+exiftool prints `Warning: Error opening file` and **still exits 0**, so every caller's
+`$LASTEXITCODE -ne 0` check passed. The output carried no EXIF, XMP, IPTC or GPS at all and the
+run reported `OK` with exit 0:
+
+```
+[1/2] OK (Uncompressed -> ZIP) | 50%off.tif
+[2/2] OK (Uncompressed -> ZIP) | plain.tif
+Done: 2 OK | 0 skipped | 0 warnings | 0 errors
+
+exiftool -EXIF:Make -EXIF:Artist "50%off.tif"  ->  (nothing)
+exiftool -EXIF:Make -EXIF:Artist plain.tif     ->  FujiTest / Ricardo
+```
+
+In **mode 8 with `-DeleteSource` this is permanent**: the source is removed right afterwards.
+Copy EXIF was hit on both sides -- the JPEG it reads tags *from*, and the TIFF it restores tags
+from into the staged ZIP -- so a `50%off.jpg` / `50%off.tif` pair reported `OK+ZIP` while the TIFF
+never received any EXIF.
+
+Doubling does **not** escape it (verified on exiftool 13.59): `50%%off.jpg` -> `50%ff.jpg`,
+`50%%%off.jpg` -> `50%%ff.jpg`. Each extra `%` is emitted literally and the trailing `%o` is
+consumed anyway. Only the `-tagsfromfile` **argument** is expanded; the source *file operand* is
+not, which is what makes the fix possible.
+
+Why it survived the `%` work already in flight: the in-place paths already route through
+`Backup-TiffMetadata`, whose MIE container lives in `%TEMP%` under a generated name with no `%`
+in it -- and those are exactly the paths the new `%` tests exercised.
+- **Fix:** `Backup-TiffMetadata` now triggers on **two** conditions, not one: the write
+  overwrites its own source (as before), **or** the source name contains a `%`. The container it
+  already produced answers both, so all three compress workers were fixed by widening one
+  condition. The same function was added, byte-identical, to both Copy EXIF backends and used at
+  both of their `-tagsfromfile` sites. `_safe_tag_source` mirrors it in `convert_tiff.py` for the
+  padded-file conversion, which replaces the original with a lossy 8-bit rewrite. `-o` is
+  format-expanded too, so a `%` anywhere in `%TEMP%` fails the container closed rather than
+  writing it somewhere else.
+- **Fix (generic):** every `-tagsfromfile` call now runs with **one** `-q` instead of two -- the
+  second suppresses warnings, and the warning is the only signal exiftool gives -- captures the
+  output, and treats `Error opening file` as a failure regardless of the exit code. That catches
+  the whole class, not just `%`. Benign per-tag warnings (scanner files emit plenty) and a
+  legitimately tag-less source stay non-fatal.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `convert_tiff.py`
+
+### HIGH - Modes 1-7 Walked Into `OLD_TIFFs/` and Compressed the Backups
+**Issue:** `OLD_TIFFs` holds the pristine originals modes 0/9 deliberately archived. Only the
+legacy scan, `Get-Files-Mode8` and the modes 0/9 task builder excluded it, each with its own
+**absolute** regex; `Get-Files-Mode2` through `Get-Files-Mode7` had nothing at all. The run even
+printed `(N in OLD_TIFFs)` with a code comment reading *"already processed, will be skipped"* --
+about files it went on to compress.
+
+The result is worse than duplicated work. The real file is already Deflate, so it is `SKIP`ped,
+which leaves the **backup** as the only candidate: it claims the output name, or loses the
+collision guard and lands as `_v2`. After a mode 9 run, mode 2 into a flat folder produced:
+
+```
+Found: 2 TIFF(s) (1 in OLD_TIFFs)
+[1/2] SKIP (Adobe Deflate) | a.tif      <- the real file
+[2/2] OK (Uncompressed -> ZIP) | a.tif  <- the backup
+=>  FLAT/a_v2.tif   and no a.tif at all
+```
+
+Mode 3 wrote `OLD_TIFFs/ZIP/a.tif`; mode 5 wrote `ZIP/a_v2.tif`. All of it then confuses the
+Restore and Delete OLD_TIFFs workflows, which start finding `ZIP/` folders inside the backups.
+- **Fix:** one `$script:toolOutputNames` list applied in the collection loop, so **every** mode is
+  covered and a new mode is covered the day it is added. Matched **relative to the scan root** via
+  `Test-PathExcluded` -- the round 14 rule -- which also means pointing `-InputDir` straight at an
+  `OLD_TIFFs` folder now works in every mode; the three absolute regexes it replaces made that
+  impossible in the modes that had one. The `(N in OLD_TIFFs)` note is gone: it is always zero
+  now, and it never described what the run did.
+- **Files:** `compress_tiff_zip.ps1`
+
+### MEDIUM - Files Left by an Interrupted Run Were Compressed as Photos
+**Issue:** Two file shapes this toolkit writes are not photos, and both end in `.tif`:
+`<8 hex>_<12 hex>_<name>.tif` (a staged file) and `<name>.<8 hex>_<12 hex>.tif` (the temp sibling
+of an in-place write). A run interrupted between the write and the move leaves one behind, and
+every later run discovered it as an ordinary source -- compressed, kept, counted as a photo, and
+in mode 8 given a `[SOURCE DELETED]` line of its own.
+
+Two reasons they were left: `$script:cleanupDirs` in the Copy EXIF backends only ever held
+`-StagingDir`, so with no staging directory -- where the staged file is written **into the source
+folder** -- the interrupt trap had nothing to clean; and the mode >= 0 `-Parallel` worker built
+its temp sibling without the `$runStagingId` prefix the other two workers use, so it could not
+even be attributed to a run.
+- **Fix:** discovery skips both shapes by name, in every mode, and reports the count. By name, so
+  a **concurrent** run's in-flight files are skipped too -- never deleted. The Copy EXIF backends
+  register whatever folder they actually stage into for cleanup, and the third worker's temp
+  sibling now carries the run id like its twins.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### MEDIUM - The Thumbnail Generator Silently Refused `_EXPORT` and `ZIP` Trees
+**Issue:** `generate_thumbnails.ps1` carried a hardcoded exclusion list --
+`OLD_TIFFs, OLD_TIFF, ZIP, converted_zip, _EXPORT` -- with no flag to override it, no line in the
+log, and no mention in the docs. Two of those entries are wrong for this toolkit: `_EXPORT` is
+what compress modes 6/7 exist to process, and `ZIP/` is where modes 1/3/5/6/7 **put** the
+compressed library. "Generate thumbnails for my compressed library" produced nothing and looked
+exactly like an empty folder:
+
+```
+2024/_EXPORT/TIFF/e.tif + 2024/normal/n.tif, -Recursive  ->  "Found: 1 TIFF(s)"
+```
+- **Fix:** `ZIP` and `_EXPORT` dropped from the default; what is left really is backup/tool
+  output. `-ExcludeFolders` added with the same contract as the other three backends (segment
+  match, relative to the root, paths refused), so the old behaviour is one flag away. Every run
+  now logs how many files were left out. The wizard asks the question for workflow 8 too.
+- **Files:** `generate_thumbnails.ps1`, `convert_tiff.py`, `docs/README_generate_thumbnails.md`
+
+### MEDIUM - `-Page all` Made `-Page 0` Permanently Unrunnable
+**Issue:** With `-Page all` ImageMagick writes `name_thumb-0.jpg`, `name_thumb-1.jpg`, ...; with
+`-Page <n>` it writes `name_thumb.jpg`. `Test-ThumbExists` looked for the frame set
+**unconditionally**, so once a `-Page all` run had happened every later `-Page 0` run reported
+`SKIP (exists)` for every file, and `name_thumb.jpg` could only be produced by deleting the frames
+by hand.
+- **Fix:** the frame set is only accepted when the caller actually asked for `-Page all`. The
+  repeat-is-a-no-op behaviour for identical flags is unchanged, and the docs now say plainly that
+  the check is by name -- changing `-Size` alone does not regenerate anything.
+- **Files:** `generate_thumbnails.ps1`, `docs/README_generate_thumbnails.md`
+
+### MEDIUM - The Python Mirror Never Got the `%` Filename-Spec Fix
+**Issue:** Seven call sites in `convert_tiff.py` build `f"{path}[0]"` specs without escaping, so
+for any `%` name workflow **[6] Delete OLD_TIFFs** returned `(False, 'magick identify failed')` --
+a permanent `MISMATCH`, meaning those backups could never be cleaned up -- and workflow
+**[7] Diagnose** printed an ERROR line for every one. Fail-closed, so nothing was deleted, but the
+message blamed the file rather than the tool.
+- **Fix:** `_magick_spec()` mirrors `ConvertTo-MagickPathSpec`, applied to every spec and every
+  output path (a plain input stays literal, same rule as the backends).
+- **Files:** `convert_tiff.py`
+
+### LOW - A Failed Move Took the Whole Padded-File Workflow Down
+**Issue:** In `_compress_padded_files` the `try/except` covered the backup into `OLD_PADDED/`, but
+the `_safe_move(tmp8, final_dst)` right after it was bare. A failure there raised out of the loop:
+the remaining files were never processed, no summary was printed, and the original sat in
+`OLD_PADDED/` looking as though it had been replaced. `run_undo_old_tiffs` already had `_try_move`
+for exactly this shape.
+- **Fix:** the move is guarded per file; on failure the backup is put back, the file is reported,
+  and the run continues.
+- **Files:** `convert_tiff.py`
+
+### LOW - Two Compression Probes Disagreed About Which IFD to Read
+**Issue:** The batched map and both Copy EXIF backends read `-IFD0:Compression`. The three
+compress workers' per-file fallback read plain `-Compression` and took line `[0]` -- which is the
+first IFD that **has** the tag, not necessarily IFD0. Same bug four other call sites had already
+fixed, surviving on the fallback path.
+- **Fix:** all four probes read `-IFD0:Compression`.
+- **Files:** `compress_tiff_zip.ps1`
+
+### LOW - Mode 8 Replaced Originals Without `-DeleteSource`, and the Docs Said Otherwise
+**Issue:** Mode 8 resolves `finalDst == srcPath` for a `.tif` source, so the verified output is
+moved on top of the original whether or not `-DeleteSource` was passed. The flag only decides the
+fate of a `.tiff` source, whose output is written beside it as `.tif`. The README read
+"Originals deleted after confirm", which suggests nothing is touched without it.
+- **Fix:** the run says so at startup when mode 8 is used without the flag, and the README row
+  describes what actually happens. Behaviour unchanged -- the pixel gate has always guarded it.
+- **Files:** `compress_tiff_zip.ps1`, `README.md`
+
+### LOW - Test Suite: Two Stale Assertions and One Helper Carrying the Bug It Was Pinning
+**Issue:** Three tests failed against correct code. `rmse_pages` built `f"{path}[{page}]"` without
+escaping `%` -- the very bug `TestPercentInFileNames` exists to pin -- so it opened `500ff.tif`
+and reported the *product* as broken. And
+`test_legacy_in_place_writes_go_through_verified_temp_sibling` had only its first count raised
+from 2 to 3 when the in-place guard grew a third worker; the other two assertions were left
+behind.
+- **Fix:** the helper escapes like the backends do, and the two counts match the three workers.
+- **Files:** `tests/test_regression_classes.py`
+
+### Docs
+- README: mode 4 does not rename anything (it creates a sibling `<parent>_ZIP` folder and leaves
+  the source folder in place); the mode 8 row was rewritten (above).
+- `docs/README_generate_thumbnails.md`: `-Quality` is deliberately **not** passed for `png` or
+  `tif`; folder exclusions documented; `-ExcludeFolders` added to the parameter table.
+
 ## v2.3 - Audit Round 14
 
 ### 🟠 MEDIUM - `-ExcludeFolders` Matched the Absolute Path, Not the Tree Below the Root

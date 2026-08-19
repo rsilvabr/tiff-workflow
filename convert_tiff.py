@@ -290,6 +290,85 @@ def clamp_workers(value: int, default: int = 8) -> int:
     return n
 
 
+#: Folder names that hold this toolkit's own output. Discovery skips them, but only BELOW
+#: the folder the user pointed at -- see _is_tool_output_path.
+_TOOL_OUTPUT_PARTS = {"old_tiffs", "old_padded", "logs", "zip", "_export", "converted_zip"}
+
+
+def _is_tool_output_path(path: Path, root: Path) -> bool:
+    """True when `path` sits inside one of this toolkit's own output folders BELOW `root`.
+
+    Evaluated RELATIVE to the scan root, never against the absolute path. Matching the
+    absolute path also matched every ancestor: a library under `D:\\Backup\\zip\\2019\\`
+    reported "No TIFF files found" and exited 0, and pointing a workflow straight AT a
+    folder named `ZIP` or `OLD_TIFFs` could never work. That is the same bug the three
+    PowerShell backends fixed in audit round 14 (Test-PathExcluded); the diagnose workflow
+    kept the absolute form, while the manifest generator already did it relative.
+
+    A path that is not under the root at all falls back to the whole path -- in doubt, skip.
+    """
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        rel = path
+    return any(part.lower() in _TOOL_OUTPUT_PARTS for part in rel.parts)
+
+
+def _magick_spec(path) -> str:
+    """Escape '%' for the filename SPECS ImageMagick expands.
+
+    Python mirror of ConvertTo-MagickPathSpec in the PowerShell backends. ImageMagick reads
+    printf-style scene specifiers in a filename spec: `50%off.tif` addresses `500ff.tif`
+    ('%o' consumed), `100%dpi.tif` addresses `1000pi.tif`. '%%' is the escape.
+
+    WHERE THIS APPLIES, exactly:
+      - EVERY output path.
+      - An INPUT that carries a '[n]' page suffix -- appending the suffix turns the argument
+        into a filename spec.
+    And where it must NOT be used:
+      - A PLAIN input path. There ImageMagick opens the name literally, so an escaped name is
+        simply not found.
+
+    The backends were fixed for this; the Python side was the copy left behind, so workflow
+    [6] Delete OLD_TIFFs reported a permanent MISMATCH for any '%' file (it could never be
+    purged) and workflow [7] Diagnose reported an ERROR line for each one.
+    """
+    return str(path).replace("%", "%%")
+
+
+def _safe_tag_source(path: Path):
+    """Return (source_for_tagsfromfile, temp_to_delete_or_None) for `path`.
+
+    exiftool expands printf-style filename format codes in the `-tagsfromfile` ARGUMENT, so
+    `50%off.tif` is read as `50ff.tif` -- and exiftool STILL EXITS 0, so a returncode check
+    passes while nothing was copied. Doubling the '%' does not escape it. The fix is to hand
+    exiftool a name without one: park the tags in a temp MIE container first, exactly like
+    Backup-TiffMetadata does in the PowerShell backends. The source FILE OPERAND is not
+    format-expanded, only the -tagsfromfile argument is, so dumping FROM the '%' name works.
+
+    Returns (None, None) when the container was needed but could not be written -- callers
+    must treat that as a failure, never as "copy from the original name".
+    """
+    if "%" not in str(path):
+        return str(path), None
+    fd, tmp = tempfile.mkstemp(suffix=".mie")
+    os.close(fd)
+    os.unlink(tmp)
+    if "%" in tmp:
+        # `-o` is format-expanded too, so a '%' anywhere in the temp dir breaks the container.
+        return None, None
+    try:
+        r = subprocess.run(["exiftool", "-q", "-q", "-all:all", "-o", tmp, str(path)],
+                           capture_output=True, timeout=60)
+        if r.returncode != 0 or not Path(tmp).exists():
+            Path(tmp).unlink(missing_ok=True)
+            return None, None
+    except Exception:
+        Path(tmp).unlink(missing_ok=True)
+        return None, None
+    return tmp, tmp
+
+
 def _file_digest(path: Path) -> str:
     """SHA-256 of a file, streamed so large TIFF sidecars do not land in memory."""
     h = hashlib.sha256()
@@ -1251,6 +1330,61 @@ def _strip_magick_noise(text: str) -> str:
     return re.sub(r"@\s+(?:warning|error)/\S+", " ", cleaned)
 
 
+def _tiff_page_geometry(path) -> Optional[List[Tuple[str, int, int]]]:
+    """(subfiletype, width, height) for every page, or None when it cannot be read.
+
+    One `identify` call, same format string the PowerShell page classifiers use. None means
+    "cannot classify" and every caller must treat it as a refusal, never as "no thumbnails".
+    """
+    try:
+        r = subprocess.run(
+            ["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n", str(path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0 or not r.stdout:
+            return None
+    except Exception:
+        return None
+
+    geo: List[Tuple[str, int, int]] = []
+    for line in r.stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.strip().split("|")
+        if len(parts) < 3:
+            return None
+        try:
+            geo.append((parts[0].strip().upper(), int(parts[1]), int(parts[2])))
+        except ValueError:
+            return None
+    return geo or None
+
+
+def _image_page_indices(geo: List[Tuple[str, int, int]]) -> List[int]:
+    """Indices of the pages that carry the actual image, i.e. everything that is not a
+    thumbnail. Page 0 is always an image page.
+
+    A later page counts as a thumbnail only when it is BOTH tagged REDUCEDIMAGE/REDUCED
+    AND strictly smaller than page 0. That is deliberately stricter than SafeMode's rule
+    (which accepts either), because the only caller is the purge gate: being wrong here
+    deletes the last backup of a page. Every thumbnail this toolkit writes is tagged
+    (Set-TiffThumbMarkers), so the strict rule still covers the case it exists for; an
+    untagged small page is simply not excused, and the file is kept.
+
+    A full-size scanner IR (MASK) page is an image page under either rule.
+    """
+    if not geo:
+        return []
+    main_w, main_h = geo[0][1], geo[0][2]
+    keep = [0]
+    for i, (subfile, w, h) in enumerate(geo[1:], start=1):
+        is_thumb = (subfile in ("REDUCEDIMAGE", "REDUCED")
+                    and main_w > 0 and main_h > 0 and 0 < w < main_w and 0 < h < main_h)
+        if not is_thumb:
+            keep.append(i)
+    return keep
+
+
 def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     """
     Compare two TIFFs pixel-by-pixel using RMSE.
@@ -1264,7 +1398,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     def get_dimensions(path):
         try:
             result = subprocess.run(
-                ["magick", "identify", "-format", "%w %h", f"{path}[0]"],
+                ["magick", "identify", "-format", "%w %h", f"{_magick_spec(path)}[0]"],
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0:
@@ -1305,46 +1439,90 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     new_pages = get_page_count(new_path)
     if old_pages is None or new_pages is None:
         return False, "page count unreadable (cannot verify pages were preserved)"
-    if old_pages != new_pages:
-        return False, f"PAGE_COUNT_MISMATCH {old_pages} vs {new_pages}"
+    # A differing page count is still a refusal by default -- it is decided below, together
+    # with the one exception (a thumbnail page added or regenerated), so that the exception
+    # cannot be reached without reading the page layout of BOTH files.
 
     # Every page is compared pairwise. `magick compare A B` on multi-page files pairs
     # pages across the two lists and returns garbage RMSE (~27% for identical data), so
     # a single whole-file compare cannot be trusted; comparing only [0] would miss a
     # corrupted extra page. This gate authorises permanent deletion, so any page that
     # differs (or cannot be compared) blocks the purge.
-    for page in range(old_pages):
-        try:
-            result = subprocess.run(
-                ["magick", "compare", "-metric", "RMSE", f"{old_path}[{page}]", f"{new_path}[{page}]", "null:"],
-                capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
-            )
-            output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
+    def _pages_identical(pairs) -> tuple[bool, str]:
+        for old_page, new_page in pairs:
+            try:
+                result = subprocess.run(
+                    ["magick", "compare", "-metric", "RMSE",
+                     f"{_magick_spec(old_path)}[{old_page}]", f"{_magick_spec(new_path)}[{new_page}]", "null:"],
+                    capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
+                )
+                output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
 
-            if result.returncode not in (0, 1):
-                return False, f"compare failed on page {page}: {output}"
+                if result.returncode not in (0, 1):
+                    return False, f"compare failed on page {old_page}: {output}"
 
-            import re
-            output = _strip_magick_noise(output).strip()
-            # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
-            # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
-            # it matched "06" as the RMSE.
-            match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
-            if not match:
-                return False, f"parse failed on page {page}: '{output}'"
+                import re
+                output = _strip_magick_noise(output).strip()
+                # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
+                # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
+                # it matched "06" as the RMSE.
+                match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
+                if not match:
+                    return False, f"parse failed on page {old_page}: '{output}'"
 
-            rmse = float(match.group(1))
-            if rmse != 0.0:
-                return False, f"PIXEL_DIFF page {page} RMSE={rmse}"
+                rmse = float(match.group(1))
+                if rmse != 0.0:
+                    return False, f"PIXEL_DIFF page {old_page} RMSE={rmse}"
 
-        except subprocess.TimeoutExpired:
-            return False, f"compare timeout on page {page} (>{COMPARE_TIMEOUT_S}s)"
-        except FileNotFoundError:
-            return False, "ImageMagick not found (magick command missing)"
-        except Exception as e:
-            return False, f"compare error on page {page}: {e}"
+            except subprocess.TimeoutExpired:
+                return False, f"compare timeout on page {old_page} (>{COMPARE_TIMEOUT_S}s)"
+            except FileNotFoundError:
+                return False, "ImageMagick not found (magick command missing)"
+            except Exception as e:
+                return False, f"compare error on page {old_page}: {e}"
+        return True, ""
 
-    return True, f"IDENTICAL ({old_w}x{old_h}, {old_pages} page(s))"
+    if old_pages == new_pages:
+        strict_ok, strict_detail = _pages_identical([(i, i) for i in range(old_pages)])
+        if strict_ok:
+            return True, f"IDENTICAL ({old_w}x{old_h}, {old_pages} page(s))"
+    else:
+        strict_ok, strict_detail = False, f"PAGE_COUNT_MISMATCH {old_pages} vs {new_pages}"
+
+    # One difference is EXPECTED and safe: -GenerateThumbnail adds a thumbnail page, or
+    # replaces the one the source had with a freshly generated one at another size. Judged
+    # strictly, every file in a folder compressed with thumbnails came back MISMATCH
+    # ("PAGE_COUNT_MISMATCH 1 vs 2", "PIXEL_DIFF page 1"), so the backups could never be
+    # purged and the user was told a perfectly good archive did not match.
+    #
+    # Compare the IMAGE pages instead -- the thumbnail is derived data, and page 0 (the
+    # image the backup exists for) still has to be pixel-identical. Anything else keeps the
+    # strict verdict, and an unreadable page layout keeps it too: in doubt, do not delete.
+    old_geo = _tiff_page_geometry(old_path)
+    new_geo = _tiff_page_geometry(new_path)
+    if (old_geo is None or new_geo is None
+            or len(old_geo) != old_pages or len(new_geo) != new_pages):
+        return False, strict_detail
+
+    old_img = _image_page_indices(old_geo)
+    new_img = _image_page_indices(new_geo)
+    if not old_img or len(old_img) != len(new_img):
+        return False, strict_detail
+    if len(old_img) == old_pages and len(new_img) == new_pages:
+        # No thumbnail on either side -- nothing to excuse, the strict verdict stands.
+        return False, strict_detail
+
+    img_ok, _img_detail = _pages_identical(list(zip(old_img, new_img)))
+    if not img_ok:
+        return False, strict_detail
+
+    if new_pages > old_pages:
+        note = "thumbnail added"
+    elif new_pages < old_pages:
+        note = "thumbnail removed"
+    else:
+        note = "thumbnail regenerated"
+    return True, f"IDENTICAL ({old_w}x{old_h}, {len(old_img)} image page(s), {note})"
 
 
 def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "none") -> tuple[bool, float, str]:
@@ -1360,7 +1538,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
     def get_depth(path):
         try:
             result = subprocess.run(
-                ["magick", "identify", "-format", "%z", f"{path}[0]"],
+                ["magick", "identify", "-format", "%z", f"{_magick_spec(path)}[0]"],
                 capture_output=True, text=True, timeout=30
             )
             if result.returncode == 0:
@@ -1395,7 +1573,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             # RGB+IR) made the whole-file compare return garbage RMSE (~27%) even for
             # pixel-identical data, so padded files were misclassified as real 16-bit.
             result = subprocess.run(
-                ["magick", f"{tiff_path}[0]", "-depth", "8"] + (compress_8.split() if compress_8 else []) + [str(tmp8)],
+                ["magick", f"{_magick_spec(tiff_path)}[0]", "-depth", "8"] + (compress_8.split() if compress_8 else []) + [_magick_spec(tmp8)],
                 capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -1406,7 +1584,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
 
         try:
             result = subprocess.run(
-                ["magick", f"{tmp8}[0]", "-depth", "16"] + (compress_16.split() if compress_16 else []) + [str(tmp16)],
+                ["magick", f"{_magick_spec(tmp8)}[0]", "-depth", "16"] + (compress_16.split() if compress_16 else []) + [_magick_spec(tmp16)],
                 capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -1420,7 +1598,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
 
         try:
             result = subprocess.run(
-                ["magick", "compare", "-metric", "RMSE", f"{tiff_path}[0]", f"{tmp16}[0]", "null:"],
+                ["magick", "compare", "-metric", "RMSE", f"{_magick_spec(tiff_path)}[0]", f"{_magick_spec(tmp16)}[0]", "null:"],
                 capture_output=True, text=True, timeout=COMPARE_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -1474,10 +1652,13 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
     if folder is None:
         return False
 
+    # Relative to the folder the user chose (see _is_tool_output_path): testing the absolute
+    # path meant an ancestor named zip/logs/_export hid every file under it, and pointing
+    # the workflow AT such a folder found nothing at all.
     tiff_files = sorted([
         f for f in folder.rglob("*")
         if f.suffix.lower() in (".tif", ".tiff") and f.is_file()
-        and not any(p.lower() in ("old_tiffs", "old_padded", "logs", "zip", "_export", "converted_zip") for p in f.parts)
+        and not _is_tool_output_path(f, folder)
     ])
 
     if not tiff_files:
@@ -1783,7 +1964,7 @@ def _process_single_padded(tiff_path, staging):
     try:
         try:
             result = subprocess.run(
-                ["magick", str(tiff_path), "-depth", "8", "-compress", "zip", str(tmp8)],
+                ["magick", str(tiff_path), "-depth", "8", "-compress", "zip", _magick_spec(tmp8)],
                 capture_output=True, timeout=CONVERT_TIMEOUT_S
             )
         except FileNotFoundError:
@@ -1797,17 +1978,30 @@ def _process_single_padded(tiff_path, staging):
             status = "magick_error"
             return (name, parent, status, None, None, None, False, None, tmp8)
 
+        # A '%' in the name makes exiftool read a DIFFERENT file for -tagsfromfile and still
+        # exit 0, so `exif_ok` was true while nothing had been copied -- and this path replaces
+        # the original with a LOSSY 8-bit conversion. See _safe_tag_source.
+        tag_source, tag_temp = _safe_tag_source(tiff_path)
         try:
-            exif_result = subprocess.run(
-                ["exiftool", "-q", "-overwrite_original",
-                 "-tagsfromfile", str(tiff_path), "-all:all", "-unsafe",
-                 "--Compression", "--BitsPerSample", "--SampleFormat",
-                 str(tmp8)],
-                capture_output=True, timeout=30
-            )
-            exif_ok = exif_result.returncode == 0
+            if tag_source is None:
+                exif_ok = False
+            else:
+                exif_result = subprocess.run(
+                    ["exiftool", "-q", "-overwrite_original",
+                     "-tagsfromfile", tag_source, "-all:all", "-unsafe",
+                     "--Compression", "--BitsPerSample", "--SampleFormat",
+                     str(tmp8)],
+                    capture_output=True, text=True, timeout=30
+                )
+                # ONE -q above, not two: the second suppresses warnings, and an unreadable
+                # tagsfromfile source is only ever reported as a warning (exit stays 0).
+                exif_ok = (exif_result.returncode == 0
+                           and "Error opening file" not in (exif_result.stderr or ""))
         except (FileNotFoundError, subprocess.TimeoutExpired):
             exif_ok = False
+        finally:
+            if tag_temp:
+                Path(tag_temp).unlink(missing_ok=True)
 
         # magick drops the per-page SubfileType markers on rewrite, so a Capture One
         # thumbnail came back stamped PAGE and stopped being recognised as a thumbnail by
@@ -1835,7 +2029,7 @@ def _process_single_padded(tiff_path, staging):
             # with nothing verified.
             def _read_dims(path) -> Optional[tuple]:
                 r = subprocess.run(
-                    ["magick", "identify", "-format", "%w %h\n", f"{path}[0]"],
+                    ["magick", "identify", "-format", "%w %h\n", f"{_magick_spec(path)}[0]"],
                     capture_output=True, text=True, timeout=30
                 )
                 if r.returncode != 0 or not r.stdout:
@@ -2000,7 +2194,24 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                         print(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved")
                     tmp8.unlink(missing_ok=True)
                     continue
-                _safe_move(tmp8, final_dst)
+                # Bare, this move took the whole workflow down with a traceback: the files
+                # after it were never processed and no summary was printed, while the original
+                # sat in OLD_PADDED/ looking like it had been replaced. Put the backup back and
+                # carry on with the next file -- run_undo_old_tiffs already works this way.
+                try:
+                    _safe_move(tmp8, final_dst)
+                except Exception as e:
+                    try:
+                        _safe_move(backup_path, final_dst)
+                        restored = " -- original restored"
+                    except Exception:
+                        restored = f" -- ORIGINAL LEFT IN OLD_PADDED/{backup_path.name}"
+                    if RICH_AVAILABLE and console:
+                        console.print(f"    [red]FAILED: could not move the converted file into place ({escape(str(e))}){escape(restored)}[/red]")
+                    else:
+                        print(f"    FAILED: could not move the converted file into place ({e}){restored}")
+                    tmp8.unlink(missing_ok=True)
+                    continue
                 if RICH_AVAILABLE and console:
                     console.print(f"    [dim]Original backed up: OLD_PADDED/{escape(backup_path.name)}[/dim]")
                 else:
@@ -2096,7 +2307,14 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
                 (orphans if result[2] == MISSING_PARENT else mismatches).append(result)
 
     orphan_keys = {(o[0], o[1]) for o in orphans}
-    deletable = [it for it in items if (it[0], it[1]) not in orphan_keys]
+    # A file that does not verify is KEPT -- and only that file. One mismatch used to abort
+    # the purge for the entire tree, so a single bad conversion (or, before the thumbnail
+    # rule above, any file compressed with -GenerateThumbnail) left the user with no way to
+    # clean up the backups except deleting them by hand, which is exactly what this gate
+    # exists to prevent. Same shape as the orphan handling right above.
+    mismatch_keys = {(m[0], m[1]) for m in mismatches}
+    deletable = [it for it in items
+                 if (it[0], it[1]) not in orphan_keys and (it[0], it[1]) not in mismatch_keys]
 
     # Display results
     total_old_size = sum(s for _, _, s in deletable)
@@ -2138,15 +2356,16 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             print(f"  [{status_str}] {old_file.relative_to(folder)}  {size_info}{detail}")
 
     if mismatches:
+        head = (f"{len(mismatches)} file(s) did not verify against their parent copy and will "
+                f"be KEPT (nothing below is deleted for them):")
         if RICH_AVAILABLE and console:
-            console.print(f"\n[red]{len(mismatches)} file(s) have issues -- cannot purge.[/red]")
+            console.print(f"\n[red]{escape(head)}[/red]")
             for old_file, new_file, reason in mismatches:
                 console.print(f"  [red]! {escape(str(old_file.relative_to(folder)))}: {escape(reason)}[/red]")
         else:
-            print(f"\n{len(mismatches)} file(s) have issues -- cannot purge.")
+            print(f"\n{head}")
             for old_file, new_file, reason in mismatches:
                 print(f"  ! {old_file.relative_to(folder)}: {reason}")
-        return False
 
     if orphans:
         note = (f"{len(orphans)} file(s) have no counterpart in the parent folder and will be "
@@ -2167,7 +2386,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
             console.print(f"\n[yellow]{escape(msg)}[/yellow]")
         else:
             print(f"\n{msg}")
-        return True
+        return not mismatches
 
     # Summary
     if RICH_AVAILABLE and console:
@@ -2256,7 +2475,9 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
     else:
         print(f"\nDone. Deleted {deleted} file(s).")
 
-    return True
+    # False when something did not verify: those backups were deliberately kept, and the
+    # caller should not read the run as "everything checked out".
+    return not mismatches
 
 
 def _format_size(size_bytes: int) -> str:
@@ -2543,12 +2764,11 @@ def generate_manifest(root: Path, mode: int) -> Optional[str]:
     tiff_dirs = set()
     # Same exclusions as run_diagnose_tiffs: OLD_TIFFs holds the pristine originals the
     # compression modes archived -- a manifest entry pointing there would recompress the
-    # backups, and in mode 8 DELETE them.
-    _excluded_parts = {"old_tiffs", "old_padded", "logs", "zip", "_export", "converted_zip"}
+    # backups, and in mode 8 DELETE them. Relative to the root, via _is_tool_output_path.
     for p in root.rglob("*"):
         try:
             if p.is_file() and p.suffix.lower() in TIFF_EXTS:
-                if any(part.lower() in _excluded_parts for part in p.relative_to(root).parts):
+                if _is_tool_output_path(p, root):
                     continue
                 tiff_dirs.add(p.parent)
         except OSError:
@@ -3599,6 +3819,25 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
             input("Dry-run? [y/N]: ").strip().lower() == "y",
         )
 
+    def _ask_exclude_folders():
+        """Same question the compress/Copy EXIF workflows ask. The backend used to carry a
+        hardcoded, silent exclusion list instead (ZIP and _EXPORT included, which are exactly
+        where the compressed library and the export trees live)."""
+        default = cfg.config.last_exclude_folders or ""
+        if RICH_AVAILABLE and console:
+            value = Prompt.ask(
+                "[cyan]Exclude folders?[/cyan] (';'-separated folder names, '-' = none)",
+                default=default or "-").strip()
+        else:
+            value = input(f"Exclude folders? (';'-separated names, '-' = none) [{default or '-'}]: ").strip()
+            if value == "":
+                value = default
+        if value in ("-", "", "none"):
+            cfg.config.last_exclude_folders = None
+            return ""
+        cfg.config.last_exclude_folders = value
+        return value
+
     def _ask_output_dir():
         if RICH_AVAILABLE and console:
             value = Prompt.ask("[cyan]Output folder (empty = next to each TIFF)[/cyan]", default="").strip()
@@ -3686,6 +3925,7 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
     if out_dir is None:
         return False
     recursive, dry_run = _ask_recursive_and_dry()
+    exclude_folders = _ask_exclude_folders() if recursive else ""
 
     cmd = [
         cfg.config.ps_name, "-NoProfile", "-File", str(script),
@@ -3698,6 +3938,8 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
     ]
     if out_dir:
         cmd += ["-OutputDir", out_dir]
+    if exclude_folders:
+        cmd += ["-ExcludeFolders", exclude_folders]
     if recursive:
         cmd += ["-Recursive"]
     if dry_run:

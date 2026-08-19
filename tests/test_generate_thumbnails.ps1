@@ -42,20 +42,34 @@ Describe "generate_thumbnails.ps1 - Input Scan" {
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match 'OLD_TIFFS'
     }
+
+    It "Matches the tool-output folders RELATIVE to the scan root, not absolutely" {
+        # Round 15: the exclusion was a regex over the ABSOLUTE directory, so an ancestor
+        # named zip/_EXPORT/OLD_TIFFs hid every file under it and pointing -InputDir AT such
+        # a folder found nothing. Same fix the three backends got in round 14.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'function Test-PathExcluded'
+        $content | Should -Match 'Test-PathExcluded -Directory \$_\.DirectoryName -Root \$_\.InputRoot'
+        $content | Should -Not -Match '\$_\.DirectoryName -notmatch'
+    }
 }
 
 Describe "generate_thumbnails.ps1 - Suffixed-Frame Fallback" {
-    It "Checks for suffixed frames (-Filter with -*) when exact dest not created" {
-        # The filter pattern is built from wildcard-escaped parts so basenames
-        # containing [] or * cannot silently match the wrong files
-        $matches = Select-String -Path $script:ScriptPath -Pattern '-Filter \$framePattern'
+    It "Checks for suffixed frames by ordinal name match when exact dest not created" {
+        # Round 15: this used to pass a wildcard-escaped pattern to -Filter, which is the
+        # FileSystem provider's DOS filter -- it has no escape syntax, so the backticks were
+        # taken literally and a basename containing '[' matched nothing. Frames that HAD
+        # been written were reported as "output not created" on every run.
+        $matches = Select-String -Path $script:ScriptPath -Pattern '\$_\.Name\.StartsWith\(\$framePrefix, \[System\.StringComparison\]::OrdinalIgnoreCase\)'
         $matches.Count | Should -BeGreaterOrEqual 2  # parallel + sequential paths
     }
 
-    It "Escapes wildcards in the frame/exists filter basenames" {
+    It "Never routes a name pattern through -Filter" {
         $content = Get-Content $script:ScriptPath -Raw
-        $content | Should -Match 'WildcardPattern]::Escape\(\$destBase\)'
-        $content | Should -Match 'WildcardPattern]::Escape\(\$b\)'
+        $content | Should -Not -Match '-Filter \$framePattern'
+        $content | Should -Not -Match '-Filter \$pattern'
+        # The call form, so the explanation left in the source comment does not match
+        $content | Should -Not -Match 'WildcardPattern\]::Escape\('
     }
 
     It "Reports frame count in OK result for multi-page output" {
