@@ -9,9 +9,192 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 >
 > Rounds 4-7 used to be titled `v2.3`-`v2.6`. Those versions were never released: all five of
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
-> that way now. Rounds 8-13 shipped after v2.2 and make up **v2.3**.
+> that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**.
 
-## Audit Round 15
+## v2.4 - Audit Round 16
+
+A full audit of the four backends and the wizard against real files: Capture One 16-bit exports
+(`TIFF16`, `TIFF16_Z8`) and multi-page film scans including an RGB+IR file whose IR channel is a
+separate full-size `MASK` page (`raw_scan_2`, 700 MB per frame). Every finding below was traced to
+the code path that causes it; the externally verifiable ones were reproduced on disk first. Each
+fix is pinned by a test, and the round-16 classes in `tests/test_regression_classes.py` pin the
+fixes in all three PowerShell backends at once so the copies cannot drift apart again.
+
+The recurring theme this round: **gates that verified pixels but not metadata, and writes that were
+safe only until something interrupted them.**
+
+### HIGH - A Failed Metadata Restore Still Overwrote the Original (Copy EXIF, in-place)
+**Issue:** the in-place `-CompressZip` flow writes EXIF into the original, builds a staged ZIP
+(which magick does not populate with the full EXIF/XMP/IPTC block), then restores the tags into the
+staged file with `exiftool -tagsfromfile`. The staged file was registered in the staging map
+**before** the restore result was checked, so a failed restore -- or a failed `Backup-TiffMetadata`
+container, whose own docblock says "the caller must REFUSE the write" -- still moved the
+metadata-poor ZIP on top of the EXIF-bearing original. Reported as `WARN`, exit 0. The same hole
+existed for a failed `Restore-TiffSubfileTypes`.
+- **Fix:** the staging mapping is registered only after the restore, backup and subfiletype gates
+  all pass. Any failure deletes the staged file, leaves the original untouched, and reports
+  `ERROR (... - original untouched)` with a nonzero exit.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### HIGH - Ctrl+C Stranded Originals in `OLD_TIFFs/` With No Rollback
+**Issue:** modes 0/9 move each original into `OLD_TIFFs/` before any worker runs, and the rollback
+only executed on per-group processing errors -- never on an interrupt. A Ctrl+C left originals in
+`OLD_TIFFs/` with no output and no `ROLLBACK` line; since discovery excludes `OLD_TIFFs/`, no later
+run would ever touch or restore them.
+- **Fix:** every move registers the triple (backup, original, destination) in
+  `$script:movedOriginals`; the interrupt trap walks it and restores any original whose output is
+  missing or fails a full decode (`Test-ZipIntegrity`), deleting the partial output first. Verified
+  outputs are kept.
+- **Files:** `compress_tiff_zip.ps1`
+
+### HIGH - A Corrupt Output Blocked the Rollback Forever ("SKIP rollback (ZIP exists)")
+**Issue:** without `-StagingDir`, the worker writes straight to the final destination. If magick
+left a partial file behind (disk full, killed mid-write), the rollback saw a file at the
+destination and skipped restoring the original -- leaving a corrupt file under the photo's name and
+the pristine original hidden in `OLD_TIFFs/`.
+- **Fix:** "ZIP exists" now means "ZIP exists **and decodes fully**". A destination that fails the
+  integrity check is deleted and the original restored. The magick-failure paths also delete a
+  partial `writeDst` when it is the final destination, not only when it is an in-place temp
+  sibling.
+- **Files:** `compress_tiff_zip.ps1`
+
+### HIGH - The Copy EXIF Backends Passed Filenames to exiftool as Raw argv
+**Issue:** round 4 routed every exiftool call in `compress_tiff_zip.ps1` through a `-@` argfile
+beginning with `-charset filename=utf8`, because exiftool decodes argv in the ANSI codepage. The
+Copy EXIF backends never got the port: their EXIF probe, ICC probe, `-tagsfromfile` copy,
+compression probe and metadata restore all passed paths as plain argv, so a non-ANSI name
+(`äphoto.tif`, CJK) failed or addressed the wrong file -- while the same script's
+`Backup-TiffMetadata` handled that name correctly through an argfile.
+- **Fix:** a single `Invoke-ExifTool` helper (UTF-8 argfile, one argument per line, exit code on
+  `.ExitCode`) now backs every exiftool invocation in both backends, injected into the PS7
+  `-Parallel` runspace. The fail-closed `Error opening file` checks are unchanged.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### HIGH - The Purge Gate Verified Pixels Only; Metadata Loss in the Parent Was Never Checked
+**Issue:** workflow [6] deletes the `OLD_TIFFs/` backup when the compressed parent compares
+pixel-identical. A backend that compressed successfully but lost EXIF/ICC/SubfileType (an exiftool
+failure, or the restore-return bug below) still passed RMSE 0 on every page -- so the purge deleted
+the last copy of that metadata.
+- **Fix:** `_compare_tiff_metadata` now also requires `_metadata_matches`: per-IFD `SubfileType` on
+  aligned page pairs, EXIF *presence* per compared page plus non-IFD groups file-wide, and ICC
+  *identity* by SHA-256. Unreadable metadata or a missing exiftool refuses the purge (fail
+  closed). EXIF is presence-not-identity because a bare `magick -compress zip` rewrite legitimately
+  drops IFD0 user tags -- verified live, and pinned by the round-15 read-only tests.
+- **Files:** `convert_tiff.py`
+
+### HIGH - ImageMagick Globs `[`/`]` in Filenames, and a Glob Match Wins Over the Literal File
+**Issue:** `_magick_spec` escaped `%` but not `[`/`]`, which ImageMagick reads as a filename glob.
+With `Scan [1].tif` and `Scan 1.tif` in the same folder -- plausible scanner naming -- the
+`[1]`-named file's compares could silently read the other file's pixels, and a `True` verdict from
+`_compare_tiff_metadata` authorizes deleting the `OLD_TIFFs` backup. Verified live on IM 7.1.2:
+a glob match **wins** over an existing literal file, and **no** escape exists on Windows
+(`\[`, `[[]` and the `tiff:` prefix all fail or still glob).
+- **Fix:** paths containing brackets are routed through a bracket-free hard-link alias (copy
+  fallback cross-volume, wiped at exit); if the alias cannot be created, the spec returned is
+  deliberately unopenable so every gate fails closed. Appended `[n]` page selectors are unaffected
+  (callers append them after the function returns). The padded-conversion staging name is
+  bracket-sanitized at creation so outputs never need an alias.
+- **Files:** `convert_tiff.py`
+
+### HIGH - `-ExcludeFolders` Degraded to Absolute-Path Matching With the Default `-InputDir .`
+**Issue:** the round 14 fix made matching relative to the scan root, but the root itself was built
+with `Join-Path $PWD.Path $dir` and never normalized: with the default `-InputDir .` it stayed
+`C:\some\dir\.`. `Test-PathExcluded` then never recognised the root, fell into its "should not
+happen" absolute-path fallback for **every** file, and matched exclusion names against the drive,
+every ancestor and the root's own name -- the exact failure round 14 fixed, back through the
+default parameter value. An ancestor name like `Documents` or `GitHub` excluded the entire run,
+logged as a normal exclusion, exit 0. The same un-normalized root also broke the mode 5
+grandparent clamp, collapsing output into `<root>\.\ZIP`.
+- **Fix:** every `-InputDir` root is normalized with `[System.IO.Path]::GetFullPath()` right after
+  the join.
+- **Files:** `compress_tiff_zip.ps1`
+
+### MEDIUM - Modes 6/7 Could Write Output Outside the Chosen `-InputDir`
+The `_EXPORT` marker was matched against the file's **absolute** directory -- including segments
+above the root -- so `-Mode 6 -InputDir C:\jobs\_EXPORT\archive` wrote to
+`C:\jobs\_EXPORT\ZIP\...`, outside the selected tree. Both discovery and `Resolve-Output` now match
+the marker **relative to the scan root** (the round 14 rule); a marker above the root yields no
+prefix and the file is reported rather than written outside.
+- **Files:** `compress_tiff_zip.ps1`
+
+### MEDIUM - The 30-Second magick Timeout False-Failed the Files This Toolkit Exists For
+A full decode+compare of a 500 MB film scan takes 20-35 s on a fast disk (the function's own
+`.NOTES` said so), and every integrity/pixel gate ran under the same `-MagickTimeout`. Mode 8 and
+every in-place replace therefore refused 500-700 MB scans. The effective timeout is now
+`max(base, ceil(sizeMB * 0.25))` on the PowerShell side and `base + sizeMB * 0.25` in
+`convert_tiff.py`, floors unchanged -- a 700 MB scan gets ~3 minutes.
+- **Files:** `compress_tiff_zip.ps1`, `convert_tiff.py`
+
+### MEDIUM - A Page-Short Multi-Page Output Shipped as `OK` in Modes 1-7
+On a damaged multi-page scan with `-SafeMode:$false`, magick can write fewer pages than the source;
+only the in-place and mode 8 paths had a gate. Modes 1-7 now compare source/output page counts
+after the write; a shrink or an unreadable output is an `ERROR (page count shrink)` and the partial
+file is dropped.
+- **Files:** `compress_tiff_zip.ps1`
+
+### MEDIUM - `copy_exif` In-Place ZIP Dropped the File's mtime
+The code read `LastWriteTime` from the destination **after** the move replaced it -- a self
+-assignment. The original's mtime is now captured before the move and applied after, matching the
+`-P` behaviour of the EXIF-only path.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### MEDIUM - `-unsafe` Stamped the JPEG's Geometry Onto the TIFF
+The JPEG→TIFF `-tagsfromfile` copy passed `-unsafe`, lifting exiftool's block on tags that describe
+the image data. Verified live with an 80x60 JPEG and a 200x150 TIFF: the TIFF came out tagged
+`Orientation=Rotate 90 CW` and `ExifImageWidth=80`. `-unsafe` is gone, replaced by explicit
+exclusions (`--ImageWidth --ImageHeight --ImageLength --ExifImageWidth --ExifImageHeight
+--PixelXDimension --PixelYDimension --Orientation --ThumbnailImage --PreviewImage --JpgFromRaw`).
+Same live pair afterwards: geometry untouched, `DateTimeOriginal`/Make/XMP/IPTC/MakerNotes copied.
+The TIFF→TIFF restore copy keeps `-unsafe` -- it restores between identical files.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`
+
+### MEDIUM - The Padded-File Converter Treated Any Smaller Page as a Thumbnail
+`_tiff_extra_pages_are_thumbnails` excused an **untagged** page merely for being smaller than page
+0, and the padded-compress path then down-converted it to 8-bit without ever diagnosing it -- while
+the purge path's `_image_page_indices` required the `REDUCEDIMAGE` tag. The two classifiers now use
+the same rule: tag **and** strictly smaller. An untagged extra page refuses the lossy path.
+- **Files:** `convert_tiff.py`
+
+### MEDIUM - Small Gates Hardened
+- `_restore_subfile_types` returning False was ignored; the file now gets a
+  `subfile_restore_failed` status, a WARN, and the original is preserved (`convert_tiff.py`).
+- `exif_ok` accepted exiftool's exit 0 with warnings that tags went unwritten; a warning
+  containing `sorry`/`not written`/`can't` now fails the copy (`convert_tiff.py`).
+- Heuristic-match detection used case-sensitive `-cne`, so an exact case-differing stem pair
+  (`DSC_0001.tif` / `dsc_0001.jpg`) was reported as a heuristic WARN and failed `-FailOnWarn`
+  runs (Copy EXIF backends).
+- The 259-char guard now charges the +26 characters the in-place temp sibling adds, so a
+  234-259-char destination no longer fails inside magick with a bare "No such file or directory"
+  (`compress_tiff_zip.ps1`).
+- Mode 2 with a relative `-OutputDir` and several `;` roots scattered one output per root, and
+  cross-root name collisions were never seen; the output is resolved once against `$PWD`
+  (`compress_tiff_zip.ps1`).
+
+### LOW
+- Mode 4 `-ZipSuffix` was an unescaped `-replace` replacement; `$` in it is now doubled.
+- `-InputDir` lists are deduped (`A;A` no longer double-processes) in both compress and Copy EXIF.
+- File lists are sorted before duplicate-name claiming, so `_v2` assignment is reproducible
+  (compress, Copy EXIF, thumbnail generator).
+- Dry runs now carry `FinalDst`, so the collision-rename note shows on `DRY` lines.
+- `generate_thumbnails.ps1`: only `name_thumb-<digits>.<ext>` counts as a `-Page all` frame (a
+  stray `photo_thumb-old.jpg` no longer suppresses generation forever); `-Remove` matches the
+  OutputDir tail literally instead of via `-like`; `-FolderPattern` is escaped before `-like`.
+- `convert_tiff.py`: the error tuple no longer carries the **source** path in the temp-file slot;
+  the OLD_TIFFs undo skips non-files; AutoFind excludes `old_padded`; the plain-text wizard
+  validates `thumb_format` instead of crashing at binding; `temp_dir.mkdir` failures fall back to
+  the system temp with a message; a corrupt config file warns on stderr instead of silently
+  reverting to defaults.
+- A partial `.mie` container is deleted when `Backup-TiffMetadata` fails (Copy EXIF backends).
+
+### Verified correct, not changed
+- The `[IFDn] SubfileType:` regex in `convert_tiff.py` matches exiftool 13.59's `-a -G1 -s -s -n`
+  output exactly (tested on a synthetic multi-page TIFF).
+- `_compare_tiff_metadata`'s page-count gate and IR-page refusal could not be false-passed with the
+  RGB+IR or Capture One main+thumbnail shapes.
+- The MIE backup/restore round-trip, the run-scoped staging prefixes, and the manifest loader
+  guards all behaved as designed.
+
+## v2.4 - Audit Round 15
 
 Started from a full re-read of the four backends and the wizard, with every finding reproduced on
 disk before it was fixed and pinned by a test that fails when the fix is reverted (6 targeted

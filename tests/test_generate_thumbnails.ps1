@@ -133,6 +133,31 @@ Describe "generate_thumbnails.ps1 - Audit Round 7" {
         # in <any subfolder>\<OutputDir>; -Remove only looked at <root>\<OutputDir>.
         $content = Get-Content $script:ScriptPath -Raw
         $content | Should -Match 'Get-ChildItem -LiteralPath \$r -Directory -Recurse'
-        $content | Should -Match '\$_\.FullName -like "\*\\\$suffix"'
+    }
+}
+
+Describe "generate_thumbnails.ps1 - Audit Round 16" {
+    It "-Remove matches the relative -OutputDir tail literally, not as a wildcard" {
+        # Was `-like "*\$suffix"`: a '[' in -OutputDir became a wildcard character class, so
+        # the literal folder never matched and folders like 'xy' matched pattern 'x[y]'.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Not -Match '-like "\*\\\$suffix"'
+        $content | Should -Match '\.EndsWith\(\$suffixTail, \[System\.StringComparison\]::OrdinalIgnoreCase\)'
+    }
+
+    It "Frame-name checks require digits between prefix and extension (all 3 copies)" {
+        # Test-ThumbExists plus the parallel/sequential frame fallbacks: any name_thumb-* file
+        # used to count as a -Page all frame, so a manually saved name_thumb-old.jpg made
+        # every future run report SKIP forever.
+        $digits = Select-String -Path $script:ScriptPath -Pattern "-match '\^\\d\+\$'"
+        $digits.Count | Should -Be 3
+    }
+
+    It "Dedupes and sorts discovered sources before claiming destination names" {
+        # A repeated -InputDir (A;A) or roots nested under a -Recursive root enumerated the
+        # same source twice and the second copy became _v2; unsorted Get-ChildItem order also
+        # made the photo_thumb.jpg vs photo_thumb_v2.jpg assignment non-reproducible.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$allFiles = @\(\$allFiles \| Sort-Object FullName -Unique\)'
     }
 }

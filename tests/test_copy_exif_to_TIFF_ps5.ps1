@@ -99,3 +99,73 @@ Describe "copy_exif_to_TIFF_ps5.ps1 - Audit Round 7" {
         $content | Should -Not -Match 'Join-Path \$writeDir \$tif\.Name'
     }
 }
+
+Describe "copy_exif_to_TIFF_ps5.ps1 - Audit Round 16" {
+    It "exiftool calls route through a UTF-8 argfile (Invoke-ExifTool)" {
+        # Raw-argv calls reached exiftool in the console code page, losing non-ASCII names.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'function Invoke-ExifTool'
+        $content | Should -Match "'-charset', 'filename=utf8'"
+        $content | Should -Not -Match 'exiftool -q -q -G1 -s -EXIF:all'
+        $content | Should -Not -Match 'exiftool -s -s -s -IFD0:Compression'
+        $content | Should -Not -Match 'exiftool -s -s -s -ICC_Profile:all'
+        $content | Should -Not -Match 'exiftool -q -overwrite_original'
+    }
+
+    It "JPEG->TIFF copy drops -unsafe and excludes geometry tags explicitly" {
+        # -unsafe stamped the JPEG's ImageWidth/Height/ExifImageWidth/Orientation onto a TIFF
+        # whose geometry legitimately differs (Capture One crops).
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match "'--ImageWidth'"
+        $content | Should -Match "'--ImageHeight'"
+        $content | Should -Match "'--ExifImageWidth'"
+        $content | Should -Match "'--ExifImageHeight'"
+        $content | Should -Match "'--PixelXDimension'"
+        $content | Should -Match "'--PixelYDimension'"
+        $content | Should -Match "'--Orientation'"
+    }
+
+    It "Failed metadata restore is an ERROR and the staged file is deleted, not moved" {
+        # The staging mapping used to be registered BEFORE the restore check, so a staged ZIP
+        # that lost EXIF was moved on top of the EXIF-bearing original as a mere WARN.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Not -Match 'WARN \(exiftool metadata copy failed'
+        $content | Should -Not -Match 'WARN \(subfiletype restore failed'
+        $content | Should -Match 'ERROR \(exiftool metadata restore failed - original untouched\)'
+        $content | Should -Match 'ERROR \(subfiletype restore failed - original untouched\)'
+    }
+
+    It "Heuristic-match detection is case-insensitive" {
+        # Find-JpegPair matched case-insensitively, so DSC_0001.tif + dsc_0001.jpg is an exact
+        # stem match, not a heuristic WARN.
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$p\.UsedBase -ine \$p\.TifBase'
+        $content | Should -Not -Match '\$p\.UsedBase -cne \$p\.TifBase'
+    }
+
+    It "In-place ZIP preserves the original mtime (captured BEFORE the move)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$origMtime = \(Get-Item -LiteralPath \$tif\.FullName\)\.LastWriteTime'
+    }
+
+    It "-FolderPattern is wildcard-escaped before -like" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'WildcardPattern\]::Escape\(\$FolderPattern\)'
+        $content | Should -Not -Match '-like "\*\$FolderPattern\*"'
+    }
+
+    It "InputDir entries are deduplicated case-insensitively" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$seenInputDirs\.Add\(\$_\)'
+    }
+
+    It "TIFF list is sorted before destination claiming" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$tiffFiles = @\(\$tiffFiles \| Sort-Object FullName\)'
+    }
+
+    It "Backup-TiffMetadata deletes a partial .mie on failure" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'PARTIAL container behind; remove it'
+    }
+}

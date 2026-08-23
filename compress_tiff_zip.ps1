@@ -240,6 +240,13 @@ function Process-Results {
 
 # -- Cleanup on interrupt -----------------------------------------
 $script:cleanupDirs   = @()
+# Audit round 16: originals that modes 0/9 moved to OLD_TIFFs/ (Backup = path in OLD_TIFFs,
+# Original = where it came from, FinalDst = where the verified ZIP should land). The trap
+# below puts back any original whose verified output never landed -- the per-group rollback
+# only runs on the normal exit path, so Ctrl+C used to strand originals in OLD_TIFFs/.
+# Entries are validated against the DISK at trap time, so a stale entry causes a no-op
+# check, never a wrong restore.
+$script:movedOriginals = [System.Collections.ArrayList]::new()
 # 8 hex chars, not 32: this prefix and a per-file id are prepended to every staged file
 # name, and Windows still refuses paths over 260 characters (magick.exe is not long-path
 # aware). The old <32 hex>_<32 hex>_<name> form added 66 characters to a path that already
@@ -264,6 +271,27 @@ trap {
         if (Test-Path -LiteralPath $dir) {
             # Only remove staging files created by this run (run-scoped prefix)
             Get-ChildItem -LiteralPath $dir -Force | Where-Object { $_.Name -like "$($script:runStagingId)_*" } | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        }
+    }
+    # Audit round 16: restore originals stranded in OLD_TIFFs/ by the interrupt. An original
+    # goes back unless its output exists AND decodes cleanly (modes 0/9 deliberately keep
+    # archived originals for completed files); a partial/corrupt output is deleted first.
+    foreach ($mv in @($script:movedOriginals.ToArray())) {
+        try {
+            if (-not (Test-Path -LiteralPath $mv.Backup)) { continue }
+            $outputOk = $false
+            if ($mv.FinalDst -and (Test-Path -LiteralPath $mv.FinalDst)) {
+                $outputOk = Test-ZipIntegrity -Path $mv.FinalDst -TimeoutSec $script:MagickTimeout
+            }
+            if ($outputOk) { continue }
+            if ($mv.FinalDst) { Remove-Item -LiteralPath $mv.FinalDst -Force -ErrorAction SilentlyContinue }
+            $origDir = Split-Path $mv.Original -Parent
+            if ($origDir -and -not (Test-Path -LiteralPath $origDir)) { [System.IO.Directory]::CreateDirectory($origDir) | Out-Null }
+            Move-Item -LiteralPath $mv.Backup -Destination $mv.Original -Force -ErrorAction Stop
+            [void]$script:movedOriginals.Remove($mv)
+            Write-Log "RESTORED (interrupt cleanup) | $($mv.Original)" "WARN"
+        } catch {
+            Write-Log "RESTORE FAILED | $($mv.Original): $($_.Exception.Message)" "ERROR"
         }
     }
     if ($isInterrupt) { break } else { exit 1 }
@@ -357,16 +385,32 @@ function Get-Files-Mode6 {
     Get-ChildItem -LiteralPath $root -File -Recurse:$true |
         Where-Object {
             $_.Extension -match '^\.(tif|tiff)$' -and
-            $_.DirectoryName -match "(?i)[\\/]$([regex]::Escape($marker))(?:[\\/]|$)"
+            # Audit round 16: match the marker RELATIVE to the scan root (same contract as
+            # Test-PathExcluded). The old absolute-path regex let an _EXPORT folder ABOVE the
+            # chosen -InputDir claim the file, and Resolve-Output then rebuilt the output
+            # from the absolute path -- landing outside the tree the user selected.
+            (Test-PathExcluded -Directory $_.DirectoryName -Root $root -Names @($marker))
         }
 }
 
 function Get-Files-Mode7 {
     param([string]$root, [string]$marker, [string]$tiffSubfolder)
+    # Audit round 16: same relative-to-root contract as mode 6 -- the marker and the TIFF
+    # subfolder only count at/below the scan root, never in the ancestors above it.
+    $rootN = "$root".Replace('/', '\').TrimEnd('\')
     Get-ChildItem -LiteralPath $root -File -Recurse:$true |
         Where-Object {
-            $_.Extension -match '^\.(tif|tiff)$' -and
-            $_.DirectoryName -match "(?i)[\\/]$([regex]::Escape($marker))[\\/]$([regex]::Escape($tiffSubfolder))(?:[\\/]|$)"
+            if ($_.Extension -notmatch '^\.(tif|tiff)$') { return $false }
+            $dirN = $_.DirectoryName.Replace('/', '\').TrimEnd('\')
+            if ($dirN -ieq $rootN) { $rel = "" }
+            elseif ($dirN.StartsWith("$rootN\", [System.StringComparison]::OrdinalIgnoreCase)) { $rel = $dirN.Substring($rootN.Length + 1) }
+            else { $rel = $dirN }
+            if (-not $rel) { return $false }
+            $segs = $rel -split '\\'
+            for ($i = 0; $i -lt $segs.Count - 1; $i++) {
+                if ($segs[$i] -ieq $marker -and $segs[$i + 1] -ieq $tiffSubfolder) { return $true }
+            }
+            return $false
         }
 }
 
@@ -446,22 +490,6 @@ function Test-PathExcluded {
 
 # -- Output Path Resolution ----------------------------------------
 
-function Get-PathPrefix {
-    <#
-    .SYNOPSIS
-        Rebuilds the path formed by $parts[0..$idx], where $parts comes from splitting a
-        directory on [\/]. Used by modes 6/7 to locate the real _EXPORT folder of a file.
-        Falls back to <inputRoot>\<marker> when the rebuild yields nothing usable.
-    #>
-    param([string[]]$parts, [int]$idx, [string]$inputRootP, [string]$marker)
-
-    if ($idx -lt 0 -or $idx -ge $parts.Count) { return (Join-Path $inputRootP $marker) }
-    $prefix = ($parts[0..$idx]) -join '\'
-    # UNC paths split into leading empty parts; only bail out when nothing but separators is left
-    if ([string]::IsNullOrWhiteSpace($prefix.Replace('\', ''))) { return (Join-Path $inputRootP $marker) }
-    return $prefix
-}
-
 function Resolve-Output {
     param(
         [System.IO.FileInfo]$tiff,
@@ -508,15 +536,18 @@ function Resolve-Output {
         4 {
             $parentFolder = Split-Path $parent -Leaf
             $grandparent  = Split-Path $parent -Parent
-            # Replace TIFF suffix with ZIP, handling _TIFF -> _ZIP and TIFF -> ZIP
+            # Replace TIFF suffix with ZIP, handling _TIFF -> _ZIP and TIFF -> ZIP.
+            # -replace treats '$' in the REPLACEMENT as a group reference, so a -ZipSuffix
+            # like "arc$1" mangled the folder name; doubling escapes it (audit round 16).
+            $zipSuffixR = $zipSuffix.Replace('$', '$$')
             if ($parentFolder -match '(?i)_(TIFF)$') {
-                $newFolderName = $parentFolder -replace '(?i)_(TIFF)$', "$zipSuffix"
+                $newFolderName = $parentFolder -replace '(?i)_(TIFF)$', "$zipSuffixR"
             } elseif ($parentFolder -ieq 'TIFF') {
                 # A folder named exactly "TIFF" has no stem, so the suffix rule below turned
                 # it into "_ZIP" (leading underscore). Use the plain subfolder name instead.
                 $newFolderName = $zipSubfolderName
             } elseif ($parentFolder -match '(?i)^(.+)(TIFF)$') {
-                $newFolderName = $parentFolder -replace '(?i)(TIFF)$', $zipSuffix
+                $newFolderName = $parentFolder -replace '(?i)(TIFF)$', $zipSuffixR
             } else {
                 $newFolderName = $parentFolder + "$zipSuffix"
             }
@@ -547,7 +578,15 @@ function Resolve-Output {
             return Join-Path $zipFolder "$stem.tif"
         }
         6 {
-            $parts = $parent -split '[\\/]'
+            # Audit round 16: consider the marker only AT/BELOW the input root, matching the
+            # discovery contract above. The old absolute-path split let an _EXPORT folder
+            # ABOVE the chosen -InputDir rebuild the output outside the selected tree; such a
+            # marker is now treated as no-marker ($null -> the file is reported, not written).
+            $parentN = $parent.Replace('/', '\').TrimEnd('\')
+            if ($parentN -ieq $inputRootP) { $relParent = "" }
+            elseif ($parentN.StartsWith("$inputRootP\", [System.StringComparison]::OrdinalIgnoreCase)) { $relParent = $parentN.Substring($inputRootP.Length + 1) }
+            else { return $null }
+            $parts = if ($relParent) { $relParent -split '\\' } else { @() }
             $exportIdx = -1
             for ($i = 0; $i -lt $parts.Count; $i++) {
                 if ($parts[$i] -ieq $exportMarker) { $exportIdx = $i; break }
@@ -556,7 +595,7 @@ function Resolve-Output {
             # Output goes inside the _EXPORT folder the file actually came from.
             # (Using <inputRoot>\_EXPORT would merge every job into one folder and
             # create an _EXPORT at the root that never existed.)
-            $exportRoot = Get-PathPrefix $parts $exportIdx $inputRootP $exportMarker
+            $exportRoot = Join-Path $inputRootP (($parts[0..$exportIdx]) -join '\')
             $relParts = if (($exportIdx + 1) -le ($parts.Count - 1)) { $parts[($exportIdx + 1)..($parts.Count - 1)] } else { @() }
             $newParent = Join-Path $exportRoot $exportZipSubfolder
             if ($relParts.Count -gt 0 -and $relParts[0]) {
@@ -566,7 +605,13 @@ function Resolve-Output {
             return Join-Path $newParent "$stem.tif"
         }
         7 {
-            $parts = $parent -split '[\\/]'
+            # Audit round 16: same clamp as mode 6 -- the marker (and the TIFF subfolder
+            # below it) only count relative to the input root.
+            $parentN = $parent.Replace('/', '\').TrimEnd('\')
+            if ($parentN -ieq $inputRootP) { $relParent = "" }
+            elseif ($parentN.StartsWith("$inputRootP\", [System.StringComparison]::OrdinalIgnoreCase)) { $relParent = $parentN.Substring($inputRootP.Length + 1) }
+            else { return $null }
+            $parts = if ($relParent) { $relParent -split '\\' } else { @() }
             $exportIdx = -1
             $tifIdx    = -1
             for ($i = 0; $i -lt $parts.Count; $i++) {
@@ -575,7 +620,7 @@ function Resolve-Output {
                 if ($exportIdx -ge 0 -and $parts[$i] -ieq $exportTiffSubfolder) { $tifIdx = $i; break }
             }
             if ($exportIdx -lt 0 -or $tifIdx -lt 0) { return $null }
-            $exportRoot = Get-PathPrefix $parts $exportIdx $inputRootP $exportMarker
+            $exportRoot = Join-Path $inputRootP (($parts[0..$exportIdx]) -join '\')
             $relParts = if (($tifIdx + 1) -le ($parts.Count - 1)) { $parts[($tifIdx + 1)..($parts.Count - 1)] } else { @() }
             $newParent = Join-Path $exportRoot $exportZipSubfolder
             if ($relParts.Count -gt 0 -and $relParts[0]) {
@@ -808,6 +853,15 @@ function Test-ZipIntegrity {
     #>
     param([string]$Path, [int]$TimeoutSec = 30)
 
+    # Audit round 16: a flat -MagickTimeout false-failed huge scans -- a full pixel decode
+    # of a 700 MB film scan takes longer than the 30 s probe default. Scale the effective
+    # timeout by input size (~0.25 s/MB, measured on disk-bound Deflate scans), never below
+    # the caller's value.
+    try {
+        $sizeMB = (Get-Item -LiteralPath $Path -ErrorAction Stop).Length / 1MB
+        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($sizeMB * 0.25))
+    } catch { }
+
     $r = Invoke-MagickWithTimeout -Arguments @($Path, "null:") -TimeoutSec $TimeoutSec
     if ($r.TimedOut) { return $false }
     return ($r.ExitCode -eq 0)
@@ -833,6 +887,17 @@ function Test-PixelIdentical {
         injected too.)
     #>
     param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30)
+
+    # Audit round 16: per-page compare of multi-hundred-MB scans overran the flat 30 s
+    # probe timeout. Scale by the larger input (~0.25 s/MB) -- see Test-ZipIntegrity.
+    try {
+        $maxMB = 0.0
+        foreach ($p in @($SrcPath, $DstPath)) {
+            $mb = (Get-Item -LiteralPath $p -ErrorAction Stop).Length / 1MB
+            if ($mb -gt $maxMB) { $maxMB = $mb }
+        }
+        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($maxMB * 0.25))
+    } catch { }
 
     $ps = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
     $pd = Get-TiffPageCount -Path $DstPath -TimeoutSec $TimeoutSec
@@ -1193,6 +1258,17 @@ function Test-ThumbOutputMatchesSource {
     #>
     param([string]$SrcPath, [string]$DstPath, [int]$ExpectedPages, [int]$TimeoutSec = 30)
 
+    # Audit round 16: page-0 compare of a huge scan overran the flat 30 s probe timeout.
+    # Scale by the larger input (~0.25 s/MB) -- see Test-ZipIntegrity.
+    try {
+        $maxMB = 0.0
+        foreach ($p in @($SrcPath, $DstPath)) {
+            $mb = (Get-Item -LiteralPath $p -ErrorAction Stop).Length / 1MB
+            if ($mb -gt $maxMB) { $maxMB = $mb }
+        }
+        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($maxMB * 0.25))
+    } catch { }
+
     $pd = Get-TiffPageCount -Path $DstPath -TimeoutSec $TimeoutSec
     if (-not $pd.Ok) { return $false }
     if ($ExpectedPages -gt 0 -and $pd.PageCount -ne $ExpectedPages) { return $false }
@@ -1445,7 +1521,10 @@ function Process-TiffJob {
         $out = magick -quiet $srcPath -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
         if ($LASTEXITCODE -ne 0) {
             if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
-            if ($inPlaceFinalDst) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }
+            # Audit round 16: also drop the partial when writeDst IS finalDst (no staging) --
+            # this run created/truncated it, and leaving it vetoes the OLD_TIFFs rollback
+            # ("ZIP exists"). With -Overwrite the pre-existing file was doomed anyway.
+            if ($inPlaceFinalDst -or ($writeDst -eq $finalDst)) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }
             return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
         }
         # Exit 0 is not proof the file landed: see the thumbnail branch above.
@@ -1481,6 +1560,20 @@ function Process-TiffJob {
     if (-not $generateThumb) {
         if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $script:MagickTimeout)) {
             $subfileRestoreFailed = $true
+        }
+    }
+
+    # Audit round 16: modes 1-7 ship without a pixel gate, so a magick rewrite that silently
+    # dropped pages (multi-page source let through with SafeMode off or thumbnails-only)
+    # used to report OK/WARN. A page-count shrink is data loss: fail closed with ERROR and
+    # drop an output this run created (writeDst==finalDst, or the in-place temp sibling).
+    if (-not $generateThumb -and $mode -ge 1 -and $mode -le 7) {
+        $pcSrc = Get-TiffPageCount -Path $srcPath -TimeoutSec $script:MagickTimeout
+        $pcDst = Get-TiffPageCount -Path $writeDst -TimeoutSec $script:MagickTimeout
+        if ((-not $pcDst.Ok) -or ($pcSrc.Ok -and $pcDst.PageCount -lt $pcSrc.PageCount)) {
+            if ($inPlaceFinalDst -or ($writeDst -eq $finalDst)) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }
+            $detail = if (-not $pcDst.Ok) { "output page count unreadable ($($pcDst.Error))" } else { "$($pcSrc.PageCount) -> $($pcDst.PageCount) pages" }
+            return @{ Result = "ERROR (page count shrink) | $name | $detail"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
         }
     }
 
@@ -1745,7 +1838,7 @@ if ($Mode -lt 0) {
                         if ($ts.Reason -eq "thumb-replaced") { $thumbNote = " [thumb replaced]" }
                     }
 
-                    if ($dryL) { return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
+                    if ($dryL) { return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src; FinalDst = $finalDst } }
 
                     # $noThumbNote accumulates the degraded outcome instead of returning early:
                     # returning here used to skip the EXIF restore block below, so a failed
@@ -1836,7 +1929,7 @@ if ($Mode -lt 0) {
                     } else {
                         # Input literal, OUTPUT escaped -- see ConvertTo-MagickPathSpec.
                         $out = magick -quiet $src -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
-                        if ($LASTEXITCODE -ne 0) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; if ($inPlaceFinalDst) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
+                        if ($LASTEXITCODE -ne 0) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; if ($inPlaceFinalDst -or ($writeDst -eq $finalDst)) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
                         if (-not (Test-Path -LiteralPath $writeDst)) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick reported success but wrote no file) | $name | expected: $writeDst"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
                     }
 
@@ -1987,12 +2080,22 @@ if ($Mode -lt 0) {
 # Support multiple input directories separated by semicolon (from wizard AutoFind)
 $inputRoots = @()
 $missingRoots = @()
+$seenRootSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($dir in ($InputDir -split ';')) {
     $dir = $dir.Trim()
     if ([string]::IsNullOrWhiteSpace($dir)) { continue }
     if (-not [System.IO.Path]::IsPathRooted($dir)) {
         $dir = Join-Path $PWD.Path $dir
     }
+    # Audit round 16: normalise every root. Join-Path $PWD.Path "." leaves a trailing "\."
+    # (and "a\..\b" keeps its ".."), which broke Test-PathExcluded's root compare: files
+    # directly under the root fell into its absolute-path fallback, so an -ExcludeFolders
+    # entry matching the root's OWN name excluded the whole run -- and the mode 5
+    # grandparent clamp produced "<root>\.\ZIP".
+    try { $dir = [System.IO.Path]::GetFullPath($dir) } catch { $missingRoots += $dir; continue }
+    # Audit round 16: dedupe roots ("A;A"). Overlapping trees ("A;A\sub") are still deduped
+    # per file by $seenFiles in the collection loop below.
+    if (-not $seenRootSet.Add($dir)) { continue }
     # A typo used to fall through to "No TIFF files found" and exit 0, so the wizard/CI
     # could not tell a wrong path from an empty folder
     if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
@@ -2010,6 +2113,15 @@ if ($inputRoots.Count -eq 0) {
     Write-Log "No valid input directories specified." "ERROR"
     Write-Log "Log: $logFile"
     exit 1
+}
+
+# Audit round 16: a RELATIVE -OutputDir was re-based on EACH input root by Resolve-Output
+# (mode 2), so "-InputDir A;B -OutputDir out" scattered one flat output across A\out and
+# B\out -- and the per-dest-dir $usedNames map never saw the cross-root collision. Resolve
+# it ONCE against $PWD so every root shares one output and collision handling is global.
+if ($OutputDir -and -not [System.IO.Path]::IsPathRooted($OutputDir)) {
+    $OutputDir = [System.IO.Path]::GetFullPath((Join-Path $PWD.Path $OutputDir))
+    $script:OutputDir = $OutputDir
 }
 
 $script:total = 0
@@ -2080,7 +2192,9 @@ if ($leftoverCount -gt 0) {
     Write-Log "Skipped $leftoverCount staged/temp file(s) left by an interrupted run" "WARN"
 }
 
-$files = $allFiles
+# Sorted by full path so duplicate-name claiming below (the _v2 renames) is deterministic
+# instead of depending on Get-ChildItem enumeration order (audit round 16).
+$files = @($allFiles | Sort-Object FullName)
 $script:total = $files.Count
 
 if ($script:total -eq 0) {
@@ -2175,8 +2289,13 @@ foreach ($f in $files) {
     # "No such file or directory" naming neither the cause nor the limit -- and in modes 0/9
     # that error arrives only AFTER the original was moved to OLD_TIFFs. Refuse here, before
     # any directory is created and before anything is moved.
-    if ($finalDst.Length -gt 259) {
-        Process-Results @("ERROR (path too long: $($finalDst.Length) chars, Windows allows 259) | $($f.Name) | $finalDst")
+    # Audit round 16: an in-place write (finalDst == source) makes the worker compress to a
+    # temp sibling "<finalDst>.<8 hex>_<12 hex>.tif" first -- +26 chars the check below used
+    # to ignore, so a borderline path still blew up inside magick. Charge it here.
+    $finalLen = $finalDst.Length
+    if ($finalDst -eq $f.FullName) { $finalLen += 26 }
+    if ($finalLen -gt 259) {
+        Process-Results @("ERROR (path too long: $finalLen chars, Windows allows 259) | $($f.Name) | $finalDst")
         continue
     }
 
@@ -2283,10 +2402,18 @@ foreach ($f in $files) {
     }
 
     # Same guard for the staged path (the collision rename above can also have lengthened
-    # $finalDst since it was checked).
-    $tooLong = @($writeDst, $finalDst) | Where-Object { $_ -and $_.Length -gt 259 } | Select-Object -First 1
+    # $finalDst since it was checked). An in-place writeDst grows by the 26-char temp
+    # sibling suffix inside the worker (audit round 16), so charge that too.
+    $writeLen = if ($writeDst) { $writeDst.Length } else { 0 }
+    if ($writeDst -and $writeDst -eq $f.FullName) { $writeLen += 26 }
+    $finalLen2 = if ($finalDst) { $finalDst.Length } else { 0 }
+    if ($finalDst -and $finalDst -eq $f.FullName) { $finalLen2 += 26 }
+    $tooLong = $null
+    $tooLongLen = 0
+    if ($writeLen -gt 259) { $tooLong = $writeDst; $tooLongLen = $writeLen }
+    elseif ($finalLen2 -gt 259) { $tooLong = $finalDst; $tooLongLen = $finalLen2 }
     if ($tooLong) {
-        Process-Results @("ERROR (path too long: $($tooLong.Length) chars, Windows allows 259) | $($f.Name) | $tooLong")
+        Process-Results @("ERROR (path too long: $tooLongLen chars, Windows allows 259) | $($f.Name) | $tooLong")
         continue
     }
 
@@ -2399,6 +2526,8 @@ foreach ($f in $files) {
                 Process-Results @("ERROR (move to OLD_TIFFs failed) | $($f.Name)")
                 continue
             }
+            # Tracked so the interrupt trap can restore it if no verified output lands (audit round 16)
+            [void]$script:movedOriginals.Add(@{ Backup = $oldSrc; Original = $f.FullName; FinalDst = $finalDst })
             $tasks += @{
                 Src      = $oldSrc
                 WriteDst = $writeDst
@@ -2609,7 +2738,8 @@ foreach ($group in $groupedTasks) {
             }
 
             if ($dryRun) {
-                return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+                # FinalDst included so the collision-rename note is appended to DRY lines too (audit round 16)
+                return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
             }
 
             # In-place output destroys the original before the EXIF restore runs; park the
@@ -2704,7 +2834,10 @@ foreach ($group in $groupedTasks) {
                 $out = magick -quiet $srcPath -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
                 if ($LASTEXITCODE -ne 0) {
                     if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
-                    if ($inPlaceFinalDst) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }
+                    # Audit round 16: also drop the partial when writeDst IS finalDst (no
+                    # staging) -- this run created/truncated it, and leaving it vetoes the
+                    # OLD_TIFFs rollback ("ZIP exists").
+                    if ($inPlaceFinalDst -or ($writeDst -eq $finalDst)) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }
                     return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                 }
                 # Exit 0 is not proof the file landed: see the thumbnail branch above.
@@ -2737,6 +2870,19 @@ foreach ($group in $groupedTasks) {
             if (-not $generateThumb) {
                 if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $magickTimeout)) {
                     $subfileRestoreFailed = $true
+                }
+            }
+
+            # Audit round 16: modes 1-7 ship without a pixel gate, so a rewrite that silently
+            # dropped pages used to report OK/WARN. A page-count shrink is data loss: ERROR,
+            # and drop an output this run created (see the Process-TiffJob twin).
+            if (-not $generateThumb -and $mode -ge 1 -and $mode -le 7) {
+                $pcSrc = Get-TiffPageCount -Path $srcPath -TimeoutSec $magickTimeout
+                $pcDst = Get-TiffPageCount -Path $writeDst -TimeoutSec $magickTimeout
+                if ((-not $pcDst.Ok) -or ($pcSrc.Ok -and $pcDst.PageCount -lt $pcSrc.PageCount)) {
+                    if ($inPlaceFinalDst -or ($writeDst -eq $finalDst)) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }
+                    $detail = if (-not $pcDst.Ok) { "output page count unreadable ($($pcDst.Error))" } else { "$($pcSrc.PageCount) -> $($pcDst.PageCount) pages" }
+                    return @{ Result = "ERROR (page count shrink) | $name | $detail"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                 }
             }
 
@@ -2921,8 +3067,18 @@ foreach ($group in $groupedTasks) {
             foreach ($t in $groupTasks) {
                 if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup -and $errorSrcPaths.Contains($t.Src)) {
                     if (Test-Path -LiteralPath $t.FinalDst) {
-                        Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
-                        continue
+                        # Audit round 16: "exists" is not "valid" -- a partial/corrupt write
+                        # left at FinalDst used to veto the rollback and strand the original
+                        # in OLD_TIFFs/. Verify a full decode; a file that fails is deleted
+                        # and the original restored below.
+                        if (Test-ZipIntegrity -Path $t.FinalDst -TimeoutSec $MagickTimeout) {
+                            Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
+                            # Settled: verified output landed, the interrupt trap leaves it alone
+                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
+                            continue
+                        }
+                        Remove-Item -LiteralPath $t.FinalDst -Force -ErrorAction SilentlyContinue
+                        Write-Log "Rollback: deleted corrupt output | $($t.Name)" "WARN"
                     }
                     if (Test-Path -LiteralPath $t.Src) {
                         try {
@@ -2931,6 +3087,8 @@ foreach ($group in $groupedTasks) {
                                 [System.IO.Directory]::CreateDirectory((Split-Path $origDst -Parent)) | Out-Null
                             }
                             Move-Item -LiteralPath $t.Src -Destination $origDst -Force -ErrorAction Stop
+                            # Settled: original restored, nothing left for the interrupt trap
+                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
                             Write-Log "ROLLBACK (restored from OLD_TIFFs) | $($t.Name)" "WARN"
                             $failedCount++
                         } catch {
@@ -3055,8 +3213,18 @@ foreach ($group in $groupedTasks) {
             foreach ($t in $groupTasks) {
                 if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup -and $errorSrcPaths.Contains($t.Src)) {
                     if (Test-Path -LiteralPath $t.FinalDst) {
-                        Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
-                        continue
+                        # Audit round 16: "exists" is not "valid" -- a partial/corrupt write
+                        # left at FinalDst used to veto the rollback and strand the original
+                        # in OLD_TIFFs/. Verify a full decode; a file that fails is deleted
+                        # and the original restored below.
+                        if (Test-ZipIntegrity -Path $t.FinalDst -TimeoutSec $MagickTimeout) {
+                            Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
+                            # Settled: verified output landed, the interrupt trap leaves it alone
+                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
+                            continue
+                        }
+                        Remove-Item -LiteralPath $t.FinalDst -Force -ErrorAction SilentlyContinue
+                        Write-Log "Rollback: deleted corrupt output | $($t.Name)" "WARN"
                     }
                     if (Test-Path -LiteralPath $t.Src) {
                         try {
@@ -3065,6 +3233,8 @@ foreach ($group in $groupedTasks) {
                                 [System.IO.Directory]::CreateDirectory((Split-Path $origDst -Parent)) | Out-Null
                             }
                             Move-Item -LiteralPath $t.Src -Destination $origDst -Force -ErrorAction Stop
+                            # Settled: original restored, nothing left for the interrupt trap
+                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
                             Write-Log "ROLLBACK (restored from OLD_TIFFs) | $($t.Name)" "WARN"
                             $failedCount++
                         } catch {

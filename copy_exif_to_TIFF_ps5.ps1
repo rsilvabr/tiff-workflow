@@ -204,6 +204,44 @@ function ConvertTo-MagickPathSpec {
     return $Path.Replace('%', '%%')
 }
 
+function Invoke-ExifTool {
+    <#
+    .SYNOPSIS
+        Runs exiftool with its arguments routed through a UTF-8 `-@` argfile and returns
+        @{ ExitCode = [int]; Output = $null/string/array }.
+
+    .DESCRIPTION
+        The main copy/probe/restore calls used to pass file names as raw argv, so a non-ASCII
+        name reached exiftool in the console code page and could not be found. Every invocation
+        now goes through a per-call argfile: `-charset filename=utf8` first, then one argument
+        per line (options and operands on their own lines, paths as-is), UTF-8 without BOM
+        (WriteAllText's default encoding) -- the same pattern compress_tiff_zip.ps1 uses for
+        every exiftool call. -MergeStderr folds stderr into Output, for the callers whose
+        fail-closed 'Error opening file' check reads the combined stream.
+
+    .NOTES
+        Re-inject into -Parallel runspaces with:
+            ${function:Invoke-ExifTool} = $using:ExifToolFnDef
+    #>
+    param(
+        [string[]]$Arguments = @(),
+        [switch]$MergeStderr
+    )
+
+    $argFile = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argFile, ((@('-charset', 'filename=utf8') + $Arguments) -join "`n") + "`n")
+        if ($MergeStderr) {
+            $out = exiftool -@ $argFile 2>&1
+        } else {
+            $out = exiftool -@ $argFile 2>$null
+        }
+        return @{ ExitCode = $LASTEXITCODE; Output = $out }
+    } finally {
+        Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-TiffPageCount {
     <#
     .SYNOPSIS
@@ -330,8 +368,11 @@ function Backup-TiffMetadata {
     try {
         [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
         exiftool -@ $argMeta | Out-Null
-        if ($LASTEXITCODE -ne 0) { return @{ Needed = $true; Path = $null } }
+        # A failed dump can still leave a PARTIAL container behind; remove it so nothing
+        # downstream mistakes it for a complete backup.
+        if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue; return @{ Needed = $true; Path = $null } }
     } catch {
+        Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue
         return @{ Needed = $true; Path = $null }
     } finally {
         Remove-Item $argMeta -Force -ErrorAction SilentlyContinue
@@ -546,6 +587,10 @@ function Invoke-S5ProFolder {
         }
     }
 
+    # Deterministic order: destination claiming hands out _v2 renames in enumeration order,
+    # which otherwise depends on Get-ChildItem's (filesystem-dependent) order.
+    $tiffFiles = @($tiffFiles | Sort-Object FullName)
+
     if ($tiffFiles.Count -eq 0) {
         Write-Log "No TIFFs found in: $RootPath" "WARN"
         return
@@ -636,7 +681,7 @@ function Invoke-S5ProFolder {
             $destName = $tif.Name
             if ($OutputDir -and ($finalDir -ine $tif.DirectoryName)) {
                 $dKey = (Join-Path $finalDir $destName).ToLowerInvariant()
-                if ($script:claimedDest.ContainsKey($dKey) -and $script:claimedDest[$dKey] -ne $tif.FullName) {
+                if ($script:claimedDest.ContainsKey($dKey) -and $script:claimedDest[$dKey] -ine $tif.FullName) {
                     $dStem = $tif.BaseName
                     $dExt  = $tif.Extension
                     $n = 2
@@ -684,7 +729,9 @@ function Invoke-S5ProFolder {
 
             # The _\d{3,4}$ strip in Find-JpegPair can match an unrelated JPEG
             # (foto_2024.tif -> foto.jpg): EXIF copied from the wrong file must be loud.
-            $heurMatch = ($p.UsedBase -and $p.UsedBase -cne $p.TifBase)
+            # Case-insensitive: Find-JpegPair matched case-insensitively, so
+            # DSC_0001.tif + dsc_0001.jpg is an EXACT stem match, not a heuristic one.
+            $heurMatch = ($p.UsedBase -and $p.UsedBase -ine $p.TifBase)
             $okPrefix = if ($heurMatch) { "WARN (heuristic JPEG match)" } else { "OK" }
             $heurSuffix = if ($heurMatch) { " | TIFF base '$($p.TifBase)' matched JPEG base '$($p.UsedBase)'" } else { "" }
 
@@ -693,9 +740,9 @@ function Invoke-S5ProFolder {
                 # pipeline, so $LASTEXITCODE could still hold an earlier command's value --
                 # and the check right below is the fail-closed gate that decides whether this
                 # TIFF may be overwritten. Read it all, check the exit code, then take [0].
-                $exifProbe = exiftool -q -q -G1 -s -EXIF:all $p.Tiff 2>$null
-                $exifProbeExit = $LASTEXITCODE
-                $firstExif = @($exifProbe | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })[0]
+                $exifProbeRes = Invoke-ExifTool -Arguments @('-q','-q','-G1','-s','-EXIF:all',$p.Tiff)
+                $exifProbeExit = $exifProbeRes.ExitCode
+                $firstExif = @($exifProbeRes.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })[0]
                 # Fail-closed: an unreadable TIFF must not be overwritten by the copy below
                 if ($exifProbeExit -ne 0) { "ERROR (exiftool EXIF check) | $($p.TifName) | cannot inspect TIFF, not overwriting"; continue }
                 if ($firstExif) { "SKIP (already has EXIF) | $($p.TifName)"; continue }
@@ -738,8 +785,8 @@ function Invoke-S5ProFolder {
             # Check if TIFF already has ICC (fixed logic - don't reset $LASTEXITCODE)
             $tiffHasIcc = $false
             if ($iccPolicyL -eq "preserve_tiff" -or $iccPolicyL -eq "always") {
-                $iccCheck = exiftool -s -s -s -ICC_Profile:all $p.Tiff 2>$null
-                if (-not [string]::IsNullOrWhiteSpace($iccCheck)) { $tiffHasIcc = $true }
+                $iccRes = Invoke-ExifTool -Arguments @('-s','-s','-s','-ICC_Profile:all',$p.Tiff)
+                if (-not [string]::IsNullOrWhiteSpace("$($iccRes.Output)")) { $tiffHasIcc = $true }
             }
             $copyIcc = ($iccPolicyL -eq "always") -or ($iccPolicyL -eq "preserve_tiff" -and -not $tiffHasIcc)
             $iccTag = if ($copyIcc) { "-ICC_Profile" } else { "" }
@@ -783,14 +830,24 @@ function Invoke-S5ProFolder {
             }
             $jpegTagSource = if ($jpegMeta.Path) { $jpegMeta.Path } else { $p.Jpeg }
 
-            $tagsArgs = @("-tagsfromfile", $jpegTagSource, "-EXIF:All", "-XMP:All", "-IPTC:All")
+            # No -unsafe: it stamps the JPEG's GEOMETRY (ImageWidth/Height, ExifImageWidth/
+            # Height, Orientation) onto a TIFF whose dimensions legitimately differ (Capture
+            # One crops/resizes). Those tags are excluded explicitly instead; the remaining
+            # -unsafe-only tags (embedded thumbnail/preview images) do not belong on the TIFF
+            # either. Verified live on a synthetic pair: EXIF DateTime/MakerNotes copy,
+            # geometry does not.
+            $tagsArgs = @('-tagsfromfile', $jpegTagSource, '-EXIF:All', '-XMP:All', '-IPTC:All',
+                          '--ImageWidth', '--ImageHeight', '--ImageLength',
+                          '--ExifImageWidth', '--ExifImageHeight', '--PixelXDimension', '--PixelYDimension',
+                          '--Orientation', '--ThumbnailImage', '--PreviewImage', '--JpgFromRaw')
             if ($iccTag) { $tagsArgs += $iccTag }
-            $tagsArgs += "-unsafe", $tiffTarget
+            $tagsArgs += $tiffTarget
 
             # ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
             # exiftool gives when the tagsfromfile source could not be opened -- it still exits 0.
-            $exifOut = "$(exiftool -q -overwrite_original -P @tagsArgs 2>&1)"
-            $exifExit = $LASTEXITCODE
+            $exifRes = Invoke-ExifTool -Arguments (@('-q','-overwrite_original','-P') + $tagsArgs) -MergeStderr
+            $exifOut = "$($exifRes.Output)"
+            $exifExit = $exifRes.ExitCode
             if ($jpegMeta.Path) { Remove-Item -LiteralPath $jpegMeta.Path -Force -ErrorAction SilentlyContinue }
             # Only "Error opening file" is fatal: it means the SOURCE was never read. A JPEG that
             # legitimately carries nothing writable reports differently and stays non-fatal.
@@ -810,13 +867,13 @@ function Invoke-S5ProFolder {
             # uncompressed main image whose thumbnail page happened to be compressed was
             # reported "already ZIP" and never compressed. compress_tiff_zip.ps1 fixed this in
             # four places; these two backends were the copies left behind.
-            $comp = exiftool -s -s -s -IFD0:Compression $tiffTarget 2>$null
-            if ($LASTEXITCODE -ne 0 -or -not $comp) {
+            $compRes = Invoke-ExifTool -Arguments @('-s','-s','-s','-IFD0:Compression',$tiffTarget)
+            if ($compRes.ExitCode -ne 0 -or -not $compRes.Output) {
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 "ERROR (exiftool check) | $($p.TifName) | cannot detect compression"
                 continue
             }
-            $comp = "$(@($comp)[0])".Trim()
+            $comp = "$(@($compRes.Output)[0])".Trim()
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
                 "$(if ($heurMatch) { "WARN (heuristic JPEG match, already $comp -- ZIP skipped)" } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix"; continue
             }
@@ -826,7 +883,7 @@ function Invoke-S5ProFolder {
             $writeDst = Join-Path $writeDirL $stagingName
             $finalDst = Join-Path $finalDirL $p.DestName
 
-            if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ne $p.Tiff) -and -not $tiffCopied) {
+            if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ine $p.Tiff) -and -not $tiffCopied) {
                 # No cleanup here: the guard above already requires -not $tiffCopied
                 "OK+SKIP-ZIP (exists) | $($p.TifName)"; continue
             }
@@ -867,22 +924,30 @@ function Invoke-S5ProFolder {
             $restoreExit = 1
             if (-not ($tiffMeta.Needed -and -not $tiffMeta.Path)) {
                 # ONE -q: the second hides the unreadable-source warning (exiftool exits 0 anyway).
-                $restoreOut = "$(exiftool -q -overwrite_original -tagsfromfile $tiffTagSource -all:all -unsafe $writeDst 2>&1)"
-                $restoreExit = $LASTEXITCODE
+                $restoreRes = Invoke-ExifTool -Arguments @('-q','-overwrite_original','-tagsfromfile',$tiffTagSource,'-all:all','-unsafe',$writeDst) -MergeStderr
+                $restoreOut = "$($restoreRes.Output)"
+                $restoreExit = $restoreRes.ExitCode
                 if ($restoreOut -match 'Error opening file') { $restoreExit = 1 }
             }
             if ($tiffMeta.Path) { Remove-Item -LiteralPath $tiffMeta.Path -Force -ErrorAction SilentlyContinue }
-            # Store staging mapping BEFORE checking the restore result so WARN files get moved too
-            if ($stagingName) { $script:stagingMap[$p.Tiff] = $stagingName }
+            # The staging mapping is registered ONLY after every restore gate below has passed:
+            # the move loop moves whatever is registered, so a staged ZIP whose metadata restore
+            # failed was moved ON TOP of the EXIF-bearing original and reported as a mere WARN
+            # (exit 0). On failure the staged file is deleted, the original stays untouched and
+            # the file counts as an error.
             if ($restoreExit -ne 0) {
+                Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-                "WARN (exiftool metadata copy failed, ZIP ok) | $($p.TifName)"; continue
+                "ERROR (exiftool metadata restore failed - original untouched) | $($p.TifName)"; continue
             }
 
             if (-not (Restore-TiffSubfileTypes -SrcPath $tiffTarget -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
+                Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-                "WARN (subfiletype restore failed, ZIP ok) | $($p.TifName)"; continue
+                "ERROR (subfiletype restore failed - original untouched) | $($p.TifName)"; continue
             }
+
+            if ($stagingName) { $script:stagingMap[$p.Tiff] = $stagingName }
 
             if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
             "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { 'OK+ZIP' }) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$heurSuffix"
@@ -904,15 +969,20 @@ function Invoke-S5ProFolder {
                 $stagePath = Join-Path $writeDir $stagingName
                 $destName = if ($destNameMap.ContainsKey($tif.FullName)) { $destNameMap[$tif.FullName] } else { $tif.Name }
                 $destPath  = Join-Path $finalDir   $destName
-                if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
+                if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ine $destPath) {
                     try {
+                        # In-place, $destPath IS $tif.FullName: the original mtime must be
+                        # captured BEFORE the move -- reading it afterwards read the staged
+                        # file's own fresh timestamp and preserved nothing.
+                        $origMtime = $null
+                        try { $origMtime = (Get-Item -LiteralPath $tif.FullName).LastWriteTime } catch { }
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
                         Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
                         if ((Test-Path -LiteralPath $destPath) -and ((Get-Item -LiteralPath $destPath).Length -eq $stageSize)) {
                             # The staged ZIP is a new file with "now" as mtime; the plain
                             # EXIF-only path preserves the source date via exiftool -P, so
                             # the ZIP path does the same for consistency.
-                            try { (Get-Item -LiteralPath $destPath).LastWriteTime = (Get-Item -LiteralPath $tif.FullName).LastWriteTime } catch { }
+                            if ($origMtime) { try { (Get-Item -LiteralPath $destPath).LastWriteTime = $origMtime } catch { } }
                             $moved++
                         } else {
                             $script:errTotal++
@@ -951,6 +1021,10 @@ if ($InputDir) {
     $inputDirs = @($PWD.Path)
 }
 
+# A doubled entry ("A;A") used to process the same folder twice.
+$seenInputDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$inputDirs = @($inputDirs | Where-Object { $seenInputDirs.Add($_) })
+
 Write-Log "Log: $logFile"
 
 foreach ($m in $missingRoots) { Write-Log "ERROR: input directory not found: $m" "ERROR" }
@@ -968,8 +1042,11 @@ foreach ($root in $inputDirs) {
     if ($AutoFind) {
         Write-Log "AutoFind mode | Pattern: '$FolderPattern' | Root: $root"
 
+        # Escape the pattern: -like is a WILDCARD match, so a '[' in a folder name would be
+        # parsed as a character class and never match the literal folder.
+        $folderPatternEsc = [System.Management.Automation.WildcardPattern]::Escape($FolderPattern)
         $matchingFolders = Get-ChildItem -LiteralPath $root -Directory -Recurse |
-                           Where-Object { $_.Name -like "*$FolderPattern*" -and $_.FullName -notlike "*\Logs\*" -and $_.FullName -notlike "*\OLD_TIFFs\*" -and $_.FullName -notlike "*\ZIP\*" -and $_.FullName -notlike "*\_EXPORT\*" -and $_.FullName -notlike "*\converted_zip\*" }
+                           Where-Object { $_.Name -like "*$folderPatternEsc*" -and $_.FullName -notlike "*\Logs\*" -and $_.FullName -notlike "*\OLD_TIFFs\*" -and $_.FullName -notlike "*\ZIP\*" -and $_.FullName -notlike "*\_EXPORT\*" -and $_.FullName -notlike "*\converted_zip\*" }
 
         if ($matchingFolders.Count -eq 0) {
             Write-Log "No folders matching '$FolderPattern' found in: $root" "WARN"

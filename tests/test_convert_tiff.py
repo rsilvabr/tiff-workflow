@@ -25,7 +25,14 @@ from convert_tiff import (
     _compare_tiff_metadata,
     _compress_padded_files,
     _is_real_16bit,
+    _magick_spec,
+    _work_timeout,
+    _exiftool_copy_failed,
+    _tiff_extra_pages_are_thumbnails,
+    find_folders_by_pattern,
     run_purge_old_tiffs,
+    run_undo_old_tiffs,
+    run_free_compress,
     step_folder,
     main,
     ConfigManager,
@@ -33,6 +40,7 @@ from convert_tiff import (
 )
 
 MAGICK_AVAILABLE = shutil.which("magick") is not None
+EXIFTOOL_AVAILABLE = shutil.which("exiftool") is not None
 POWERSHELL_AVAILABLE = (
     shutil.which("pwsh") is not None or shutil.which("powershell") is not None
 )
@@ -597,6 +605,328 @@ class TestPurgeSidecarVerification:
         result = run_purge_old_tiffs(cfg)
         assert result is False  # user cancelled at confirmation
         assert (old_dir / "notes.txt").exists()
+
+
+class TestMagickSpec:
+    """audit round 16: '[' and ']' in a filename are glob characters to ImageMagick once
+    a '[n]' page selector is appended, and a glob match WINS over the literal file. No
+    bracket escape exists on Windows IM (verified live on 7.1.2-27), so _magick_spec
+    routes bracketed paths through a bracket-free alias; callers append the selector
+    AFTER the function returns, so selectors must never be touched."""
+
+    def test_percent_doubled(self):
+        assert _magick_spec("50%off.tif") == "50%%off.tif"
+
+    def test_plain_path_unchanged(self):
+        assert _magick_spec("plain.tif") == "plain.tif"
+
+    def test_bracket_path_aliased(self, tmp_path):
+        p = tmp_path / "foo[1].tif"
+        p.write_bytes(b"x" * 100)
+        spec = _magick_spec(p)
+        assert "[" not in spec and "]" not in spec
+        alias = Path(spec)
+        assert alias.exists() and alias.read_bytes() == b"x" * 100
+
+    def test_selector_appended_afterwards_is_untouched(self):
+        spec = f"{_magick_spec('foo.tif')}[0]"
+        assert spec == "foo.tif[0]"
+
+    @pytest.mark.skipif(not MAGICK_AVAILABLE, reason="ImageMagick (magick) not on PATH")
+    def test_literal_bracket_file_wins_over_glob(self, tmp_path):
+        """foo[1].tif (8x8) next to foo1.tif (20x20): unescaped, `foo[1].tif[0]` reads
+        foo1.tif -- the glob match. The spec must address the literal file."""
+        big = tmp_path / "big.tif"
+        subprocess.run(["magick", "-size", "8x8", "gradient:red-blue", str(big)],
+                       capture_output=True, check=True)
+        bracket = tmp_path / "foo[1].tif"
+        shutil.copy(big, bracket)
+        subprocess.run(["magick", "-size", "20x20", "gradient:red-blue",
+                        str(tmp_path / "foo1.tif")], capture_output=True, check=True)
+
+        r = subprocess.run(["magick", "identify", "-format", "%w %h",
+                            f"{_magick_spec(bracket)}[0]"], capture_output=True, text=True)
+        assert r.returncode == 0 and r.stdout.strip() == "8 8", r.stderr
+
+
+@pytest.mark.skipif(not (MAGICK_AVAILABLE and EXIFTOOL_AVAILABLE),
+                    reason="ImageMagick (magick) and exiftool required")
+class TestPurgeMetadataGate:
+    """audit round 16: the purge gate verified pixels only -- a conversion that dropped
+    metadata (per-page SubfileType, ICC profile) while leaving pixels intact purged the
+    last good backup."""
+
+    def _two_page_with_exif(self, tmp_path, name):
+        """magick two-page TIFF (both pages stamped PAGE by magick) + EXIF tags."""
+        main = tmp_path / f"main_{name}"
+        thumb = tmp_path / f"thumb_{name}"
+        subprocess.run(["magick", "-size", "64x64", "gradient:red-blue", "-depth", "16",
+                        str(main)], capture_output=True, check=True)
+        subprocess.run(["magick", "-size", "16x16", "gradient:red-blue",
+                        str(thumb)], capture_output=True, check=True)
+        out = tmp_path / name
+        subprocess.run(["magick", str(main), str(thumb), str(out)],
+                       capture_output=True, check=True)
+        subprocess.run(["exiftool", "-q", "-overwrite_original",
+                        "-EXIF:Make=TestCam", "-EXIF:Artist=Tester", str(out)],
+                       capture_output=True, check=True)
+        return out
+
+    def _zip_with_tags_restored(self, old, new):
+        """What the compress backends do: magick recompress + exiftool tag restore."""
+        subprocess.run(["magick", str(old), "-compress", "zip", str(new)],
+                       capture_output=True, check=True)
+        subprocess.run(["exiftool", "-q", "-overwrite_original",
+                        "-tagsfromfile", str(old), "-all:all", "-unsafe",
+                        "--Compression", "--BitsPerSample", "--SampleFormat", str(new)],
+                       capture_output=True, check=True)
+        return new
+
+    def test_backend_pipeline_pair_passes(self, tmp_path):
+        """Guard against the metadata gate being tightened into always-False: a real
+        uncompressed -> ZIP pair with tags restored must still verify."""
+        old = self._two_page_with_exif(tmp_path, "old.tif")
+        new = self._zip_with_tags_restored(old, tmp_path / "new.tif")
+        match, detail = _compare_tiff_metadata(old, new)
+        assert match is True, detail
+
+    def test_dropped_subfiletype_blocks_match(self, tmp_path):
+        """Pixel-identical pages but a dropped SubfileType marker must NOT be purged."""
+        old = self._two_page_with_exif(tmp_path, "old.tif")
+        new = self._zip_with_tags_restored(old, tmp_path / "new.tif")
+        subprocess.run(["exiftool", "-q", "-overwrite_original",
+                        "-IFD1:SubfileType=", str(new)], capture_output=True, check=True)
+        match, detail = _compare_tiff_metadata(old, new)
+        assert match is False
+        assert "SUBFILETYPE" in detail
+
+    def test_dropped_icc_profile_blocks_match(self, tmp_path):
+        icm = Path(r"C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm")
+        if not icm.exists():
+            pytest.skip("no system sRGB profile to embed")
+        old = tmp_path / "old.tif"
+        new = tmp_path / "new.tif"
+        subprocess.run(["magick", "-size", "32x32", "gradient:red-blue",
+                        "-profile", str(icm), str(old)], capture_output=True, check=True)
+        subprocess.run(["magick", str(old), "+profile", "*", str(new)],
+                       capture_output=True, check=True)
+        match, detail = _compare_tiff_metadata(old, new)
+        assert match is False
+        assert "ICC" in detail
+
+
+class TestRestoreSubfileTypesHonored:
+    """audit round 16: _process_single_padded ignored _restore_subfile_types' False
+    return and replaced the original as if the markers had been restored."""
+
+    def _fake_run(self, cmd, **kwargs):
+        cmd = [str(c) for c in cmd]
+        if cmd[0] == "exiftool":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[0] == "magick" and "-depth" in cmd:
+            Path(cmd[-1]).write_bytes(b"z" * 100)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "null:" in cmd:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if "identify" in cmd:
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt.startswith("%[tiff:subfiletype]"):
+                return SimpleNamespace(returncode=0, stdout="|100|100\n", stderr="")
+            if fmt.startswith("%n"):
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="100 100\n", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    def test_failed_restore_preserves_original(self, tmp_path, monkeypatch, capsys):
+        src = tmp_path / "photo.tif"
+        src.write_bytes(b"x" * 2000)
+        monkeypatch.setattr(subprocess, "run", self._fake_run)
+        monkeypatch.setattr(convert_tiff, "_restore_subfile_types", lambda a, b: False)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+
+        cfg = SimpleNamespace(config=ToolConfig())
+        _compress_padded_files([src], tmp_path / "temp", workers=1, cfg=cfg)
+
+        assert src.read_bytes() == b"x" * 2000, "original replaced despite failed restore"
+        assert not (tmp_path / "OLD_PADDED").exists()
+        assert "WARN" in capsys.readouterr().out
+
+    def test_successful_restore_still_replaces(self, tmp_path, monkeypatch):
+        src = tmp_path / "photo.tif"
+        src.write_bytes(b"x" * 2000)
+        monkeypatch.setattr(subprocess, "run", self._fake_run)
+        monkeypatch.setattr(convert_tiff, "_restore_subfile_types", lambda a, b: True)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+
+        cfg = SimpleNamespace(config=ToolConfig())
+        _compress_padded_files([src], tmp_path / "temp", workers=1, cfg=cfg)
+
+        assert src.read_bytes() == b"z" * 100
+        assert (tmp_path / "OLD_PADDED" / "photo.tif").read_bytes() == b"x" * 2000
+
+
+class TestExiftoolCopyGate:
+    """audit round 16: exiftool exits 0 on partial copies; the lossy 16->8 gate must
+    catch 'not written' warnings, not just 'Error opening file'."""
+
+    def test_clean_stderr_passes(self):
+        assert not _exiftool_copy_failed("")
+
+    def test_benign_minor_warning_passes(self):
+        assert not _exiftool_copy_failed("Warning: [minor] Unrecognized char in EXIF:Foo")
+
+    def test_error_opening_file_fails(self):
+        assert _exiftool_copy_failed("Warning: Error opening file - foo.tif")
+
+    def test_sorry_not_written_fails(self):
+        assert _exiftool_copy_failed("Warning: Sorry, EXIF:Make doesn't exist or isn't writable")
+        assert _exiftool_copy_failed("Warning: Tag 'EXIF:Make' was not written")
+
+    def test_cant_fails(self):
+        assert _exiftool_copy_failed("Warning: Can't write TIFF:Foo - foo.tif")
+
+
+class TestExtraPagesClassifier:
+    """audit round 16: an untagged page that is merely smaller than page 0 was excused
+    as a thumbnail here while the purge-path classifier (_image_page_indices) requires
+    the REDUCEDIMAGE tag. Both now use tag AND strictly-smaller."""
+
+    def _identify(self, monkeypatch, stdout):
+        def fake_run(cmd, **kwargs):
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+
+    def test_untagged_smaller_page_refused(self, monkeypatch):
+        self._identify(monkeypatch, "|4000|3000\n|400|300\n")
+        assert _tiff_extra_pages_are_thumbnails(Path("x.tif")) is False
+
+    def test_tagged_reduced_smaller_page_accepted(self, monkeypatch):
+        self._identify(monkeypatch, "|4000|3000\nREDUCEDIMAGE|400|300\n")
+        assert _tiff_extra_pages_are_thumbnails(Path("x.tif")) is True
+
+    def test_tagged_but_fullsize_page_refused(self, monkeypatch):
+        self._identify(monkeypatch, "|4000|3000\nREDUCEDIMAGE|4000|3000\n")
+        assert _tiff_extra_pages_are_thumbnails(Path("x.tif")) is False
+
+    def test_single_page_accepted(self, monkeypatch):
+        self._identify(monkeypatch, "|4000|3000\n")
+        assert _tiff_extra_pages_are_thumbnails(Path("x.tif")) is True
+
+    def test_unreadable_returns_none(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert _tiff_extra_pages_are_thumbnails(Path("x.tif")) is None
+
+
+class TestFindFoldersExcludesOldPadded:
+    """audit round 16: AutoFind walked into OLD_PADDED/ and reprocessed the backups."""
+
+    def test_old_padded_excluded(self, tmp_path):
+        backup = tmp_path / "OLD_PADDED"
+        backup.mkdir()
+        (backup / "a.tif").write_bytes(b"x")
+        session = tmp_path / "my_padded_session"
+        session.mkdir()
+        (session / "b.tif").write_bytes(b"x")
+
+        found = find_folders_by_pattern(tmp_path, ["padded"])
+        assert session in found
+        assert backup not in found
+
+
+class TestUndoSkipsNonFiles:
+    """audit round 16: a DIRECTORY named *.tif inside OLD_TIFFs made _safe_move raise
+    IsADirectoryError and count as FAILED; non-files must be skipped by the move loop."""
+
+    def test_directory_named_tif_is_skipped(self, tmp_path, monkeypatch):
+        old_dir = tmp_path / "OLD_TIFFs"
+        old_dir.mkdir()
+        (old_dir / "dir.tif").mkdir()
+
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        inputs = iter(["n", "y", "n"])  # overwrite? move? delete empty folders?
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(inputs))
+
+        cfg = SimpleNamespace(config=ToolConfig())
+        result = run_undo_old_tiffs(cfg)
+        assert result is True
+        assert (old_dir / "dir.tif").is_dir()
+
+
+class TestConfigCorruptWarning:
+    """audit round 16: a corrupt config file was swallowed silently."""
+
+    def test_corrupt_config_warns_on_stderr(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        (tmp_path / ".convert_tiff_config.json").write_text("{ not json")
+        ConfigManager()
+        assert "WARNING" in capsys.readouterr().err
+
+
+class TestThumbFormatPlainTextFallback:
+    """audit round 16: the plain-text path of workflow [1] passed any string to
+    -ThumbFormat and the backend failed at parameter binding."""
+
+    def test_invalid_format_falls_back_to_jpg(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        captured = []
+
+        def fake_run_subprocess(cmd, timeout=None):
+            captured.append(cmd)
+            return 0
+
+        monkeypatch.setattr(convert_tiff, "run_subprocess", fake_run_subprocess)
+        answers = iter([
+            "0",            # mode
+            str(tmp_path),  # input folder
+            "n",            # generate manifest?
+            "", "", "n", "", "", "", "", "",  # workers/staging/dry/safe/skip_lzw/cap/exclude/force-parallel
+            "y", "y",       # generate thumbnails? configure?
+            "", "", "bmp",  # size, quality, FORMAT (invalid)
+            "n",            # skip compressed with thumb?
+            "y",            # proceed?
+        ])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+
+        cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
+        cfg.config.ps_name = "pwsh"
+        assert run_free_compress(cfg) is True
+
+        assert "Invalid format 'bmp', using jpg." in capsys.readouterr().out
+        assert captured, "the backend command was never built"
+        cmd = captured[0]
+        assert cmd[cmd.index("-ThumbFormat") + 1] == "jpg"
+
+
+class TestWorkTimeout:
+    """audit round 16: fixed timeouts false-failed multi-GB scans; whole-file magick/
+    exiftool calls scale as base + size_mb * TIMEOUT_S_PER_MB with the base as floor."""
+
+    def test_missing_path_keeps_floor(self):
+        assert _work_timeout(60, "does/not/exist.tif") == 60
+
+    def test_small_file_keeps_floor(self, tmp_path):
+        f = tmp_path / "tiny.tif"
+        f.write_bytes(b"x" * 100)
+        assert _work_timeout(60, f) == pytest.approx(60)
+
+    def test_scales_with_size(self, tmp_path):
+        f = tmp_path / "big.tif"
+        with open(f, "wb") as fh:
+            fh.truncate(10 * 1024 * 1024)
+        expected = 60 + 10 * convert_tiff.TIMEOUT_S_PER_MB
+        assert _work_timeout(60, f) == pytest.approx(expected)
+
+    def test_multiple_paths_add_up(self, tmp_path):
+        a = tmp_path / "a.tif"
+        b = tmp_path / "b.tif"
+        for p in (a, b):
+            with open(p, "wb") as fh:
+                fh.truncate(10 * 1024 * 1024)
+        expected = 120 + 20 * convert_tiff.TIMEOUT_S_PER_MB
+        assert _work_timeout(120, a, b) == pytest.approx(expected)
 
 
 if __name__ == "__main__":

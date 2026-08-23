@@ -300,6 +300,92 @@ Describe "compress_tiff_zip_v2.ps1 - Audit Round 4" {
     }
 }
 
+Describe "compress_tiff_zip_v2.ps1 - Audit Round 16" {
+    It "Relative -InputDir roots are normalized with GetFullPath (trailing '\.' broke exclusion and mode 5)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$dir = \[System\.IO\.Path\]::GetFullPath\(\$dir\)'
+    }
+
+    It "Duplicate -InputDir roots are deduped" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'seenRootSet'
+    }
+
+    It "Interrupt trap restores originals stranded in OLD_TIFFs (tracked moved originals)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$script:movedOriginals'
+        $content | Should -Match 'RESTORED \(interrupt cleanup\)'
+    }
+
+    It "Rollback verifies an existing ZIP before skipping (corrupt output no longer vetoes rollback)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $matches = Select-String -Path $script:ScriptPath -Pattern 'Test-ZipIntegrity -Path \$t\.FinalDst'
+        $matches.Count | Should -Be 2   # PS7 and PS5 rollback blocks
+    }
+
+    It "Magick probe timeout scales with input size (huge scans false-failed at 30s)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        # full decode (Test-ZipIntegrity) + both per-page compare gates
+        $content | Should -Match '\$sizeMB \* 0\.25'
+        $matches = Select-String -Path $script:ScriptPath -Pattern '\$maxMB \* 0\.25'
+        $matches.Count | Should -Be 2
+    }
+
+    It "Relative -OutputDir is resolved once against PWD, not per input root" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match 'GetFullPath\(\(Join-Path \$PWD\.Path \$OutputDir\)\)'
+    }
+
+    It "Modes 1-7 fail closed (ERROR) on a page-count shrink" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $matches = Select-String -Path $script:ScriptPath -Pattern 'ERROR \(page count shrink\)'
+        $matches.Count | Should -Be 2   # Process-TiffJob and the PS7 worker
+    }
+
+    It "In-place temp sibling suffix (+26 chars) is charged against the 259-char limit" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$finalLen \+= 26'
+        $content | Should -Match '\$writeLen \+= 26'
+    }
+
+    It "Mode 4 escapes `$ in the -ZipSuffix replacement string" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$zipSuffixR = \$zipSuffix\.Replace\(''\$'', ''\$\$''\)'
+    }
+
+    It "Discovery is sorted before duplicate-name claiming (deterministic _v2 renames)" {
+        $content = Get-Content $script:ScriptPath -Raw
+        $content | Should -Match '\$files = @\(\$allFiles \| Sort-Object FullName\)'
+    }
+
+    It "Modes 6/7 only honor the _EXPORT marker at/below the input root" {
+        $content = Get-Content $script:ScriptPath -Raw
+        # discovery reuses the relative matcher; Resolve-Output rebuilds from the root
+        $content | Should -Match 'Test-PathExcluded -Directory \$_\.DirectoryName -Root \$root -Names @\(\$marker\)'
+        $content | Should -Match '\$exportRoot = Join-Path \$inputRootP \(\(\$parts\[0\.\.\$exportIdx\]\) -join'
+        # the old absolute-path rebuild helper is gone
+        $content | Should -Not -Match 'Get-PathPrefix'
+    }
+
+    It "Functional: cwd-relative '-InputDir .' with the root's own name in -ExcludeFolders still processes files" {
+        $root = Join-Path $TestDrive "Round16Root"
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        & magick -size 16x16 xc:red -compress none (Join-Path $root "a.tif") 2>$null
+        (Test-Path -LiteralPath (Join-Path $root "a.tif")) | Should -BeTrue
+        $rootName = Split-Path $root -Leaf
+        Push-Location $root
+        try {
+            $out = & pwsh -NoProfile -File $script:ScriptPath -Mode 1 -InputDir . -ExcludeFolders $rootName -Workers 1 2>&1
+            $code = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
+        $code | Should -Be 0
+        (Test-Path -LiteralPath (Join-Path $root "ZIP\a.tif")) | Should -BeTrue
+        "$out" | Should -Match 'OK \('
+    }
+}
+
 AfterAll {
     # Clean up test directory
     if (Test-Path $script:TestDir) {

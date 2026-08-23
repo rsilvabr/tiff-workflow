@@ -212,7 +212,11 @@ function Test-ThumbExists {
     $prefix = "$b-"
     return (@(Get-ChildItem -LiteralPath $d -File -ErrorAction SilentlyContinue | Where-Object {
         $_.Name.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) -and
-        $_.Name.EndsWith($e, [System.StringComparison]::OrdinalIgnoreCase)
+        $_.Name.EndsWith($e, [System.StringComparison]::OrdinalIgnoreCase) -and
+        # Round 16: require digits between prefix and extension. Any `name_thumb-*` used to
+        # count as a -Page all frame, so a manually saved name_thumb-old.jpg made every
+        # future run report SKIP forever.
+        $_.Name.Substring($prefix.Length, $_.Name.Length - $prefix.Length - $e.Length) -match '^\d+$'
     }).Count -gt 0)
 }
 $script:ThumbExistsFnDef = ${function:Test-ThumbExists}.ToString()
@@ -268,7 +272,13 @@ $allFiles = foreach ($root in $inputRoots) {
     }
 }
 
-$allTiffCount = @($allFiles).Count
+# Round 16: Sort-Object -Unique both dedupes and orders.
+#  - Dedupe: a repeated -InputDir entry (A;A) or roots nested under a -Recursive root
+#    enumerate the same source twice, and the second copy was thumbnailed again as _v2.
+#  - Order: Get-ChildItem order is filesystem-dependent, so which of two same-name sources
+#    claimed photo_thumb.jpg vs photo_thumb_v2.jpg varied between runs.
+$allFiles = @($allFiles | Sort-Object FullName -Unique)
+$allTiffCount = $allFiles.Count
 $files = @($allFiles | Where-Object {
     -not (Test-PathExcluded -Directory $_.DirectoryName -Root $_.InputRoot -Names $script:ToolOutputNames) -and
     $_.BaseName -notmatch $script:ThumbNamePattern
@@ -315,11 +325,15 @@ if ($Remove) {
             # <any subfolder>\<OutputDir>, not only <root>\<OutputDir>. Looking only at the
             # latter meant -Remove with the exact flags that created them found nothing.
             $suffix = $OutputDir.TrimEnd('\', '/').Replace('/', '\')
+            # Round 16: used to be a -like pattern over the path tail, so a '[' in -OutputDir
+            # became a wildcard character class and matched the wrong folders (and never the
+            # literal one). Literal ordinal tail match on a segment boundary instead.
+            $suffixTail = "\$suffix"
             @(foreach ($r in $inputRoots) {
                 Join-Path $r $suffix
                 if ($recurseFlag) {
                     Get-ChildItem -LiteralPath $r -Directory -Recurse -ErrorAction SilentlyContinue |
-                        Where-Object { $_.FullName -like "*\$suffix" } |
+                        Where-Object { $_.FullName.Replace('/', '\').TrimEnd('\').EndsWith($suffixTail, [System.StringComparison]::OrdinalIgnoreCase) } |
                         ForEach-Object { $_.FullName }
                 }
             })
@@ -516,7 +530,9 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                     $framePrefix = "$destBase-"
                     $frames = @(Get-ChildItem -LiteralPath $destDir -File -ErrorAction SilentlyContinue | Where-Object {
                         $_.Name.StartsWith($framePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
-                        $_.Name.EndsWith($destExt, [System.StringComparison]::OrdinalIgnoreCase)
+                        $_.Name.EndsWith($destExt, [System.StringComparison]::OrdinalIgnoreCase) -and
+                        # Round 16: digits only between prefix and extension (see Test-ThumbExists).
+                        $_.Name.Substring($framePrefix.Length, $_.Name.Length - $framePrefix.Length - $destExt.Length) -match '^\d+$'
                     })
                     if ($frames.Count -gt 0) {
                         "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"
@@ -599,7 +615,9 @@ if ($isPS7 -and $effectiveWorkers -gt 1) {
                     $framePrefix = "$destBase-"
                     $frames = @(Get-ChildItem -LiteralPath $destDir -File -ErrorAction SilentlyContinue | Where-Object {
                         $_.Name.StartsWith($framePrefix, [System.StringComparison]::OrdinalIgnoreCase) -and
-                        $_.Name.EndsWith($destExt, [System.StringComparison]::OrdinalIgnoreCase)
+                        $_.Name.EndsWith($destExt, [System.StringComparison]::OrdinalIgnoreCase) -and
+                        # Round 16: digits only between prefix and extension (see Test-ThumbExists).
+                        $_.Name.Substring($framePrefix.Length, $_.Name.Length - $framePrefix.Length - $destExt.Length) -match '^\d+$'
                     })
                     if ($frames.Count -gt 0) {
                         $result = "OK | $name -> $destBase-*$destExt ($($frames.Count) frames)"

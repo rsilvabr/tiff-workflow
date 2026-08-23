@@ -12,6 +12,9 @@ class below gets tests that fail if the fix is reverted anywhere it applies:
     4. path/staging   - a run must never touch another run's in-flight files
     5. dest collision - a failed move must never leave both source and destination gone
 
+Later audit rounds pinned their own fixes the same way; the round-specific classes
+(TestRound15Reporting, the TestAuditRound16* group, ...) sit below the five classes.
+
 The PowerShell parts run end to end through the real shells (skipped when a shell or
 ImageMagick/exiftool is missing) rather than as Pester tests, because the repo's Pester suites
 need Pester 5 and CI/dev boxes here still ship 3.4.0. Static AST invariants live in
@@ -1869,7 +1872,9 @@ class TestCopyExifProbesTheMainImage:
     def test_probe_reads_page_zero_only(self, script):
         source = (REPO / script).read_text(encoding="ascii")
         assert "-IFD0:Compression" in source, f"{script}: probe still reads every IFD"
-        assert '$comp = "$(@($comp)[0])".Trim()' in source, (
+        # Audit round 16 routed the probe through Invoke-ExifTool; the collapse to the
+        # first output line now happens on the helper's .Output array.
+        assert '$comp = "$(@($compRes.Output)[0])".Trim()' in source, (
             f"{script}: -match on the raw array is truthy for ANY page"
         )
 
@@ -1882,7 +1887,9 @@ class TestCopyExifProbesTheMainImage:
         assert "-EXIF:all $p.Tiff 2>$null | Select-Object -First 1" not in source, (
             f"{script}: the fail-closed EXIF check can read a stale exit code again"
         )
-        assert "$exifProbeExit = $LASTEXITCODE" in source
+        # Audit round 16: the probe runs through Invoke-ExifTool, which returns the real
+        # exiftool exit code on .ExitCode; the gate must read that, not $LASTEXITCODE.
+        assert "$exifProbeExit = $exifProbeRes.ExitCode" in source
 
 
 class TestPurgeKeepsOrphansInsteadOfAborting:
@@ -2813,6 +2820,250 @@ class TestPythonMagickSpec:
         finally:
             if temp:
                 Path(temp).unlink(missing_ok=True)
+
+
+class TestAuditRound16InputRootsAreNormalised:
+    """`Join-Path $PWD.Path "."` leaves a trailing `\\.` (and `a\\..\\b` keeps its `..`),
+    which broke Test-PathExcluded's root compare: files directly under the root fell
+    into its absolute-path fallback, so an -ExcludeFolders entry matching the root's
+    OWN name excluded the whole run."""
+
+    def test_roots_are_normalised_before_they_reach_the_exclusion_check(self):
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        normalise = "try { $dir = [System.IO.Path]::GetFullPath($dir) }"
+        assert normalise in source, "input roots are no longer normalised"
+        excluded = "Test-PathExcluded -Directory $df.DirectoryName -Root $inputRoot"
+        assert excluded in source
+        assert source.index(normalise) < source.index(excluded), (
+            "GetFullPath must run in the -InputDir root loop, before Test-PathExcluded "
+            "ever sees the root"
+        )
+
+
+class TestAuditRound16InterruptRollback:
+    """Modes 0/9 move originals into OLD_TIFFs/ before the verified ZIP lands; the
+    per-group rollback only runs on the normal exit path, so Ctrl+C used to strand
+    them there. The trap now walks $script:movedOriginals and puts back any original
+    whose output never landed (or does not decode)."""
+
+    def test_moved_originals_are_tracked(self):
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        assert "$script:movedOriginals = [System.Collections.ArrayList]::new()" in source
+        assert "[void]$script:movedOriginals.Add(" in source, (
+            "mode 0/9 moves no longer register the original for the interrupt trap"
+        )
+
+    def test_trap_restores_stranded_originals(self):
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        trap = source[source.index("trap {"):source.index("# Detect PowerShell version")]
+        assert "foreach ($mv in @($script:movedOriginals.ToArray()))" in trap, (
+            "the interrupt trap does not walk the moved-originals list"
+        )
+        assert "Move-Item -LiteralPath $mv.Backup -Destination $mv.Original" in trap
+        assert "RESTORED (interrupt cleanup)" in trap
+
+    def test_trap_keeps_an_original_only_when_its_output_decodes(self):
+        """A partial/corrupt FinalDst must not veto the restore."""
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        trap = source[source.index("trap {"):source.index("# Detect PowerShell version")]
+        assert "Test-ZipIntegrity -Path $mv.FinalDst" in trap, (
+            "the trap trusts the mere EXISTENCE of the output again"
+        )
+
+
+class TestAuditRound16SkipRollbackIsVerified:
+    """"SKIP rollback (ZIP exists)" used to fire on the mere existence of FinalDst, so a
+    partial/corrupt write vetoed the rollback and stranded the original in OLD_TIFFs/.
+    Both rollback copies (PS7 parallel and PS5 sequential) now decode the output first."""
+
+    def test_skip_rollback_is_gated_on_zip_integrity(self):
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        gated = re.findall(
+            r"Test-ZipIntegrity -Path \$t\.FinalDst[^}]*?"
+            r'Write-Log "SKIP rollback \(ZIP exists\)',
+            source, re.S,
+        )
+        assert len(gated) == 2, (
+            "expected the integrity gate ahead of BOTH 'SKIP rollback (ZIP exists)' "
+            f"branches, found {len(gated)}"
+        )
+        corrupt = re.findall(
+            r'SKIP rollback \(ZIP exists\).{0,400}?'
+            r'Remove-Item -LiteralPath \$t\.FinalDst',
+            source, re.S,
+        )
+        assert len(corrupt) == 2, (
+            "an output that fails the integrity check must be deleted before the "
+            "original is restored"
+        )
+
+
+class TestAuditRound16OutputDirAndPageCount:
+    """A RELATIVE -OutputDir was re-based on EACH input root by Resolve-Output, so
+    '-InputDir A;B -OutputDir out' scattered one flat output across A\\out and B\\out.
+    It is resolved ONCE against $PWD before the task loop. Separately: modes 1-7 ship
+    without a pixel gate, so a rewrite that silently dropped pages reported OK -- a
+    page-count shrink is now an ERROR."""
+
+    def test_relative_output_dir_is_resolved_once_against_pwd(self):
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        resolved = "$OutputDir = [System.IO.Path]::GetFullPath((Join-Path $PWD.Path $OutputDir))"
+        assert resolved in source, "a relative -OutputDir is re-based per input root again"
+        assert source.count(resolved) == 1
+        # The resolution must sit between the root loop and the task loop.
+        assert source.index("$inputRoots += $dir") < source.index(resolved), (
+            "-OutputDir must be resolved AFTER the roots are known..."
+        )
+        assert source.index(resolved) < source.index("$script:total = 0"), (
+            "...and BEFORE the task loop runs"
+        )
+
+    def test_page_count_shrink_is_an_error_for_modes_1_to_7(self):
+        source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
+        gate = "if (-not $generateThumb -and $mode -ge 1 -and $mode -le 7) {"
+        assert gate in source, "the page-count shrink gate lost its mode range"
+        assert 'ERROR (page count shrink)' in source, (
+            "a silent page drop is no longer reported as an ERROR"
+        )
+        assert source.index(gate) < source.index('ERROR (page count shrink)'), (
+            "the ERROR must be emitted from inside the modes 1-7 gate"
+        )
+
+
+class TestAuditRound16CopyExifRestoreGates:
+    """The staging mapping was registered BEFORE the metadata/subfiletype restore gates,
+    so a staged ZIP whose restore failed was moved ON TOP of the EXIF-bearing original
+    and reported as a mere WARN (exit 0). A failed restore is now an ERROR that leaves
+    the original untouched, and the JPEG->TIFF copy no longer passes -unsafe (it stamped
+    the JPEG's geometry onto a TIFF whose dimensions legitimately differ)."""
+
+    @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
+    def test_failed_restore_is_an_error_and_leaves_the_original_untouched(self, script):
+        source = (REPO / script).read_text(encoding="ascii")
+        assert "ERROR (exiftool metadata restore failed - original untouched)" in source
+        assert "ERROR (subfiletype restore failed - original untouched)" in source
+
+    @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
+    def test_staging_mapping_is_registered_after_the_restore_gates(self, script):
+        source = (REPO / script).read_text(encoding="ascii")
+        meta_err = source.index("ERROR (exiftool metadata restore failed - original untouched)")
+        sub_err = source.index("ERROR (subfiletype restore failed - original untouched)")
+        assert meta_err < sub_err, "the subfiletype gate must run after the metadata gate"
+        if script.endswith("ps5.ps1"):
+            registered = source.index("$script:stagingMap[$p.Tiff] = $stagingName")
+            assert registered > sub_err, (
+                "the staging mapping is registered before the restore gates again"
+            )
+        else:
+            # PS7 hands the staging name back on the result object; the error results
+            # must carry StagingName = $null so the move loop never sees the file.
+            for line in source.splitlines():
+                if "restore failed - original untouched" in line:
+                    assert "StagingName = $null" in line, line
+
+    @pytest.mark.parametrize("script", ["copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"])
+    def test_jpeg_copy_block_has_no_bare_unsafe(self, script):
+        source = (REPO / script).read_text(encoding="ascii")
+        start = source.index("$tagsArgs = @('-tagsfromfile'")
+        end = source.index(")", start)
+        block = source[start:end]
+        assert "'-unsafe'" not in block, (
+            f"{script}: -unsafe crept back into the JPEG->TIFF tagsfromfile copy"
+        )
+        assert "--ImageWidth" in block and "--Orientation" in block, (
+            f"{script}: the geometry tags must be excluded explicitly instead"
+        )
+
+
+class TestAuditRound16ThumbnailFrameDigits:
+    """Test-ThumbExists matched `name_thumb-*.jpg`, so `name_thumb-copy.jpg` (or any
+    non-frame sibling) counted as the frame set and -Page all reported SKIP (exists)
+    forever. The middle of a frame name must be all digits; the check exists in three
+    places (the shared helper and both shell paths)."""
+
+    def test_frame_existence_check_requires_digits_three_times(self):
+        source = (REPO / "generate_thumbnails.ps1").read_text(encoding="ascii")
+        count = source.count("-match '^\\d+$'")
+        assert count == 3, f"expected the digit check in 3 places, found {count}"
+
+
+class TestAuditRound16PurgeMetadataGate:
+    """The purge verified PIXELS only, so a conversion that dropped metadata (a lost
+    per-page SubfileType, an EXIF block, an ICC profile) purged the last good backup.
+    _compare_tiff_metadata now refuses unless the metadata signatures match too."""
+
+    @staticmethod
+    def _fake_run(subfile_by_name):
+        def fake_run(cmd, **kwargs):
+            cmd = [str(a) for a in cmd]
+            if cmd[0] == "exiftool":
+                name = cmd[-1]
+                if "-SubfileType" in cmd:
+                    out = subfile_by_name.get(name, "")
+                    return SimpleNamespace(returncode=0, stdout=out, stderr="")
+                if "-EXIF:all" in cmd:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+            if "compare" in cmd:
+                return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt == "%n\n":
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="64 64", stderr="")
+        return fake_run
+
+    def test_lost_subfiletype_refuses_the_purge(self, tmp_path, monkeypatch):
+        old = tmp_path / "OLD_TIFFs" / "scan.tif"
+        old.parent.mkdir()
+        old.write_bytes(b"old")
+        new = tmp_path / "scan.tif"
+        new.write_bytes(b"new")
+        monkeypatch.setattr(subprocess, "run", self._fake_run({
+            str(old): "[IFD0] SubfileType: 1\n",
+            str(new): "",
+        }))
+
+        match, detail = convert_tiff._compare_tiff_metadata(old, new)
+        assert not match, "the new file lost its SubfileType tag and the purge still passed"
+        assert "SUBFILETYPE_MISMATCH" in detail, detail
+
+    def test_matching_subfiletypes_pass(self, tmp_path, monkeypatch):
+        old = tmp_path / "OLD_TIFFs" / "scan.tif"
+        old.parent.mkdir()
+        old.write_bytes(b"old")
+        new = tmp_path / "scan.tif"
+        new.write_bytes(b"new")
+        monkeypatch.setattr(subprocess, "run", self._fake_run({
+            str(old): "[IFD0] SubfileType: 1\n",
+            str(new): "[IFD0] SubfileType: 1\n",
+        }))
+
+        match, detail = convert_tiff._compare_tiff_metadata(old, new)
+        assert match, f"identical metadata was refused: {detail}"
+
+    def test_unreadable_metadata_refuses_the_purge(self, tmp_path, monkeypatch):
+        """Missing exiftool must fail CLOSED, never read as 'metadata matches'."""
+        old = tmp_path / "OLD_TIFFs" / "scan.tif"
+        old.parent.mkdir()
+        old.write_bytes(b"old")
+        new = tmp_path / "scan.tif"
+        new.write_bytes(b"new")
+
+        def fake_run(cmd, **kwargs):
+            cmd = [str(a) for a in cmd]
+            if cmd[0] == "exiftool":
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            if "compare" in cmd:
+                return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt == "%n\n":
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="64 64", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        match, detail = convert_tiff._compare_tiff_metadata(old, new)
+        assert not match
+        assert "metadata unreadable" in detail, detail
 
 
 if __name__ == "__main__":
