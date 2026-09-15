@@ -81,6 +81,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-ThumbPage` | int | `1` | Output page position for the embedded thumbnail. Must be **>= 1** -- `0` (thumbnail first) is refused at startup, see below |
 | `-ThumbFormat` | string | `"jpg"` | Thumbnail format: `jpg`, `png`, or `tif` |
 | `-SkipCompressedWithThumb` | switch | off | Skip TIFFs that are already compressed AND have thumbnail |
+| `-SrgbProfile` | string | `""` | ICC profile used to convert wide-gamut sources before the profile is stripped. `""` auto-detects the Windows sRGB ICC; pass a path to `.icc` to override |
 
 **Example:**
 ```powershell
@@ -92,6 +93,16 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -Th
 - Page 0: Original image (compressed with ZIP/Deflate), keeping the `SubfileType` marker the source carried
 - Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved), marked `subfiletype=1` (reduced resolution flag)
 - The main image is always read from page 0, and the thumbnail is always appended after it.
+
+**Thumbnails are colour-managed.** Wide-gamut sources (ProPhoto, AdobeRGB) are converted *through*
+their embedded ICC profile before the profile is stripped, so a Capture One ProPhoto export produces
+a thumbnail that actually looks like the photo. The sRGB profile is auto-detected on Windows; if
+none is found the run logs a single `WARN` and the thumbnails come out with shifted colours --
+pass `-SrgbProfile <path.icc>` to fix it.
+
+**`-GenerateThumbnail` never drops pages.** It rebuilds the file from page 0 plus a new thumbnail,
+so it replaces an existing embedded preview but **refuses** any file whose extra pages are real
+(scanner IR, Photoshop layers) instead of discarding them.
 
 **`-ThumbPage 0` is refused.** Every page classifier in this toolkit -- SafeMode, the
 thumbnail-safety gate, both Copy EXIF backends and the Python mirror -- treats page 0 as the
@@ -177,11 +188,20 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 0 -InputDir . -SafeMode:
 
 ---
 
-## OLD_TIFFs Protection (Modes 0 and 9)
+## OLD_TIFFs Protection (all modes)
 
-Modes 0 and 9 move originals to `OLD_TIFFs/` subfolder and **skip any TIFF already inside an `OLD_TIFFs` folder**. This protects originals from previous conversions and prevents re-processing.
+Modes 0 and 9 move originals to an `OLD_TIFFs/` subfolder. **Every mode then skips any TIFF inside an
+`OLD_TIFFs` folder** -- the same relative rule `-ExcludeFolders` uses, so pointing `-InputDir`
+straight at an `OLD_TIFFs` folder still processes it. This protects originals from previous
+conversions and prevents re-processing.
 
-Other modes (1-8) do not have this filter — running them on a folder that already has `OLD_TIFFs` content will process those files normally.
+Before round 15 only modes 0 and 9 applied the filter, so a mode 2/3/5 run over a tree already
+compressed with mode 0/9 walked into the backups: the real file was skipped as already-Deflate,
+which left the *backup* to claim the output name and produced a folder of `_v2` copies of backups.
+One exclusion list now covers every mode.
+
+Staged and temporary files left behind by an interrupted run are skipped the same way, and both
+counts are logged.
 
 ---
 

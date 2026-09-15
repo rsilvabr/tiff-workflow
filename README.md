@@ -1,6 +1,6 @@
 # TIFF Workflow Automation
 
-Unified TIFF processing toolkit with two complementary workflows:
+Unified TIFF processing toolkit with four complementary workflows:
 
 1. **TIFF ZIP Compression** — Re-compress TIFFs with better Deflate parameters (lossless, smaller files)
 2. **Copy EXIF to TIFF** — Copy EXIF metadata from JPEG to TIFF (Fuji S3/S5 Pro workflow)
@@ -24,6 +24,8 @@ TIFFs support many codecs, but only Deflate actually reduces size on 16-bit file
 | Deflate | 214 MB (-11%) | 60 MB (-53%) | 71 MB (-72%) |
 
 *Padded 16-bit = 8-bit image converted to 16-bit TIFFs
+
+Some software offers LZW as the only TIFF compression option on export; an existing archive of 16-bit LZW files can therefore be larger than the same files stored uncompressed.
 
 **For bloated 8-bit TIFFs** (marked as 16-bit but actually 8-bit padded):
 - Keep as 16-bit: 70 MB (Deflate)
@@ -96,6 +98,7 @@ tiff-workflow/
 |   |-- README_compress_tiff_zip.md <- compress_tiff_zip.ps1 detailed docs
 |   |-- README_copy_exif.md           <- Copy EXIF scripts detailed docs
 |   |-- README_generate_thumbnails.md  <- Thumbnail generator docs
+|   |-- CHANGELOG.md                   <- Release history
 |   |-- bugs_fixed.md                  <- Bug fixes history
 |
 |-- tests/                         <- Pytest + Pester tests
@@ -192,7 +195,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -S
 
 See [docs/README_compress_tiff_zip.md](docs/README_compress_tiff_zip.md) for full CLI reference.
 
-### Copy EXIF (wizard options 2, 3, 4)
+### Fuji S3/S5 Pro: Copy EXIF (wizard options 2, 3, 4)
 
 For Fuji S5 Pro / S3 Pro users who export TIFFs via Hyper Utility — these TIFFs come without EXIF metadata. The wizard's AutoFind automatically locates all `S5pro` or `S3pro` folders and processes them.
 
@@ -269,47 +272,15 @@ I am sharing these scripts because getting all of this to work correctly was une
 
 Getting there required finding and fixing several bugs. The full history and technical details are documented in [`docs/bugs_fixed.md`](docs/bugs_fixed.md).
 
-### Unreleased — audit round 15
+---
 
-Two of these lose data silently; if you have file names containing `%`, this round matters.
+## Changelog
 
-- **A `%` in a file name stripped every metadata tag** and the run still said `OK`. exiftool
-  expands printf-style filename codes in the `-tagsfromfile` argument (`50%off.tif` is read as
-  `50ff.tif`), warns, and **exits 0** — so the check every backend relied on passed. In mode 8
-  with `-DeleteSource` it was permanent. Doubling the `%` does not escape it; the metadata now
-  travels in a container whose name has none. Every `-tagsfromfile` call also fails on
-  `Error opening file` now, whatever the exit code
-- **Modes 1-7 walked into `OLD_TIFFs/` and compressed the backups.** The real file is already
-  Deflate so it was skipped, which left the *backup* to claim the output name — a mode 2 run
-  over a mode 9 tree produced a flat folder holding nothing but `_v2` copies of backups. One
-  exclusion list now covers every mode, relative to the folder you point at
-- **The thumbnail generator no longer refuses `ZIP/` and `_EXPORT/` trees** — that is where the
-  compressed library and the export trees live, and the exclusion was silent, undocumented and
-  impossible to turn off. It takes `-ExcludeFolders` now and logs what it left out
-- **`-Page all` no longer makes `-Page 0` unrunnable**: the frame set only counts as "already
-  there" when `-Page all` was actually asked for
-- Files left behind by an interrupted run are no longer discovered as photos
-- Workflows [6] and [7] work on `%` names (the Python side never got the escaping fix)
-- Mode 8 says at startup that it replaces each original in place, with or without
-  `-DeleteSource` — it always did, and the docs implied otherwise
+**Latest release: v2.4** — audit rounds 15 and 16.
 
-### v2.3
-
-Six audit rounds (8-13), driven by real scanner and Capture One files:
-
-- **Folder exclusion** — `-ExcludeFolders "_EXPORT;temp"` skips whole folder trees by name, in every mode and in all three backends; the wizard asks once per workflow. Matching is relative to the folder you point at, so a name appearing higher up the path never excludes anything
-- **Worker cap decoupled from Safe Mode** — `-CapWorkers` (default: no cap), so Safe Mode no longer quietly limits parallelism
-- **Discovery is much faster** — the "already compressed?" probe is batched, one `exiftool` per ~400 files instead of one process per file
-- **Colour-managed thumbnails** — wide-gamut sources are converted through their embedded ICC profile before it is stripped, so a ProPhoto export finally produces a thumbnail that looks like the photo
-- `-GenerateThumbnail` no longer silently drops pages, and no longer leaves the main image marked as a page of a multi-page document; `-ThumbPage 0` is refused, because those files were classified multi-page by the tool's own Safe Mode on every later run
-- **Mode 8 works on deeply nested archives** — staged names were long enough to blow past Windows' 260-character path limit, which failed *every* file with an unexplained error; an over-long path is now refused up front, with the number
-- In-place replacement and the mode 8 delete now require a pixel-identical check, not just "the file decodes"
-- Safe Mode classifies a thumbnail by size as well as by tag, so a full-size IR `MASK` page is always treated as a real page
-- "Repeat last workflow" rebuilds the command for the PowerShell it is about to run; it could previously turn Safe Mode back on
-
-⚠️ **Breaking:** `-ThumbPage 0` is now refused (exit 1). It only ever produced files this toolkit would not touch again.
-
-See [`docs/bugs_fixed.md`](docs/bugs_fixed.md) for the complete list.
+- Full release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
+- Per-bug technical detail: [`docs/bugs_fixed.md`](docs/bugs_fixed.md)
+- [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
 
 ---
 

@@ -196,6 +196,8 @@ Config saved to `~/.convert_tiff_config.json`:
 - `last_mode` -- last mode selected
 - `last_origin` -- last workflow used
 - `last_manifest_path` -- last manifest CSV run (repeat re-reads it via the loader)
+- `last_exclude_folders` -- last `-ExcludeFolders` list. The wizard asks once per workflow and
+  offers this as the default; a fresh install defaults to nothing excluded
 
 ---
 

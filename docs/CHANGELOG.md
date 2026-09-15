@@ -1,0 +1,69 @@
+# Changelog
+
+Release-level history, moved here from `README.md`. Per-bug technical detail -- what broke, why,
+which code path, and which test pins it -- is in [`bugs_fixed.md`](bugs_fixed.md). Downloads are on
+the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
+
+> **Numbering.** Sections carry the version the work shipped in. Audit rounds are the stable
+> identifier and match the `fix(audit-round-N)` commits: rounds 8-14 shipped as **v2.3**, rounds
+> 15-16 as **v2.4**.
+
+---
+
+## v2.4
+
+Audit rounds 15 and 16. Round 15 is the section below -- it was written while unreleased and landed
+after the v2.3 tag. Round 16 (interrupt rollback, metadata-aware purge gate, fail-closed metadata
+restores in Copy EXIF, size-scaled timeouts) is covered in `RELEASE_v2.4.md` and, per bug, in
+[`bugs_fixed.md`](bugs_fixed.md).
+
+### Audit round 15
+
+Two of these lose data silently; if you have file names containing `%`, this round matters.
+
+- **A `%` in a file name stripped every metadata tag** and the run still said `OK`. exiftool
+  expands printf-style filename codes in the `-tagsfromfile` argument (`50%off.tif` is read as
+  `50ff.tif`), warns, and **exits 0** — so the check every backend relied on passed. In mode 8
+  with `-DeleteSource` it was permanent. Doubling the `%` does not escape it; the metadata now
+  travels in a container whose name has none. Every `-tagsfromfile` call also fails on
+  `Error opening file` now, whatever the exit code
+- **Modes 1-7 walked into `OLD_TIFFs/` and compressed the backups.** The real file is already
+  Deflate so it was skipped, which left the *backup* to claim the output name — a mode 2 run
+  over a mode 9 tree produced a flat folder holding nothing but `_v2` copies of backups. One
+  exclusion list now covers every mode, relative to the folder you point at
+- **The thumbnail generator no longer refuses `ZIP/` and `_EXPORT/` trees** — that is where the
+  compressed library and the export trees live, and the exclusion was silent, undocumented and
+  impossible to turn off. It takes `-ExcludeFolders` now and logs what it left out
+- **`-Page all` no longer makes `-Page 0` unrunnable**: the frame set only counts as "already
+  there" when `-Page all` was actually asked for
+- Files left behind by an interrupted run are no longer discovered as photos
+- Workflows [6] and [7] work on `%` names (the Python side never got the escaping fix)
+- Mode 8 says at startup that it replaces each original in place, with or without
+  `-DeleteSource` — it always did, and the docs implied otherwise
+
+---
+
+## v2.3
+
+Six audit rounds (8-13), driven by real scanner and Capture One files:
+
+- **Folder exclusion** — `-ExcludeFolders "_EXPORT;temp"` skips whole folder trees by name, in every mode and in all three backends; the wizard asks once per workflow. Matching is relative to the folder you point at, so a name appearing higher up the path never excludes anything
+- **Worker cap decoupled from Safe Mode** — `-CapWorkers` (default: no cap), so Safe Mode no longer quietly limits parallelism
+- **Discovery is much faster** — the "already compressed?" probe is batched, one `exiftool` per ~400 files instead of one process per file
+- **Colour-managed thumbnails** — wide-gamut sources are converted through their embedded ICC profile before it is stripped, so a ProPhoto export finally produces a thumbnail that looks like the photo
+- `-GenerateThumbnail` no longer silently drops pages, and no longer leaves the main image marked as a page of a multi-page document; `-ThumbPage 0` is refused, because those files were classified multi-page by the tool's own Safe Mode on every later run
+- **Mode 8 works on deeply nested archives** — staged names were long enough to blow past Windows' 260-character path limit, which failed *every* file with an unexplained error; an over-long path is now refused up front, with the number
+- In-place replacement and the mode 8 delete now require a pixel-identical check, not just "the file decodes"
+- Safe Mode classifies a thumbnail by size as well as by tag, so a full-size IR `MASK` page is always treated as a real page
+- "Repeat last workflow" rebuilds the command for the PowerShell it is about to run; it could previously turn Safe Mode back on
+
+⚠️ **Breaking:** `-ThumbPage 0` is now refused (exit 1). It only ever produced files this toolkit would not touch again.
+
+See [`bugs_fixed.md`](bugs_fixed.md) for the complete list.
+
+---
+
+## Earlier releases
+
+Per-release notes for v2.0, v2.2, v2.3 and v2.4 are kept at the repository root
+(`RELEASE_v2.0.md`, `RELEASE_v2.2.md`, `RELEASE_v2.3.md`, `RELEASE_v2.4.md`).

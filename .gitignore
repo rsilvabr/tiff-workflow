@@ -45,3 +45,6 @@ tests/.tmp/
 
 # Release notes (local only, copied to GitHub releases)
 RELEASE_*.md
+
+# Promo / outreach drafts (local only, pasted into GitHub settings and posts)
+PROMO_*.md

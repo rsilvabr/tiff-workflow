@@ -97,6 +97,10 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -Recursive -Remo
 ## Features
 
 - **sRGB colorspace**: All outputs converted to sRGB for consistency
+- **Colour-managed**: wide-gamut sources (ProPhoto, AdobeRGB) are converted *through* their embedded
+  ICC profile before it is stripped, so a Capture One ProPhoto export produces a thumbnail that
+  actually looks like the photo. The sRGB profile is auto-detected on Windows; override it with
+  `-SrgbProfile <path.icc>` (a missing profile logs one `WARN` and shifts the colours)
 - **ICC stripping**: Removes ICC profiles to reduce file size
 - **Configurable quality**: JPEG quality adjustable (default 85)
 - **Multi-format**: Supports JPEG, PNG, and TIFF output

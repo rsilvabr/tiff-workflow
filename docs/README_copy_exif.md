@@ -93,6 +93,10 @@ The wizard's AutoFind feature scans recursively for folders matching `S5pro` or 
 -InputDir "E:\photos\S5pro\session1;E:\photos\S5pro\session2;E:\photos\S3pro\session3"
 ```
 
+**Note on `-ExcludeFolders`:** both Copy EXIF backends accept the flag for consistency with the
+other backends, but they read each `-InputDir` folder **non-recursively** -- there is nothing below
+their roots to exclude, so the flag only really bites in the recursive compression modes.
+
 Each session folder is processed independently.
 
 ---
