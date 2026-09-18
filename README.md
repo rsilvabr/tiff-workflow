@@ -163,21 +163,77 @@ F:\2025\São Paulo\TIFF,F:\2025\São Paulo\TIFF,0
 
 ---
 
-## Requirements
+## Requirements & Installation
 
-```
-ImageMagick 7    https://imagemagick.org/script/download.php
-exiftool         https://exiftool.org
-Python 3.9+      (for wizard only)
-Rich             pip install rich
-```
+### 1. External Tools (Download Executables, NOT Source Code)
 
-Both `magick.exe` and `exiftool.exe` must be on your PATH.
+| Tool | Download URL | What to Download | Extract to |
+|------|-------------|------------------|------------|
+| **ImageMagick 7** | https://imagemagick.org/script/download.php | Installer `.exe` (Q16-HDRI x64) | Default location |
+| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
 
-### Verify
+#### Common Download Mistakes
+
+| Wrong Download | Why It Fails | Correct Download |
+|---------------|--------------|------------------|
+| `exiftool-XX.XX.tar.gz` | Perl source code, needs Perl installed | `exiftool-XX.XX_64.zip` (Windows executable) |
+
+#### exiftool Setup — Renaming IS Required Here
+
+> **Unlike jxl-photo, this toolkit requires the plain name `exiftool.exe`.** Every script calls `exiftool` directly — a file still named `exiftool(-k).exe` is not found, and the dependency check reports exiftool as missing.
+
+The Windows download comes as `exiftool(-k).exe`. Rename it:
+
 ```powershell
+# Option A: Rename the file
+Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
+
+# Option B: Duplicate and rename (keeps the original)
+Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
+```
+
+### 2. Add to PATH (PowerShell)
+
+**Replace the example paths below with YOUR actual installation paths:**
+
+```powershell
+# EDIT THESE PATHS to match where YOU installed/extracted the tools:
+$myPaths = @(
+    "C:\tools\exiftool",                              # where exiftool.exe is (RENAMED!)
+    "C:\Program Files\ImageMagick-7.1.1-Q16-HDRI"     # where magick.exe is
+)
+
+# Add to user PATH
+$p = [Environment]::GetEnvironmentVariable("PATH", "User")
+[Environment]::SetEnvironmentVariable("PATH", ($myPaths -join ";") + ";$p", "User")
+
+# RESTART your PowerShell/terminal after this!
+```
+
+> **Important:** Both `magick.exe` and `exiftool.exe` must be on your PATH for the scripts and the wizard to find them. They only search the system PATH — they do not look in other directories.
+
+### 3. Python + Rich (wizard only — optional)
+
+Python 3.9+ with the `rich` package is needed **only** for the guided wizard (`convert_tiff.py`). The direct PowerShell scripts need nothing but the two tools above.
+
+```powershell
+pip install rich
+```
+
+> Install `rich` in the same Python version you'll use to run the wizard: `python -m pip install rich`.
+
+### 4. Verify Installation
+
+**Restart PowerShell**, then run:
+
+```powershell
+# Each should return a version number
 magick --version    # ImageMagick 7.x.x
 exiftool -ver       # 13.xx
+
+# Test full environment (wizard only)
+cd "C:\Users\YourName\Documents\GitHub\tiff-workflow"  # adjust path
+python convert_tiff.py
 ```
 
 ---
@@ -234,17 +290,15 @@ On fast storage (SSD), processing cost >> I/O cost, so uncompressed is fastest. 
 
 ## Troubleshooting
 
-### "ERROR (exiftool check)" — cannot detect compression
-```powershell
-exiftool -s -s -s -Compression photo.tif
-# Should output: Deflate, LZW, or nothing (uncompressed)
-```
-
-### "ERROR (magick)" — compression failed
-```powershell
-magick identify -verbose photo.tif
-# Should display image info without errors
-```
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| `exiftool` not recognized / wizard reports exiftool missing | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` | Add the folder to PATH (step 2 above) and reopen the terminal; **rename** to `exiftool.exe` — unlike jxl-photo, this toolkit does not detect the `(-k)` name |
+| `magick` not recognized | ImageMagick folder not on PATH | Add its folder to PATH and reopen the terminal |
+| `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download the `.zip` with `_64` suffix |
+| `ModuleNotFoundError: No module named 'rich'` | `rich` installed in a different Python version | Run `python -m pip install rich` |
+| PATH still not working | Terminal not restarted | Close and reopen PowerShell completely |
+| "ERROR (exiftool check) — cannot detect compression" | exiftool can't read the file | `exiftool -s -s -s -Compression photo.tif` — should output: Deflate, LZW, or nothing (uncompressed) |
+| "ERROR (magick) — compression failed" | magick can't read the file | `magick identify -verbose photo.tif` — should display image info without errors |
 
 ---
 
