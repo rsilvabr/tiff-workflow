@@ -48,3 +48,6 @@ RELEASE_*.md
 
 # Promo / outreach drafts (local only, pasted into GitHub settings and posts)
 PROMO_*.md
+
+# Plans, coder reports and reviews exchanged between AI tools (see AGENTS.md)
+AI_tools/
