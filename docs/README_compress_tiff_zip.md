@@ -58,6 +58,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 |-----------|------|---------|-------------|
 | `-Workers` | int | `8` | Parallel jobs (PS7) / throttle limit |
 | `-CapWorkers` | int | `0` | Clamp parallel workers to this value (0 = no cap). Independent of SafeMode |
+| `-WorkerMemoryFraction` | double | `0.8` | Cap parallel workers so their ImageMagick processes fit in this share of the memory still free (0 = no cap) |
 | `-DryRun` | switch | off | Show what would be compressed, don't write anything |
 | `-SafeMode` | bool | `$true` | Skip multi-page TIFFs (scanner IR, Photoshop layers). Does NOT cap workers |
 | `-SkipLzwAsCompressed` | bool | `$false` | Treat LZW as already compressed (skip re-compression) |
@@ -82,6 +83,16 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-ThumbFormat` | string | `"jpg"` | Thumbnail format: `jpg`, `png`, or `tif` |
 | `-SkipCompressedWithThumb` | switch | off | Skip TIFFs that are already compressed AND have thumbnail |
 | `-SrgbProfile` | string | `""` | ICC profile used to convert wide-gamut sources before the profile is stripped. `""` auto-detects the Windows sRGB ICC; pass a path to `.icc` to override |
+
+**Memory and `-Workers`.** A `magick compare` (the in-place pixel gate) holds ~68 bytes per
+pixel -- measured at **5.35 GiB on an 84 MP scan**, while a plain recompress/decode peaks at
+~12.7 B/px. ImageMagick's own limit is 32 GiB per process, so it does not protect the machine.
+Before the first worker starts, the run reads the largest image of the batch and logs
+`Memory: ~N GB per worker | N GB available | workers N`; if that needs fewer workers than you
+asked for, it logs `Workers reduced from N to M` and runs at M. `-CapWorkers` still applies --
+the effective count is the **smaller** of `-Workers`, `-CapWorkers` and the memory cap. A file
+whose size cannot be read is counted as 150 MP, so an unreadable file can only make the cap
+stricter; if the available memory cannot be read at all, the count is left alone.
 
 **Example:**
 ```powershell

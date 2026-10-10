@@ -70,7 +70,7 @@ def no_subprocess(monkeypatch):
     """run_subprocess must never fire in these tests unless a test mocks it."""
     calls = []
 
-    def fake(cmd, timeout=None):
+    def fake(cmd, timeout=None, **kw):
         calls.append(cmd)
         return 0
 
@@ -440,7 +440,7 @@ class TestExecution:
         entries = [(str(a), str(a), 0), (str(b), str(b), 0)]
         calls = []
 
-        def fake_run(cmd, timeout=None):
+        def fake_run(cmd, timeout=None, **kw):
             calls.append(cmd)
             return 1 if len(calls) == 1 else 0
 
@@ -511,6 +511,9 @@ class TestRepeat:
         cfg.config.last_run_kind = "manifest"
         cfg.config.last_run_label = "Manifest: manifest_1.csv (1 entries)"
         cfg.config.last_manifest_path = str(manifest)
+        # The run's answers travel with the journal (round 19): a repeat without
+        # them is refused, so the fixture must look like run_manifest_workflow wrote it.
+        cfg.config.last_manifest_workflow = _workflow()
 
         loader_calls = []
         real_loader = convert_tiff.load_manifest_entries

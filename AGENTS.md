@@ -15,7 +15,9 @@ gitignored). If one exists:
 ## Active scripts
 - `convert_tiff.py` -- the interactive wizard (Python). Builds and runs the
   PowerShell backends, owns the manifest, the AutoFind search and the
-  multi-step workflows (it gates step 2 on step 1's exit code).
+  multi-step workflows (it gates step 2 on step 1's exit code). Presets
+  (menu 5, `--run-preset`, `--list-presets`) are named journal snapshots run
+  by `_run_journal`, the same runner as Repeat last.
 - `compress_tiff_zip.ps1` -- TIFF -> ZIP/Deflate, modes 0-9, in-place backups
   in `OLD_TIFFs/`, thumbnails, `-ExcludeFolders`.
 - `copy_exif_to_TIFF_ps5.ps1` / `copy_exif_to_TIFF_ps7.ps1` -- EXIF from the
@@ -40,6 +42,10 @@ gitignored). If one exists:
   re-injected with `${function:Name} = $using:NameFnDef`, captured once near
   the top. A new helper used in a parallel block needs a `...FnDef` capture
   AND an injection line in EVERY runspace.
+- **Functions duplicated across the .ps1 files are pinned by
+  `tests/test_ps_helper_parity.py` -- fix every copy.** The test extracts each
+  duplicated function body and requires the copies to be identical (doc and
+  line comments stripped); `_KNOWN_DIVERGENT` lists the annotated exceptions.
 - **Never `return` at script scope.** It exits 0 and discards the
   `$errTotal -gt 0 -> exit 1` contract that `convert_tiff.py` relies on.
 - **Gates that authorise destroying data fail CLOSED**: a timeout, a non-zero
@@ -56,6 +62,9 @@ gitignored). If one exists:
   even when it equals the default: omitting it "because it is the default"
   lets a backend whose own setting was edited run with a different value
   than the wizard planned with.
+- The wizard reads a backend default with `_backend_default(script, param)`;
+  its `_BACKEND_PARAM_FALLBACKS` is used only when the `.ps1` cannot be read,
+  and `tests/test_settings_literals.py` pins it to the scripts.
 
 ## Tool traps (verified, all silent)
 - **exiftool `-tagsfromfile SRCFILE` expands printf codes** in SRCFILE: `%o`
@@ -113,6 +122,11 @@ inventing a new one.
   the folder, never modify them, work on copies.
 - Fixtures with `%` in the name are built under a safe name and renamed
   (`make_tiff_named`), or `magick` writes `500ff.tif`.
+- **Every subprocess call in `convert_tiff.py` goes through `_run_captured`**
+  except the version probes (`detect_powershell_version`, `_probe_version`) and
+  the streaming `run_subprocess`; `tests/test_memory_subprocess.py` enforces
+  it. `capture_output=True` starts reader threads that can hang `Thread.start()`
+  under memory exhaustion, before the timeout is armed.
 
 ## Editing source safely
 - **Bash heredocs eat backslashes** even with a quoted delimiter

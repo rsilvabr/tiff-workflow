@@ -66,10 +66,21 @@ powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -Overwrite
 | `-InputDir` | string | `.` | Folder containing JPEG and TIFF pairs |
 | `-OutputDir` | string | `""` | Output folder for processed TIFFs. **If set and different from source folder, the original TIFF is preserved** — a copy is created in OutputDir and EXIF is applied to the copy |
 | `-Workers` | int | `8` | Parallel jobs (PS7 only) |
+| `-WorkerMemoryFraction` | double | `0.8` | Cap parallel workers so their ImageMagick compares fit in this share of the memory still free (0 = no cap; PS5 is sequential and ignores it) |
 | `-DryRun` | switch | off | Show what would be copied, don't modify anything |
 | `-SkipIfTiffHasExif` | switch | off | Skip TIFFs that already have EXIF data |
 | `-CompressZip` | switch | off | Compress TIFF to ZIP after copying EXIF |
 | `-Overwrite` | switch | off | Overwrite existing TIFFs |
+
+**Memory and `-Workers` (PS7).** The `-CompressZip` flow proves the staged ZIP is
+pixel-identical to the TIFF it replaces with a `magick compare`, which holds ~68 bytes per
+pixel -- measured at **5.35 GiB on an 84 MP scan** -- and up to `-Workers` of those ran at
+once with no memory limit. Before the parallel block starts, the run reads the largest TIFF
+of the group and logs `Memory: ~N GB per worker | N GB available | workers N`; if fewer
+workers than requested fit in `-WorkerMemoryFraction` of the free memory, it logs
+`Workers reduced from N to M` and runs at M. A size that cannot be read counts as 150 MP
+(never shrinks the estimate); if the available memory cannot be read, the count is left
+alone. `-DryRun` skips the cap entirely (nothing runs).
 
 ---
 

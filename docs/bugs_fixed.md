@@ -11,6 +11,133 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**.
 
+## Unreleased - Audit Round 19
+
+Presets (menu 5, `--run-preset`/`--list-presets`) and the two repeat bugs they exposed:
+a manifest repeat silently dropped the run's answers, and a Fuji repeat never saw
+sessions added since the journal was saved. Repeat and presets now run through one
+runner (`_run_journal`), so the two cannot drift apart. An unattended preset that
+deletes sources is refused (exit 1) unless `--dry-run`; an unattended run never prompts.
+
+### MEDIUM - Repeat of a manifest dropped the run's answers and could change the mode
+**Issue:** `_repeat_manifest` rebuilt the workflow from `last_workers`/`last_staging`
+only, forced `duplicate_action = "Numbered"`, and used `last_mode` -- the last FREE
+workflow's mode, which `run_manifest_workflow` never writes -- for rows without a Mode
+cell. Repeating a manifest ran with other rules than the original run, and a row without
+a Mode could silently run a different mode (mode 8 deletes sources).
+- **Fix:** `run_manifest_workflow` now saves the whole `step_basic_params` dict and the
+  default mode with the journal (`last_manifest_workflow`, `last_manifest_default_mode`),
+  and a repeat or preset re-runs with exactly those answers. A journal saved by an older
+  version (no workflow stored) is refused with "run the manifest once more from menu 3",
+  never re-run with invented values.
+- **Files:** `convert_tiff.py`
+
+### LOW - Repeating a Fuji workflow never saw new sessions
+**Issue:** workflows 2/3/4 journaled the folder list AutoFind found that day. A repeat
+(or a scheduled preset) replayed that list forever: sessions added since were invisible.
+- **Fix:** the Fuji runs save the AutoFind root and patterns (`last_autofind`) and every
+  repeat/preset re-runs the search ("all or nothing", the same choice the wizard offers).
+  A journal without that data replays its saved folders with a note saying so.
+- **Files:** `convert_tiff.py`
+
+## Unreleased - Audit Round 18
+
+Memory, subprocesses and timeouts under load. A real measurement on an 84 MP 16-bit scan
+(`E:\TESTE\tiff_scan\000001-rescan.tif`, 490 MB, ImageMagick 7.1.2-27 Q16-HDRI) found the
+peak private memory of one `magick compare` at **5.35 GiB (68 B/px)**; the pool sizes
+(up to 64) were never limited by memory. Round 16's fix for that class had reached only
+one of the three copies of the function. Lessons ported from jxl-photo rounds 44/45/47.
+
+### HIGH - Parallel ImageMagick Compares Were Never Limited by Memory
+**Issue:** every parallel pool ran as many workers as the user asked -- the wizard's
+diagnose, padded-compress and purge pools (up to 64), and the `-Parallel` blocks of
+`compress_tiff_zip.ps1` and `copy_exif_to_TIFF_ps7.ps1`. One `magick compare` holds ~68 bytes
+per pixel (5.35 GiB on an 84 MP scan) and ImageMagick's own per-process limit is 32 GiB, so
+8 workers on a 120 MP scan asked for ~8 GB each: past the RAM of a 64 GB machine. `-CapWorkers`
+existed but is a count, not a memory budget.
+- **Fix:** each pool now estimates its peak from the largest image of the batch and lowers the
+  worker count so the run fits in `WORKER_MEMORY_FRACTION` (wizard) / `-WorkerMemoryFraction`
+  (backends, default 0.8) of the memory still available. The smaller of `-Workers`,
+  `-CapWorkers` and the memory cap wins; a file whose size cannot be read counts as the
+  150 MP placeholder, so an unknown size never shrinks the estimate, and unreadable memory
+  leaves the count alone (fail-open by design -- nothing is destroyed by running too many
+  workers, and the caps only reduce concurrency).
+- **Files:** `convert_tiff.py`, `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `copy_exif_to_TIFF_ps5.ps1` (parameter accepted for interface parity; sequential)
+
+### MEDIUM - `capture_output=True` Started Two Reader Threads per Subprocess Call
+**Issue:** the wizard's 22 captured subprocess calls started two reader threads each on
+Windows. Under memory exhaustion a thread's bootstrap can fail with MemoryError before it
+signals "started", and `Thread.start()` then waits forever -- *before* the timeout is armed
+(jxl-photo hung 60 min on 2026-10-04).
+- **Fix:** `_run_captured` writes stdout/stderr through temp FILES (no thread); a failed
+  spawn raises OSError, which the callers already handle. Every captured call in
+  `convert_tiff.py` goes through it, except the two version probes and the streaming
+  `run_subprocess` (one reader thread created at process start, documented exception).
+- **Files:** `convert_tiff.py`, `tests/test_memory_subprocess.py`
+
+### MEDIUM - A Round-16 Fix Reached Only One of Three Copies
+**Issue:** round 16 scaled `Test-PixelIdentical`'s flat 30 s timeout by input size -- but
+only in `compress_tiff_zip.ps1`. Both `copy_exif` copies kept the flat timeout while their
+docstrings said "Keep implementations identical", so a multi-hundred-MB pair could false-fail
+the gate that authorises overwriting the original. No test pinned the parity.
+- **Fix:** the scaling (and the new `-LoadFactor`) was copied into both `copy_exif` scripts,
+  and `tests/test_ps_helper_parity.py` now extracts every duplicated function from the four
+  backends and requires identical bodies, with four annotated known divergences (none
+  reviewed by this round).
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `tests/test_ps_helper_parity.py`
+
+### LOW - Timeouts Were Measured With One File and Failed Good Files Under Load
+**Issue:** `0.25 s/MB` was measured with one file at a time. With W workers sharing the
+disk each gets ~1/W of the throughput, so good files false-failed: jxl-photo round 47 lost
+12 good files to timeouts with 17 workers.
+- **Fix:** `_work_timeout` (wizard) and `Test-PixelIdentical`/`Test-ZipIntegrity` (backends)
+  multiply the size-scaled part by the number of workers running at once (`_TIMEOUT_LOAD`,
+  `-LoadFactor`); only the calls inside `-Parallel` blocks pass it, sequential callers keep 1.
+- **Files:** `convert_tiff.py`, `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`,
+  `copy_exif_to_TIFF_ps7.ps1`
+
+## Unreleased - Audit Round 17
+
+The wizard carried literal copies of the backends' shipped defaults (the jxl-photo #467/#528
+class) and in two places passed a setting only when the answer differed from the copy -- so
+editing a default at the top of a `.ps1` silently lost to the wizard's answer. The wizard now
+reads the `param()` block of the backend it is about to run.
+
+### MEDIUM - Safe Mode, LZW and the Worker Cap Were Passed Only When They Differed From the Default
+**Issue:** `build_compress_command` passed `-SafeMode:$false` only when the answer was "no",
+`-SkipLzwAsCompressed:$true` only when it was "yes", and `-CapWorkers` only when the answer was
+above 0. All three are user-editable at the top of `compress_tiff_zip.ps1`/the Copy EXIF backends.
+With `$SafeMode = $false` edited, a user answering "Safe mode? Yes" had nothing passed and the
+backend processed multi-page TIFFs the summary said were skipped; with `$CapWorkers = 4` edited,
+the answer "0 (no cap)" silently ran capped at 4.
+- **Fix:** the wizard's decision is passed explicitly whenever it was made, even when it equals
+  the shipped default (`-SafeMode:$true`/`:$false`, `-SkipLzwAsCompressed:$true`/`:$false`,
+  `-CapWorkers 0`). The Copy EXIF backends keep only the positive LZW form -- there it is a
+  `[switch]`, whose default is OFF by type.
+- **Files:** `convert_tiff.py`
+
+### LOW - Thumbnail, Duplicate-Name and Output-Folder Defaults Were Literal Copies in the Wizard
+**Issue:** the prompts offered `256`/`"85"`/`jpg`/`Numbered`/`"0"` from literals instead of the
+scripts' `param()` defaults, and "Configure thumbnail settings? No" wrote all three `thumb_*`
+keys anyway -- so an edited `$ThumbSize`/`$ThumbQuality`/`$ThumbFormat`/`$DuplicateAction` was
+always overridden. AutoFind, diagnose and the manifest collision check also kept their own
+literal `zip`/`_export` list, so an edited `-ZipSubfolderName`/`-ExportMarker` was walked into as
+if it were a source folder.
+- **Fix:** a new `_backend_default(script, param)` reads the default from the backend's own
+  `param()` block (falling back to the shipped value only when the file cannot be read or the
+  value has the wrong type). Every prompt default, the "No" thumbnail path, the duplicate-name
+  default and `_tool_output_names()` now come from it.
+- **Files:** `convert_tiff.py`
+
+### LOW - A Dead `export_marker` Setting
+**Issue:** `ToolConfig.export_marker` (`"_EXPORT"`) was never read anywhere; editing it did
+nothing.
+- **Fix:** removed. An old config JSON with the key still loads (unknown keys are ignored) and the
+  next save drops it.
+- **Files:** `convert_tiff.py`
+
 ## v2.4 - Audit Round 16
 
 A full audit of the four backends and the wizard against real files: Capture One 16-bit exports

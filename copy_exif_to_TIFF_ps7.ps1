@@ -15,9 +15,111 @@ param(
     [string]$FolderPattern = "S5pro",
     [int]$MagickTimeout = 30,
     [switch]$FailOnWarn,
-    [string]$ExcludeFolders = ""     # ';'-separated folder NAMES to skip during discovery
+    [string]$ExcludeFolders = "",    # ';'-separated folder NAMES to skip during discovery
+    [double]$WorkerMemoryFraction = 0.8  # Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap
 )
 # ------------------------------------------------------------------
+
+# Peak memory of one ImageMagick process per pixel of the main page, measured on an
+# 84 MP 16-bit scan (IM 7.1.2 Q16-HDRI): compare 68 B/px, conversion/decode 12.7 B/px.
+# Plan AI_tools/261010_Claude_plan_memory-subprocess.md. +~10% margin.
+$script:CompareBytesPerPixel = 75
+$script:UnknownImagePixels   = 150000000
+
+function Get-AvailableMemoryBytes {
+    <#
+    .SYNOPSIS
+        The smaller of the memory the system can still commit and the physical RAM
+        still available (incl. standby), in bytes; $null when either cannot be read.
+        CIM class names are not localised (performance-counter names are).
+    #>
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $pm = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Memory -ErrorAction Stop
+        $commit = [double]$os.FreeVirtualMemory * 1KB
+        $phys   = [double]$pm.AvailableBytes
+        if ($commit -le 0 -or $phys -le 0) { return $null }
+        return [Math]::Min($commit, $phys)
+    } catch { return $null }
+}
+
+function Get-MaxImagePixels {
+    <#
+    .SYNOPSIS
+        Largest IFD0 width*height among the files, read by exiftool in chunks of 400.
+        A file exiftool does not report, or reports without a size, counts as
+        $script:UnknownImagePixels: an unknown size must never shrink the estimate.
+    #>
+    param([string[]]$Paths, [int]$ChunkSize = 400)
+    $best = [double]0
+    if (-not $Paths -or $Paths.Count -eq 0) { return $best }
+    for ($off = 0; $off -lt $Paths.Count; $off += $ChunkSize) {
+        $end = [Math]::Min($off + $ChunkSize, $Paths.Count) - 1
+        $chunk = @($Paths[$off..$end])
+        $seen = @{}
+        $argFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $argLines = @("-charset", "filename=utf8", "-T", "-n", "-Directory", "-FileName",
+                          "-IFD0:ImageWidth", "-IFD0:ImageHeight") + $chunk
+            [System.IO.File]::WriteAllLines($argFile, $argLines, [System.Text.UTF8Encoding]::new($false))
+            # exiftool prints UTF-8 (-charset filename=utf8), but PowerShell decodes a
+            # native command's output with [Console]::OutputEncoding -- the OEM code page
+            # (850) on a scheduled `cmd /k`. A non-ASCII path then never matched and every
+            # file counted as UnknownImagePixels.
+            $prevEnc = $null
+            try { $prevEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
+            try {
+                $out = exiftool -@ $argFile 2>$null
+            } finally {
+                if ($prevEnc) { try { [Console]::OutputEncoding = $prevEnc } catch { } }
+            }
+            foreach ($line in @($out)) {
+                $cols = "$line" -split "`t"
+                if ($cols.Count -lt 4) { continue }
+                $full = (Join-Path $cols[0] $cols[1]).Replace('/', '\').ToLowerInvariant()
+                $w = 0; $h = 0
+                if ([int]::TryParse($cols[2].Trim(), [ref]$w) -and [int]::TryParse($cols[3].Trim(), [ref]$h)) {
+                    $seen[$full] = [double]$w * [double]$h
+                }
+            }
+        } finally {
+            Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($p in $chunk) {
+            $px = $seen[$p.Replace('/', '\').ToLowerInvariant()]
+            if (-not $px -or $px -le 0) { $px = [double]$script:UnknownImagePixels }
+            if ($px -gt $best) { $best = $px }
+        }
+    }
+    return $best
+}
+
+function Get-MemoryCappedWorkers {
+    <#
+    .SYNOPSIS
+        $Requested lowered so that many parallel ImageMagick workers fit in
+        $Fraction of the free memory (Get-AvailableMemoryBytes). Logs the estimate;
+        -Quiet logs only when it lowers the count. 0/negative fraction = no cap.
+    #>
+    param([int]$Requested, [string[]]$Paths, [double]$BytesPerPixel, [double]$Fraction, [switch]$Quiet)
+    if ($Fraction -le 0 -or $Requested -le 1 -or -not $Paths -or $Paths.Count -eq 0) { return $Requested }
+    $avail = Get-AvailableMemoryBytes
+    if ($null -eq $avail) {
+        Write-Log "Memory: could not read the available memory -- workers not capped" "WARN"
+        return $Requested
+    }
+    $px  = Get-MaxImagePixels -Paths $Paths
+    $per = $px * $BytesPerPixel
+    $cap = [Math]::Max(1, [int][Math]::Floor($avail * $Fraction / $per))
+    $w   = [Math]::Min($Requested, $cap)
+    if (-not $Quiet -or $cap -lt $Requested) {
+        Write-Log ("Memory: ~{0:N1} GB per worker ({1:N0} MP) | {2:N1} GB available | workers {3}" -f ($per / 1GB), ($px / 1e6), ($avail / 1GB), $w)
+    }
+    if ($cap -lt $Requested) {
+        Write-Log ("Workers reduced from {0} to {1}: {0} ImageMagick processes at ~{2:N1} GB each would not fit (WorkerMemoryFraction={3})" -f $Requested, $w, ($per / 1GB), $Fraction) "WARN"
+    }
+    return $w
+}
 
 
 # -- Excluded folder names ------------------------------------------
@@ -288,8 +390,21 @@ function Test-PixelIdentical {
             ${function:Test-PixelIdentical} = $using:PixelCompareFnDef
         (Invoke-MagickWithTimeout, Get-TiffPageCount and ConvertTo-MagickPathSpec must be
         injected too.)
+        -LoadFactor = workers running at once (they share the disk); the -Parallel blocks
+        pass it, sequential callers leave it at 1.
     #>
-    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30)
+    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30, [double]$LoadFactor = 1)
+
+    # Audit round 16: per-page compare of multi-hundred-MB scans overran the flat 30 s
+    # probe timeout. Scale by the larger input (~0.25 s/MB) -- see Test-ZipIntegrity.
+    try {
+        $maxMB = 0.0
+        foreach ($p in @($SrcPath, $DstPath)) {
+            $mb = (Get-Item -LiteralPath $p -ErrorAction Stop).Length / 1MB
+            if ($mb -gt $maxMB) { $maxMB = $mb }
+        }
+        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($maxMB * 0.25 * [Math]::Max(1.0, $LoadFactor)))
+    } catch { }
 
     $ps = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
     $pd = Get-TiffPageCount -Path $DstPath -TimeoutSec $TimeoutSec
@@ -735,7 +850,14 @@ function Invoke-S5ProFolder {
         $magickTimeoutCapture = $MagickTimeout
         $runStagingIdCapture  = $script:runStagingId
 
-        $results = $pairs | ForEach-Object -ThrottleLimit $Workers -Parallel {
+        # -Parallel only; the cap is about how many ImageMagick compares run at once.
+        # -DryRun never starts one, so the cap is skipped there.
+        $cxWorkers = $Workers
+        if (-not $DryRun) {
+            $cxWorkers = Get-MemoryCappedWorkers -Requested $Workers -Paths @($pairs | ForEach-Object { $_.Tiff }) -BytesPerPixel $script:CompareBytesPerPixel -Fraction $WorkerMemoryFraction -Quiet
+        }
+
+        $results = $pairs | ForEach-Object -ThrottleLimit $cxWorkers -Parallel {
             $p         = $_
             # Functions from the parent scope are not visible inside -Parallel runspaces
             ${function:Invoke-MagickWithTimeout}      = $using:MagickTimeoutFnDef
@@ -943,7 +1065,7 @@ function Invoke-S5ProFolder {
             # pixel-identical first. A zero exit from magick is not proof: a page-short or
             # truncated file still exits 0 and still decodes. Same fail-closed gate that
             # compress_tiff_zip.ps1 requires before a mode 8 delete.
-            if (-not (Test-PixelIdentical -SrcPath $tiffTarget -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
+            if (-not (Test-PixelIdentical -SrcPath $tiffTarget -DstPath $writeDst -TimeoutSec $magickTimeoutSec -LoadFactor $using:cxWorkers)) {
                 Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
                 return @{ Result = "ERROR (ZIP pixel verification failed - original untouched) | $($p.TifName)"; StagingName = $null; OriginalName = $p.TifName; SrcPath = $p.Tiff; CopiedTiffPath = $copiedTiffPath; IsIntermediate = ($null -ne $copiedTiffPath) }

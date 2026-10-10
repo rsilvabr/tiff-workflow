@@ -18,6 +18,18 @@ and streaming output from PowerShell backends.
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes
 
+WORKER_MEMORY_FRACTION = 0.8
+# Caps the parallel workers of the Python workflows (diagnose, padded compress,
+# Delete OLD_TIFFs) so their ImageMagick processes fit in memory: the peak of one
+# worker is estimated from the largest image of the batch (a `magick compare`
+# holds ~68 bytes per pixel -- 5.4 GB for an 84 MP scan). The run uses at most
+# this fraction of the memory WORKER_MEMORY_LIMIT picks. 0 disables the cap.
+
+WORKER_MEMORY_LIMIT = "both"
+# "both" -> the smaller of what the system can still commit (RAM + pagefile)
+#           and the physical RAM still available (default);
+# "commit" or "physical" -> only that reading.
+
 # Subprocess timeouts (seconds)
 CONVERT_TIMEOUT_S = 60   # magick depth/format conversions
 COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
@@ -30,13 +42,15 @@ COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
 #     timeout_s = base + size_mb * TIMEOUT_S_PER_MB      (floor: base)
 #
 # 0.25 s/MB tolerates a combined read+decode+write throughput of ~4 MB/s --
-# slower than a USB-2 hard disk. Header-only probes (identify, single-tag exiftool
-# reads) keep their short fixed timeouts.
+# slower than a USB-2 hard disk. Multiplied by the number of workers running at
+# once (_TIMEOUT_LOAD): they share the disk. Header-only probes (identify,
+# single-tag exiftool reads) keep their short fixed timeouts.
 TIMEOUT_S_PER_MB = 0.25
 
 import argparse
 import concurrent.futures
 import csv
+import functools
 import hashlib
 import io
 import json
@@ -81,7 +95,6 @@ class ToolConfig:
     """Configuration for convert_tiff tools."""
     staging_dir: Optional[str] = None
     default_workers: int = 8
-    export_marker: str = "_EXPORT"
 
     last_input_dir: Optional[str] = None
     last_workers: Optional[int] = None
@@ -104,6 +117,16 @@ class ToolConfig:
     # Path of the last manifest CSV run (menu option 3). Only the path is
     # kept -- a repeat re-reads the CSV through the same loader guards.
     last_manifest_path: Optional[str] = None
+    # Settings of the last manifest run (menu 3), so a repeat or a preset runs it with
+    # the SAME answers: the step_basic_params dict and the mode for rows without one.
+    last_manifest_workflow: Optional[Dict] = None
+    last_manifest_default_mode: Optional[int] = None
+    # AutoFind of the last Fuji workflow (2/3/4): {"root": str, "patterns": [str]}.
+    # A repeat or preset searches again, so sessions added since are included.
+    last_autofind: Optional[Dict] = None
+    # Named snapshots of the journal above: name -> {kind, label, commands, time,
+    # manifest_path, manifest_workflow, manifest_default_mode, autofind, saved_at}.
+    presets: Optional[Dict[str, Dict]] = None
     ps_major: int = 0  # detected at startup, not persisted
     ps_name: str = "powershell"  # "pwsh" or "powershell", not persisted
 
@@ -131,11 +154,45 @@ class ConfigManager:
                     for k, v in data.items():
                         if hasattr(self.config, k):
                             setattr(self.config, k, v)
+                    self._sanitise_presets()
             except Exception as e:
                 # audit round 16: a corrupt config was swallowed silently and the
                 # wizard ran on defaults with no hint why the saved state vanished.
                 print(f"WARNING: ignoring unreadable config file {self.config_path}: {e}",
                       file=sys.stderr)
+
+    def _sanitise_presets(self) -> None:
+        """Drop presets that are not a name -> settings mapping.
+
+        The config file is a plain JSON the user can (and does) hand-edit, and
+        every consumer of `presets` assumed both levels were dicts: a list, or a
+        single preset saved as a string, took down the preset menu, --list-presets
+        and the main menu's counter with a traceback before anything could be
+        run. Discarding the malformed entries with a warning keeps the good ones
+        usable -- and the file is only rewritten when the user saves, so nothing
+        is lost behind their back. An entry whose journal could never run (no
+        label, or no commands and not a manifest) is discarded here too: it would
+        only refuse at run time.
+        """
+        raw = self.config.presets
+        if raw is None:
+            return
+        if not isinstance(raw, dict):
+            print(f"Warning: 'presets' in the config is a {type(raw).__name__}, not a "
+                  f"mapping of name -> settings. Ignoring it.", file=sys.stderr)
+            self.config.presets = {}
+            return
+        clean, bad = {}, []
+        for name, body in raw.items():
+            if isinstance(name, str) and isinstance(body, dict) and _journal_runnable(body):
+                clean[name] = body
+            else:
+                bad.append(str(name))
+        if bad:
+            print(f"Warning: ignoring {len(bad)} malformed preset(s) in the config: "
+                  f"{', '.join(sorted(bad)[:5])}"
+                  + (" ..." if len(bad) > 5 else ""), file=sys.stderr)
+        self.config.presets = clean
 
     def save_config(self) -> None:
         try:
@@ -256,7 +313,9 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
     results = {}
     # audit round 16: OLD_PADDED (the padded-compress backup folder) was missing here --
     # AutoFind walked into it and reprocessed the backups. _TOOL_OUTPUT_PARTS had it.
-    exclude_names = {"logs", "converted_zip", "zip", "_export", "old_tiffs", "old_padded"}
+    # audit round 17: one list only -- the ZIP/_EXPORT names are read from the backend's
+    # own settings (a literal copy here let an edited -ZipSubfolderName be walked into).
+    exclude_names = _TOOL_OUTPUT_PARTS
     for path in root.rglob("*/"):
         if not path.is_dir():
             continue  # Python < 3.11: rglob("*/") also yields files
@@ -310,9 +369,93 @@ def clamp_workers(value: int, default: int = 8) -> int:
     return n
 
 
+#: Shipped defaults of the backend parameters the wizard offers or passes. Used ONLY
+#: when the .ps1 cannot be read or the parameter is missing -- the source of truth is
+#: the param() block of the script itself (tests pin these to it).
+_BACKEND_PARAM_FALLBACKS = {
+    ("compress_tiff_zip.ps1", "SafeMode"): True,
+    ("compress_tiff_zip.ps1", "SkipLzwAsCompressed"): False,
+    ("compress_tiff_zip.ps1", "CapWorkers"): 0,
+    ("compress_tiff_zip.ps1", "DuplicateAction"): "Numbered",
+    ("compress_tiff_zip.ps1", "ThumbSize"): 256,
+    ("compress_tiff_zip.ps1", "ThumbQuality"): "85",
+    ("compress_tiff_zip.ps1", "ThumbFormat"): "jpg",
+    ("compress_tiff_zip.ps1", "ZipSubfolderName"): "ZIP",
+    ("compress_tiff_zip.ps1", "ExportZipSubfolder"): "ZIP",
+    ("compress_tiff_zip.ps1", "ExportMarker"): "_EXPORT",
+    ("copy_exif_to_TIFF_ps7.ps1", "SafeMode"): True,
+    ("copy_exif_to_TIFF_ps5.ps1", "SafeMode"): True,
+    ("generate_thumbnails.ps1", "Size"): 256,
+    ("generate_thumbnails.ps1", "Quality"): "85",
+    ("generate_thumbnails.ps1", "Format"): "jpg",
+    ("generate_thumbnails.ps1", "Page"): "0",
+}
+
+_PS_PARAM_LINE = re.compile(
+    r"""^\s*(?:\[[^\]]*\]\s*)*\$(\w+)\s*=\s*("(?:[^"]*)"|'(?:[^']*)'|\$true|\$false|-?\d+(?:\.\d+)?)""",
+    re.IGNORECASE)
+
+
+@functools.lru_cache(maxsize=None)
+def _ps_param_defaults(script_name: str) -> Dict[str, object]:
+    """name -> default of every parameter in the script's top param() block.
+
+    Only the block from the first line that starts with `param(` to the first line
+    that is just `)`; values: $true/$false -> bool, "..."/'...' -> str, numbers ->
+    int/float. {} when the file cannot be read."""
+    try:
+        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out: Dict[str, object] = {}
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            inside = line.lstrip().lower().startswith("param(")
+            continue
+        if line.strip() == ")":
+            break
+        m = _PS_PARAM_LINE.match(line)
+        if not m:
+            continue
+        raw = m.group(2)
+        low = raw.lower()
+        if low in ("$true", "$false"):
+            val: object = (low == "$true")
+        elif raw[0] in "\"'":
+            val = raw[1:-1]
+        elif "." in raw:
+            val = float(raw)
+        else:
+            val = int(raw)
+        out[m.group(1)] = val
+    return out
+
+
+def _backend_default(script_name: str, param: str):
+    """The default of `param` as written in `script_name`'s param() block; the
+    shipped value from _BACKEND_PARAM_FALLBACKS only when it cannot be read or has
+    another type than the fallback (a typo must not reach a command line)."""
+    fallback = _BACKEND_PARAM_FALLBACKS[(script_name, param)]
+    val = _ps_param_defaults(script_name).get(param)
+    if val is None or type(val) is not type(fallback):
+        return fallback
+    return val
+
+
+def _tool_output_names() -> set:
+    """Lower-cased folder names that hold this toolkit's own output (discovery skips
+    them below the scan root). The ZIP/_EXPORT names come from compress_tiff_zip.ps1's
+    own settings: a copy here let an edited -ZipSubfolderName be walked into."""
+    names = {"old_tiffs", "old_padded", "logs", "converted_zip"}
+    for p in ("ZipSubfolderName", "ExportZipSubfolder", "ExportMarker"):
+        names.add(str(_backend_default("compress_tiff_zip.ps1", p)).lower())
+    return names
+
+
 #: Folder names that hold this toolkit's own output. Discovery skips them, but only BELOW
 #: the folder the user pointed at -- see _is_tool_output_path.
-_TOOL_OUTPUT_PARTS = {"old_tiffs", "old_padded", "logs", "zip", "_export", "converted_zip"}
+_TOOL_OUTPUT_PARTS = _tool_output_names()
 
 
 def _is_tool_output_path(path: Path, root: Path) -> bool:
@@ -334,6 +477,201 @@ def _is_tool_output_path(path: Path, root: Path) -> bool:
     return any(part.lower() in _TOOL_OUTPUT_PARTS for part in rel.parts)
 
 
+# Captured at import: some tests replace this module's `subprocess` with a stub.
+_DEVNULL = subprocess.DEVNULL
+_CompletedProcess = subprocess.CompletedProcess
+
+
+def _run_captured(cmd, timeout, text=False, input=None):
+    """subprocess.run with stdout/stderr captured through temp FILES.
+
+    capture_output=True makes communicate() start two reader threads per call on
+    Windows. Under memory exhaustion a thread can fail in its bootstrap
+    (MemoryError) before it signals "started", and Thread.start() then waits
+    forever -- before the timeout is even armed (jxl-photo, 2026-10-04: one
+    worker hung 60 min). With files there is no thread: a failed spawn raises
+    OSError, which the callers already handle. Copied from jxl-photo; keep in
+    step. text=True decodes as UTF-8 (what magick and exiftool print), where
+    subprocess's text mode used the console code page."""
+    stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout, **stdin_kw)
+        out.seek(0)
+        err.seek(0)
+        o = r.stdout if r.stdout is not None else out.read()
+        e = r.stderr if r.stderr is not None else err.read()
+    if text:
+        if isinstance(o, bytes):
+            o = o.decode("utf-8", "replace").replace("\r\n", "\n")
+        if isinstance(e, bytes):
+            e = e.decode("utf-8", "replace").replace("\r\n", "\n")
+    return _CompletedProcess(cmd, r.returncode, o, e)
+
+
+# Memory helpers copied from jxl-photo's jxl_recompressor.py (v2.9.0); keep in step.
+
+def _windows_memory_status():
+    """GlobalMemoryStatusEx as (ullAvailPhys, ullAvailPageFile), or None."""
+    import ctypes
+
+    class _MemoryStatusEx(ctypes.Structure):
+        _fields_ = [("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+    st = _MemoryStatusEx()
+    st.dwLength = ctypes.sizeof(_MemoryStatusEx)
+    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+        return None
+    return int(st.ullAvailPhys), int(st.ullAvailPageFile)
+
+
+def _linux_mem_available():
+    """/proc/meminfo MemAvailable in bytes, or None."""
+    with open("/proc/meminfo", encoding="ascii") as f:
+        for line in f:
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    return None
+
+
+def _available_commit_bytes():
+    """Memory the system can still commit, in bytes, or None if unknown.
+    Windows: ullAvailPageFile (RAM + pagefile not yet committed -- the limit
+    WinError 1455 reports). Linux: MemAvailable."""
+    try:
+        if sys.platform == "win32":
+            st = _windows_memory_status()
+            return st[1] if st else None
+        return _linux_mem_available()
+    except Exception:
+        return None
+
+
+def _available_physical_bytes():
+    """Physical RAM still available (free + standby cache), in bytes, or None
+    if unknown. Windows: ullAvailPhys. Linux: MemAvailable (no commit limit by
+    default there, so both readings are the same)."""
+    try:
+        if sys.platform == "win32":
+            st = _windows_memory_status()
+            return st[0] if st else None
+        return _linux_mem_available()
+    except Exception:
+        return None
+
+
+_MEMORY_LIMITS = ("both", "commit", "physical")
+# How the cap's log and warning name the budget it used.
+_MEMORY_BUDGET_TEXT = {"commit": "the system can still commit (RAM + pagefile)",
+                       "physical": "of physical RAM still available"}
+
+
+def _available_memory_bytes():
+    """(bytes, "commit"|"physical") the worker cap budgets from, per
+    WORKER_MEMORY_LIMIT: the smaller of the two ("both"), or just one. A reading
+    that fails is left out; (None, None) when nothing could be read. An unknown
+    setting counts as "both", the stricter budget."""
+    limit = WORKER_MEMORY_LIMIT if WORKER_MEMORY_LIMIT in _MEMORY_LIMITS else "both"
+    readings = []
+    if limit in ("both", "commit"):
+        readings.append((_available_commit_bytes(), "commit"))
+    if limit in ("both", "physical"):
+        readings.append((_available_physical_bytes(), "physical"))
+    readings = [r for r in readings if r[0] is not None]
+    if not readings:
+        return None, None
+    return min(readings, key=lambda r: r[0])
+
+
+# Peak private memory of one ImageMagick process, in bytes per pixel of the image's
+# main page, measured on an 84 MP 16-bit scan (ImageMagick 7.1.2 Q16-HDRI; plan
+# AI_tools/261010_Claude_plan_memory-subprocess.md), +~10% margin.
+_COMPARE_BYTES_PER_PIXEL = 75     # magick compare (68 measured)
+_CONVERT_BYTES_PER_PIXEL = 15     # depth/format conversion, decode (12.7 measured)
+_UNKNOWN_IMAGE_PIXELS = 150_000_000
+
+
+def _say(msg: str, style: str = "") -> None:
+    """One line on the console, Rich-styled when available."""
+    if RICH_AVAILABLE and console:
+        console.print(f"[{style}]{escape(msg)}[/{style}]" if style else escape(msg))
+    else:
+        print(msg)
+
+
+def _max_image_pixels(paths) -> int:
+    """Largest IFD0 width*height among `paths`, read in batches of 400 by exiftool
+    (-j). A file exiftool does not report, or reports without a size, counts as
+    _UNKNOWN_IMAGE_PIXELS -- an unknown size must never shrink the estimate."""
+    paths = [str(p) for p in paths]
+    best = 0
+    for off in range(0, len(paths), 400):
+        chunk = paths[off:off + 400]
+        seen = {}
+        argfile = None
+        try:
+            fd, argfile = tempfile.mkstemp(suffix=".args")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(["-charset", "filename=utf8", "-j", "-n",
+                                   "-IFD0:ImageWidth", "-IFD0:ImageHeight"] + chunk) + "\n")
+            r = _run_captured(["exiftool", "-@", argfile], _work_timeout(60), text=True)
+            for entry in json.loads(r.stdout or "[]"):
+                try:
+                    px = int(entry.get("ImageWidth") or 0) * int(entry.get("ImageHeight") or 0)
+                except (TypeError, ValueError):
+                    px = 0
+                seen[os.path.normcase(os.path.abspath(str(entry.get("SourceFile", ""))))] = px
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            pass
+        finally:
+            if argfile:
+                try:
+                    os.unlink(argfile)
+                except OSError:
+                    pass
+        for p in chunk:
+            px = seen.get(os.path.normcase(os.path.abspath(p)), 0)
+            best = max(best, px if px > 0 else _UNKNOWN_IMAGE_PIXELS)
+    return best
+
+
+def _memory_capped_pool_workers(requested: int, paths, bytes_per_pixel: int,
+                                what: str) -> int:
+    """`requested` lowered so that many ImageMagick workers fit in memory; prints
+    the estimate, and a warning when it lowered the count."""
+    if WORKER_MEMORY_FRACTION <= 0 or requested <= 1 or not paths:
+        return requested
+    avail, budget = _available_memory_bytes()
+    if avail is None:
+        _say("Memory: could not read the available memory -- workers not capped", "dim")
+        return requested
+    pixels = _max_image_pixels(paths)
+    per_job = pixels * bytes_per_pixel
+    cap = max(1, int(avail * WORKER_MEMORY_FRACTION // per_job))
+    workers = min(requested, cap)
+    _say(f"Memory: ~{per_job / 2**30:.1f} GB per worker ({what}, "
+         f"{pixels / 1e6:.0f} MP) | {avail / 2**30:.1f} GB available ({budget}) "
+         f"| workers {workers}", "dim")
+    if cap < requested:
+        _say(f"Workers reduced from {requested} to {workers}: {requested} {what} "
+             f"processes at ~{per_job / 2**30:.1f} GB each would not fit in the "
+             f"{avail / 2**30:.1f} GB {_MEMORY_BUDGET_TEXT[budget]} "
+             f"(WORKER_MEMORY_FRACTION={WORKER_MEMORY_FRACTION}).", "yellow")
+    return workers
+
+
+# Workers running at once in the current pool (set around each ThreadPoolExecutor):
+# they share the disk, so each gets ~1/N of the throughput TIMEOUT_S_PER_MB assumes.
+_TIMEOUT_LOAD = 1
+
+
 def _work_timeout(base_s: float, *paths) -> float:
     """Size-scaled subprocess timeout (audit round 16; see TIMEOUT_S_PER_MB for the
     formula). Missing/unreadable paths contribute 0, so the floor is always `base_s`.
@@ -344,7 +682,7 @@ def _work_timeout(base_s: float, *paths) -> float:
             total += Path(p).stat().st_size
         except (OSError, TypeError, ValueError):
             continue
-    return base_s + (total / (1024 * 1024)) * TIMEOUT_S_PER_MB
+    return base_s + (total / (1024 * 1024)) * TIMEOUT_S_PER_MB * max(1, _TIMEOUT_LOAD)
 
 
 _magick_alias_dir: Optional[Path] = None
@@ -441,8 +779,8 @@ def _safe_tag_source(path: Path):
         # `-o` is format-expanded too, so a '%' anywhere in the temp dir breaks the container.
         return None, None
     try:
-        r = subprocess.run(["exiftool", "-q", "-q", "-all:all", "-o", tmp, str(path)],
-                           capture_output=True, timeout=_work_timeout(60, path))
+        r = _run_captured(["exiftool", "-q", "-q", "-all:all", "-o", tmp, str(path)],
+                          _work_timeout(60, path))
         if r.returncode != 0 or not Path(tmp).exists():
             Path(tmp).unlink(missing_ok=True)
             return None, None
@@ -688,6 +1026,13 @@ def _supports_cap_workers(workflow: Dict) -> bool:
 
 def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
     """Workers, DryRun, Staging."""
+    # The backend this run will actually launch: each one's param() defaults are the
+    # source of the prompt defaults below (audit round 17).
+    _ref = "compress_tiff_zip.ps1" if _supports_cap_workers(workflow) else ("copy_exif_to_TIFF_ps5.ps1" if cfg.config.ps_name == "powershell" else "copy_exif_to_TIFF_ps7.ps1")
+    safe_default = _backend_default(_ref, "SafeMode")
+    skip_default = (_backend_default("compress_tiff_zip.ps1", "SkipLzwAsCompressed")
+                    if _ref == "compress_tiff_zip.ps1" else False)
+    cap_default = _backend_default("compress_tiff_zip.ps1", "CapWorkers")
     if RICH_AVAILABLE and console:
         workers_str = Prompt.ask(
             "[cyan]Workers[/cyan]",
@@ -715,18 +1060,18 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         workflow["dry_run"] = Confirm.ask("Dry-run mode?", default=False)
         
         # SafeMode and SkipLzw options
-        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs)", default=True)
-        workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as already compressed?[/cyan] (LZW files will be ignored)", default=False)
+        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs)", default=safe_default)
+        workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as already compressed?[/cyan] (LZW files will be ignored)", default=skip_default)
 
         # -CapWorkers only exists on compress_tiff_zip.ps1; asking it for a Copy EXIF
         # workflow produced an answer that was silently dropped by the command builder.
         if _supports_cap_workers(workflow):
-            cap_str = Prompt.ask("[cyan]Cap workers?[/cyan] (0 = no cap)", default="0")
+            cap_str = Prompt.ask("[cyan]Cap workers?[/cyan] (0 = no cap)", default=str(cap_default))
             try:
                 workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS))
             except ValueError:
-                console.print(f"[yellow]Invalid cap '{cap_str}', no cap applied[/yellow]")
-                workflow["cap_workers"] = 0
+                console.print(f"[yellow]Invalid cap '{cap_str}', using {cap_default}[/yellow]")
+                workflow["cap_workers"] = cap_default
 
         excl_default = cfg.config.last_exclude_folders or ""
         excl = Prompt.ask(
@@ -761,17 +1106,19 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         cfg.config.last_staging = staging
         dry = input("Dry-run? [y/N]: ").strip().lower()
         workflow["dry_run"] = (dry == "y")
-        safe = input("Safe mode? (skip multi-page TIFFs) [Y/n]: ").strip().lower()
-        workflow["safe_mode"] = (safe != "n")
-        skip_lzw = input("Skip LZW as already compressed? (LZW files will be ignored) [y/N]: ").strip().lower()
-        workflow["skip_lzw"] = (skip_lzw == "y")
+        safe = input(f"Safe mode? (skip multi-page TIFFs) [{'Y/n' if safe_default else 'y/N'}]: ").strip().lower()
+        workflow["safe_mode"] = (False if safe in ("n", "no")
+                                 else True if safe in ("y", "yes") else safe_default)
+        skip_lzw = input(f"Skip LZW as already compressed? (LZW files will be ignored) [{'Y/n' if skip_default else 'y/N'}]: ").strip().lower()
+        workflow["skip_lzw"] = (True if skip_lzw in ("y", "yes")
+                                else False if skip_lzw in ("n", "no") else skip_default)
         if _supports_cap_workers(workflow):
-            cap_str = input("Cap workers? (0 = no cap) [0]: ").strip()
+            cap_str = input(f"Cap workers? (0 = no cap) [{cap_default}]: ").strip()
             try:
-                workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS)) if cap_str else 0
+                workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS)) if cap_str else cap_default
             except ValueError:
-                print(f"Invalid cap '{cap_str}', no cap applied")
-                workflow["cap_workers"] = 0
+                print(f"Invalid cap '{cap_str}', using {cap_default}")
+                workflow["cap_workers"] = cap_default
         excl_default = cfg.config.last_exclude_folders or ""
         excl = input(f"Exclude folders? (';'-separated names, '-' = none) [{excl_default or '-'}]: ").strip()
         if excl == "":
@@ -979,9 +1326,16 @@ def _journaled_script_path(parts: List[str], ps_name: str) -> Path:
     return script
 
 
-def _rebuild_journaled_command(parts: List[str], ps_name: str) -> List[str]:
-    """Turn a shell-neutral [script, *args] back into a command for `ps_name`."""
+def _rebuild_journaled_command(parts: List[str], ps_name: str,
+                               non_interactive: bool = False) -> List[str]:
+    """Turn a shell-neutral [script, *args] back into a command for `ps_name`.
+
+    `non_interactive` (--run-preset) adds -NonInteractive, so a prompt the
+    backend might still ask cannot wait forever on a closed stdin; the flag is
+    inserted before the PS5 wrap, which preserves the prefix."""
     cmd = [ps_name, "-NoProfile", "-File", str(_journaled_script_path(parts, ps_name))] + list(parts[1:])
+    if non_interactive:
+        cmd = cmd[:2] + ["-NonInteractive"] + cmd[2:]
     if ps_name == "powershell":
         cmd = _wrap_ps5_command(cmd)
     return cmd
@@ -1013,16 +1367,19 @@ def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: 
         cmd += ["-StagingDir", workflow["staging"]]
     if workflow.get("workers"):
         cmd += ["-Workers", str(clamp_workers(workflow["workers"]))]
-    if workflow.get("cap_workers"):
-        cmd += ["-CapWorkers", str(workflow["cap_workers"])]
+    if workflow.get("cap_workers") is not None:
+        cmd += ["-CapWorkers", str(int(workflow["cap_workers"]))]
     if workflow.get("exclude_folders"):
         cmd += ["-ExcludeFolders", workflow["exclude_folders"]]
     if workflow.get("dry_run"):
         cmd += ["-DryRun"]
-    if workflow.get("safe_mode") is False:
-        cmd += ["-SafeMode:$false"]
-    if workflow.get("skip_lzw"):
-        cmd += ["-SkipLzwAsCompressed:$true"]
+    # Passed explicitly whenever the wizard decided it -- even when it equals the
+    # default: omitting it let a backend whose own default was edited run with a
+    # different value than the summary showed (audit round 17, the jxl-photo #467 class).
+    if isinstance(workflow.get("safe_mode"), bool):
+        cmd += ["-SafeMode:$true" if workflow["safe_mode"] else "-SafeMode:$false"]
+    if isinstance(workflow.get("skip_lzw"), bool):
+        cmd += ["-SkipLzwAsCompressed:$true" if workflow["skip_lzw"] else "-SkipLzwAsCompressed:$false"]
     if workflow.get("overwrite"):
         cmd += ["-Overwrite"]
     if workflow.get("delete_source"):
@@ -1078,8 +1435,10 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
         cmd += ["-SkipIfTiffHasExif"]
     if workflow.get("compress_zip"):
         cmd += ["-CompressZip"]
-    if workflow.get("safe_mode") is False:
-        cmd += ["-SafeMode:$false"]
+    if isinstance(workflow.get("safe_mode"), bool):
+        cmd += ["-SafeMode:$true" if workflow["safe_mode"] else "-SafeMode:$false"]
+    # -SkipLzwAsCompressed is a [switch] in the Copy EXIF backends (a [bool] in
+    # compress_tiff_zip.ps1): its default is OFF by type, so only "yes" is passed.
     if workflow.get("skip_lzw"):
         cmd += ["-SkipLzwAsCompressed:$true"]
     if workflow.get("overwrite"):
@@ -1117,8 +1476,12 @@ def _decode_console_line(raw: bytes) -> str:
         return raw.decode(enc, errors="replace")
 
 
-def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
-    """Run command, stream output with Rich coloring. Has configurable timeout."""
+def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
+                   stdin=None) -> int:
+    """Run command, stream output with Rich coloring. Has configurable timeout.
+
+    `stdin` is passed through to Popen when not None (the unattended preset
+    path closes it with DEVNULL, so no prompt can wait on the console)."""
     import time
     import sys
     import threading
@@ -1129,6 +1492,8 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
         # Binary mode: lines are decoded manually in the reader thread
         # (UTF-8 with locale fallback, see _decode_console_line).
     }
+    if stdin is not None:
+        popen_kwargs["stdin"] = stdin
     if sys.platform == "win32":
         # Keep the child in the same console process group so Ctrl+C propagates.
         popen_kwargs["creationflags"] = 0
@@ -1162,10 +1527,9 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None) -> int:
     def _kill_tree():
         try:
             if sys.platform == "win32":
-                subprocess.run(
+                _run_captured(
                     ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                    capture_output=True,
-                    timeout=10,
+                    10,
                 )
             else:
                 process.kill()
@@ -1423,9 +1787,9 @@ def _tiff_page_geometry(path) -> Optional[List[Tuple[str, int, int]]]:
     "cannot classify" and every caller must treat it as a refusal, never as "no thumbnails".
     """
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n", str(path)],
-            capture_output=True, text=True, timeout=30,
+            30, text=True,
         )
         if r.returncode != 0 or not r.stdout:
             return None
@@ -1504,9 +1868,9 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
     """
     try:
         timeout = _work_timeout(30, path)
-        r = subprocess.run(
+        r = _run_captured(
             ["exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(path)],
-            capture_output=True, text=True, timeout=timeout,
+            timeout, text=True,
         )
         if r.returncode != 0:
             return None
@@ -1516,9 +1880,9 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
             if m:
                 subfile[int(m.group(1))] = int(m.group(2))
 
-        r = subprocess.run(
+        r = _run_captured(
             ["exiftool", "-a", "-G1", "-s", "-EXIF:all", str(path)],
-            capture_output=True, text=True, timeout=timeout,
+            timeout, text=True,
         )
         if r.returncode != 0:
             return None
@@ -1534,9 +1898,9 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
             else:
                 exif_other.add(m.group(1))
 
-        r = subprocess.run(
+        r = _run_captured(
             ["exiftool", "-q", "-q", "-b", "-ICC_Profile", str(path)],
-            capture_output=True, timeout=timeout,
+            timeout,
         )
         if r.returncode != 0:
             return None
@@ -1562,9 +1926,9 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
 
     def get_dimensions(path):
         try:
-            result = subprocess.run(
+            result = _run_captured(
                 ["magick", "identify", "-format", "%w %h", f"{_magick_spec(path)}[0]"],
-                capture_output=True, text=True, timeout=30
+                30, text=True
             )
             if result.returncode == 0:
                 parts = result.stdout.strip().split()
@@ -1578,9 +1942,9 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
 
     def get_page_count(path):
         try:
-            result = subprocess.run(
+            result = _run_captured(
                 ["magick", "identify", "-format", "%n\n", str(path)],
-                capture_output=True, text=True, timeout=30
+                30, text=True
             )
             if result.returncode == 0 and result.stdout:
                 return int(result.stdout.splitlines()[0].strip())
@@ -1616,11 +1980,10 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     def _pages_identical(pairs) -> tuple[bool, str]:
         for old_page, new_page in pairs:
             try:
-                result = subprocess.run(
+                result = _run_captured(
                     ["magick", "compare", "-metric", "RMSE",
                      f"{_magick_spec(old_path)}[{old_page}]", f"{_magick_spec(new_path)}[{new_page}]", "null:"],
-                    capture_output=True, text=True,
-                    timeout=_work_timeout(COMPARE_TIMEOUT_S, old_path, new_path)
+                    _work_timeout(COMPARE_TIMEOUT_S, old_path, new_path), text=True
                 )
                 output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
 
@@ -1738,9 +2101,9 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
 
     def get_depth(path):
         try:
-            result = subprocess.run(
+            result = _run_captured(
                 ["magick", "identify", "-format", "%z", f"{_magick_spec(path)}[0]"],
-                capture_output=True, text=True, timeout=30
+                30, text=True
             )
             if result.returncode == 0:
                 first = result.stdout.strip().split()[0]
@@ -1773,9 +2136,9 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             # [0] on every step: multi-page TIFFs (Capture One main+thumbnail, scanner
             # RGB+IR) made the whole-file compare return garbage RMSE (~27%) even for
             # pixel-identical data, so padded files were misclassified as real 16-bit.
-            result = subprocess.run(
+            result = _run_captured(
                 ["magick", f"{_magick_spec(tiff_path)}[0]", "-depth", "8"] + (compress_8.split() if compress_8 else []) + [_magick_spec(tmp8)],
-                capture_output=True, timeout=_work_timeout(CONVERT_TIMEOUT_S, tiff_path)
+                _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found"
@@ -1784,9 +2147,9 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             return False, 0.0, "ERROR: 8-bit conversion failed"
 
         try:
-            result = subprocess.run(
+            result = _run_captured(
                 ["magick", f"{_magick_spec(tmp8)}[0]", "-depth", "16"] + (compress_16.split() if compress_16 else []) + [_magick_spec(tmp16)],
-                capture_output=True, timeout=_work_timeout(CONVERT_TIMEOUT_S, tiff_path)
+                _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found"
@@ -1798,9 +2161,9 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             return False, 0.0, "ERROR: round-trip file missing"
 
         try:
-            result = subprocess.run(
+            result = _run_captured(
                 ["magick", "compare", "-metric", "RMSE", f"{_magick_spec(tiff_path)}[0]", f"{_magick_spec(tmp16)}[0]", "null:"],
-                capture_output=True, text=True, timeout=_work_timeout(COMPARE_TIMEOUT_S, tiff_path)
+                _work_timeout(COMPARE_TIMEOUT_S, tiff_path), text=True
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found (compare failed)"
@@ -1849,6 +2212,8 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
     Check if TIFFs marked as 16-bit are real 16-bit data or padded 8-bit.
     Uses parallel processing with configurable temp directory.
     """
+    global _TIMEOUT_LOAD
+
     folder = step_folder(cfg, "Root folder to scan for TIFFs")
     if folder is None:
         return False
@@ -1935,6 +2300,8 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
         compress_map = {"1": "none", "2": "lzw", "3": "zip"}
         compress_tmp = compress_map.get(resp, "none")
 
+    workers = _memory_capped_pool_workers(workers, tiff_files, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
+
     if RICH_AVAILABLE and console:
         console.print(f"\n[cyan]Diagnosing {len(tiff_files)} TIFF file(s) with {workers} workers...[/cyan]")
     else:
@@ -1954,44 +2321,48 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
     completed = 0
     total_start = time.time() if DEBUG_TIMING else None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(process_one, f): f for f in tiff_files}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                tiff_path, (is_real, stddev, detail) = future.result()
-            except Exception as e:
-                tiff_path = futures[future]
-                is_real = False
-                stddev = 0.0
-                detail = f"ERROR: {e}"
-            results.append((tiff_path, is_real, stddev, detail))
+    _TIMEOUT_LOAD = workers
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_one, f): f for f in tiff_files}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    tiff_path, (is_real, stddev, detail) = future.result()
+                except Exception as e:
+                    tiff_path = futures[future]
+                    is_real = False
+                    stddev = 0.0
+                    detail = f"ERROR: {e}"
+                results.append((tiff_path, is_real, stddev, detail))
 
-            if not is_real and "padded" in detail.lower():
-                padded_count += 1
-                padded_files.append(tiff_path)
-                status = "PADDED"
-            elif is_real:
-                real_count += 1
-                status = "real 16-bit"
-            elif "not 16-bit" in detail:
-                other_count += 1
-                status = detail
-            else:
-                error_count += 1
-                status = detail
-
-            completed += 1
-            progress = f"[{completed}/{total}]"
-
-            if RICH_AVAILABLE and console:
                 if not is_real and "padded" in detail.lower():
-                    console.print(f"  {progress} [yellow]{escape(status)}[/yellow] {escape(tiff_path.name)}")
-                elif not is_real:
-                    console.print(f"  {progress} [red]{escape(status)}[/red] {escape(tiff_path.name)}")
+                    padded_count += 1
+                    padded_files.append(tiff_path)
+                    status = "PADDED"
+                elif is_real:
+                    real_count += 1
+                    status = "real 16-bit"
+                elif "not 16-bit" in detail:
+                    other_count += 1
+                    status = detail
                 else:
-                    console.print(f"  {progress} [dim]{escape(status)}[/dim] {escape(tiff_path.name)}")
-            else:
-                print(f"  {progress} {status} - {tiff_path.name}")
+                    error_count += 1
+                    status = detail
+
+                completed += 1
+                progress = f"[{completed}/{total}]"
+
+                if RICH_AVAILABLE and console:
+                    if not is_real and "padded" in detail.lower():
+                        console.print(f"  {progress} [yellow]{escape(status)}[/yellow] {escape(tiff_path.name)}")
+                    elif not is_real:
+                        console.print(f"  {progress} [red]{escape(status)}[/red] {escape(tiff_path.name)}")
+                    else:
+                        console.print(f"  {progress} [dim]{escape(status)}[/dim] {escape(tiff_path.name)}")
+                else:
+                    print(f"  {progress} {status} - {tiff_path.name}")
+    finally:
+        _TIMEOUT_LOAD = 1
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[bold]Results:[/bold]")
@@ -2059,9 +2430,9 @@ def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
     sites: a full-size IR channel is a real page, not a preview.
     """
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n", str(tiff_path)],
-            capture_output=True, text=True, timeout=30,
+            30, text=True,
         )
         if r.returncode != 0 or not r.stdout:
             return None
@@ -2095,9 +2466,9 @@ def _tiff_page_count(path) -> Optional[int]:
 
     `%n` prints once per frame, so "%n\\n" plus the first line is the only reliable form."""
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["magick", "identify", "-format", "%n\n", str(path)],
-            capture_output=True, text=True, timeout=30,
+            30, text=True,
         )
         if r.returncode != 0 or not r.stdout:
             return None
@@ -2122,9 +2493,9 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     The PowerShell twin was fixed for exactly this; the mirror had been left behind.
     """
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(src_path)],
-            capture_output=True, text=True, timeout=30,
+            30, text=True,
         )
         if r.returncode != 0:
             return False
@@ -2155,9 +2526,9 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     if not tags:
         return True
     try:
-        r = subprocess.run(
+        r = _run_captured(
             ["exiftool", "-q", "-q", "-overwrite_original"] + tags + [str(dst_path)],
-            capture_output=True, timeout=30,
+            30,
         )
         return r.returncode == 0
     except Exception:
@@ -2207,9 +2578,9 @@ def _process_single_padded(tiff_path, staging):
 
     try:
         try:
-            result = subprocess.run(
+            result = _run_captured(
                 ["magick", str(tiff_path), "-depth", "8", "-compress", "zip", _magick_spec(tmp8)],
-                capture_output=True, timeout=_work_timeout(CONVERT_TIMEOUT_S, tiff_path)
+                _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
             status = "magick_not_found"
@@ -2230,12 +2601,12 @@ def _process_single_padded(tiff_path, staging):
             if tag_source is None:
                 exif_ok = False
             else:
-                exif_result = subprocess.run(
+                exif_result = _run_captured(
                     ["exiftool", "-q", "-overwrite_original",
                      "-tagsfromfile", tag_source, "-all:all", "-unsafe",
                      "--Compression", "--BitsPerSample", "--SampleFormat",
                      str(tmp8)],
-                    capture_output=True, text=True, timeout=_work_timeout(30, tiff_path)
+                    _work_timeout(30, tiff_path), text=True
                 )
                 # ONE -q above, not two: the second suppresses warnings, and an unreadable
                 # tagsfromfile source is only ever reported as a warning (exit stays 0).
@@ -2261,9 +2632,9 @@ def _process_single_padded(tiff_path, staging):
 
         # Integrity check: ensure the compressed file decodes and dimensions match
         try:
-            verify_result = subprocess.run(
+            verify_result = _run_captured(
                 ["magick", str(tmp8), "null:"],
-                capture_output=True, timeout=_work_timeout(30, tmp8)
+                _work_timeout(30, tmp8)
             )
             if verify_result.returncode != 0:
                 status = "integrity_error"
@@ -2274,9 +2645,9 @@ def _process_single_padded(tiff_path, staging):
             # unparseable output) fell through to status = "ok" and the original was replaced
             # with nothing verified.
             def _read_dims(path) -> Optional[tuple]:
-                r = subprocess.run(
+                r = _run_captured(
                     ["magick", "identify", "-format", "%w %h\n", f"{_magick_spec(path)}[0]"],
-                    capture_output=True, text=True, timeout=30
+                    30, text=True
                 )
                 if r.returncode != 0 or not r.stdout:
                     return None
@@ -2297,9 +2668,9 @@ def _process_single_padded(tiff_path, staging):
             # Page-count parity: -depth 8 on a multi-page TIFF can drop pages, and the
             # dimension check above only looks at page [0].
             def _read_pages(path) -> Optional[int]:
-                r = subprocess.run(
+                r = _run_captured(
                     ["magick", "identify", "-format", "%n\n", str(path)],
-                    capture_output=True, text=True, timeout=30
+                    30, text=True
                 )
                 if r.returncode != 0 or not r.stdout:
                     return None
@@ -2346,6 +2717,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     Originals are backed up to an OLD_PADDED/ subfolder before being replaced.
     Uses parallel processing with ThreadPoolExecutor.
     """
+    global _TIMEOUT_LOAD
     if temp_dir is None:
         temp_dir = Path(tempfile.gettempdir())
     # Run-scoped staging dir. A shared "compress_staging" meant the cleanup below wiped
@@ -2358,17 +2730,23 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     def _process_one(tiff_path):
         return _process_single_padded(tiff_path, staging)
 
+    workers = _memory_capped_pool_workers(workers, padded_files, _CONVERT_BYTES_PER_PIXEL, "8-bit conversion")
+
     results = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_process_one, f): i for i, f in enumerate(padded_files)}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                results.append((futures[future], future.result()))
-            except Exception as e:
-                f = padded_files[futures[future]]
-                # audit round 16: the last slot is the staging path the result loop may
-                # unlink; putting the SOURCE path there risked deleting the original.
-                results.append((futures[future], (f.name, f.parent, "error", None, None, None, False, str(e), None)))
+    _TIMEOUT_LOAD = workers
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_process_one, f): i for i, f in enumerate(padded_files)}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    results.append((futures[future], future.result()))
+                except Exception as e:
+                    f = padded_files[futures[future]]
+                    # audit round 16: the last slot is the staging path the result loop may
+                    # unlink; putting the SOURCE path there risked deleting the original.
+                    results.append((futures[future], (f.name, f.parent, "error", None, None, None, False, str(e), None)))
+    finally:
+        _TIMEOUT_LOAD = 1
 
     results.sort(key=lambda x: x[0])
 
@@ -2501,6 +2879,7 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
     (same filename), confirming content matches (ignoring compression).
     Shows sizes and asks for time confirmation before deleting.
     """
+    global _TIMEOUT_LOAD
     folder = step_folder(cfg, "Root folder to scan for OLD_TIFFs")
     if folder is None:
         return False
@@ -2566,10 +2945,15 @@ def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
         return None
 
     workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        for result in executor.map(_verify, items):
-            if result:
-                (orphans if result[2] == MISSING_PARENT else mismatches).append(result)
+    workers = _memory_capped_pool_workers(workers, [it[0] for it in items if Path(it[0]).suffix.lower() in (".tif", ".tiff")], _COMPARE_BYTES_PER_PIXEL, "copy verification")
+    _TIMEOUT_LOAD = workers
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for result in executor.map(_verify, items):
+                if result:
+                    (orphans if result[2] == MISSING_PARENT else mismatches).append(result)
+    finally:
+        _TIMEOUT_LOAD = 1
 
     orphan_keys = {(o[0], o[1]) for o in orphans}
     # A file that does not verify is KEPT -- and only that file. One mismatch used to abort
@@ -2755,7 +3139,10 @@ def _format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.1f}TB"
 
-def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]]) -> None:
+def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]],
+                   manifest_workflow: Optional[Dict] = None,
+                   manifest_default_mode: Optional[int] = None,
+                   autofind: Optional[Dict] = None) -> None:
     """Record the last executed workflow for the 'Repeat last workflow' menu entry.
 
     Only command-driven workflows (1-4, 8) are journaled: the interactive
@@ -2763,12 +3150,44 @@ def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]]) -> Non
     Commands are stored with dry-run stripped -- a repeat always runs for real.
     Manifest runs store no commands (None): a repeat re-reads the CSV through
     the loader guards instead of replaying command lines.
+
+    `manifest_workflow`/`manifest_default_mode`/`autofind` are written ALWAYS
+    (None for the kinds that do not use them): keeping an older run's values
+    around would let a repeat run with settings the wizard never answered.
     """
     cfg.config.last_run_kind = kind
     cfg.config.last_run_label = label
     cfg.config.last_run_commands = [[str(a) for a in cmd] for cmd in (commands or [])] or None
     cfg.config.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    if manifest_workflow is not None:
+        manifest_workflow = {k: v for k, v in manifest_workflow.items() if k != "dry_run"}
+        manifest_workflow["dry_run"] = False
+    cfg.config.last_manifest_workflow = manifest_workflow
+    cfg.config.last_manifest_default_mode = manifest_default_mode
+    cfg.config.last_autofind = autofind
     cfg.save_config()
+
+
+_JOURNAL_FIELDS = ("kind", "label", "commands", "time", "manifest_path",
+                   "manifest_workflow", "manifest_default_mode", "autofind")
+
+
+def _journal_snapshot(cfg) -> Dict:
+    """The last-run journal as one plain dict -- what a repeat runs and what a preset
+    stores. Copies, so a later run cannot change a saved preset."""
+    c = cfg.config
+    return json.loads(json.dumps({
+        "kind": c.last_run_kind, "label": c.last_run_label,
+        "commands": c.last_run_commands, "time": c.last_run_time,
+        "manifest_path": c.last_manifest_path,
+        "manifest_workflow": c.last_manifest_workflow,
+        "manifest_default_mode": c.last_manifest_default_mode,
+        "autofind": c.last_autofind,
+    }))
+
+
+def _journal_runnable(entry: Dict) -> bool:
+    return bool(entry.get("label") and (entry.get("commands") or entry.get("kind") == "manifest"))
 
 
 WORKFLOW_OPTIONS = [
@@ -2818,8 +3237,7 @@ def show_main_menu(cfg) -> str:
     """Display main menu - NO DEFAULT (jxl_photo style)."""
     last_label = cfg.config.last_run_label
     last_time = cfg.config.last_run_time
-    has_last_run = bool(last_label and (cfg.config.last_run_commands
-                                        or cfg.config.last_run_kind == "manifest"))
+    has_last_run = _journal_runnable(_journal_snapshot(cfg))
     if has_last_run:
         repeat_text = f"Repeat last workflow ({last_label} -- {last_time})"
         if len(repeat_text) > 100:
@@ -2828,12 +3246,14 @@ def show_main_menu(cfg) -> str:
         repeat_text = "Repeat last workflow (none saved)"
 
     has_manifests = get_latest_manifest() is not None
+    presets = cfg.config.presets or {}
 
     options = [
         ("1", "New workflow", True),
         ("2", repeat_text, has_last_run),
         ("3", "Run from manifest (CSV)", has_manifests),
         ("4", "Check dependencies again", True),
+        ("5", f"Presets ({len(presets)} saved)", True),
         ("0", "Exit", True),
     ]
 
@@ -3322,13 +3742,19 @@ def build_manifest_entry_cmd(source: str, dest_path: str, mode: int,
     return build_compress_command(entry_wf, folders=[Path(source)], ps_name=ps_name)
 
 
-def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict) -> bool:
+def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
+                              unattended: bool = False) -> bool:
     """Execute a compress workflow from manifest entries.
 
     `entries` must be mode-resolved (no None modes -- the caller replaced
     them with the run's default mode). One child process per entry; a failed
     entry does not stop the rest. Returns True only when every entry exited
-    cleanly."""
+    cleanly.
+
+    `unattended` (--run-preset) never asks: overlapping Sources refuse instead
+    of offering "Run anyway?", each child gets -NonInteractive and a closed
+    stdin, and the mode-8 gate below stays as a defensive refusal (the runner
+    already refused a deleting preset before calling this)."""
     if not entries:
         _manifest_error("No manifest entries found!")
         return False
@@ -3373,6 +3799,14 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict) -> bool
             print(f"WARNING: {head}")
         for a, b in overlaps[:10]:
             print(f"  {a}  <->  {b}")
+        if unattended:
+            msg = ("Refused: overlapping sources need a confirmation, which cannot be "
+                   "given unattended.")
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]{escape(msg)}[/red]")
+            else:
+                print(f"ERROR: {msg}")
+            return False
         if RICH_AVAILABLE and console:
             ok_overlap = Confirm.ask("Run anyway?", default=False)
         else:
@@ -3420,6 +3854,11 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict) -> bool
     # the wizard enforces, ONCE, before anything runs. Without it,
     # build_manifest_entry_cmd never emits -DeleteSource.
     if not dry_run and any(m == 8 for _, _, m in entries):
+        if unattended:
+            # Defensive only: _run_journal refuses a deleting preset before it
+            # reaches this call, because there is nobody to confirm. Fail closed
+            # if a future caller ever gets here unattended.
+            return False
         if RICH_AVAILABLE and console:
             if not Confirm.ask("[red]Manifest contains mode-8 entries: source TIFFs will be DELETED after compression. Are you sure?[/red]", default=False):
                 console.print("[dim]Cancelled.[/dim]")
@@ -3453,7 +3892,11 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict) -> bool
             print(f"[{i}/{total_entries}] Mode {mode} | {source} -> {dest_path}")
 
         cmd = build_manifest_entry_cmd(source, dest_path, mode, workflow, ps_name)
-        rc = run_subprocess(cmd)
+        if unattended:
+            cmd = cmd[:1] + ["-NonInteractive"] + cmd[1:]
+            rc = run_subprocess(cmd, stdin=subprocess.DEVNULL)
+        else:
+            rc = run_subprocess(cmd)
         if rc == 0:
             ok_count += 1
             state = "ok"
@@ -3570,15 +4013,16 @@ def run_manifest_workflow(cfg) -> bool:
 
     # Collision policy for mode-2 (flattened) entries, same as the wizard.
     if any(m == 2 for _, _, m in entries):
+        dup_default = _backend_default("compress_tiff_zip.ps1", "DuplicateAction")
         if RICH_AVAILABLE and console:
             workflow["duplicate_action"] = Prompt.ask(
                 "[cyan]Duplicate filenames (mode 2)[/cyan]",
                 choices=["Numbered", "Skip", "Overwrite"],
-                default="Numbered",
+                default=dup_default,
             )
         else:
-            dup = input("Duplicate filenames (Numbered/Skip/Overwrite) [Numbered]: ").strip() or "Numbered"
-            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else "Numbered"
+            dup = input(f"Duplicate filenames (Numbered/Skip/Overwrite) [{dup_default}]: ").strip() or dup_default
+            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else dup_default
 
     if not confirm_manifest_entries(manifest_path, entries):
         return False
@@ -3590,57 +4034,8 @@ def run_manifest_workflow(cfg) -> bool:
     label = f"Manifest: {Path(manifest_path).name} ({len(entries)} entries)"
     if any(m == 8 for _, _, m in entries):
         label += " [DELETES SOURCES]"
-    _save_last_run(cfg, "manifest", label, None)
-
-    return execute_manifest_workflow(cfg, entries, workflow)
-
-
-def _repeat_manifest(cfg) -> bool:
-    """Repeat path for a manifest run: re-read the CSV through the same
-    loader guards the wizard used, then re-execute with saved settings.
-    Never replays journaled commands blindly -- the CSV may have been edited
-    (or replaced) since the last run."""
-    manifest_path = cfg.config.last_manifest_path
-    if not manifest_path or not Path(manifest_path).exists():
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]Manifest CSV no longer available.[/yellow]")
-        else:
-            print("Manifest CSV no longer available.")
-        return False
-
-    entries = load_manifest_entries(manifest_path)
-    if entries is None:
-        return False
-
-    default_mode = cfg.config.last_mode or 0
-    entries = [(s, d, m if m is not None else default_mode) for s, d, m in entries]
-
-    workflow = {
-        "origin": "free_compress",
-        "dest": "zip",
-        "workers": clamp_workers(cfg.config.last_workers or cfg.config.default_workers),
-        "staging": cfg.config.last_staging or "",
-        "dry_run": False,
-    }
-    if any(m == 2 for _, _, m in entries):
-        workflow["duplicate_action"] = "Numbered"
-
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[bold cyan]Repeat manifest[/bold cyan]: {escape(Path(manifest_path).name)}")
-        console.print(f"  {len(entries)} entry(ies)")
-        if any(m == 8 for _, _, m in entries):
-            console.print("[red]WARNING: manifest contains mode-8 entries (DELETES sources).[/red]")
-        if not Confirm.ask("Run it now?", default=False):
-            console.print("[dim]Cancelled.[/dim]")
-            return False
-    else:
-        print(f"\n--- Repeat manifest: {Path(manifest_path).name} ---")
-        print(f"  {len(entries)} entry(ies)")
-        if any(m == 8 for _, _, m in entries):
-            print("WARNING: manifest contains mode-8 entries (DELETES sources).")
-        if input("Run it now? [y/N]: ").strip().lower() != "y":
-            print("Cancelled.")
-            return False
+    _save_last_run(cfg, "manifest", label, None,
+                   manifest_workflow=workflow, manifest_default_mode=default_mode)
 
     return execute_manifest_workflow(cfg, entries, workflow)
 
@@ -3728,36 +4123,38 @@ def run_free_compress(cfg: ToolConfig) -> bool:
             workflow["output_dir"] = out_dir
 
         # Collision policy for the flattened output
+        dup_default = _backend_default("compress_tiff_zip.ps1", "DuplicateAction")
         if RICH_AVAILABLE and console:
             workflow["duplicate_action"] = Prompt.ask(
                 "[cyan]Duplicate filenames[/cyan]",
                 choices=["Numbered", "Skip", "Overwrite"],
-                default="Numbered",
+                default=dup_default,
             )
         else:
-            dup = input("Duplicate filenames (Numbered/Skip/Overwrite) [Numbered]: ").strip() or "Numbered"
-            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else "Numbered"
+            dup = input(f"Duplicate filenames (Numbered/Skip/Overwrite) [{dup_default}]: ").strip() or dup_default
+            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else dup_default
 
     # Basic params
     step_basic_params(cfg, workflow)
 
-    # Thumbnail generation option
+    # Thumbnail generation option. The defaults come from the backend's own param()
+    # block; "Configure? No" adds no thumb_* keys at all, so the backend runs on its
+    # own settings (audit round 17 -- the wizard used to force 256/"85"/jpg always).
+    thumb_size_default = _backend_default("compress_tiff_zip.ps1", "ThumbSize")
+    thumb_quality_default = _backend_default("compress_tiff_zip.ps1", "ThumbQuality")
+    thumb_format_default = _backend_default("compress_tiff_zip.ps1", "ThumbFormat")
     if RICH_AVAILABLE and console:
         if Confirm.ask("[cyan]Generate embedded thumbnails?[/cyan]", default=False):
             workflow["generate_thumbnail"] = True
             if Confirm.ask("[cyan]Configure thumbnail settings?[/cyan]", default=False):
                 # Thumbnail size
-                size_str = Prompt.ask("[cyan]Thumbnail size (px)[/cyan]", default="256")
-                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else 256
+                size_str = Prompt.ask("[cyan]Thumbnail size (px)[/cyan]", default=str(thumb_size_default))
+                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
                 # Quality
-                quality_str = Prompt.ask("[cyan]JPEG quality[/cyan]", default="85")
+                quality_str = Prompt.ask("[cyan]JPEG quality[/cyan]", default=thumb_quality_default)
                 workflow["thumb_quality"] = quality_str
                 # Format
-                workflow["thumb_format"] = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default="jpg")
-            else:
-                workflow["thumb_size"] = 256
-                workflow["thumb_quality"] = "85"
-                workflow["thumb_format"] = "jpg"
+                workflow["thumb_format"] = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default=thumb_format_default)
             # Option to skip compressed TIFFs with existing thumbnails
             workflow["skip_compressed_with_thumb"] = Confirm.ask("[cyan]Skip already-compressed TIFFs that have thumbnails?[/cyan]", default=False)
     else:
@@ -3766,22 +4163,18 @@ def run_free_compress(cfg: ToolConfig) -> bool:
             workflow["generate_thumbnail"] = True
             config_thumb = input("Configure thumbnail settings? [y/N]: ").strip().lower()
             if config_thumb == "y":
-                size_str = input("Thumbnail size (px) [256]: ").strip() or "256"
-                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else 256
-                quality_str = input("JPEG quality [85]: ").strip() or "85"
+                size_str = input(f"Thumbnail size (px) [{thumb_size_default}]: ").strip() or str(thumb_size_default)
+                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
+                quality_str = input(f"JPEG quality [{thumb_quality_default}]: ").strip() or thumb_quality_default
                 workflow["thumb_quality"] = quality_str
-                fmt = input("Format (jpg/png/tif) [jpg]: ").strip().lower() or "jpg"
+                fmt = input(f"Format (jpg/png/tif) [{thumb_format_default}]: ").strip().lower() or thumb_format_default
                 # audit round 16: the Rich path constrains choices, but the plain-text
                 # path passed any string straight to -ThumbFormat and the backend failed
                 # at parameter binding. Fall back to the default with a warning instead.
                 if fmt not in ("jpg", "jpeg", "png", "tif", "tiff"):
-                    print(f"Invalid format '{fmt}', using jpg.")
-                    fmt = "jpg"
+                    print(f"Invalid format '{fmt}', using {thumb_format_default}.")
+                    fmt = thumb_format_default
                 workflow["thumb_format"] = fmt
-            else:
-                workflow["thumb_size"] = 256
-                workflow["thumb_quality"] = "85"
-                workflow["thumb_format"] = "jpg"
             skip_existing = input("Skip already-compressed TIFFs that have thumbnails? [y/N]: ").strip().lower()
             workflow["skip_compressed_with_thumb"] = (skip_existing == "y")
 
@@ -3944,7 +4337,8 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
             build_copy_exif_command(journal_step1, folders=found_folders, ps_name=cfg.config.ps_name),
             build_compress_command(journal_wf, folders=found_folders, ps_name=cfg.config.ps_name),
         ]
-    _save_last_run(cfg, workflow_type, label, journal_cmds)
+    _save_last_run(cfg, workflow_type, label, journal_cmds,
+                   autofind={"root": str(root), "patterns": list(patterns)})
 
     if workflow_type == "copy_exif":
         cmd = build_copy_exif_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
@@ -4144,53 +4538,60 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
             print(f"\nRunning: {' '.join(cmd)}\n")
         return run_subprocess(cmd) == 0
 
+    # The four prompt defaults come from generate_thumbnails.ps1's own param() block
+    # (audit round 17): a literal here silently overrode an edited backend setting.
+    size_default = _backend_default("generate_thumbnails.ps1", "Size")
+    quality_default = _backend_default("generate_thumbnails.ps1", "Quality")
+    format_default = _backend_default("generate_thumbnails.ps1", "Format")
+    page_default = _backend_default("generate_thumbnails.ps1", "Page")
+
     # Thumbnail size (backend accepts 32-4096)
     if RICH_AVAILABLE and console:
-        size_str = Prompt.ask("[cyan]Thumbnail size (px, 32-4096)[/cyan]", default="256")
+        size_str = Prompt.ask("[cyan]Thumbnail size (px, 32-4096)[/cyan]", default=str(size_default))
     else:
-        size_str = input("Thumbnail size (px, 32-4096) [256]: ").strip() or "256"
+        size_str = input(f"Thumbnail size (px, 32-4096) [{size_default}]: ").strip() or str(size_default)
     try:
         size = int(size_str)
     except ValueError:
-        size = 256
+        size = size_default
     if not (32 <= size <= 4096):
-        msg = f"Size {size} out of range (32-4096), using 256."
+        msg = f"Size {size} out of range (32-4096), using {size_default}."
         if RICH_AVAILABLE and console:
             console.print(f"[yellow]{msg}[/yellow]")
         else:
             print(msg)
-        size = 256
+        size = size_default
 
     # Quality: the backend validates 1-100 and refuses to start otherwise
     if RICH_AVAILABLE and console:
-        quality_str = Prompt.ask("[cyan]JPEG quality (1-100)[/cyan]", default="85")
+        quality_str = Prompt.ask("[cyan]JPEG quality (1-100)[/cyan]", default=quality_default)
     else:
-        quality_str = input("JPEG quality (1-100) [85]: ").strip() or "85"
+        quality_str = input(f"JPEG quality (1-100) [{quality_default}]: ").strip() or quality_default
     if not (quality_str.isdigit() and 1 <= int(quality_str) <= 100):
-        msg = f"Invalid quality '{quality_str}' (must be 1-100), using 85."
+        msg = f"Invalid quality '{quality_str}' (must be 1-100), using {quality_default}."
         if RICH_AVAILABLE and console:
             console.print(f"[yellow]{escape(msg)}[/yellow]")
         else:
             print(msg)
-        quality_str = "85"
+        quality_str = quality_default
 
     # Format
     if RICH_AVAILABLE and console:
-        fmt = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default="jpg")
+        fmt = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default=format_default)
     else:
-        fmt = input("Format (jpg/png/tif) [jpg]: ").strip().lower() or "jpg"
+        fmt = input(f"Format (jpg/png/tif) [{format_default}]: ").strip().lower() or format_default
         if fmt not in ("jpg", "jpeg", "png", "tif", "tiff"):
-            print(f"Invalid format '{fmt}', using jpg.")
-            fmt = "jpg"
+            print(f"Invalid format '{fmt}', using {format_default}.")
+            fmt = format_default
 
     # Page: 0 (first) or all
     if RICH_AVAILABLE and console:
-        page = Prompt.ask("[cyan]Page[/cyan]", choices=["0", "all"], default="0")
+        page = Prompt.ask("[cyan]Page[/cyan]", choices=["0", "all"], default=page_default)
     else:
-        page = input("Page (0=first, all) [0]: ").strip().lower() or "0"
+        page = input(f"Page (0=first, all) [{page_default}]: ").strip().lower() or page_default
         if page != "all" and not page.isdigit():
-            print(f"Invalid page '{page}', using 0.")
-            page = "0"
+            print(f"Invalid page '{page}', using {page_default}.")
+            page = page_default
 
     out_dir = _ask_output_dir()
     if out_dir is None:
@@ -4229,87 +4630,162 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
 # --- Main ---------------------------------------------------------
 
 
-def run_repeat_last(cfg) -> bool:
-    """Re-run the journaled commands of the last workflow (menu option 2).
+def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
+                 dry_run: bool = False) -> int:
+    """Run a journal entry -- the last run (Repeat) or a preset. 0 = ran (or nothing
+    to do), 1 = failed or refused. `unattended` (--run-preset): no prompt at all,
+    stdin closed, -NonInteractive; a run that deletes sources is refused unless
+    dry_run. `dry_run` comes only from the command line, never from the entry."""
+    if not _journal_runnable(entry):
+        _say("Nothing saved to run.", "yellow")
+        return 1
 
-    The stored commands were built with dry-run stripped, so a repeat always
-    runs for real. The PowerShell executable is swapped for the currently
-    detected one, and the backend script path is re-validated before running.
-    Manifest runs take their own path: the CSV is re-read through the loader
-    guards and re-executed, never replayed blind.
-    """
-    if cfg.config.last_run_kind == "manifest":
-        return _repeat_manifest(cfg)
-
-    label = cfg.config.last_run_label
-    commands = cfg.config.last_run_commands
-    if not label or not commands:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No saved workflow to repeat.[/yellow]")
-        else:
-            print("No saved workflow to repeat.")
-        return False
-
-    # Rebuild for the PowerShell detected NOW instead of swapping argv[0]: the journal may
-    # have been written by the other shell, and the two invocation forms are not
-    # interchangeable (see _journal_parts).
-    run_cmds = []
-    journal_parts = []
-    for c in commands:
-        parts = _journal_parts([str(a) for a in c])
-        if not parts:
-            msg = ("Saved workflow cannot be replayed: its command line was recorded in a "
-                   "form this version does not recognise. Run the workflow again from the "
-                   "menu -- replaying it as-is could bind switches the wrong way.")
+    if entry.get("kind") == "manifest":
+        manifest_path = entry.get("manifest_path")
+        if not manifest_path or not Path(manifest_path).exists():
+            _say(f"Manifest CSV no longer available: {manifest_path or '(not saved)'}",
+                 "yellow")
+            return 1
+        entries = load_manifest_entries(manifest_path)
+        if entries is None:
+            return 1
+        workflow = entry.get("manifest_workflow")
+        old_manifest_msg = ("This repeat was saved by an older version without the run's "
+                            "settings -- run the manifest once more from menu 3, then "
+                            "repeat or save it as a preset.")
+        if workflow is None:
+            _say(old_manifest_msg, "red")
+            return 1
+        default_mode = entry.get("manifest_default_mode")
+        if any(m is None for _, _, m in entries):
+            if default_mode is None:
+                _say(old_manifest_msg, "red")
+                return 1
+            entries = [(s, d, m if m is not None else default_mode) for s, d, m in entries]
+        workflow = dict(workflow)
+        workflow["dry_run"] = dry_run
+        deletes = (not dry_run) and any(m == 8 for _, _, m in entries)
+        if unattended and deletes:
+            _say("Refused: this preset deletes source files (mode 8). That needs a "
+                 "confirmation, which cannot be given unattended -- run it from the "
+                 "menu, or pass --dry-run.", "red")
+            return 1
+        if not unattended:
             if RICH_AVAILABLE and console:
-                console.print(f"[red]{escape(msg)}[/red]")
+                console.print(f"\n[bold cyan]{escape(title)}[/bold cyan]: "
+                              f"{escape(Path(manifest_path).name)}")
+                console.print(f"  {len(entries)} entry(ies)")
+                if any(m == 8 for _, _, m in entries):
+                    console.print("[red]WARNING: manifest contains mode-8 entries (DELETES sources).[/red]")
+                if not Confirm.ask("Run it now?", default=False):
+                    console.print("[dim]Cancelled.[/dim]")
+                    return 1
             else:
-                print(f"ERROR: {msg}")
-            return False
-        journal_parts.append(parts)
-        run_cmds.append(_rebuild_journaled_command(parts, cfg.config.ps_name))
+                print(f"\n--- {title}: {Path(manifest_path).name} ---")
+                print(f"  {len(entries)} entry(ies)")
+                if any(m == 8 for _, _, m in entries):
+                    print("WARNING: manifest contains mode-8 entries (DELETES sources).")
+                if input("Run it now? [y/N]: ").strip().lower() != "y":
+                    print("Cancelled.")
+                    return 1
+        ok = execute_manifest_workflow(cfg, entries, workflow, unattended=unattended)
+        return 0 if ok else 1
 
-    for parts in journal_parts:
+    # Command-driven journals (1-4, 8): rebuild for the PowerShell detected NOW
+    # instead of swapping argv[0] -- the journal may have been written by the other
+    # shell, and the two invocation forms are not interchangeable (see _journal_parts).
+    parts_list = [_journal_parts([str(a) for a in c]) for c in entry["commands"]]
+    if any(p is None for p in parts_list):
+        _say("Saved workflow cannot be replayed: its command line was recorded in a "
+             "form this version does not recognise. Run the workflow again from the "
+             "menu -- replaying it as-is could bind switches the wrong way.", "red")
+        return 1
+
+    # AutoFind is redone on every Fuji journal run: the root and the patterns were
+    # saved with it, so a scheduled preset sees the sessions added since it was saved
+    # (a journal from an older version has no such data and replays what it saved).
+    # Only the Fuji workflows (2/3/4) search; their labels all start with "Fuji:".
+    # Menu 1 also journals kind "compress" but has a fixed folder and no AutoFind.
+    af = entry.get("autofind")
+    is_fuji = (entry.get("kind") in ("copy_exif", "compress", "both")
+               and str(entry.get("label") or "").startswith("Fuji:"))
+    if is_fuji:
+        if af:
+            root = Path(af["root"])
+            if not root.is_dir():
+                _say(f"AutoFind root is gone: {root}", "red")
+                return 1
+            folders = sorted(find_folders_by_pattern(root, af["patterns"]))
+            if not folders:
+                _say(f"AutoFind: no matching folders under {root} -- nothing to do.",
+                     "yellow")
+                return 0
+            folder_str = ";".join(str(f) for f in folders)
+            for parts in parts_list:
+                if "-InputDir" in parts:
+                    i = parts.index("-InputDir")
+                    if i + 1 < len(parts):
+                        parts[i + 1] = folder_str
+            _say(f"AutoFind: {len(folders)} session(s) under {root}")
+        else:
+            _say(f"Folders as saved on {entry.get('time')} (saved by an older version: "
+                 f"sessions added since are not included)", "yellow")
+
+    for parts in parts_list:
         # Validate the script that will actually run, which _journaled_script_path may have
         # swapped for the other Copy EXIF backend.
         script = _journaled_script_path(parts, cfg.config.ps_name)
         if not script.exists():
-            msg = f"Backend script no longer exists: {script}"
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]{escape(msg)}[/red]")
-            else:
-                print(f"ERROR: {msg}")
-            return False
+            _say(f"Backend script no longer exists: {script}", "red")
+            return 1
 
     # Read the flag from the neutral parts: under powershell.exe every argument is folded
     # into one -Command string, so a membership test on the command list never matched and
     # the DELETES-SOURCES warning was silently skipped on PS5.
-    deletes_sources = any("-DeleteSource" in p for p in journal_parts)
+    deletes = (not dry_run) and any("-DeleteSource" in p for p in parts_list)
+    if dry_run:
+        for parts in parts_list:
+            if "-DryRun" not in parts:
+                parts.append("-DryRun")
+    if unattended and deletes:
+        _say("Refused: this preset deletes source files (-DeleteSource). That needs a "
+             "confirmation, which cannot be given unattended -- run it from the "
+             "menu, or pass --dry-run.", "red")
+        return 1
+
+    run_cmds = [_rebuild_journaled_command(p, cfg.config.ps_name, non_interactive=unattended)
+                for p in parts_list]
 
     if RICH_AVAILABLE and console:
-        console.print(f"\n[bold cyan]Repeat last workflow[/bold cyan]")
-        console.print(f"  {escape(label)}")
-        console.print(f"  [dim]saved {cfg.config.last_run_time}[/dim]")
+        console.print(f"\n[bold cyan]{escape(title)}[/bold cyan]")
+        console.print(f"  {escape(entry.get('label') or '')}")
+        console.print(f"  [dim]saved {entry.get('time')}[/dim]")
         for c in run_cmds:
             console.print(f"\n[dim]{escape(' '.join(c))}[/dim]")
-        console.print("[yellow]Note: dry-run is never inherited -- this runs for real.[/yellow]")
-        if deletes_sources:
+        if dry_run:
+            console.print("[yellow]Note: --dry-run requested -- this is a simulation (-DryRun).[/yellow]")
+        else:
+            console.print("[yellow]Note: dry-run is never inherited -- this runs for real.[/yellow]")
+        if deletes:
             console.print("[red]WARNING: this workflow DELETES source files (-DeleteSource).[/red]")
-        if not Confirm.ask("Run it now?", default=False):
+        if not unattended and not Confirm.ask("Run it now?", default=False):
             console.print("[dim]Cancelled.[/dim]")
-            return False
+            return 1
     else:
-        print("\n--- Repeat last workflow ---")
-        print(f"  {label}")
-        print(f"  saved {cfg.config.last_run_time}")
+        print(f"\n--- {title} ---")
+        print(f"  {entry.get('label') or ''}")
+        print(f"  saved {entry.get('time')}")
         for c in run_cmds:
             print(f"\n  {' '.join(c)}")
-        print("Note: dry-run is never inherited -- this runs for real.")
-        if deletes_sources:
+        if dry_run:
+            print("Note: --dry-run requested -- this is a simulation (-DryRun).")
+        else:
+            print("Note: dry-run is never inherited -- this runs for real.")
+        if deletes:
             print("WARNING: this workflow DELETES source files (-DeleteSource).")
-        if input("Run it now? [y/N]: ").strip().lower() != "y":
+        if not unattended and input("Run it now? [y/N]: ").strip().lower() != "y":
             print("Cancelled.")
-            return False
+            return 1
 
     for i, c in enumerate(run_cmds):
         if len(run_cmds) > 1:
@@ -4317,15 +4793,134 @@ def run_repeat_last(cfg) -> bool:
                 console.print(f"\n[cyan]=== Step {i + 1}/{len(run_cmds)} ===[/cyan]")
             else:
                 print(f"\n=== Step {i + 1}/{len(run_cmds)} ===")
-        result = run_subprocess(c)
+        result = run_subprocess(c, stdin=subprocess.DEVNULL) if unattended else run_subprocess(c)
         if result != 0:
-            msg = f"Step {i + 1} failed (exit {result}). Remaining steps skipped."
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]{msg}[/red]")
+            _say(f"Step {i + 1} failed (exit {result}). Remaining steps skipped.", "red")
+            return 1
+    return 0
+
+
+def run_repeat_last(cfg) -> bool:
+    """Re-run the last workflow (menu option 2), through the shared journal runner.
+
+    The stored commands were built with dry-run stripped, so a repeat always
+    runs for real. Manifest runs take their own path inside _run_journal: the CSV
+    is re-read through the loader guards and re-executed, never replayed blind.
+    """
+    return _run_journal(cfg, _journal_snapshot(cfg), "Repeat last workflow") == 0
+
+
+def _clean_preset_name(raw: str) -> Optional[str]:
+    """Reject names that would be unusable or would corrupt the config: the
+    key ends up in JSON and in a menu row, so control characters and
+    runaway lengths are cut here rather than at display time."""
+    name = (raw or "").strip().strip('"\'')
+    if not name or len(name) > 40:
+        return None
+    if any(ord(ch) < 32 for ch in name):
+        return None
+    return name
+
+
+def presets_menu(cfg) -> None:
+    """Named snapshots of the last workflow (main menu option 5), so several
+    recurring jobs (a nightly manifest sync, a one-off shoot) can coexist
+    instead of overwriting the single 'last workflow' slot. Saving stores a copy
+    of the journal; running goes through the same _run_journal as 'Repeat last
+    workflow', so the two cannot drift apart."""
+    while True:
+        presets = dict(cfg.config.presets or {})
+        names = sorted(presets)
+
+        if RICH_AVAILABLE and console:
+            if names:
+                table = Table(show_header=True, header_style="bold cyan", box=BOX_SIMPLE)
+                table.add_column("#", justify="right", style="dim")
+                table.add_column("Name", style="bold")
+                table.add_column("Workflow")
+                table.add_column("Saved", style="dim")
+                for i, name in enumerate(names, 1):
+                    table.add_row(str(i), name, presets[name].get("label", ""),
+                                  presets[name].get("saved_at", ""))
+                console.print(Panel(table, title="[bold]Presets[/bold]", border_style="green"))
             else:
-                print(f"ERROR: {msg}")
-            return False
-    return True
+                console.print("\n[dim]No presets saved yet.[/dim]")
+            console.print("[bold]\\[number][/bold] run  "
+                          "[bold]\\[S][/bold] save last workflow as preset  "
+                          "[bold]\\[D][/bold] delete  [bold]\\[B][/bold] back")
+            choice = Prompt.ask("Presets").strip()
+        else:
+            print("\n--- Presets ---")
+            if names:
+                for i, name in enumerate(names, 1):
+                    print(f"  {i}. {name}")
+                    print(f"     {presets[name].get('label', '')}  "
+                          f"(saved {presets[name].get('saved_at', '')})")
+            else:
+                print("  (none saved yet)")
+            print("[number] run | [S] save last workflow as preset | [D] delete | [B] back")
+            choice = input("Presets: ").strip()
+
+        upper = choice.upper()
+        if not choice or upper == "B":
+            return
+
+        if upper == "S":
+            snapshot = _journal_snapshot(cfg)
+            if not _journal_runnable(snapshot):
+                _say("Nothing to save yet: run a workflow first.", "yellow")
+                continue
+            if RICH_AVAILABLE and console:
+                console.print(f"[dim]{escape(snapshot.get('label') or '')}[/dim]")
+                raw_name = Prompt.ask("Preset name")
+            else:
+                print(f"  {snapshot.get('label') or ''}")
+                raw_name = input("Preset name: ")
+            name = _clean_preset_name(raw_name)
+            if not name:
+                _say("Invalid name (empty, too long, or contains control characters).", "red")
+                continue
+            if name in presets:
+                if RICH_AVAILABLE and console:
+                    overwrite = Confirm.ask("Replace it?", default=False)
+                else:
+                    overwrite = input("Replace it? [y/N]: ").strip().lower().startswith("y")
+                if not overwrite:
+                    continue
+            presets[name] = {**snapshot, "saved_at": time.strftime("%Y-%m-%d %H:%M")}
+            cfg.config.presets = presets
+            cfg.save_config()
+            _say(f"Preset '{name}' saved.", "green")
+            continue
+
+        if upper == "D":
+            if not names:
+                continue
+            if RICH_AVAILABLE and console:
+                target = Prompt.ask("Delete which number?").strip()
+            else:
+                target = input("Delete which number?: ").strip()
+            if not target.isdigit() or not 1 <= int(target) <= len(names):
+                _say("No preset with that number.", "red")
+                continue
+            name = names[int(target) - 1]
+            if RICH_AVAILABLE and console:
+                sure = Confirm.ask(f"Delete preset '{name}'?", default=False)
+            else:
+                sure = input(f"Delete preset '{name}'? [y/N]: ").strip().lower().startswith("y")
+            if sure:
+                del presets[name]
+                cfg.config.presets = presets
+                cfg.save_config()
+                _say(f"Preset '{name}' deleted.", "green")
+            continue
+
+        if choice.isdigit() and 1 <= int(choice) <= len(names):
+            name = names[int(choice) - 1]
+            _run_journal(cfg, presets[name], f"Preset: {name}")
+            continue
+
+        _say("Not a valid option.", "red")
 
 
 def main():
@@ -4345,14 +4940,47 @@ def main():
         epilog="Run without arguments to start the interactive wizard. "
                "See README.md and docs/README_convert_tiff_py.md for full documentation.",
     )
-    parser.parse_args()
+    parser.add_argument("--run-preset", metavar="NAME",
+                        help="Run a saved preset without the menu (Task Scheduler) and exit")
+    parser.add_argument("--list-presets", action="store_true",
+                        help="List saved presets and exit")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="With --run-preset: simulate (-DryRun) instead of running")
+    args = parser.parse_args()
+
+    # A stray --dry-run would otherwise be ignored -- the worst outcome is a real
+    # run for someone who asked for a simulation. Same rule as jxl-photo.
+    if args.dry_run and not args.run_preset:
+        parser.error("--dry-run only applies together with --run-preset")
 
     cfg = ConfigManager()
+
+    # Read-only listing: no PowerShell detection, no environment panel, so it works
+    # even on a machine where the shells are not on PATH.
+    if args.list_presets:
+        presets = cfg.config.presets or {}
+        if not presets:
+            print("No presets saved. Run a workflow, then save it from menu 5.")
+        for name in sorted(presets):
+            preset = presets[name]
+            saved = preset.get("saved_at", "")
+            line = f"    {preset.get('label', '')}" + (f"  (saved {saved})" if saved else "")
+            print(f"{name}\n{line}")
+        sys.exit(0)
 
     # Detect PowerShell version at startup
     ps_major, ps_name, ps_version = detect_powershell_version()
     cfg.config.ps_major = ps_major
     cfg.config.ps_name = ps_name  # store for use in command builders
+
+    if args.run_preset:
+        presets = cfg.config.presets or {}
+        if args.run_preset not in presets:
+            available = ", ".join(sorted(presets)) or "(none saved)"
+            print(f"ERROR: no preset named '{args.run_preset}'. Available: {available}")
+            sys.exit(2)
+        sys.exit(_run_journal(cfg, presets[args.run_preset], f"Preset: {args.run_preset}",
+                              unattended=True, dry_run=args.dry_run))
 
     show_environment_panel(cfg)
 
@@ -4371,6 +4999,10 @@ def main():
             cfg.config.ps_major = ps_major
             cfg.config.ps_name = ps_name
             show_environment_panel(cfg)
+            continue
+
+        if choice == "5":
+            presets_menu(cfg)
             continue
 
         if choice == "3":

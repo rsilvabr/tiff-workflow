@@ -143,10 +143,13 @@ class TestBuildCompressCommand:
         assert "-CapWorkers" in cmd
         assert "4" in cmd
 
-    def test_cap_workers_zero_omitted(self, tmp_path):
+    def test_cap_workers_zero_passed_explicitly(self, tmp_path):
+        """audit round 17: the wizard's "0 (no cap)" answer is passed even though 0 IS
+        the shipped default -- omitting it let an edited $CapWorkers win over the answer."""
         workflow = {"cap_workers": 0}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-CapWorkers" not in cmd
+        assert "-CapWorkers" in cmd
+        assert cmd[cmd.index("-CapWorkers") + 1] == "0"
 
     def test_exclude_folders(self, tmp_path):
         workflow = {"exclude_folders": "_EXPORT;temp"}
@@ -873,7 +876,7 @@ class TestThumbFormatPlainTextFallback:
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         captured = []
 
-        def fake_run_subprocess(cmd, timeout=None):
+        def fake_run_subprocess(cmd, timeout=None, **kw):
             captured.append(cmd)
             return 0
 

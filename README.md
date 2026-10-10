@@ -55,6 +55,8 @@ Eight workflows available:
 
 The wizard supports **AutoFind** — automatically locates folders matching patterns like `S5pro` or `S3pro` for Fuji workflows.
 
+**Presets:** save the last workflow under a name (main menu **[5]**) and run it unattended with `python convert_tiff.py --run-preset NAME` — see [Presets](docs/README_convert_tiff_py.md#presets-menu-5).
+
 ### Direct PowerShell (no Python required)
 
 ```powershell

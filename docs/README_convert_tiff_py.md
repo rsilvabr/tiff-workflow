@@ -174,7 +174,122 @@ the end-of-run summary lists every entry's state and is written to
 
 **Repeat:** main menu [2] ("Repeat last workflow") re-reads the manifest CSV through
 the same loader guards and re-executes it — it never replays stored command lines,
-so edits to the CSV between runs are honored.
+so edits to the CSV between runs are honored. The run's answers (Safe mode, exclusions,
+worker cap, duplicate policy, the default mode for rows without a Mode cell) travel
+with the journal, so a repeat runs with exactly the settings of the original run. A
+journal saved by an older version without those settings is refused: run the manifest
+once more from menu [3], then repeat it.
+
+---
+
+## Presets (menu 5)
+
+"Repeat last workflow" only ever remembers **one** run. Presets are named snapshots of
+that journal, so several recurring jobs (a nightly manifest sync, a per-shoot
+compression) can coexist instead of overwriting each other:
+
+```
+--- Presets ---
+  1. nightly-zip
+     Compress TIFFs -- mode 9 -- D:\Fotos  (saved 2026-10-10 03:00)
+  2. fuji-copy
+     Fuji: Copy EXIF -- pattern 'S5pro' under E:\Fuji (12 folders)  (saved 2026-10-10 03:00)
+[number] run | [S] save last workflow as preset | [D] delete | [B] back
+```
+
+- **`[S]`** snapshots whatever ran last (including a manifest run) under a name you
+  choose, so it stops being affected by later runs. A manifest preset re-reads the CSV
+  on every run, exactly like "Repeat last workflow".
+- **`[number]`** runs a preset. It goes through the same questions as
+  "Repeat last workflow" (`Run it now?`, the mode-8 warning), because it is the same
+  runner — the two cannot drift apart.
+- A workflow that deletes sources keeps `[DELETES SOURCES]` in its label.
+- Presets live in the same `~/.convert_tiff_config.json` as the rest of the settings.
+
+### Running a preset unattended (Task Scheduler)
+
+```powershell
+python convert_tiff.py --list-presets                    # names + what each one does
+python convert_tiff.py --run-preset nightly-zip          # runs it, no menu, no prompts
+python convert_tiff.py --run-preset nightly-zip --dry-run
+```
+
+`--run-preset` runs once and exits. It never waits on stdin (`-NonInteractive` and a
+closed stdin are passed to the backends), so a prompt left on the path is a refusal, not
+a hang.
+
+| | |
+|---|---|
+| **Dry-run** | off unless you pass `--dry-run`. It is **never** inherited from the stored run |
+| **Exit code** | `0` ran (or nothing to do), `1` failed or refused, `2` no such preset (available names are printed) |
+
+- A preset that deletes sources (`-DeleteSource`, or a manifest with a mode-8 row) is
+  **refused** unattended (exit 1) unless you pass `--dry-run`: the confirmation cannot
+  be given without a console. Run those from the menu.
+- There is no `--overwrite`: the stored command already carries `-Overwrite` if the
+  wizard asked for it, and an override has no clear meaning for the backends. A preset
+  runs exactly as it was saved.
+- A Fuji preset (workflows 2/3/4) **redoes the AutoFind** on every run, so sessions
+  added since it was saved are included. A journal saved by an older version replays
+  the folders it saved and says so.
+- `--dry-run` without `--run-preset` is an error (exit 2) rather than silently ignored:
+  a stray flag must never turn a requested simulation into a real run.
+
+### Scheduling on Windows (Task Scheduler)
+
+One line — it works the same in `cmd` and in PowerShell (a `^` line continuation does
+**not** work in PowerShell; keep it on one line):
+
+```text
+schtasks /Create /TN "tiff-workflow nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR "cmd /k cd /d C:\Users\You\Documents\GitHub\tiff-workflow && python convert_tiff.py --run-preset nightly-zip"
+```
+
+`cmd /k` keeps the window open when the run ends, so a failure is in front of you the
+next morning instead of buried in a log. The `cd /d` matters: the backends write their
+logs to `Logs\` of the **current directory** (`$PWD`), so the run must start in the
+folder where the scripts live. Or use the task editor (*Create Task -> Actions -> New ->
+Start a program*):
+
+- **Program/script:** `cmd`
+- **Add arguments:** `/k python convert_tiff.py --run-preset "nightly-zip"` — quote a
+  name that contains spaces
+- **Start in:** the folder where `convert_tiff.py` lives (same reason as `cd /d`).
+
+### Several presets in one scheduled run (a `.cmd` file)
+
+One scheduled task can run any number of presets, in order. Save this as
+`run_scheduled_presets.cmd` in the folder where `convert_tiff.py` lives:
+
+```bat
+@echo off
+rem One block per preset, in the order they must run.
+cd /d "%~dp0"
+
+echo === %date% %time%  nightly-zip
+python convert_tiff.py --run-preset "nightly-zip"
+echo === exit code %errorlevel%
+
+echo === %date% %time%  fuji-copy
+python convert_tiff.py --run-preset "fuji-copy"
+echo === exit code %errorlevel%
+
+rem python convert_tiff.py --run-preset "backup-zip"
+echo === %date% %time%  done
+```
+
+- The `echo === exit code %errorlevel%` lines are the morning report: `0` ran, `1`
+  failed or refused, `2` no such preset.
+- Each line runs even if the one before failed. Join lines with `&&` only if a failure
+  must stop everything after it.
+- `rem` disables a line without deleting it.
+- Do not list presets that delete sources: they are refused unattended (exit 1) and only
+  clutter the log.
+
+Then point one task at the batch file:
+
+```text
+schtasks /Create /TN "tiff-workflow" /SC WEEKLY /D SAT /ST 23:30 /RL LIMITED /TR "cmd /k C:\Users\You\Documents\GitHub\tiff-workflow\run_scheduled_presets.cmd"
+```
 
 ---
 
@@ -196,8 +311,33 @@ Config saved to `~/.convert_tiff_config.json`:
 - `last_mode` -- last mode selected
 - `last_origin` -- last workflow used
 - `last_manifest_path` -- last manifest CSV run (repeat re-reads it via the loader)
+- `last_manifest_workflow` / `last_manifest_default_mode` -- the answers of that manifest
+  run (Safe mode, exclusions, cap, duplicate policy, default mode), so a repeat or preset
+  re-runs it with the same rules
+- `last_autofind` -- root and patterns of the last Fuji run (2/3/4); a repeat/preset
+  searches again, so sessions added since are included
+- `presets` -- named snapshots of the journal above (menu 5 and `--run-preset`)
 - `last_exclude_folders` -- last `-ExcludeFolders` list. The wizard asks once per workflow and
   offers this as the default; a fresh install defaults to nothing excluded
+
+The wizard's defaults for Safe mode, LZW, thumbnails and duplicate names are read from the
+backends' own `param()` defaults — edit them there.
+
+The wizard's own workflows that run ImageMagick in parallel (Diagnose, the padded-8-bit
+compress, Delete OLD_TIFFs) are capped by memory instead of by the worker count alone. Two
+settings at the top of `convert_tiff.py` control it:
+
+- `WORKER_MEMORY_FRACTION` (default `0.8`) — the run may use at most this share of the
+  available memory; `0` disables the cap.
+- `WORKER_MEMORY_LIMIT` (default `"both"`) — which reading to budget from: `"both"` (the
+  smaller of what the system can still commit and the physical RAM still free), `"commit"`
+  or `"physical"`.
+
+The peak of one worker is estimated from the largest image of the batch: a `magick compare`
+holds ~68 bytes per pixel — 5.4 GB on an 84 MP scan. The estimate is printed before the pool
+starts (`Memory: ~N GB per worker | N GB available | workers N`), with a warning whenever
+the count is reduced. An image whose size cannot be read counts as 150 MP, so an unknown
+size never shrinks the estimate.
 
 ---
 
@@ -206,9 +346,14 @@ Config saved to `~/.convert_tiff_config.json`:
 ```powershell
 python convert_tiff.py                    # Interactive wizard
 python convert_tiff.py --help             # Show help
+python convert_tiff.py --list-presets     # List saved presets and exit
+python convert_tiff.py --run-preset NAME  # Run a preset unattended and exit
+python convert_tiff.py --run-preset NAME --dry-run
 ```
 
-No CLI flags are required -- the wizard is fully interactive.
+No CLI flags are required -- the wizard is fully interactive. `--run-preset` and
+`--list-presets` are for Task Scheduler/cron: see
+[Presets (menu 5)](#presets-menu-5).
 
 ---
 

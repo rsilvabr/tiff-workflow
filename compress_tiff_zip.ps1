@@ -34,9 +34,112 @@ param(
     [string]$ThumbFormat = "jpg",   # Thumbnail format (jpg, png, etc.)
     [int]$ThumbPage = 1,            # Output page position for the embedded thumbnail; must be >= 1 (after the main image)
     [switch]$SkipCompressedWithThumb, # Skip TIFFs that are already compressed AND have thumbnail
-    [string]$SrgbProfile = ""       # ICC profile used to convert wide-gamut sources; "" = auto-detect
+    [string]$SrgbProfile = "",       # ICC profile used to convert wide-gamut sources; "" = auto-detect
+    [double]$WorkerMemoryFraction = 0.8  # Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap
 )
 # -----------------------------------------------------------------
+
+# Peak memory of one ImageMagick process per pixel of the main page, measured on an
+# 84 MP 16-bit scan (IM 7.1.2 Q16-HDRI): compare 68 B/px, conversion/decode 12.7 B/px.
+# Plan AI_tools/261010_Claude_plan_memory-subprocess.md. +~10% margin.
+$script:CompareBytesPerPixel = 75
+$script:ConvertBytesPerPixel = 15
+$script:UnknownImagePixels   = 150000000
+
+function Get-AvailableMemoryBytes {
+    <#
+    .SYNOPSIS
+        The smaller of the memory the system can still commit and the physical RAM
+        still available (incl. standby), in bytes; $null when either cannot be read.
+        CIM class names are not localised (performance-counter names are).
+    #>
+    try {
+        $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+        $pm = Get-CimInstance -ClassName Win32_PerfFormattedData_PerfOS_Memory -ErrorAction Stop
+        $commit = [double]$os.FreeVirtualMemory * 1KB
+        $phys   = [double]$pm.AvailableBytes
+        if ($commit -le 0 -or $phys -le 0) { return $null }
+        return [Math]::Min($commit, $phys)
+    } catch { return $null }
+}
+
+function Get-MaxImagePixels {
+    <#
+    .SYNOPSIS
+        Largest IFD0 width*height among the files, read by exiftool in chunks of 400.
+        A file exiftool does not report, or reports without a size, counts as
+        $script:UnknownImagePixels: an unknown size must never shrink the estimate.
+    #>
+    param([string[]]$Paths, [int]$ChunkSize = 400)
+    $best = [double]0
+    if (-not $Paths -or $Paths.Count -eq 0) { return $best }
+    for ($off = 0; $off -lt $Paths.Count; $off += $ChunkSize) {
+        $end = [Math]::Min($off + $ChunkSize, $Paths.Count) - 1
+        $chunk = @($Paths[$off..$end])
+        $seen = @{}
+        $argFile = [System.IO.Path]::GetTempFileName()
+        try {
+            $argLines = @("-charset", "filename=utf8", "-T", "-n", "-Directory", "-FileName",
+                          "-IFD0:ImageWidth", "-IFD0:ImageHeight") + $chunk
+            [System.IO.File]::WriteAllLines($argFile, $argLines, [System.Text.UTF8Encoding]::new($false))
+            # exiftool prints UTF-8 (-charset filename=utf8), but PowerShell decodes a
+            # native command's output with [Console]::OutputEncoding -- the OEM code page
+            # (850) on a scheduled `cmd /k`. A non-ASCII path then never matched and every
+            # file counted as UnknownImagePixels.
+            $prevEnc = $null
+            try { $prevEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
+            try {
+                $out = exiftool -@ $argFile 2>$null
+            } finally {
+                if ($prevEnc) { try { [Console]::OutputEncoding = $prevEnc } catch { } }
+            }
+            foreach ($line in @($out)) {
+                $cols = "$line" -split "`t"
+                if ($cols.Count -lt 4) { continue }
+                $full = (Join-Path $cols[0] $cols[1]).Replace('/', '\').ToLowerInvariant()
+                $w = 0; $h = 0
+                if ([int]::TryParse($cols[2].Trim(), [ref]$w) -and [int]::TryParse($cols[3].Trim(), [ref]$h)) {
+                    $seen[$full] = [double]$w * [double]$h
+                }
+            }
+        } finally {
+            Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($p in $chunk) {
+            $px = $seen[$p.Replace('/', '\').ToLowerInvariant()]
+            if (-not $px -or $px -le 0) { $px = [double]$script:UnknownImagePixels }
+            if ($px -gt $best) { $best = $px }
+        }
+    }
+    return $best
+}
+
+function Get-MemoryCappedWorkers {
+    <#
+    .SYNOPSIS
+        $Requested lowered so that many parallel ImageMagick workers fit in
+        $Fraction of the free memory (Get-AvailableMemoryBytes). Logs the estimate;
+        -Quiet logs only when it lowers the count. 0/negative fraction = no cap.
+    #>
+    param([int]$Requested, [string[]]$Paths, [double]$BytesPerPixel, [double]$Fraction, [switch]$Quiet)
+    if ($Fraction -le 0 -or $Requested -le 1 -or -not $Paths -or $Paths.Count -eq 0) { return $Requested }
+    $avail = Get-AvailableMemoryBytes
+    if ($null -eq $avail) {
+        Write-Log "Memory: could not read the available memory -- workers not capped" "WARN"
+        return $Requested
+    }
+    $px  = Get-MaxImagePixels -Paths $Paths
+    $per = $px * $BytesPerPixel
+    $cap = [Math]::Max(1, [int][Math]::Floor($avail * $Fraction / $per))
+    $w   = [Math]::Min($Requested, $cap)
+    if (-not $Quiet -or $cap -lt $Requested) {
+        Write-Log ("Memory: ~{0:N1} GB per worker ({1:N0} MP) | {2:N1} GB available | workers {3}" -f ($per / 1GB), ($px / 1e6), ($avail / 1GB), $w)
+    }
+    if ($cap -lt $Requested) {
+        Write-Log ("Workers reduced from {0} to {1}: {0} ImageMagick processes at ~{2:N1} GB each would not fit (WorkerMemoryFraction={3})" -f $Requested, $w, ($per / 1GB), $Fraction) "WARN"
+    }
+    return $w
+}
 
 # -- LEGACY SETTINGS (used when Mode = -1 / no CLI params) --------
 # These are overridden by CLI params when Mode >= 0
@@ -850,8 +953,10 @@ function Test-ZipIntegrity {
     .NOTES
         Re-inject into -Parallel runspaces with:
             ${function:Test-ZipIntegrity} = $using:ZipIntegrityFnDef
+        -LoadFactor = workers running at once (they share the disk); the -Parallel blocks
+        pass it, sequential callers leave it at 1.
     #>
-    param([string]$Path, [int]$TimeoutSec = 30)
+    param([string]$Path, [int]$TimeoutSec = 30, [double]$LoadFactor = 1)
 
     # Audit round 16: a flat -MagickTimeout false-failed huge scans -- a full pixel decode
     # of a 700 MB film scan takes longer than the 30 s probe default. Scale the effective
@@ -859,7 +964,7 @@ function Test-ZipIntegrity {
     # the caller's value.
     try {
         $sizeMB = (Get-Item -LiteralPath $Path -ErrorAction Stop).Length / 1MB
-        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($sizeMB * 0.25))
+        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($sizeMB * 0.25 * [Math]::Max(1.0, $LoadFactor)))
     } catch { }
 
     $r = Invoke-MagickWithTimeout -Arguments @($Path, "null:") -TimeoutSec $TimeoutSec
@@ -885,8 +990,10 @@ function Test-PixelIdentical {
             ${function:Test-PixelIdentical} = $using:PixelCompareFnDef
         (Invoke-MagickWithTimeout, Get-TiffPageCount and ConvertTo-MagickPathSpec must be
         injected too.)
+        -LoadFactor = workers running at once (they share the disk); the -Parallel blocks
+        pass it, sequential callers leave it at 1.
     #>
-    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30)
+    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30, [double]$LoadFactor = 1)
 
     # Audit round 16: per-page compare of multi-hundred-MB scans overran the flat 30 s
     # probe timeout. Scale by the larger input (~0.25 s/MB) -- see Test-ZipIntegrity.
@@ -896,7 +1003,7 @@ function Test-PixelIdentical {
             $mb = (Get-Item -LiteralPath $p -ErrorAction Stop).Length / 1MB
             if ($mb -gt $maxMB) { $maxMB = $mb }
         }
-        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($maxMB * 0.25))
+        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($maxMB * 0.25 * [Math]::Max(1.0, $LoadFactor)))
     } catch { }
 
     $ps = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
@@ -1684,6 +1791,11 @@ if ($Mode -lt 0) {
         Write-Log "TIFFs: $($script:total) | Workers: $script:Workers | OutputDir: $(if ($script:OutputDir) { $script:OutputDir } else { '(overwrite in place)' }) | Staging: $(if ($script:StagingDir) { $script:StagingDir } else { 'disabled' }) | DryRun: $script:DryRun"
         Write-Log "Mode: $modeLabel"
 
+        $script:memoryWorkerCap = 0
+        if ($script:IS_PS7 -and -not $script:DryRun) {
+            $script:memoryWorkerCap = Get-MemoryCappedWorkers -Requested $script:Workers -Paths @($files | ForEach-Object { $_.FullName }) -BytesPerPixel $script:CompareBytesPerPixel -Fraction $WorkerMemoryFraction
+        }
+
         $groups = $files | Group-Object { $_.DirectoryName.ToLowerInvariant() }
 
         foreach ($group in $groups) {
@@ -1725,6 +1837,7 @@ if ($Mode -lt 0) {
 
             $script:stagingMap = @{}
             $effectiveWorkersLegacy = if ($CapWorkers -gt 0) { [Math]::Min($script:Workers, $CapWorkers) } else { $script:Workers }
+            if ($script:memoryWorkerCap -gt 0) { $effectiveWorkersLegacy = [Math]::Min($effectiveWorkersLegacy, $script:memoryWorkerCap) }
 
             if ($script:IS_PS7) {
                 $results = $groupFiles | ForEach-Object -Parallel {
@@ -1966,7 +2079,7 @@ if ($Mode -lt 0) {
                         # Decode alone is not enough -- same reasoning as mode 8: a page-short or
                         # truncated file still decodes, and in-place destroys the ONLY copy.
                         # Skipped for the thumbnail path, which legitimately rewrites the pages.
-                        $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeoutSec
+                        $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeoutSec -LoadFactor $using:effectiveWorkersLegacy
                         if ($inPlaceOk) {
                             if ($genThumbL) {
                                 # Used to be decode-only here: whole-file identity cannot hold for
@@ -1975,7 +2088,7 @@ if ($Mode -lt 0) {
                                 $expectedPages = if ($noThumbNote) { 1 } else { 2 }
                                 $inPlaceOk = Test-ThumbOutputMatchesSource -SrcPath $src -DstPath $writeDst -ExpectedPages $expectedPages -TimeoutSec $magickTimeoutSec
                             } else {
-                                $inPlaceOk = Test-PixelIdentical -SrcPath $src -DstPath $writeDst -TimeoutSec $magickTimeoutSec
+                                $inPlaceOk = Test-PixelIdentical -SrcPath $src -DstPath $writeDst -TimeoutSec $magickTimeoutSec -LoadFactor $using:effectiveWorkersLegacy
                             }
                         }
                         if ($inPlaceOk) {
@@ -2598,6 +2711,15 @@ if ($tasks.Count -eq 0) {
 # never wrote to -- for TIFFs sitting directly under the input root that was the drive root,
 # so a correct run read as if it had written to C:\. It also meant the pre-create below made
 # the parent instead of the output folder.
+$script:memoryWorkerCap = 0
+if ($script:IS_PS7 -and -not $DryRun) {
+    # Only an in-place write (WriteDst == Src) or mode 8's delete gate runs a pixel
+    # compare in the workers; modes 0/9 already moved the source to OLD_TIFFs/ and only
+    # decode-check the output (Test-ZipIntegrity).
+    $needsCompare = ($Mode -eq 8) -or (@($tasks | Where-Object { $_.WriteDst -eq $_.Src }).Count -gt 0)
+    $bpp = if ($needsCompare) { $script:CompareBytesPerPixel } else { $script:ConvertBytesPerPixel }
+    $script:memoryWorkerCap = Get-MemoryCappedWorkers -Requested $Workers -Paths @($tasks | ForEach-Object { $_.Src }) -BytesPerPixel $bpp -Fraction $WorkerMemoryFraction
+}
 $groupedTasks = $tasks | Group-Object {
     $dir = [System.IO.Path]::GetDirectoryName($_.FinalDst)
     if ([string]::IsNullOrWhiteSpace($dir)) { "" } else { $dir.ToLowerInvariant() }
@@ -2620,6 +2742,7 @@ foreach ($group in $groupedTasks) {
     # Plain (non-$script:) variable: ForEach-Object -Parallel can only capture with $using:<name>
     $runStagingIdForWorker = $script:runStagingId
     $effectiveWorkers = if ($CapWorkers -gt 0) { [Math]::Min($Workers, $CapWorkers) } else { $Workers }
+    if ($script:memoryWorkerCap -gt 0) { $effectiveWorkers = [Math]::Min($effectiveWorkers, $script:memoryWorkerCap) }
     if ($CapWorkers -gt 0 -and $Workers -gt $CapWorkers) {
         Write-Log "Workers capped to $effectiveWorkers (CapWorkers limit)"
     }
@@ -2892,13 +3015,13 @@ foreach ($group in $groupedTasks) {
                 # enough -- a page-short or truncated file still decodes, and in-place destroys
                 # the ONLY copy. The thumbnail path legitimately rewrites the page layout, so it
                 # is verified against page 0 instead (see Test-ThumbOutputMatchesSource).
-                $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeout
+                $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers
                 if ($inPlaceOk) {
                     if ($generateThumb) {
                         $expectedPages = if ($noThumbNote) { 1 } else { 2 }
                         $inPlaceOk = Test-ThumbOutputMatchesSource -SrcPath $srcPath -DstPath $writeDst -ExpectedPages $expectedPages -TimeoutSec $magickTimeout
                     } else {
-                        $inPlaceOk = Test-PixelIdentical -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $magickTimeout
+                        $inPlaceOk = Test-PixelIdentical -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers
                     }
                 }
                 if ($inPlaceOk) {
@@ -2922,7 +3045,7 @@ foreach ($group in $groupedTasks) {
                 # Decode-check alone is not enough (a truncated page still decodes): the staged
                 # file must also be pixel-identical to the source it replaces.
                 $verifyPath = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
-                $mode8Ok = (Test-ZipIntegrity -Path $verifyPath -TimeoutSec $magickTimeout) -and
+                $mode8Ok = (Test-ZipIntegrity -Path $verifyPath -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers) -and
                            (Test-Path -LiteralPath $srcPath)
                 if ($mode8Ok) {
                     if ($generateThumb) {
@@ -2933,7 +3056,7 @@ foreach ($group in $groupedTasks) {
                         $expectedPages = if ($noThumbNote) { 1 } else { 2 }
                         $mode8Ok = Test-ThumbOutputMatchesSource -SrcPath $srcPath -DstPath $verifyPath -ExpectedPages $expectedPages -TimeoutSec $magickTimeout
                     } else {
-                        $mode8Ok = Test-PixelIdentical -SrcPath $srcPath -DstPath $verifyPath -TimeoutSec $magickTimeout
+                        $mode8Ok = Test-PixelIdentical -SrcPath $srcPath -DstPath $verifyPath -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers
                     }
                 }
                 if ($mode8Ok) {

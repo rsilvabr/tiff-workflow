@@ -15,7 +15,8 @@ param(
     [string]$FolderPattern = "S5pro",
     [int]$MagickTimeout = 30,
     [switch]$FailOnWarn,
-    [string]$ExcludeFolders = ""     # ';'-separated folder NAMES to skip during discovery
+    [string]$ExcludeFolders = "",    # ';'-separated folder NAMES to skip during discovery
+    [double]$WorkerMemoryFraction = 0.8  # Accepted for interface parity; this script is sequential and ignores it
 )
 # ------------------------------------------------------------------
 
@@ -283,8 +284,21 @@ function Test-PixelIdentical {
             ${function:Test-PixelIdentical} = $using:PixelCompareFnDef
         (Invoke-MagickWithTimeout, Get-TiffPageCount and ConvertTo-MagickPathSpec must be
         injected too.)
+        -LoadFactor = workers running at once (they share the disk); the -Parallel blocks
+        pass it, sequential callers leave it at 1.
     #>
-    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30)
+    param([string]$SrcPath, [string]$DstPath, [int]$TimeoutSec = 30, [double]$LoadFactor = 1)
+
+    # Audit round 16: per-page compare of multi-hundred-MB scans overran the flat 30 s
+    # probe timeout. Scale by the larger input (~0.25 s/MB) -- see Test-ZipIntegrity.
+    try {
+        $maxMB = 0.0
+        foreach ($p in @($SrcPath, $DstPath)) {
+            $mb = (Get-Item -LiteralPath $p -ErrorAction Stop).Length / 1MB
+            if ($mb -gt $maxMB) { $maxMB = $mb }
+        }
+        $TimeoutSec = [Math]::Max($TimeoutSec, [int][Math]::Ceiling($maxMB * 0.25 * [Math]::Max(1.0, $LoadFactor)))
+    } catch { }
 
     $ps = Get-TiffPageCount -Path $SrcPath -TimeoutSec $TimeoutSec
     $pd = Get-TiffPageCount -Path $DstPath -TimeoutSec $TimeoutSec
