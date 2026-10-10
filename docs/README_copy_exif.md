@@ -65,6 +65,7 @@ powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -Overwrite
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `-InputDir` | string | `.` | Folder containing JPEG and TIFF pairs |
+| `-InputDirFile` | string | `""` | UTF-8 text file with one input folder per line, used instead of `-InputDir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. |
 | `-OutputDir` | string | `""` | Output folder for processed TIFFs. **If set and different from source folder, the original TIFF is preserved** — a copy is created in OutputDir and EXIF is applied to the copy |
 | `-Workers` | int | `8` | Parallel jobs (PS7 only) |
 | `-WorkerMemoryFraction` | double | `0.8` | Cap parallel workers so their ImageMagick compares fit in this share of the memory still free (0 = no cap; PS5 is sequential and ignores it) |

@@ -20,6 +20,9 @@ gitignored). If one exists:
   by `_run_journal`, the same runner as Repeat last.
 - `compress_tiff_zip.ps1` -- TIFF -> ZIP/Deflate, modes 0-9, in-place backups
   in `OLD_TIFFs/`, thumbnails, `-ExcludeFolders`.
+  compress and both copy_exif backends also take `-InputDirFile` (one folder per
+  line); the wizard's `run_subprocess` switches to it when the command line would
+  pass `_CMDLINE_SPILL_CHARS`.
 - `copy_exif_to_TIFF_ps5.ps1` / `copy_exif_to_TIFF_ps7.ps1` -- EXIF from the
   Fuji S3/S5 Pro JPEG into the TIFF. Two copies of one behaviour: PS5
   (sequential) and PS7 (`-Parallel`).
@@ -91,12 +94,19 @@ feature's semantics are in doubt, read jxl-photo's version and ask before
 inventing a new one.
 
 ## Verification
+On the owner's machine `py` is a Python 3.13 without pytest -- use `python` for
+the suite and the battery.
 - **Two suites, different jobs.** `pytest tests` is the real one: it drives
   the PowerShell backends end to end through both `powershell` and `pwsh`
   with real TIFFs. Pester is static pattern-matching over the sources, and
   only runs under `pwsh` (Pester lives in the PS7 module path):
   `Invoke-Pester -Path (Get-ChildItem tests/test_*.ps1).FullName`
   (Pester 5+ auto-discovers only `*.Tests.ps1`).
+- **Real-photo battery** -- `python tools/real_photo_battery.py
+  --fixtures <folder>` (or `TW_FIXTURES`) runs the backends unattended on COPIES
+  of real photos under both shells and checks the files on disk. Run it before
+  every release and after any change to what magick/exiftool read or write, to a
+  delete or in-place path, or to discovery. Paste its summary into the report.
 - **Prove every regression test FAILS against the pre-fix code** (mutation
   check): extract the old file and run the test against it, then compare the
   restored file's hash with the original bytes.

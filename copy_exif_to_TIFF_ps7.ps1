@@ -16,7 +16,8 @@ param(
     [int]$MagickTimeout = 30,
     [switch]$FailOnWarn,
     [string]$ExcludeFolders = "",    # ';'-separated folder NAMES to skip during discovery
-    [double]$WorkerMemoryFraction = 0.8  # Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap
+    [double]$WorkerMemoryFraction = 0.8,  # Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap
+    [string]$InputDirFile = ""       # UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)
 )
 # ------------------------------------------------------------------
 
@@ -1203,8 +1204,33 @@ if (-not [string]::IsNullOrWhiteSpace($OutputDir)) {
 # code, so a Copy EXIF that touched nothing read as success. Same contract as the other backends.
 $inputDirs    = @()
 $missingRoots = @()
-if ($InputDir) {
-    foreach ($dir in ($InputDir -split ';')) {
+# -InputDirFile (round 22): see compress_tiff_zip.ps1.
+$inputDirEntries = @()
+if ($InputDirFile) {
+    if ($InputDir) {
+        Write-Log "ERROR: pass -InputDir or -InputDirFile, not both" "ERROR"
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $InputDirFile -PathType Leaf)) {
+        Write-Log "ERROR: -InputDirFile not found: $InputDirFile" "ERROR"
+        exit 1
+    }
+    try {
+        $inputDirEntries = @(Get-Content -LiteralPath $InputDirFile -Encoding UTF8 -ErrorAction Stop |
+                             ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch {
+        Write-Log "ERROR: cannot read -InputDirFile: $InputDirFile ($($_.Exception.Message))" "ERROR"
+        exit 1
+    }
+    if ($inputDirEntries.Count -eq 0) {
+        Write-Log "ERROR: -InputDirFile lists no folders: $InputDirFile" "ERROR"
+        exit 1
+    }
+} elseif ($InputDir) {
+    $inputDirEntries = @($InputDir -split ';')
+}
+if ($inputDirEntries.Count -gt 0) {
+    foreach ($dir in $inputDirEntries) {
         $dir = $dir.Trim()
         if ([string]::IsNullOrWhiteSpace($dir)) { continue }
         if (-not [System.IO.Path]::IsPathRooted($dir)) { $dir = Join-Path $PWD.Path $dir }

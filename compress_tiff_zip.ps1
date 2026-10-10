@@ -35,7 +35,8 @@ param(
     [int]$ThumbPage = 1,            # Output page position for the embedded thumbnail; must be >= 1 (after the main image)
     [switch]$SkipCompressedWithThumb, # Skip TIFFs that are already compressed AND have thumbnail
     [string]$SrgbProfile = "",       # ICC profile used to convert wide-gamut sources; "" = auto-detect
-    [double]$WorkerMemoryFraction = 0.8  # Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap
+    [double]$WorkerMemoryFraction = 0.8,  # Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap
+    [string]$InputDirFile = ""       # UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)
 )
 # -----------------------------------------------------------------
 
@@ -1088,8 +1089,11 @@ function Backup-TiffMetadata {
     try {
         [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
         exiftool -@ $argMeta | Out-Null
-        if ($LASTEXITCODE -ne 0) { return @{ Needed = $true; Path = $null } }
+        # A failed dump can still leave a PARTIAL container behind; remove it so nothing
+        # downstream mistakes it for a complete backup.
+        if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue; return @{ Needed = $true; Path = $null } }
     } catch {
+        Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue
         return @{ Needed = $true; Path = $null }
     } finally {
         Remove-Item $argMeta -Force -ErrorAction SilentlyContinue
@@ -1766,6 +1770,10 @@ function Process-TiffJob {
 # -- LEGACY MODE (Mode = -1) --------------------------------------
 
 if ($Mode -lt 0) {
+    if ($InputDirFile) {
+        Write-Host "ERROR: -InputDirFile needs -Mode 0-9" -ForegroundColor Red
+        exit 1
+    }
     $root = $PWD.Path
     # OLD_TIFFs holds the pristine originals that modes 0/9 deliberately preserved; legacy had
     # no exclusion at all, so running it in a folder already processed by mode 0/9 recompressed
@@ -2194,7 +2202,31 @@ if ($Mode -lt 0) {
 $inputRoots = @()
 $missingRoots = @()
 $seenRootSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($dir in ($InputDir -split ';')) {
+# -InputDirFile (round 22): the wizard writes the folder list to a file when the
+# ';'-joined -InputDir would exceed the 32767-character command-line limit.
+$inputDirEntries = @($InputDir -split ';')
+if ($InputDirFile) {
+    if ($PSBoundParameters.ContainsKey('InputDir')) {
+        Write-Log "ERROR: pass -InputDir or -InputDirFile, not both" "ERROR"
+        exit 1
+    }
+    if (-not (Test-Path -LiteralPath $InputDirFile -PathType Leaf)) {
+        Write-Log "ERROR: -InputDirFile not found: $InputDirFile" "ERROR"
+        exit 1
+    }
+    try {
+        $inputDirEntries = @(Get-Content -LiteralPath $InputDirFile -Encoding UTF8 -ErrorAction Stop |
+                             ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch {
+        Write-Log "ERROR: cannot read -InputDirFile: $InputDirFile ($($_.Exception.Message))" "ERROR"
+        exit 1
+    }
+    if ($inputDirEntries.Count -eq 0) {
+        Write-Log "ERROR: -InputDirFile lists no folders: $InputDirFile" "ERROR"
+        exit 1
+    }
+}
+foreach ($dir in $inputDirEntries) {
     $dir = $dir.Trim()
     if ([string]::IsNullOrWhiteSpace($dir)) { continue }
     if (-not [System.IO.Path]::IsPathRooted($dir)) {

@@ -1476,6 +1476,42 @@ def _decode_console_line(raw: bytes) -> str:
         return raw.decode(enc, errors="replace")
 
 
+# CreateProcess fails past 32767 characters. A Fuji preset redoes the AutoFind on
+# every run, so its ';'-joined -InputDir grows with every session (round 22).
+_CMDLINE_SPILL_CHARS = 24000
+_INPUTDIR_FILE_BACKENDS = ("compress_tiff_zip.ps1", "copy_exif_to_TIFF_ps5.ps1",
+                           "copy_exif_to_TIFF_ps7.ps1")
+
+
+def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
+    """Swap a too-long -InputDir for -InputDirFile <temp file> (one folder per line).
+
+    Returns (command, temp path or None). The caller deletes the temp file once the
+    process has ended. Commands that are short enough, or that do not run one of
+    _INPUTDIR_FILE_BACKENDS, or that carry no -InputDir, come back unchanged."""
+    if len(subprocess.list2cmdline([str(a) for a in cmd])) <= _CMDLINE_SPILL_CHARS:
+        return cmd, None
+    parts = _journal_parts([str(a) for a in cmd])
+    if not parts or Path(parts[0]).name not in _INPUTDIR_FILE_BACKENDS:
+        return cmd, None
+    if "-InputDir" not in parts:
+        return cmd, None
+    i = parts.index("-InputDir")
+    if i + 1 >= len(parts):
+        return cmd, None
+    folders = [f for f in parts[i + 1].split(";") if f.strip()]
+    fd, list_path = tempfile.mkstemp(prefix="tw_inputdirs_", suffix=".txt")
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(folders) + "\n")
+    new_parts = parts[:i] + ["-InputDirFile", list_path] + parts[i + 2:]
+    cmd = [str(a) for a in cmd]
+    if "-File" in cmd:
+        j = cmd.index("-File")
+        return cmd[:j + 1] + new_parts, list_path
+    j = cmd.index("-Command")
+    return _wrap_ps5_command(cmd[:j] + ["-File"] + new_parts), list_path
+
+
 def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
                    stdin=None) -> int:
     """Run command, stream output with Rich coloring. Has configurable timeout.
@@ -1485,6 +1521,8 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
     import time
     import sys
     import threading
+
+    cmd, _spill_path = _spill_long_input_dir(cmd)
 
     popen_kwargs = {
         "stdout": subprocess.PIPE,
@@ -1499,119 +1537,126 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
         popen_kwargs["creationflags"] = 0
 
     try:
-        process = subprocess.Popen(cmd, **popen_kwargs)
-    except (FileNotFoundError, OSError) as e:
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]ERROR: Failed to start process: {e}[/red]")
-        else:
-            print(f"ERROR: Failed to start process: {e}")
-        return -1
-    output_queue = []
-    queue_lock = threading.Lock()
-    stop_reader = threading.Event()
-
-    def reader():
         try:
-            for raw_line in process.stdout:
-                line = _decode_console_line(raw_line)
-                with queue_lock:
-                    output_queue.append(line)
-        except Exception:
-            pass
-        finally:
-            stop_reader.set()
-
-    reader_thread = threading.Thread(target=reader, daemon=True)
-    reader_thread.start()
-
-    def _kill_tree():
-        try:
-            if sys.platform == "win32":
-                _run_captured(
-                    ["taskkill", "/F", "/T", "/PID", str(process.pid)],
-                    10,
-                )
+            process = subprocess.Popen(cmd, **popen_kwargs)
+        except (FileNotFoundError, OSError) as e:
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]ERROR: Failed to start process: {e}[/red]")
             else:
-                process.kill()
-        except Exception:
+                print(f"ERROR: Failed to start process: {e}")
+            return -1
+        output_queue = []
+        queue_lock = threading.Lock()
+        stop_reader = threading.Event()
+
+        def reader():
             try:
-                process.kill()
+                for raw_line in process.stdout:
+                    line = _decode_console_line(raw_line)
+                    with queue_lock:
+                        output_queue.append(line)
             except Exception:
                 pass
+            finally:
+                stop_reader.set()
 
-    start_time = time.time()
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
 
-    def _drain_lines():
-        with queue_lock:
-            pending = output_queue[:]
-            output_queue.clear()
-        for line in pending:
-            line = line.strip()
-            if not line:
-                continue
-            if RICH_AVAILABLE and console:
-                if " OK " in line or "+ZIP" in line:
-                    console.print(f"  [green]{escape(line)}[/green]")
-                elif " | ERROR |" in line or " ERROR " in line:
-                    console.print(f"  [red]{escape(line)}[/red]")
-                elif " | WARN |" in line or "WARNING" in line:
-                    console.print(f"  [yellow]{escape(line)}[/yellow]")
-                elif "DRY" in line:
-                    console.print(f"  [blue]{escape(line)}[/blue]")
+        def _kill_tree():
+            try:
+                if sys.platform == "win32":
+                    _run_captured(
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                        10,
+                    )
                 else:
-                    console.print(f"  {escape(line)}")
-            else:
-                print(f"  {line}")
+                    process.kill()
+            except Exception:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
 
-    try:
-        while True:
-            _drain_lines()
+        start_time = time.time()
 
-            if stop_reader.is_set() and process.poll() is not None:
-                _drain_lines()  # final drain: the reader may queue the last lines after our check
-                break
-
-            if timeout is not None and time.time() - start_time > timeout:
-                _kill_tree()
+        def _drain_lines():
+            with queue_lock:
+                pending = output_queue[:]
+                output_queue.clear()
+            for line in pending:
+                line = line.strip()
+                if not line:
+                    continue
                 if RICH_AVAILABLE and console:
-                    console.print(f"[red]ERROR: Process timed out after {timeout}s[/red]")
+                    if " OK " in line or "+ZIP" in line:
+                        console.print(f"  [green]{escape(line)}[/green]")
+                    elif " | ERROR |" in line or " ERROR " in line:
+                        console.print(f"  [red]{escape(line)}[/red]")
+                    elif " | WARN |" in line or "WARNING" in line:
+                        console.print(f"  [yellow]{escape(line)}[/yellow]")
+                    elif "DRY" in line:
+                        console.print(f"  [blue]{escape(line)}[/blue]")
+                    else:
+                        console.print(f"  {escape(line)}")
                 else:
-                    print(f"ERROR: Process timed out after {timeout}s")
-                return -1
+                    print(f"  {line}")
 
-            time.sleep(0.05)
-    except KeyboardInterrupt:
-        _kill_tree()
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]Interrupted by user.[/yellow]")
-        else:
-            print("Interrupted by user.")
-        return -1
-    except Exception as e:
-        _kill_tree()
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]ERROR: {e}[/red]")
-        else:
-            print(f"ERROR: {e}")
-        return -1
+        try:
+            while True:
+                _drain_lines()
 
-    try:
-        process.stdout.close()
-    except (OSError, ValueError):
-        pass
+                if stop_reader.is_set() and process.poll() is not None:
+                    _drain_lines()  # final drain: the reader may queue the last lines after our check
+                    break
 
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        _kill_tree()
-        return -1
+                if timeout is not None and time.time() - start_time > timeout:
+                    _kill_tree()
+                    if RICH_AVAILABLE and console:
+                        console.print(f"[red]ERROR: Process timed out after {timeout}s[/red]")
+                    else:
+                        print(f"ERROR: Process timed out after {timeout}s")
+                    return -1
 
-    if process.returncode != 0:
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]WARNING: Process exited with code {process.returncode}[/red]")
-        else:
-            print(f"WARNING: Process exited with code {process.returncode}")
-    return process.returncode
+                time.sleep(0.05)
+        except KeyboardInterrupt:
+            _kill_tree()
+            if RICH_AVAILABLE and console:
+                console.print("[yellow]Interrupted by user.[/yellow]")
+            else:
+                print("Interrupted by user.")
+            return -1
+        except Exception as e:
+            _kill_tree()
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]ERROR: {e}[/red]")
+            else:
+                print(f"ERROR: {e}")
+            return -1
+
+        try:
+            process.stdout.close()
+        except (OSError, ValueError):
+            pass
+
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _kill_tree()
+            return -1
+
+        if process.returncode != 0:
+            if RICH_AVAILABLE and console:
+                console.print(f"[red]WARNING: Process exited with code {process.returncode}[/red]")
+            else:
+                print(f"WARNING: Process exited with code {process.returncode}")
+        return process.returncode
+    finally:
+        if _spill_path:
+            try:
+                os.unlink(_spill_path)
+            except OSError:
+                pass
 
 
 # --- Undo OLD_TIFFs ------------------------------------------------

@@ -41,6 +41,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 |-----------|------|---------|-------------|
 | `-Mode` | int | `-1` | **-1 = legacy mode** (no CLI params = original behavior). **0-9** = new mode behavior |
 | `-InputDir` | string | `.` | Input folder. Can be relative or absolute |
+| `-InputDirFile` | string | `""` | UTF-8 text file with one input folder per line, used instead of `-InputDir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. compress: modes 0-9 only. |
 
 ### Output path control
 

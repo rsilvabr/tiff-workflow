@@ -299,6 +299,8 @@ Recursively scans a root folder for sessions matching the chosen pattern. Shows 
 
 Excluded from scan: `Logs`, `logs`, `converted_zip`, `ZIP`, `_EXPORT`, `OLD_TIFFs` folders.
 
+A long AutoFind folder list is passed to the backend through a temporary `-InputDirFile` when it would exceed the command-line limit; journals and presets still record the folders themselves.
+
 ---
 
 ## Persistent Config

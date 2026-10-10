@@ -6,7 +6,7 @@ Test-PixelIdentical copy of compress_tiff_zip.ps1 only, while the two copy_exif
 copies kept a flat 30 s -- documented as "Keep implementations identical" in
 each. This module extracts every `function Name { ... }` body from the four
 scripts, strips doc comments and line comments, and requires the copies to be
-byte-identical -- `_KNOWN_DIVERGENT` lists the four exceptions that exist TODAY
+byte-identical -- `_KNOWN_DIVERGENT` lists the three exceptions that exist TODAY
 (each annotated, none reviewed by round 18).
 
 It also scans the -LoadFactor wiring statically: every Test-PixelIdentical /
@@ -33,11 +33,9 @@ SCRIPTS = [
 # inventory of known divergence -- a fix that reaches one copy must reach the
 # others or move its entry out of here.
 _KNOWN_DIVERGENT = {
-    # copy_exif deletes the failed MIE container in both failure paths; the
-    # compress copies leave it behind in %TEMP%.
-    "Backup-TiffMetadata": "divergent at round 18, not reviewed",
-    # ps7's copy is re-wrapped/re-indented against ps5's; never reviewed.
-    "Invoke-S5ProFolder": "divergent at round 18, not reviewed",
+    # PS5 runs the pairs in a sequential foreach, PS7 in ForEach-Object -Parallel;
+    # the pairing itself is pinned through Find-JpegPair (reviewed in round 22).
+    "Invoke-S5ProFolder": "differs on purpose: sequential vs -Parallel loop",
     # copy_exif counts OK+SKIP-ZIP and MISS, result classes compress never emits.
     "Process-Results": "differs on purpose: copy_exif's result vocabulary",
     # compress routes non-console hosts to Write-Information (pytest/ISE), the

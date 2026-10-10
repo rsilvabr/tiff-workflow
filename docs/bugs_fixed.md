@@ -11,6 +11,31 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**.
 
+## Unreleased - Audit Round 22
+
+### LOW - A failed metadata dump left a partial MIE container in %TEMP%
+**Issue:** when the `exiftool` dump in `Backup-TiffMetadata` exited non-zero, the compress copy
+returned "needed, path $null" (correctly refusing the write) but left a possibly PARTIAL `.mie`
+container in `%TEMP%`, and the `catch` branch left it too. The two copy_exif copies deleted it in
+both failure paths. The name is unique per call, so nothing read the stray file back; it was
+litter, and a divergence between copies that the parity test had to carry as an exception.
+- **Fix:** the compress copy removes the container on a non-zero exit and in the `catch` block,
+  code-identical to the copy_exif copies; the `"Backup-TiffMetadata"` entry left
+  `_KNOWN_DIVERGENT` (three exceptions remain) in `tests/test_ps_helper_parity.py`.
+- **Files:** `compress_tiff_zip.ps1`, `tests/test_ps_helper_parity.py`
+
+### MEDIUM - A long AutoFind folder list made the backend launch fail past 32767 characters
+**Issue:** the wizard joined every AutoFind folder into one `-InputDir "a;b;c..."` argument, and
+a Fuji preset redoes the AutoFind on every run, so the list grew with every session. Past 32767
+characters `CreateProcess` fails, `run_subprocess` catches the OSError and returns -1 -- the run
+did nothing, silently.
+- **Fix:** `compress_tiff_zip.ps1` and both copy_exif backends take `-InputDirFile`, a UTF-8
+  file with one folder per line (refused together with `-InputDir`, fail closed); the wizard's
+  `run_subprocess` swaps a command line past `_CMDLINE_SPILL_CHARS` (24000) for a temp list file
+  and deletes it when the process ends. Journals and presets still record the folders themselves.
+- **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`,
+  `copy_exif_to_TIFF_ps7.ps1`, `convert_tiff.py`, `tests/test_inputdir_file.py`
+
 ## Unreleased - Audit Round 21
 
 ### LOW - With -CompressZip, a TIFF that got its EXIF was counted as "skipped"

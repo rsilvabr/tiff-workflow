@@ -42,6 +42,12 @@ pytest tests --cov=..
 - Guards: `..` traversal, source overlaps, output collisions (modes 2/4/5), mode-8 delete gate
 - Generation (per-folder vs root entries, backup/output folder exclusions), repeat-last
 
+### `test_inputdir_file.py` covers
+- `-InputDirFile` end to end in the three backends (non-ASCII folder list), the refuse-both/missing/empty gates, and the wizard's spill rewrite plus its temp-file cleanup
+
+### `test_exclude_folders_parity.py` covers
+- `Test-PathExcluded` in all four backends against jxl-photo's exclusion semantics (12-row table, both shells)
+
 ## Regression Suite (`test_regression_classes.py`)
 
 Audit rounds 1-6 kept re-finding the same five failure classes in modes and files the previous
@@ -67,6 +73,16 @@ own TIFFs in `tmp_path`; nothing outside the temp folder is written or deleted.
 Static AST invariants (script-scope `return`, missing `${function:...}` re-injection in a
 `-Parallel` block, parse errors) live in `helpers/Find-PsInvariantViolations.ps1`, which runs
 under both PowerShell 5.1 and 7 and is invoked from the suite.
+
+## Real-Photo Battery (`tools/real_photo_battery.py`)
+
+`python tools/real_photo_battery.py --fixtures <folder>` (or set `TW_FIXTURES`) runs the
+backends unattended on COPIES of real photos under both shells and checks the files on disk --
+metadata, pixels, page counts and scanner page layouts, OLD_TIFFs, `%` and near-260-char
+paths, embedded and standalone thumbnails, Purge/Restore, and real Fuji Copy EXIF (incl.
+`-InputDirFile` with a non-ASCII session). The fixtures are never modified; the scratch folder
+is deleted on success and kept on failure. Needs `magick` and `exiftool`; the report lands in
+`AI_tools/<YYMMDD>_battery_report.md`.
 
 ## PowerShell Tests (Pester)
 
