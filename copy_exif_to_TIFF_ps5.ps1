@@ -624,37 +624,46 @@ function Invoke-S5ProFolder {
     }
 
     function Find-JpegPair {
+        # Search order (first hit wins), each step over every $searchDirs entry:
+        #   JPEG exact -> JPEG without the Capture One variant suffix (_1, _2 ...) ->
+        #   RAF exact -> RAF without the variant suffix -> JPEG heuristic (_\d{3,4}).
+        # The RAF steps come before the heuristic: for DSC_0001.tif, DSC_0001.RAF is the
+        # right source and DSC.jpg is not. Audit round 20.
         param([System.IO.FileInfo]$tif)
         $dir    = $tif.DirectoryName
         $base   = $tif.BaseName
         $parent = Split-Path $dir -Parent
-
-        $candidates = @($base)
-        $stripped = ($base -replace '(_\d{3,4})$', '')
-        if ($stripped -ne $base -and $stripped.Length -gt 0) { $candidates += $stripped }
-
-        $searchDirs = @(
-            $dir,
-            (Join-Path $dir    "JPEG"),
-            (Join-Path $dir    "JPG"),
-            $parent,
-            (Join-Path $parent "JPEG"),
-            (Join-Path $parent "JPG")
-        ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
-
-        foreach ($b in $candidates) {
+        $variant = ($base -replace '_\d{1,2}$', '')
+        $heur    = ($base -replace '(_\d{3,4})$', '')
+        $steps = @(@{ Base = $base; Kind = "exact"; Src = "JPEG" })
+        if ($variant -ne $base -and $variant.Length -gt 0) { $steps += @{ Base = $variant; Kind = "variant"; Src = "JPEG" } }
+        $steps += @{ Base = $base; Kind = "exact"; Src = "RAF" }
+        if ($variant -ne $base -and $variant.Length -gt 0) { $steps += @{ Base = $variant; Kind = "variant"; Src = "RAF" } }
+        if ($heur -ne $base -and $heur.Length -gt 0) { $steps += @{ Base = $heur; Kind = "heuristic"; Src = "JPEG" } }
+        $searchDirs = @($dir, (Join-Path $dir "JPEG"), (Join-Path $dir "JPG"),
+                        $parent, (Join-Path $parent "JPEG"), (Join-Path $parent "JPG")) |
+                      Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+        foreach ($s in $steps) {
+            $b = $s.Base
             foreach ($d in $searchDirs) {
-                $key = ($d.ToLowerInvariant() + "|" + $b.ToLowerInvariant())
-                if ($jpgIndex.ContainsKey($key)) {
-                    return @{ Path = $jpgIndex[$key]; UsedBase = $b }
-                }
-                # The index only covers $RootPath, so the parent folder (and its JPEG/JPG
-                # subfolders) could never produce a hit -- half of $searchDirs was dead code.
-                # Probe the filesystem directly for those.
-                foreach ($ext in @(".jpg", ".jpeg")) {
-                    $probe = Join-Path $d "$b$ext"
-                    if (Test-Path -LiteralPath $probe -PathType Leaf) {
-                        return @{ Path = (Get-Item -LiteralPath $probe).FullName; UsedBase = $b }
+                if ($s.Src -eq "JPEG") {
+                    $key = ($d.ToLowerInvariant() + "|" + $b.ToLowerInvariant())
+                    if ($jpgIndex.ContainsKey($key)) { return @{ Path = $jpgIndex[$key]; UsedBase = $b; MatchKind = $s.Kind; SourceKind = "JPEG" } }
+                    # The index only covers $RootPath, so the parent folder (and its JPEG/JPG
+                    # subfolders) could never produce a hit. Probe the filesystem directly.
+                    foreach ($ext in @(".jpg", ".jpeg")) {
+                        $probe = Join-Path $d "$b$ext"
+                        if (Test-Path -LiteralPath $probe -PathType Leaf) {
+                            return @{ Path = (Get-Item -LiteralPath $probe).FullName; UsedBase = $b; MatchKind = $s.Kind; SourceKind = "JPEG" }
+                        }
+                    }
+                } else {
+                    # A directory listing, not Get-Item on a built path: Get-Item echoes the
+                    # case it was given (.raf), the listing returns the real name (.RAF).
+                    $raf = @(Get-ChildItem -LiteralPath $d -File -Filter "$b.raf" -ErrorAction SilentlyContinue |
+                             Where-Object { $_.BaseName -ieq $b -and $_.Extension -ieq ".raf" })[0]
+                    if ($raf) {
+                        return @{ Path = $raf.FullName; UsedBase = $b; MatchKind = $s.Kind; SourceKind = "RAF" }
                     }
                 }
             }
@@ -718,6 +727,8 @@ function Invoke-S5ProFolder {
                 DestName = $destName
                 Jpeg     = if ($pair) { $pair.Path }    else { $null }
                 UsedBase = if ($pair) { $pair.UsedBase } else { $null }
+                MatchKind  = if ($pair) { $pair.MatchKind }  else { $null }
+                SourceKind = if ($pair) { $pair.SourceKind } else { $null }
             }
         })
 
@@ -737,17 +748,19 @@ function Invoke-S5ProFolder {
             $iccPolicyL = $IccPolicy
 
             if (-not $p.Jpeg) {
-                "MISS | $($p.TifName) | no matching JPEG (base: $($p.TifBase))"
+                "MISS | $($p.TifName) | no matching JPEG or RAF (base: $($p.TifBase))"
                 continue
             }
 
-            # The _\d{3,4}$ strip in Find-JpegPair can match an unrelated JPEG
-            # (foto_2024.tif -> foto.jpg): EXIF copied from the wrong file must be loud.
+            # Only the _\d{3,4}$ strip is heuristic: it can match an unrelated JPEG
+            # (foto_2024.tif -> foto.jpg). The Capture One variant suffix _\d{1,2}$
+            # (_DSF4817_1 -> _DSF4817) is the normal name of the photo and reports OK.
             # Case-insensitive: Find-JpegPair matched case-insensitively, so
             # DSC_0001.tif + dsc_0001.jpg is an EXACT stem match, not a heuristic one.
-            $heurMatch = ($p.UsedBase -and $p.UsedBase -ine $p.TifBase)
+            $heurMatch = ($p.UsedBase -and $p.UsedBase -ine $p.TifBase -and $p.MatchKind -eq "heuristic")
             $okPrefix = if ($heurMatch) { "WARN (heuristic JPEG match)" } else { "OK" }
             $heurSuffix = if ($heurMatch) { " | TIFF base '$($p.TifBase)' matched JPEG base '$($p.UsedBase)'" } else { "" }
+            $rawSuffix = if ($p.SourceKind -eq "RAF") { " [EXIF from RAW]" } else { "" }
 
             if ($skipExifL) {
                 # No `| Select-Object -First 1` on the native call: -First stops the upstream
@@ -764,7 +777,7 @@ function Invoke-S5ProFolder {
 
             if ($dryL) {
                 $zipInfo = if ($compressL) { " + ZIP" } else { "" }
-                "DRY (EXIF$zipInfo) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))"
+                "DRY (EXIF$zipInfo) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$rawSuffix"
                 continue
             }
 
@@ -804,6 +817,8 @@ function Invoke-S5ProFolder {
             }
             $copyIcc = ($iccPolicyL -eq "always") -or ($iccPolicyL -eq "preserve_tiff" -and -not $tiffHasIcc)
             $iccTag = if ($copyIcc) { "-ICC_Profile" } else { "" }
+            # A RAF does not describe the colour space of the exported TIFF.
+            if ($p.SourceKind -eq "RAF") { $iccTag = "" }
 
             # Determine target TIFF path: if OutputDir is specified (different from source dir), copy first to preserve original
             $tiffTarget = $p.Tiff
@@ -854,6 +869,11 @@ function Invoke-S5ProFolder {
                           '--ImageWidth', '--ImageHeight', '--ImageLength',
                           '--ExifImageWidth', '--ExifImageHeight', '--PixelXDimension', '--PixelYDimension',
                           '--Orientation', '--ThumbnailImage', '--PreviewImage', '--JpgFromRaw')
+            # A RAF's EXIF describes its embedded 1440x960 preview: the focal-plane
+            # resolution (630 vs 1861 px/cm on an S5 Pro) is wrong for the TIFF.
+            if ($p.SourceKind -eq "RAF") {
+                $tagsArgs += @('--FocalPlaneXResolution', '--FocalPlaneYResolution', '--FocalPlaneResolutionUnit')
+            }
             if ($iccTag) { $tagsArgs += $iccTag }
             $tagsArgs += $tiffTarget
 
@@ -872,7 +892,7 @@ function Invoke-S5ProFolder {
 
             if (-not $compressL) {
                 $copyNote = if ($tiffCopied) { " -> $finalDirL" } else { "" }
-                "$okPrefix | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote$heurSuffix"
+                "$okPrefix | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$copyNote$heurSuffix$rawSuffix"
                 continue
             }
 
@@ -889,7 +909,7 @@ function Invoke-S5ProFolder {
             }
             $comp = "$(@($compRes.Output)[0])".Trim()
             if ($comp -match $(if ($skipLzwL) { 'Deflate|ZIP|Adobe|LZW' } else { 'Deflate|ZIP|Adobe' })) {
-                "$(if ($heurMatch) { "WARN (heuristic JPEG match, already $comp -- ZIP skipped)" } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix"; continue
+                "$(if ($heurMatch) { "WARN (heuristic JPEG match, already $comp -- ZIP skipped)" } else { "OK+SKIP-ZIP ($comp)" }) | $($p.TifName)$heurSuffix$rawSuffix"; continue
             }
 
             # Run-scoped prefix so the interrupt trap only cleans up this run's staged files
@@ -899,7 +919,7 @@ function Invoke-S5ProFolder {
 
             if ((Test-Path -LiteralPath $finalDst) -and -not $overL -and ($finalDst -ine $p.Tiff) -and -not $tiffCopied) {
                 # No cleanup here: the guard above already requires -not $tiffCopied
-                "OK+SKIP-ZIP (exists) | $($p.TifName)"; continue
+                "OK+SKIP-ZIP (exists) | $($p.TifName)$rawSuffix"; continue
             }
 
             # Input literal, OUTPUT escaped: a '%' in the name sends the output somewhere
@@ -964,7 +984,7 @@ function Invoke-S5ProFolder {
             if ($stagingName) { $script:stagingMap[$p.Tiff] = $stagingName }
 
             if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
-            "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { 'OK+ZIP' }) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$heurSuffix"
+            "$(if ($heurMatch) { 'WARN (heuristic JPEG match)' } else { 'OK+ZIP' }) | $($p.TifName) <= $([IO.Path]::GetFileName($p.Jpeg))$heurSuffix$rawSuffix"
         }
 
         foreach ($line in $results) { Process-Results @($line) }

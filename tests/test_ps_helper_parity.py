@@ -110,6 +110,43 @@ def test_duplicated_functions_are_identical():
 
 
 # ---------------------------------------------------------------------------
+# Find-JpegPair (round 20)
+# ---------------------------------------------------------------------------
+
+
+def _extract_indented_function(text, name):
+    """Body of `function <name> {` even when indented (Find-JpegPair lives inside
+    Invoke-S5ProFolder); the same brace-matching loop as _extract_functions."""
+    m = re.search(r"^[ \t]*function\s+" + re.escape(name) + r"\s*\{", text, re.MULTILINE)
+    assert m, f"function {name} not found"
+    i = m.end() - 1
+    depth = 0
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    return text[m.start():i + 1]
+
+
+def test_find_jpegpair_copies_are_identical():
+    """T8: Find-JpegPair sits inside Invoke-S5ProFolder, which is in
+    _KNOWN_DIVERGENT, so the inventory above never compares it -- yet the whole
+    round 20 search order (variant suffix, RAF fallback) is one behaviour and
+    must not drift between the two copies."""
+    ps5 = (REPO / "copy_exif_to_TIFF_ps5.ps1").read_text(encoding="utf-8", errors="replace")
+    ps7 = (REPO / "copy_exif_to_TIFF_ps7.ps1").read_text(encoding="utf-8", errors="replace")
+    a = _normalise(_extract_indented_function(ps5, "Find-JpegPair"))
+    b = _normalise(_extract_indented_function(ps7, "Find-JpegPair"))
+    assert a == b, "Find-JpegPair diverged (fix both copy_exif scripts):\n" + "\n".join(
+        difflib.unified_diff(a.splitlines(), b.splitlines(),
+                             fromfile="ps5", tofile="ps7", lineterm=""))
+
+
+# ---------------------------------------------------------------------------
 # The memory estimate's bytes-per-pixel classification (static)
 # ---------------------------------------------------------------------------
 

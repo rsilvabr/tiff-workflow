@@ -66,10 +66,16 @@ ARTIST = "RegressionTester"
 # -- helpers --------------------------------------------------------
 
 def run_ps(shell, script, args, cwd, timeout=300):
-    """Invoke a backend script and return the CompletedProcess (exit code included)."""
+    """Invoke a backend script and return the CompletedProcess (exit code included).
+
+    Decoded as UTF-8 with replacement: a non-ASCII path in the output is raw UTF-8
+    from one child and '?' from another (the console code page flips to UTF-8 as
+    soon as a pwsh child has run), and the locale code page (cp1252) raised
+    UnicodeDecodeError on the Japanese fixture folder (round 20)."""
     cmd = [shell, "-NoProfile", "-File", str(REPO / script)] + [str(a) for a in args]
     return subprocess.run(
-        cmd, cwd=str(cwd), capture_output=True, text=True, timeout=timeout
+        cmd, cwd=str(cwd), capture_output=True, text=True,
+        encoding="utf-8", errors="replace", timeout=timeout
     )
 
 
@@ -586,6 +592,47 @@ class TestCopyExifE2E:
 
         strict = run_ps(shell, script, ["-InputDir", str(work), "-FailOnWarn"], tmp_path)
         assert strict.returncode == 1, f"{strict.stdout}\n{strict.stderr}"
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestCopyExifVariantAndHeuristicNames:
+    """Round 20: `_1`/`_2` is the normal Capture One variant name (plain OK); only the
+    `_\\d{3,4}$` heuristic cut can be a different photo and must stay loud."""
+
+    @staticmethod
+    def _make_fuji_jpeg(path):
+        subprocess.run(["magick", "-size", "64x64", "xc:gray", str(path)],
+                       capture_output=True, check=True, timeout=120)
+        subprocess.run(["exiftool", "-q", "-overwrite_original", "-Make=FUJIFILM",
+                        "-Model=Test", "-DateTimeOriginal=2025:03:09 10:12:07", str(path)],
+                       capture_output=True, check=True, timeout=120)
+
+    def test_variant_suffix_pairs_as_plain_ok(self, tmp_path, shell):
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        work = tmp_path / "S5pro"
+        work.mkdir()
+        make_tiff(work / "foto_1.tif")
+        self._make_fuji_jpeg(work / "foto.jpg")
+
+        result = run_ps(shell, script, ["-InputDir", str(work)], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "OK | foto_1.tif <= foto.jpg" in result.stdout, result.stdout
+        assert "heuristic" not in result.stdout, result.stdout
+
+    def test_three_digit_heuristic_still_warns(self, tmp_path, shell):
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        work = tmp_path / "S5pro"
+        work.mkdir()
+        make_tiff(work / "foto_2024.tif")
+        self._make_fuji_jpeg(work / "foto.jpg")
+
+        result = run_ps(shell, script, ["-InputDir", str(work)], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "WARN (heuristic JPEG match)" in result.stdout, result.stdout
 
 
 @requires_shell

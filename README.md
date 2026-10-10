@@ -45,7 +45,7 @@ python convert_tiff.py
 
 Eight workflows available:
 - **[1] Compress TIFFs** — To Zip/Deflate, modes 0-9 (any folder)
-- **[2] Fuji: Copy EXIF** — From JPEG to TIFF (Fuji S3/S5 Pro)
+- **[2] Fuji: Copy EXIF** — From JPEG to TIFF (Fuji S3/S5 Pro); falls back to the RAF when there is no JPEG
 - **[3] Fuji: Compress** — To Zip/Deflate (Fuji S3/S5 Pro)
 - **[4] Fuji: Copy + Compress** — Combined in one pass (Fuji S3/S5 Pro)
 - **[5] Restore OLD_TIFFs** — Move TIFFs from OLD_TIFFs/ back to parent folder

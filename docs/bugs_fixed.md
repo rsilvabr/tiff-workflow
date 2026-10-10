@@ -11,6 +11,37 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**.
 
+## Unreleased - Audit Round 20
+
+Copy EXIF pairing on real Capture One exports: `<stem>_1.TIF`/`<stem>_2.TIF` variants never
+found their `<stem>.JPG`, and a session with no JPEG (S3 Pro RAW-only) got no EXIF at all
+although the `<stem>.RAF` beside each TIFF carries the same data. Both found on the owner's
+real photos; pinned by `tests/test_copy_exif_real_fuji.py` (fixtures outside the repo, env
+var `TW_FUJI_FIXTURES`).
+
+### MEDIUM - Capture One variant TIFFs never found their JPEG
+**Issue:** `Find-JpegPair` tried only the exact stem and the `_\d{3,4}$` heuristic cut, so
+Capture One's exported variants (`_DSF4817_1.TIF`, `_DSF4817_2.TIF` next to `_DSF4817.JPG`)
+matched nothing and were reported `MISS` in every real session.
+- **Fix:** a new search step strips the variant suffix `_\d{1,2}$` (for JPEG and RAF), ahead
+  of the `_\d{3,4}$` heuristic; a variant match is the normal name and reports plain `OK`.
+  `Find-JpegPair` now returns `MatchKind` (`exact`/`variant`/`heuristic`) and `SourceKind`,
+  and the heuristic WARN is gated on `MatchKind -eq "heuristic"`.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `tests/test_copy_exif_real_fuji.py`, `tests/test_ps_helper_parity.py`
+
+### LOW - No JPEG meant no EXIF although the RAF carries it
+**Issue:** a RAW-only session (or a run after the JPEGs were deleted) left every TIFF without
+EXIF even though the RAF beside it has the same DateTimeOriginal/ExposureTime/FNumber/ISO
+(the S5 Pro session `_DSF4796.TIF` + `_DSF4796.RAF`, the S3 Pro `DSCF0092_1.TIF` +
+`DSCF0092.RAF`).
+- **Fix:** fall back to the RAF (exact stem, then variant suffix) after the JPEG steps and
+  before the heuristic. The RAF's preview-only `FocalPlaneXResolution`/`YResolution`/
+  `ResolutionUnit` are excluded and the ICC is never taken from a RAF; result lines end with
+  `[EXIF from RAW]`. MISS now reads `no matching JPEG or RAF (base: ...)`.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `tests/test_copy_exif_real_fuji.py`
+
 ## Unreleased - Audit Round 19
 
 Presets (menu 5, `--run-preset`/`--list-presets`) and the two repeat bugs they exposed:

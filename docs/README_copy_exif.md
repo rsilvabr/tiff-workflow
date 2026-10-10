@@ -29,9 +29,10 @@ Fuji S3 Pro / S5 Pro workflow with Hyper Utility:
 
 ## Input Requirements
 
-- Folder with both `.tif`/`.tiff` files AND `.jpg`/`.jpeg` files
+- Folder with `.tif`/`.tiff` files and matching `.jpg`/`.jpeg` files; the `.RAF` beside a TIFF
+  is used as the fallback when there is no JPEG (see [Pairing](#pairing))
 - Filenames should match between JPEG and TIFF (e.g. `DSC_0001.jpg` and `DSC_0001.tif`)
-- EXIF data must be present in the JPEG files
+- EXIF data must be present in the JPEG (or RAF) files
 
 ---
 
@@ -87,12 +88,41 @@ alone. `-DryRun` skips the cap entirely (nothing runs).
 ## How It Works
 
 1. Scan input folder for TIFF files
-2. For each TIFF, find matching JPEG (same filename stem)
-3. Extract EXIF from JPEG using exiftool
+2. For each TIFF, find the matching JPEG or RAF (see Pairing below)
+3. Extract EXIF from the source using exiftool
 4. **If `-OutputDir` is specified and different from source folder:** copy TIFF to OutputDir first, then write EXIF to the copy (original is preserved)
 5. **Otherwise:** write EXIF directly to the original TIFF
 6. If `-CompressZip` is set, compress the TIFF (with EXIF) to ZIP format
 7. Verify EXIF was written
+
+### Pairing
+
+Each TIFF takes the first source found, trying every search folder in order (the file's own
+folder and its `JPEG`/`JPG` subfolders, then the parent folder and its `JPEG`/`JPG`
+subfolders):
+
+1. JPEG with the exact stem (`_DSF4796.TIF` <- `_DSF4796.JPG`)
+2. JPEG with the Capture One variant suffix removed (`_DSF4817_1.TIF` <- `_DSF4817.JPG`; the
+   `_1`/`_2` exported variants are normal names and report plain `OK`)
+3. RAF with the exact stem (`_DSF4796.RAF` for a RAW-only S5 Pro session)
+4. RAF with the variant suffix removed (`DSCF0092_1.TIF` <- `DSCF0092.RAF`)
+5. JPEG with the `_\d{3,4}$` cut removed (`foto_2024.tif` <- `foto.jpg`) -- a heuristic that
+   can match a different photo and reports `WARN (heuristic JPEG match)`
+
+The RAF steps come before the heuristic: for `DSC_0001.tif`, `DSC_0001.RAF` is the right
+source and `DSC.jpg` is not. A result whose source was the RAF ends with `[EXIF from RAW]`.
+
+**RAF source specifics.** A RAF carries the same EXIF/MakerNotes as the camera JPEG except
+the tags that describe its embedded 1440x960 preview, so when the source is a RAF:
+
+- `FocalPlaneXResolution`, `FocalPlaneYResolution` and `FocalPlaneResolutionUnit` are NOT
+  copied (630 vs 1861 px/cm on an S5 Pro -- the preview value would be wrong for the TIFF).
+- The ICC profile is never copied, whatever `-IccPolicy` (a RAF does not describe the colour
+  space of the exported TIFF).
+- Everything else (DateTimeOriginal, ExposureTime, FNumber, ISO, Model, ...) is copied
+  exactly as it would be from the JPEG.
+
+With neither a JPEG nor a RAF the TIFF is reported `MISS | ... | no matching JPEG or RAF`.
 
 ---
 
