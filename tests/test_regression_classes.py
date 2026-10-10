@@ -634,6 +634,27 @@ class TestCopyExifVariantAndHeuristicNames:
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "WARN (heuristic JPEG match)" in result.stdout, result.stdout
 
+    def test_compress_zip_on_a_zip_tiff_counts_the_exif_copy(self, tmp_path, shell):
+        """Round 21: with -CompressZip a TIFF that is already ZIP gets its EXIF and only the
+        ZIP step is skipped -- but the summary counted it as 'skipped', so a run that wrote
+        EXIF into every file ended in 'Done: 0 OK | N skipped' (seen on real Capture One
+        exports, which are all ZIP)."""
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        work = tmp_path / "S5pro"
+        work.mkdir()
+        tif = work / "foto_1.tif"
+        make_tiff(tif)
+        subprocess.run(["magick", str(tif), "-compress", "zip", str(tif)],
+                       capture_output=True, check=True, timeout=120)
+        self._make_fuji_jpeg(work / "foto.jpg")
+
+        result = run_ps(shell, script, ["-InputDir", str(work), "-CompressZip"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "OK+SKIP-ZIP" in result.stdout, result.stdout
+        assert read_tag(tif, "DateTimeOriginal") == "2025:03:09 10:12:07"
+        assert "Done: 1 OK (ZIP step skipped on 1) | 0 skipped" in result.stdout, result.stdout
+
 
 @requires_shell
 @requires_tools

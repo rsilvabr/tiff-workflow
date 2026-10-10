@@ -192,6 +192,7 @@ $script:counterTotal = 0
 $script:total        = 0
 $script:okTotal      = 0
 $script:skipTotal    = 0
+$script:zipSkipTotal = 0
 $script:missTotal    = 0
 $script:errTotal     = 0
 $script:warnTotal    = 0
@@ -205,7 +206,9 @@ function Process-Line {
     param([string]$line)
     $script:counterTotal++
     $lvl = "INFO"
-    if     ($line -match '^OK\+SKIP-ZIP') { $script:skipTotal++ }
+    # OK+SKIP-ZIP: the EXIF WAS written, only the ZIP step was skipped (already
+    # compressed / output exists) -- an OK, not a skip (audit round 21).
+    if     ($line -match '^OK\+SKIP-ZIP') { $script:okTotal++; $script:zipSkipTotal++ }
     elseif ($line -match '^OK')           { $script:okTotal++ }
     elseif ($line -match '^SKIP')         { $script:skipTotal++ }
     elseif ($line -match '^MISS')  { $script:missTotal++; $lvl = "WARN" }
@@ -1258,7 +1261,7 @@ foreach ($root in $inputDirs) {
 
 Write-Log ""
 Write-Log ("-" * 50)
-Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:missTotal) no JPEG pair | $($script:multiTotal) multi-page | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
+Write-Log "Done: $($script:okTotal) OK$(if ($script:zipSkipTotal -gt 0) { " (ZIP step skipped on $($script:zipSkipTotal))" }) | $($script:skipTotal) skipped | $($script:missTotal) no JPEG pair | $($script:multiTotal) multi-page | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed"
 
 if ($script:multiTotal -gt 0) {
     Write-Log ""

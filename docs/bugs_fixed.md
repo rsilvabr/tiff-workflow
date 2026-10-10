@@ -11,6 +11,18 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**.
 
+## Unreleased - Audit Round 21
+
+### LOW - With -CompressZip, a TIFF that got its EXIF was counted as "skipped"
+**Issue:** with `-CompressZip`, a TIFF that is already ZIP (every Capture One export) gets its
+EXIF written and only the ZIP step is skipped -- the line is `OK+SKIP-ZIP`. The summary counted
+that line as *skipped*, so a run that wrote EXIF into every file ended in
+`Done: 0 OK | 8 skipped` (real Fuji session, round 20 review).
+- **Fix:** `OK+SKIP-ZIP` counts as OK, and the summary says how many skipped the ZIP step:
+  `Done: 8 OK (ZIP step skipped on 8) | 0 skipped | ...`.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `tests/test_regression_classes.py`
+
 ## Unreleased - Audit Round 20
 
 Copy EXIF pairing on real Capture One exports: `<stem>_1.TIF`/`<stem>_2.TIF` variants never
