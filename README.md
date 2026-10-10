@@ -332,7 +332,7 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ## Changelog
 
-**Latest release: v2.4** — audit rounds 15 and 16.
+**Latest release: v2.5** — presets, memory-aware parallel workers, Copy EXIF for Capture One variants and RAF-only sessions; audit rounds 17-22.
 
 - Full release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 - Per-bug technical detail: [`docs/bugs_fixed.md`](docs/bugs_fixed.md)

@@ -9,9 +9,10 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 >
 > Rounds 4-7 used to be titled `v2.3`-`v2.6`. Those versions were never released: all five of
 > rounds 3-7 landed before the `v2.2` tag and shipped as part of **v2.2**, so they are labelled
-> that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**.
+> that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
+> rounds 17-22 **v2.5**.
 
-## Unreleased - Audit Round 22
+## v2.5 - Audit Round 22
 
 ### LOW - A failed metadata dump left a partial MIE container in %TEMP%
 **Issue:** when the `exiftool` dump in `Backup-TiffMetadata` exited non-zero, the compress copy
@@ -36,7 +37,7 @@ did nothing, silently.
 - **Files:** `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`,
   `copy_exif_to_TIFF_ps7.ps1`, `convert_tiff.py`, `tests/test_inputdir_file.py`
 
-## Unreleased - Audit Round 21
+## v2.5 - Audit Round 21
 
 ### LOW - With -CompressZip, a TIFF that got its EXIF was counted as "skipped"
 **Issue:** with `-CompressZip`, a TIFF that is already ZIP (every Capture One export) gets its
@@ -48,7 +49,7 @@ that line as *skipped*, so a run that wrote EXIF into every file ended in
 - **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
   `tests/test_regression_classes.py`
 
-## Unreleased - Audit Round 20
+## v2.5 - Audit Round 20
 
 Copy EXIF pairing on real Capture One exports: `<stem>_1.TIF`/`<stem>_2.TIF` variants never
 found their `<stem>.JPG`, and a session with no JPEG (S3 Pro RAW-only) got no EXIF at all
@@ -79,7 +80,7 @@ EXIF even though the RAF beside it has the same DateTimeOriginal/ExposureTime/FN
 - **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
   `tests/test_copy_exif_real_fuji.py`
 
-## Unreleased - Audit Round 19
+## v2.5 - Audit Round 19
 
 Presets (menu 5, `--run-preset`/`--list-presets`) and the two repeat bugs they exposed:
 a manifest repeat silently dropped the run's answers, and a Fuji repeat never saw
@@ -108,7 +109,7 @@ a Mode could silently run a different mode (mode 8 deletes sources).
   A journal without that data replays its saved folders with a note saying so.
 - **Files:** `convert_tiff.py`
 
-## Unreleased - Audit Round 18
+## v2.5 - Audit Round 18
 
 Memory, subprocesses and timeouts under load. A real measurement on an 84 MP 16-bit scan
 (`E:\TESTE\tiff_scan\000001-rescan.tif`, 490 MB, ImageMagick 7.1.2-27 Q16-HDRI) found the
@@ -166,7 +167,7 @@ disk each gets ~1/W of the throughput, so good files false-failed: jxl-photo rou
 - **Files:** `convert_tiff.py`, `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps5.ps1`,
   `copy_exif_to_TIFF_ps7.ps1`
 
-## Unreleased - Audit Round 17
+## v2.5 - Audit Round 17
 
 The wizard carried literal copies of the backends' shipped defaults (the jxl-photo #467/#528
 class) and in two places passed a setting only when the answer differed from the copy -- so

@@ -6,7 +6,37 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 > **Numbering.** Sections carry the version the work shipped in. Audit rounds are the stable
 > identifier and match the `fix(audit-round-N)` commits: rounds 8-14 shipped as **v2.3**, rounds
-> 15-16 as **v2.4**.
+> 15-16 as **v2.4**, rounds 17-22 as **v2.5**.
+
+---
+
+## v2.5
+
+Audit rounds 17-22. New features plus hardening; nothing changes for a run that already works.
+
+- **Presets** -- save the last workflow under a name (main menu **[5]**) and run it unattended with
+  `python convert_tiff.py --run-preset NAME` (`--list-presets`, `--dry-run`). A Fuji preset redoes
+  the AutoFind each time, so new sessions are picked up. An unattended preset that would delete
+  sources is refused unless `--dry-run`
+- **Parallel workers fit in memory** -- the number of parallel ImageMagick jobs is capped by the
+  free memory (`-WorkerMemoryFraction`, default 0.8; 0 turns the cap off), so big film scans no
+  longer push the machine into swapping
+- **Copy EXIF finds Capture One variants** (`_DSF4817_1.TIF` -> `_DSF4817.JPG`) and falls back
+  to the RAF when a session has no JPEG
+- **Long AutoFind lists** -- a folder list past the Windows command-line limit is passed to the
+  backend through a temporary file (`-InputDirFile`)
+- The wizard reads the backends' own settings instead of keeping copies, and passes them
+  explicitly, so an edited default in a `.ps1` is respected
+- Copy EXIF with `-CompressZip` counts a file that got its EXIF as OK in the summary
+- Hardening: subprocess calls without reader threads, timeouts that scale with the number of
+  workers, and helper functions pinned identical across the PowerShell backends
+- New `tools/real_photo_battery.py`: the backends end to end on copies of real photos, under both
+  shells
+
+**Upgrading:** "Repeat last" of a manifest workflow saved by v2.4 is refused with a message --
+run the manifest once more from menu **[3]** and it is recorded with the new data.
+
+Per-bug detail: [`bugs_fixed.md`](bugs_fixed.md), rounds 17-22.
 
 ---
 
