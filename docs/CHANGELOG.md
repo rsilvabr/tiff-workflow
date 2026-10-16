@@ -10,6 +10,17 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.6
+
+One new feature; nothing changes for the other workflows.
+
+- **Diagnose as a preset** -- workflow 7 can now be repeated and saved as a preset. A preset
+  run re-scans the saved folders and only reports (full paths in
+  `Logs\convert_tiff\diagnose_<timestamp>.log`); it never converts. Two new questions narrow
+  the search: a folder path the files must sit under (`_EXPORT/TIFF16`) and file-name
+  patterns to skip (`*NXSTUDIO*`). Files already checked and unchanged are not checked again
+  (`DIAGNOSE_CACHE`)
+
 ## v2.5
 
 Audit rounds 17-22. New features plus hardening; nothing changes for a run that already works.

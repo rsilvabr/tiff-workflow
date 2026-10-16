@@ -332,7 +332,7 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ## Changelog
 
-**Latest release: v2.5** — presets, memory-aware parallel workers, Copy EXIF for Capture One variants and RAF-only sessions; audit rounds 17-22.
+**Latest release: v2.6** — Diagnose TIFFs can be saved as a preset (report only), narrowed to a folder path such as `_EXPORT/TIFF16`, skip file-name patterns, and remembers files already checked.
 
 - Full release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 - Per-bug technical detail: [`docs/bugs_fixed.md`](docs/bugs_fixed.md)
