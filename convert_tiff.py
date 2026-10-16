@@ -31,11 +31,12 @@ WORKER_MEMORY_LIMIT = "both"
 # "commit" or "physical" -> only that reading.
 
 DIAGNOSE_CACHE = True
-# A Diagnose preset (or Repeat) remembers each TIFF's verdict -- real 16-bit, padded,
-# not 16-bit -- with its size and modification time in
-# .convert_tiff_diagnose_cache.json next to the config, and the next run checks only
-# the files that are new or changed. Errors are never remembered. False = check
-# everything on every run.
+# Diagnose (workflow 7, its Repeat and its presets) remembers each TIFF's verdict --
+# real 16-bit, padded, not 16-bit -- with its size and modification time in
+# .convert_tiff_diagnose_cache.json next to the config, written every few files while
+# it runs; the next run checks only the files that are new or changed. Errors are
+# never remembered. The padded -> 8-bit conversion still compares every file's pixels
+# before replacing it. False = check everything on every run.
 
 # Subprocess timeouts (seconds)
 CONVERT_TIMEOUT_S = 60   # magick depth/format conversions
@@ -2323,9 +2324,11 @@ def _diagnose_status(is_real: bool, detail: str) -> str:
 
 
 def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path],
-                   compress_tmp: str) -> List[tuple]:
+                   compress_tmp: str, on_result=None) -> List[tuple]:
     """Run _is_real_16bit over `tiff_files` with `workers` threads, printing one line
-    per file. Returns [(path, is_real, rmse, detail)] in completion order."""
+    per file. Returns [(path, is_real, rmse, detail)] in completion order. `on_result`
+    is called with each result as it arrives (the Diagnose cache saves from it). On
+    Ctrl+C the files not started yet are cancelled instead of all being run first."""
     global _TIMEOUT_LOAD
 
     def process_one(tiff_path):
@@ -2334,27 +2337,34 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
     results = []
     total = len(tiff_files)
     _TIMEOUT_LOAD = workers
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(process_one, f): f for f in tiff_files}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    tiff_path, (is_real, stddev, detail) = future.result()
-                except Exception as e:
-                    tiff_path = futures[future]
-                    is_real = False
-                    stddev = 0.0
-                    detail = f"ERROR: {e}"
-                results.append((tiff_path, is_real, stddev, detail))
+        futures = {executor.submit(process_one, f): f for f in tiff_files}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                tiff_path, (is_real, stddev, detail) = future.result()
+            except Exception as e:
+                tiff_path = futures[future]
+                is_real = False
+                stddev = 0.0
+                detail = f"ERROR: {e}"
+            results.append((tiff_path, is_real, stddev, detail))
 
-                status = _diagnose_status(is_real, detail)
-                shown = {"padded": "PADDED", "real": "real 16-bit"}.get(status, detail)
-                progress = f"[{len(results)}/{total}]"
-                if RICH_AVAILABLE and console:
-                    color = {"padded": "yellow", "real": "dim"}.get(status, "red")
-                    console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(tiff_path.name)}")
-                else:
-                    print(f"  {progress} {shown} - {tiff_path.name}")
+            status = _diagnose_status(is_real, detail)
+            shown = {"padded": "PADDED", "real": "real 16-bit"}.get(status, detail)
+            progress = f"[{len(results)}/{total}]"
+            if RICH_AVAILABLE and console:
+                color = {"padded": "yellow", "real": "dim"}.get(status, "red")
+                console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(tiff_path.name)}")
+            else:
+                print(f"  {progress} {shown} - {tiff_path.name}")
+            if on_result is not None:
+                on_result(results[-1])
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
     finally:
         _TIMEOUT_LOAD = 1
     return results
@@ -2465,15 +2475,25 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
                 "compress_tmp": compress_tmp}
     _save_last_run(cfg, "diagnose", _diagnose_label(settings), None, diagnose=settings)
 
-    workers = _memory_capped_pool_workers(workers, tiff_files, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
-
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[cyan]Diagnosing {len(tiff_files)} TIFF file(s) with {workers} workers...[/cyan]")
-    else:
-        print(f"\nDiagnosing {len(tiff_files)} TIFF file(s) with {workers} workers...")
+    # Same cache as the Diagnose preset: a file already checked and unchanged since is not
+    # checked again, so converting what a preset found does not re-read the whole library.
+    # The conversion re-verifies every file's pixels itself (_padded_pixels_status).
+    cache = _load_diagnose_cache() if DIAGNOSE_CACHE else {}
+    results, todo, keys = _split_cached(tiff_files, cache)
+    if results:
+        _say(f"{len(results)} TIFF(s) unchanged since they were last checked -- verdict reused", "dim")
 
     total_start = time.time() if DEBUG_TIMING else None
-    results = _diagnose_pool(tiff_files, workers, temp_dir, compress_tmp)
+    if todo:
+        workers = _memory_capped_pool_workers(workers, todo, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
+        if RICH_AVAILABLE and console:
+            console.print(f"\n[cyan]Diagnosing {len(todo)} TIFF file(s) with {workers} workers...[/cyan]")
+        else:
+            print(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...")
+        if DIAGNOSE_CACHE:
+            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp)
+        else:
+            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp)
     statuses = [_diagnose_status(r[1], r[3]) for r in results]
     padded_files = [r[0] for r, s in zip(results, statuses) if s == "padded"]
     padded_count = len(padded_files)
@@ -2569,6 +2589,53 @@ def _save_diagnose_cache(cache: Dict) -> None:
         _say(f"WARNING: could not save the Diagnose cache {path}: {e}", "yellow")
 
 
+_CACHE_SAVE_EVERY = 25  # results between two cache writes during a Diagnose run
+
+
+def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[tuple], List[Path], Dict]:
+    """(results already known, files to check, {file: key}). A cached verdict counts only
+    while the file keeps the size and modification time it had when checked."""
+    cached, todo, keys = [], [], {}
+    for f in files:
+        key = _file_key(f)
+        keys[f] = key
+        hit = cache.get(key[0]) if key else None
+        if (isinstance(hit, dict) and hit.get("size") == key[1]
+                and hit.get("mtime_ns") == key[2]
+                and hit.get("status") in ("real", "padded", "other")):
+            cached.append((f, hit["status"] == "real", float(hit.get("rmse") or 0.0),
+                           str(hit.get("detail") or "")))
+        else:
+            todo.append(f)
+    return cached, todo, keys
+
+
+def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
+                      temp_dir: Optional[Path], compress_tmp: str) -> List[tuple]:
+    """_diagnose_pool over `todo`, recording each verdict in `cache` and writing the
+    cache every _CACHE_SAVE_EVERY results and once more at the end -- also when the
+    run is interrupted -- so a stopped run keeps what it already checked."""
+    pending = [0]
+
+    def record(result):
+        f, is_real, rmse, detail = result
+        status = _diagnose_status(is_real, detail)
+        key = keys.get(f)
+        if key and status != "error":
+            cache[key[0]] = {"size": key[1], "mtime_ns": key[2], "status": status,
+                             "rmse": rmse, "detail": detail}
+            pending[0] += 1
+            if pending[0] >= _CACHE_SAVE_EVERY:
+                _save_diagnose_cache(cache)
+                pending[0] = 0
+
+    try:
+        return _diagnose_pool(todo, workers, temp_dir, compress_tmp, on_result=record)
+    finally:
+        if pending[0]:
+            _save_diagnose_cache(cache)
+
+
 def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False,
                           dry_run: bool = False) -> int:
     """A Diagnose repeat/preset: re-scan the saved roots and REPORT the padded files.
@@ -2588,17 +2655,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
 
     files = _diagnose_targets(roots, d.get("scope") or "", d.get("skip_names") or "")
     cache = _load_diagnose_cache() if DIAGNOSE_CACHE else {}
-    cached, todo, keys = [], [], {}
-    for f in files:
-        key = _file_key(f)
-        keys[f] = key
-        hit = cache.get(key[0]) if key else None
-        if (isinstance(hit, dict) and hit.get("size") == key[1]
-                and hit.get("mtime_ns") == key[2] and hit.get("status") in ("real", "padded", "other")):
-            cached.append((f, hit["status"] == "real", float(hit.get("rmse") or 0.0),
-                           str(hit.get("detail") or "")))
-        else:
-            todo.append(f)
+    cached, todo, keys = _split_cached(files, cache)
 
     _say(f"\n{title}", "bold cyan")
     _say(f"  {entry.get('label') or ''}")
@@ -2633,16 +2690,11 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         workers = _memory_capped_pool_workers(workers, todo, _COMPARE_BYTES_PER_PIXEL,
                                               "16-bit check")
         _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
-        fresh = _diagnose_pool(todo, workers, temp_dir, d.get("compress_tmp") or "none")
-        results += fresh
+        compress_tmp = d.get("compress_tmp") or "none"
         if DIAGNOSE_CACHE:
-            for f, is_real, rmse, detail in fresh:
-                status = _diagnose_status(is_real, detail)
-                key = keys.get(f)
-                if key and status != "error":
-                    cache[key[0]] = {"size": key[1], "mtime_ns": key[2], "status": status,
-                                     "rmse": rmse, "detail": detail}
-            _save_diagnose_cache(cache)
+            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp)
+        else:
+            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp)
 
     by_status = {"padded": [], "real": [], "other": [], "error": []}
     for f, is_real, rmse, detail in sorted(results, key=lambda r: str(r[0])):
@@ -2824,6 +2876,27 @@ def _exiftool_copy_failed(stderr: str) -> bool:
     return False
 
 
+def _padded_pixels_status(orig: Path, new8: Path) -> Optional[str]:
+    """None when page [0] of the 8-bit rewrite is pixel-identical to the original's;
+    "pixel_mismatch" when it differs (the original is real 16-bit); "pixel_compare_failed"
+    when the comparison cannot say. Fail closed: only a parsed 0 with exit 0 passes."""
+    try:
+        r = _run_captured(
+            ["magick", "compare", "-metric", "AE", f"{_magick_spec(orig)}[0]",
+             f"{_magick_spec(new8)}[0]", "null:"],
+            _work_timeout(COMPARE_TIMEOUT_S, orig), text=True
+        )
+    except Exception:
+        return "pixel_compare_failed"
+    out = _strip_magick_noise((r.stderr or "") + (r.stdout or "")).strip()
+    m = re.match(r"([\d.]+(?:[eE][+-]?\d+)?)", out)
+    if r.returncode == 1 or (m and r.returncode == 0 and float(m.group(1)) != 0.0):
+        return "pixel_mismatch"
+    if r.returncode != 0 or not m:
+        return "pixel_compare_failed"
+    return None
+
+
 def _process_single_padded(tiff_path, staging):
     """Process a single padded file. Returns (name, parent, status, size_orig, size_zip, ratio, exif_ok, error_msg, tmp8_path)."""
     name = tiff_path.name
@@ -2954,6 +3027,15 @@ def _process_single_padded(tiff_path, staging):
             if new_pages is None or orig_pages is None or new_pages != orig_pages:
                 status = "page_count_mismatch"
                 return (name, parent, status, None, None, None, False, None, tmp8)
+
+            # The 8-bit rewrite must hold exactly the pixels of the original. Nothing above
+            # looks at pixels: the verdict that called the file "padded" may be a cached one
+            # (DIAGNOSE_CACHE), and a file that is really 16-bit must never be replaced by
+            # its 8-bit rounding. -metric AE counts differing pixels; 0 with exit 0 passes,
+            # anything else (different, timeout, unparseable) refuses.
+            status = _padded_pixels_status(tiff_path, tmp8)
+            if status is not None:
+                return (name, parent, status, None, None, None, False, None, tmp8)
         except Exception as e:
             status = "integrity_error"
             return (name, parent, status, None, None, None, False, str(e), tmp8)
@@ -3000,7 +3082,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     def _process_one(tiff_path):
         return _process_single_padded(tiff_path, staging)
 
-    workers = _memory_capped_pool_workers(workers, padded_files, _CONVERT_BYTES_PER_PIXEL, "8-bit conversion")
+    workers = _memory_capped_pool_workers(workers, padded_files, _COMPARE_BYTES_PER_PIXEL, "8-bit conversion")
 
     results = []
     _TIMEOUT_LOAD = workers
@@ -3067,8 +3149,16 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 console.print(f"    [yellow]{escape(msg)}[/yellow]")
             else:
                 print(f"    {msg}")
+        elif status == "pixel_mismatch":
+            msg = ("SKIPPED: the 8-bit version is not pixel-identical -- this file holds "
+                   "real 16-bit data; original preserved")
+            if RICH_AVAILABLE and console:
+                console.print(f"    [yellow]{escape(msg)}[/yellow]")
+            else:
+                print(f"    {msg}")
         elif status in ("integrity_error", "dimension_mismatch",
-                        "dimension_unreadable", "page_count_mismatch"):
+                        "dimension_unreadable", "page_count_mismatch",
+                        "pixel_compare_failed"):
             if RICH_AVAILABLE and console:
                 console.print(f"    [red]FAILED: {status}[/red]")
             else:

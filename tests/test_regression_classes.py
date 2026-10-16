@@ -341,11 +341,12 @@ def test_legacy_mode_leaves_old_tiffs_untouched(tmp_path, shell):
     )
 
 
-def make_multipage_tiff(path, subfiletypes, sizes=None):
+def make_multipage_tiff(path, subfiletypes, sizes=None, padded=False):
     """Multi-page TIFF (main + reduced preview + optional MASK page) with the
     given NewSubfileType markers written per IFD, e.g. [None, 1, 4] for a
     scanner RGB + preview + IR file. `sizes` overrides the default geometry
-    (main large, REDUCEDIMAGE small, others large)."""
+    (main large, REDUCEDIMAGE small, others large). `padded` stores 8-bit data
+    in the 16-bit pages -- what the padded 16 -> 8-bit conversion accepts."""
     pages = []
     for i, st in enumerate(subfiletypes):
         p = path.parent / f"_pg{i}_{path.name}"
@@ -354,9 +355,12 @@ def make_multipage_tiff(path, subfiletypes, sizes=None):
         else:
             size = "64x48" if i == 0 else ("16x12" if st == 1 else "64x48")
         subprocess.run(
-            ["magick", "-size", size, "plasma:fractal", "-depth", "16", str(p)],
+            ["magick", "-size", size, "plasma:fractal", "-depth", "8" if padded else "16", str(p)],
             capture_output=True, check=True, timeout=120,
         )
+        if padded:
+            subprocess.run(["magick", str(p), "-depth", "16", str(p)],
+                           capture_output=True, check=True, timeout=120)
         pages.append(p)
     subprocess.run(
         ["magick"] + [str(p) for p in pages] + [str(path)],
@@ -808,12 +812,15 @@ class TestFailClosedGates:
 
     @staticmethod
     def _padded_fake(dims_new=DIMS_OK, dims_orig=DIMS_OK,
-                     pages_new=PAGES_OK, pages_orig=PAGES_OK):
+                     pages_new=PAGES_OK, pages_orig=PAGES_OK,
+                     compare=SimpleNamespace(returncode=0, stdout="", stderr="0 (0)")):
         """Fakes a successful 16 -> 8-bit conversion with configurable verification reads."""
         def fake_run(cmd, **kwargs):
             cmd = [str(c) for c in cmd]
             if cmd[0] == "exiftool":
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
+            if "compare" in cmd:
+                return compare
             if "-depth" in cmd:
                 Path(cmd[-1]).write_bytes(b"z" * 100)   # smaller than the original
                 return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -844,9 +851,16 @@ class TestFailClosedGates:
             ({"pages_new": IDENTIFY_FAILED}, "page_count_mismatch"),
             ({"pages_orig": IDENTIFY_GARBAGE}, "page_count_mismatch"),
             ({"pages_new": PAGES_TWO}, "page_count_mismatch"),
+            ({"compare": SimpleNamespace(returncode=1, stdout="", stderr="5120 (5120)")},
+             "pixel_mismatch"),
+            ({"compare": SimpleNamespace(returncode=2, stdout="", stderr="compare: unable")},
+             "pixel_compare_failed"),
+            ({"compare": SimpleNamespace(returncode=0, stdout="", stderr="")},
+             "pixel_compare_failed"),
         ],
         ids=["new-dims-unreadable", "orig-dims-unreadable", "dims-garbage",
-             "dims-differ", "new-pages-unreadable", "orig-pages-garbage", "pages-differ"],
+             "dims-differ", "new-pages-unreadable", "orig-pages-garbage", "pages-differ",
+             "pixels-differ", "compare-error", "compare-unparseable"],
     )
     def test_padded_refuses_when_verification_is_unreadable(
         self, tmp_path, monkeypatch, kwargs, expected
@@ -1543,7 +1557,7 @@ class TestPaddedConversionRespectsPages:
     @requires_tools
     def test_thumbnail_pair_is_still_converted(self, tmp_path):
         src = tmp_path / "photo.tif"
-        make_multipage_tiff(src, [None, 1])
+        make_multipage_tiff(src, [None, 1], padded=True)
         staging = tmp_path / "stg"
         staging.mkdir()
 
@@ -1908,7 +1922,7 @@ class TestPythonSubfileRestoreMatchesPowerShell:
     @requires_tools
     def test_explicit_zero_is_preserved(self, tmp_path):
         src = tmp_path / "photo.tif"
-        make_multipage_tiff(src, [0, 1])
+        make_multipage_tiff(src, [0, 1], padded=True)
         before = numeric_subfiletypes(src)
         assert "[IFD0] SubfileType: 0" in before
         staging = tmp_path / "stg"

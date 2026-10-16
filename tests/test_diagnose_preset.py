@@ -339,3 +339,88 @@ def test_run_preset_cli_end_to_end(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Padded 8-bit: 1" in r.stdout
     assert "Traceback" not in r.stdout + r.stderr
+
+
+# --- v2.6.1: the cache serves the conversion, survives an interruption, and the
+# --- conversion checks pixels itself ---------------------------------------
+
+
+def _depth(path: Path) -> str:
+    r = subprocess.run(["magick", "identify", "-format", "%z", f"{path}[0]"],
+                       capture_output=True, text=True, timeout=120)
+    return r.stdout.strip()
+
+
+@requires_cli
+class TestCacheServesTheConversion:
+    def test_menu_converts_what_the_preset_found_without_rechecking(self, home, monkeypatch):
+        t = _tree(home)
+        _padded(t["padded"])
+        _real16(t["real"])
+        assert ct._run_journal(_cfg(), _entry(_settings(home)), "Preset: padded",
+                               unattended=True) == 0
+
+        monkeypatch.setattr(ct, "_is_real_16bit",
+                            lambda *a, **k: pytest.fail("the menu re-checked a cached file"))
+        # folder, scope, skip names, workers, temp dir, compress-temp choice, convert?
+        answers = iter([str(home), "_EXPORT/TIFF16", "*NXSTUDIO*", "2", "", "1", "y"])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        assert ct.run_diagnose_tiffs(_cfg()) is True
+
+        assert _depth(t["padded"]) == "8", "the padded file was not converted"
+        assert (t["padded"].parent / "OLD_PADDED" / t["padded"].name).exists()
+        assert _depth(t["real"]) == "16", "a real 16-bit file was converted"
+
+
+@requires_magick
+class TestCacheSurvivesAnInterruption:
+    def test_interrupted_run_keeps_what_it_checked(self, home, monkeypatch):
+        t = _tree(home)
+        for k in ("padded", "real", "nx"):
+            _padded(t[k])
+        settings = {**_settings(home, skip=""), "workers": 1}
+        real_check = ct._is_real_16bit
+        seen = []
+
+        def stop_on_third(path, *a, **k):
+            seen.append(path)
+            if len(seen) == 3:
+                raise KeyboardInterrupt
+            return real_check(path, *a, **k)
+        monkeypatch.setattr(ct, "_is_real_16bit", stop_on_third)
+
+        with pytest.raises(KeyboardInterrupt):
+            ct._run_journal(_cfg(), _entry(settings), "Preset: padded", unattended=True)
+
+        cache = json.loads((home / ".convert_tiff_diagnose_cache.json").read_text(encoding="utf-8"))
+        assert len(cache) == 2, "the two files checked before Ctrl+C were lost"
+
+    def test_cache_is_written_while_the_run_goes(self, home, monkeypatch):
+        t = _tree(home)
+        for k in ("padded", "real", "nx"):
+            _padded(t[k])
+        monkeypatch.setattr(ct, "_CACHE_SAVE_EVERY", 1)
+        sizes = []
+        real_save = ct._save_diagnose_cache
+        monkeypatch.setattr(ct, "_save_diagnose_cache",
+                            lambda cache: (sizes.append(len(cache)), real_save(cache)))
+        settings = {**_settings(home, skip=""), "workers": 1}
+        assert ct._run_journal(_cfg(), _entry(settings), "Preset: padded", unattended=True) == 0
+        assert sizes == [1, 2, 3], f"the cache was not saved file by file: {sizes}"
+
+
+@requires_cli
+class TestConversionChecksPixels:
+    def test_a_real_16bit_file_is_never_converted(self, tmp_path):
+        """The verdict may come from the cache; the conversion must not trust it."""
+        real = _real16(tmp_path / "real.tif")
+        before = _sha(real)
+        ct._compress_padded_files([real], tmp_path / "staging", workers=1, cfg=_cfg())
+        assert _sha(real) == before, "a real 16-bit file was replaced by its 8-bit rounding"
+        assert not (tmp_path / "OLD_PADDED").exists()
+
+    def test_a_padded_file_is_still_converted(self, tmp_path):
+        padded = _padded(tmp_path / "padded.tif")
+        ct._compress_padded_files([padded], tmp_path / "staging", workers=1, cfg=_cfg())
+        assert _depth(padded) == "8"
+        assert (tmp_path / "OLD_PADDED" / "padded.tif").exists()

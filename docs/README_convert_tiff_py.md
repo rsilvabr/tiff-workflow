@@ -110,8 +110,15 @@ Two questions narrow the search before anything is checked:
 root in every case.
 
 When padded files are found, the workflow offers to rewrite them as 8-bit ZIP (originals
-backed up to `OLD_PADDED/`). Think twice inside an export tree that another tool reads
-(jxl-photo encodes `_EXPORT\TIFF16`): the backup folder sits next to the files.
+backed up to `OLD_PADDED/`). Before replacing a file, the rewrite is compared with the
+original pixel by pixel (`magick compare -metric AE`, page 0) and kept only when they are
+identical; a file that holds real 16-bit data is skipped with a message, never rounded down.
+Think twice inside an export tree that another tool reads (jxl-photo encodes
+`_EXPORT\TIFF16`): the backup folder sits next to the files -- exclude `OLD_PADDED` there.
+
+Workflow 7 uses the same verdict cache as the preset (below): a file already checked and
+unchanged since is not checked again. Running the preset first and converting from the menu
+afterwards therefore only re-reads the padded files, for the conversion itself.
 
 **As a preset (report only).** Workflow 7 is journalled like the others, so it can be
 repeated (menu 2) or saved as a preset (menu 5) and run with `--run-preset`. A repeat or
@@ -122,10 +129,12 @@ to `Logs\convert_tiff\diagnose_<timestamp>.log` under the current folder. Exit c
 ran, `1` a folder is gone, the run was cancelled or a file could not be checked.
 `--dry-run` only counts the files.
 
-The preset remembers each verdict (real 16-bit, padded, not 16-bit) with the file's size
+Diagnose remembers each verdict (real 16-bit, padded, not 16-bit) with the file's size
 and modification time in `.convert_tiff_diagnose_cache.json` next to the config, so the
-next run checks only new or changed files and still reports the cached padded ones. Errors
-are never remembered. `DIAGNOSE_CACHE = False` at the top of `convert_tiff.py` turns it
+next run checks only new or changed files and still reports the cached padded ones. The
+cache is written every 25 files while the run goes and once more when it ends or is
+stopped with Ctrl+C, so an interrupted run keeps what it already checked. Errors are never
+remembered. `DIAGNOSE_CACHE = False` at the top of `convert_tiff.py` turns it
 off. A hand-edited preset may list several folders in `"roots"`.
 
 ### Generate Thumbnails (option 8)

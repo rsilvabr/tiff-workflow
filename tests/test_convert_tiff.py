@@ -378,6 +378,8 @@ class TestSaveConfig:
 
 class TestCompressPaddedFiles:
     def _fake_run(self, cmd, **kwargs):
+        if "compare" in [str(c) for c in cmd]:  # the pixel gate: an identical 8-bit rewrite
+            return SimpleNamespace(returncode=0, stdout="", stderr="0 (0)")
         if cmd[0] == "magick" and "-depth" in cmd:
             # Simulate 16->8 bit ZIP conversion producing a smaller output
             Path(cmd[-1]).write_bytes(b"z" * 100)
@@ -723,6 +725,8 @@ class TestRestoreSubfileTypesHonored:
     return and replaced the original as if the markers had been restored."""
 
     def _fake_run(self, cmd, **kwargs):
+        if "compare" in [str(c) for c in cmd]:  # the pixel gate: an identical 8-bit rewrite
+            return SimpleNamespace(returncode=0, stdout="", stderr="0 (0)")
         cmd = [str(c) for c in cmd]
         if cmd[0] == "exiftool":
             return SimpleNamespace(returncode=0, stdout="", stderr="")
