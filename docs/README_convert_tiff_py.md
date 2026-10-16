@@ -96,6 +96,38 @@ Verify each TIFF in OLD_TIFFs matches the parent copy (via RMSE), then delete if
 
 Check if 16-bit TIFFs are real 16-bit data or padded 8-bit (stretched from 8-bit by software that only converted depth). Uses round-trip RMSE method.
 
+Two questions narrow the search before anything is checked:
+
+- **Only inside this folder path** -- e.g. `_EXPORT/TIFF16` (either slash, any case):
+  only TIFFs whose folder path contains those folder names one after the other, and
+  everything below them. Pointing the root straight at such a folder works too. `-` =
+  everywhere (the old behaviour: the export trees and the toolkit's own folders are
+  skipped below the root).
+- **Skip file names matching** -- `;`-separated patterns, case-insensitive, e.g.
+  `*NXSTUDIO*` (an NX Studio export is always real 16-bit). `-` = none.
+
+`OLD_TIFFs/`, `OLD_PADDED/`, `ZIP/`, `Logs/` and `converted_zip/` are skipped below the
+root in every case.
+
+When padded files are found, the workflow offers to rewrite them as 8-bit ZIP (originals
+backed up to `OLD_PADDED/`). Think twice inside an export tree that another tool reads
+(jxl-photo encodes `_EXPORT\TIFF16`): the backup folder sits next to the files.
+
+**As a preset (report only).** Workflow 7 is journalled like the others, so it can be
+repeated (menu 2) or saved as a preset (menu 5) and run with `--run-preset`. A repeat or
+preset re-scans the saved folder(s) with the saved answers and **only reports**: it never
+offers or runs the 8-bit rewrite, attended or not. The report -- counts plus the full path
+of every padded file and of every file that could not be checked -- is printed and written
+to `Logs\convert_tiff\diagnose_<timestamp>.log` under the current folder. Exit code `0`
+ran, `1` a folder is gone, the run was cancelled or a file could not be checked.
+`--dry-run` only counts the files.
+
+The preset remembers each verdict (real 16-bit, padded, not 16-bit) with the file's size
+and modification time in `.convert_tiff_diagnose_cache.json` next to the config, so the
+next run checks only new or changed files and still reports the cached padded ones. Errors
+are never remembered. `DIAGNOSE_CACHE = False` at the top of `convert_tiff.py` turns it
+off. A hand-edited preset may list several folders in `"roots"`.
+
 ### Generate Thumbnails (option 8)
 
 Create sRGB thumbnails from TIFFs. Can be used standalone or as part of the compression workflow.
@@ -318,6 +350,8 @@ Config saved to `~/.convert_tiff_config.json`:
   re-runs it with the same rules
 - `last_autofind` -- root and patterns of the last Fuji run (2/3/4); a repeat/preset
   searches again, so sessions added since are included
+- `last_diagnose` -- folders and answers of the last Diagnose run (7); a repeat/preset
+  re-scans and reports only
 - `presets` -- named snapshots of the journal above (menu 5 and `--run-preset`)
 - `last_exclude_folders` -- last `-ExcludeFolders` list. The wizard asks once per workflow and
   offers this as the default; a fresh install defaults to nothing excluded

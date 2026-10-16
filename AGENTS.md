@@ -17,7 +17,9 @@ gitignored). If one exists:
   PowerShell backends, owns the manifest, the AutoFind search and the
   multi-step workflows (it gates step 2 on step 1's exit code). Presets
   (menu 5, `--run-preset`, `--list-presets`) are named journal snapshots run
-  by `_run_journal`, the same runner as Repeat last.
+  by `_run_journal`, the same runner as Repeat last. A Diagnose journal
+  (kind `diagnose`, settings in `diagnose`, no commands) is REPORT ONLY:
+  `_run_diagnose_journal` must never reach `_compress_padded_files`.
 - `compress_tiff_zip.ps1` -- TIFF -> ZIP/Deflate, modes 0-9, in-place backups
   in `OLD_TIFFs/`, thumbnails, `-ExcludeFolders`.
   compress and both copy_exif backends also take `-InputDirFile` (one folder per

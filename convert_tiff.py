@@ -30,6 +30,13 @@ WORKER_MEMORY_LIMIT = "both"
 #           and the physical RAM still available (default);
 # "commit" or "physical" -> only that reading.
 
+DIAGNOSE_CACHE = True
+# A Diagnose preset (or Repeat) remembers each TIFF's verdict -- real 16-bit, padded,
+# not 16-bit -- with its size and modification time in
+# .convert_tiff_diagnose_cache.json next to the config, and the next run checks only
+# the files that are new or changed. Errors are never remembered. False = check
+# everything on every run.
+
 # Subprocess timeouts (seconds)
 CONVERT_TIMEOUT_S = 60   # magick depth/format conversions
 COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
@@ -90,6 +97,13 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 
 # --- Config -------------------------------------------------------
 
+def _config_base() -> Path:
+    """Folder of the config file (and of the Diagnose cache next to it)."""
+    if platform.system() == "Windows":
+        return Path(os.environ.get("USERPROFILE", Path.home()))
+    return Path.home()
+
+
 @dataclass
 class ToolConfig:
     """Configuration for convert_tiff tools."""
@@ -124,8 +138,13 @@ class ToolConfig:
     # AutoFind of the last Fuji workflow (2/3/4): {"root": str, "patterns": [str]}.
     # A repeat or preset searches again, so sessions added since are included.
     last_autofind: Optional[Dict] = None
+    # Settings of the last Diagnose run (workflow 7): {"roots": [str], "scope": str,
+    # "skip_names": str, "workers": int, "temp_dir": str|None, "compress_tmp": str}.
+    # A repeat or preset re-scans the roots and only REPORTS (never converts).
+    last_diagnose: Optional[Dict] = None
     # Named snapshots of the journal above: name -> {kind, label, commands, time,
-    # manifest_path, manifest_workflow, manifest_default_mode, autofind, saved_at}.
+    # manifest_path, manifest_workflow, manifest_default_mode, autofind, diagnose,
+    # saved_at}.
     presets: Optional[Dict[str, Dict]] = None
     ps_major: int = 0  # detected at startup, not persisted
     ps_name: str = "powershell"  # "pwsh" or "powershell", not persisted
@@ -140,11 +159,7 @@ class ConfigManager:
         self._load_config()
 
     def _get_config_path(self) -> Path:
-        if platform.system() == "Windows":
-            base = Path(os.environ.get("USERPROFILE", Path.home()))
-        else:
-            base = Path.home()
-        return base / ".convert_tiff_config.json"
+        return _config_base() / ".convert_tiff_config.json"
 
     def _load_config(self) -> None:
         if self.config_path.exists():
@@ -2251,26 +2266,126 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
                     pass
 
 
+def _split_semicolons(value: Optional[str]) -> List[str]:
+    return [v.strip() for v in (value or "").split(";") if v.strip()]
+
+
+def _scope_parts(scope: Optional[str]) -> List[str]:
+    """`_EXPORT/TIFF16` (either slash) -> ["_export", "tiff16"]."""
+    return [p.lower() for p in re.split(r"[\\/]+", (scope or "").strip()) if p]
+
+
+def _diagnose_targets(roots, scope: str = "", skip_names: str = "") -> List[Path]:
+    """The TIFFs Diagnose checks under `roots`, sorted.
+
+    Folders holding this toolkit's own output are skipped below each root (see
+    _is_tool_output_path). `scope` narrows the search to files whose folder path
+    contains those folder names one after the other, case-insensitive:
+    `_EXPORT/TIFF16` keeps `<root>/2025/Shoot/_EXPORT/TIFF16/a.tif` and everything
+    below it -- and everything under a root that already is such a folder. A name in
+    the scope is exempt from the tool-output skip: the export marker is one of those
+    names, and a scope that names it must be able to enter it.
+    `skip_names` is a ';'-separated list of file-name patterns (`*NXSTUDIO*`),
+    case-insensitive.
+    """
+    want = _scope_parts(scope)
+    skip_dirs = _TOOL_OUTPUT_PARTS - set(want)
+    patterns = [p.lower() for p in _split_semicolons(skip_names)]
+    import fnmatch
+    found = []
+    for root in roots:
+        root = Path(root)
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d.lower() not in skip_dirs]
+            parts = [p.lower() for p in Path(dirpath).parts]
+            if want and not any(parts[i:i + len(want)] == want
+                                for i in range(len(parts) - len(want) + 1)):
+                continue
+            for name in filenames:
+                low = name.lower()
+                if not low.endswith((".tif", ".tiff")):
+                    continue
+                if any(fnmatch.fnmatchcase(low, p) for p in patterns):
+                    continue
+                found.append(Path(dirpath) / name)
+    return sorted(found)
+
+
+def _diagnose_status(is_real: bool, detail: str) -> str:
+    """"padded", "real", "other" (not 16-bit) or "error"."""
+    if not is_real and "padded" in detail.lower():
+        return "padded"
+    if is_real:
+        return "real"
+    if "not 16-bit" in detail:
+        return "other"
+    return "error"
+
+
+def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path],
+                   compress_tmp: str) -> List[tuple]:
+    """Run _is_real_16bit over `tiff_files` with `workers` threads, printing one line
+    per file. Returns [(path, is_real, rmse, detail)] in completion order."""
+    global _TIMEOUT_LOAD
+
+    def process_one(tiff_path):
+        return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
+
+    results = []
+    total = len(tiff_files)
+    _TIMEOUT_LOAD = workers
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_one, f): f for f in tiff_files}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    tiff_path, (is_real, stddev, detail) = future.result()
+                except Exception as e:
+                    tiff_path = futures[future]
+                    is_real = False
+                    stddev = 0.0
+                    detail = f"ERROR: {e}"
+                results.append((tiff_path, is_real, stddev, detail))
+
+                status = _diagnose_status(is_real, detail)
+                shown = {"padded": "PADDED", "real": "real 16-bit"}.get(status, detail)
+                progress = f"[{len(results)}/{total}]"
+                if RICH_AVAILABLE and console:
+                    color = {"padded": "yellow", "real": "dim"}.get(status, "red")
+                    console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(tiff_path.name)}")
+                else:
+                    print(f"  {progress} {shown} - {tiff_path.name}")
+    finally:
+        _TIMEOUT_LOAD = 1
+    return results
+
+
+def _ask_line(prompt_text: str, default: str) -> str:
+    """One free-text answer; '-' (the shown default when empty) means none."""
+    if RICH_AVAILABLE and console:
+        value = Prompt.ask(f"[cyan]{prompt_text}[/cyan]", default=default or "-").strip()
+    else:
+        value = input(f"{prompt_text} [{default or '-'}]: ").strip() or (default or "-")
+    return "" if value in ("-", "none") else value
+
+
 def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
     """
     Workflow 7: Diagnose 16-bit TIFFs.
     Check if TIFFs marked as 16-bit are real 16-bit data or padded 8-bit.
     Uses parallel processing with configurable temp directory.
     """
-    global _TIMEOUT_LOAD
-
     folder = step_folder(cfg, "Root folder to scan for TIFFs")
     if folder is None:
         return False
 
+    scope = _ask_line("Only inside this folder path (e.g. _EXPORT/TIFF16, '-' = everywhere)", "")
+    skip_names = _ask_line("Skip file names matching (';'-separated, e.g. *NXSTUDIO*, '-' = none)", "")
+
     # Relative to the folder the user chose (see _is_tool_output_path): testing the absolute
     # path meant an ancestor named zip/logs/_export hid every file under it, and pointing
     # the workflow AT such a folder found nothing at all.
-    tiff_files = sorted([
-        f for f in folder.rglob("*")
-        if f.suffix.lower() in (".tif", ".tiff") and f.is_file()
-        and not _is_tool_output_path(f, folder)
-    ])
+    tiff_files = _diagnose_targets([folder], scope, skip_names)
 
     if not tiff_files:
         if RICH_AVAILABLE and console:
@@ -2345,6 +2460,11 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
         compress_map = {"1": "none", "2": "lzw", "3": "zip"}
         compress_tmp = compress_map.get(resp, "none")
 
+    settings = {"roots": [str(folder.resolve())], "scope": scope, "skip_names": skip_names,
+                "workers": workers, "temp_dir": str(temp_dir) if temp_dir else None,
+                "compress_tmp": compress_tmp}
+    _save_last_run(cfg, "diagnose", _diagnose_label(settings), None, diagnose=settings)
+
     workers = _memory_capped_pool_workers(workers, tiff_files, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
 
     if RICH_AVAILABLE and console:
@@ -2352,62 +2472,14 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
     else:
         print(f"\nDiagnosing {len(tiff_files)} TIFF file(s) with {workers} workers...")
 
-    results = []
-    padded_files = []
-    padded_count = 0
-    real_count = 0
-    other_count = 0
-    error_count = 0
-
-    def process_one(tiff_path):
-        return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
-
-    total = len(tiff_files)
-    completed = 0
     total_start = time.time() if DEBUG_TIMING else None
-
-    _TIMEOUT_LOAD = workers
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(process_one, f): f for f in tiff_files}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    tiff_path, (is_real, stddev, detail) = future.result()
-                except Exception as e:
-                    tiff_path = futures[future]
-                    is_real = False
-                    stddev = 0.0
-                    detail = f"ERROR: {e}"
-                results.append((tiff_path, is_real, stddev, detail))
-
-                if not is_real and "padded" in detail.lower():
-                    padded_count += 1
-                    padded_files.append(tiff_path)
-                    status = "PADDED"
-                elif is_real:
-                    real_count += 1
-                    status = "real 16-bit"
-                elif "not 16-bit" in detail:
-                    other_count += 1
-                    status = detail
-                else:
-                    error_count += 1
-                    status = detail
-
-                completed += 1
-                progress = f"[{completed}/{total}]"
-
-                if RICH_AVAILABLE and console:
-                    if not is_real and "padded" in detail.lower():
-                        console.print(f"  {progress} [yellow]{escape(status)}[/yellow] {escape(tiff_path.name)}")
-                    elif not is_real:
-                        console.print(f"  {progress} [red]{escape(status)}[/red] {escape(tiff_path.name)}")
-                    else:
-                        console.print(f"  {progress} [dim]{escape(status)}[/dim] {escape(tiff_path.name)}")
-                else:
-                    print(f"  {progress} {status} - {tiff_path.name}")
-    finally:
-        _TIMEOUT_LOAD = 1
+    results = _diagnose_pool(tiff_files, workers, temp_dir, compress_tmp)
+    statuses = [_diagnose_status(r[1], r[3]) for r in results]
+    padded_files = [r[0] for r, s in zip(results, statuses) if s == "padded"]
+    padded_count = len(padded_files)
+    real_count = statuses.count("real")
+    other_count = statuses.count("other")
+    error_count = statuses.count("error")
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[bold]Results:[/bold]")
@@ -2454,6 +2526,159 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
                 _compress_padded_files(padded_files, temp_dir, workers, cfg)
 
     return True
+
+
+def _diagnose_label(settings: Dict) -> str:
+    roots = settings.get("roots") or []
+    where = truncate_path(Path(roots[0]), 50) if len(roots) == 1 else f"{len(roots)} folders"
+    label = f"Diagnose TIFFs -- {settings.get('scope') or 'all folders'}"
+    if settings.get("skip_names"):
+        label += f", skip {settings['skip_names']}"
+    return f"{label} -- {where} [report only]"
+
+
+def _diagnose_cache_path() -> Path:
+    return _config_base() / ".convert_tiff_diagnose_cache.json"
+
+
+def _file_key(path: Path) -> Optional[Tuple[str, int, int]]:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return os.path.normcase(os.path.abspath(path)), st.st_size, st.st_mtime_ns
+
+
+def _load_diagnose_cache() -> Dict:
+    try:
+        with open(_diagnose_cache_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_diagnose_cache(cache: Dict) -> None:
+    path = _diagnose_cache_path()
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cache, f)
+        os.replace(tmp, path)
+    except OSError as e:
+        _say(f"WARNING: could not save the Diagnose cache {path}: {e}", "yellow")
+
+
+def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False,
+                          dry_run: bool = False) -> int:
+    """A Diagnose repeat/preset: re-scan the saved roots and REPORT the padded files.
+
+    Never converts anything, attended or not -- the 16 -> 8-bit rewrite stays an
+    explicit answer inside workflow 7. Files whose verdict is cached (DIAGNOSE_CACHE)
+    and whose size and modification time did not change are not checked again. The
+    report goes to Logs/convert_tiff/diagnose_<timestamp>.log under the current
+    folder. 0 = ran, 1 = a root is
+    missing, the run was cancelled, or a file could not be checked."""
+    d = entry["diagnose"]
+    roots = [Path(r) for r in d.get("roots") or []]
+    gone = [r for r in roots if not r.is_dir()]
+    if gone:
+        _say(f"Diagnose root is gone: {'; '.join(str(r) for r in gone)}", "red")
+        return 1
+
+    files = _diagnose_targets(roots, d.get("scope") or "", d.get("skip_names") or "")
+    cache = _load_diagnose_cache() if DIAGNOSE_CACHE else {}
+    cached, todo, keys = [], [], {}
+    for f in files:
+        key = _file_key(f)
+        keys[f] = key
+        hit = cache.get(key[0]) if key else None
+        if (isinstance(hit, dict) and hit.get("size") == key[1]
+                and hit.get("mtime_ns") == key[2] and hit.get("status") in ("real", "padded", "other")):
+            cached.append((f, hit["status"] == "real", float(hit.get("rmse") or 0.0),
+                           str(hit.get("detail") or "")))
+        else:
+            todo.append(f)
+
+    _say(f"\n{title}", "bold cyan")
+    _say(f"  {entry.get('label') or ''}")
+    _say(f"  saved {entry.get('time')}", "dim")
+    _say(f"  {len(files)} TIFF(s): {len(todo)} to check, {len(cached)} unchanged since "
+         f"they were last checked")
+    _say("Report only: padded files are listed, never converted (convert them from "
+         "workflow 7 in the menu).", "yellow")
+    if dry_run:
+        _say("--dry-run: nothing checked.", "yellow")
+        return 0
+    if not unattended:
+        if RICH_AVAILABLE and console:
+            go = Confirm.ask("Run it now?", default=False)
+        else:
+            go = input("Run it now? [y/N]: ").strip().lower() == "y"
+        if not go:
+            _say("Cancelled.", "dim")
+            return 1
+
+    results = list(cached)
+    if todo:
+        temp_dir = Path(d["temp_dir"]) if d.get("temp_dir") else None
+        if temp_dir is not None:
+            try:
+                temp_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                _say(f"Cannot use temp dir {temp_dir}: {e} -- using system temp.", "yellow")
+                temp_dir = None
+        workers = clamp_workers(d.get("workers") or cfg.config.default_workers,
+                                cfg.config.default_workers)
+        workers = _memory_capped_pool_workers(workers, todo, _COMPARE_BYTES_PER_PIXEL,
+                                              "16-bit check")
+        _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
+        fresh = _diagnose_pool(todo, workers, temp_dir, d.get("compress_tmp") or "none")
+        results += fresh
+        if DIAGNOSE_CACHE:
+            for f, is_real, rmse, detail in fresh:
+                status = _diagnose_status(is_real, detail)
+                key = keys.get(f)
+                if key and status != "error":
+                    cache[key[0]] = {"size": key[1], "mtime_ns": key[2], "status": status,
+                                     "rmse": rmse, "detail": detail}
+            _save_diagnose_cache(cache)
+
+    by_status = {"padded": [], "real": [], "other": [], "error": []}
+    for f, is_real, rmse, detail in sorted(results, key=lambda r: str(r[0])):
+        by_status[_diagnose_status(is_real, detail)].append((f, detail))
+
+    lines = [f"{title} -- {time.strftime('%Y-%m-%d %H:%M:%S')}",
+             entry.get("label") or "",
+             f"Roots: {'; '.join(str(r) for r in roots)}",
+             f"Scope: {d.get('scope') or '(all folders)'} | Skip names: {d.get('skip_names') or '(none)'}",
+             f"Checked now: {len(todo)} | unchanged (cached): {len(cached)}",
+             "",
+             f"Real 16-bit: {len(by_status['real'])}",
+             f"Padded 8-bit: {len(by_status['padded'])}",
+             f"Other bit depth: {len(by_status['other'])}",
+             f"Errors: {len(by_status['error'])}"]
+    if by_status["padded"]:
+        lines += ["", "Padded 8-bit (16-bit files holding 8-bit data):"]
+        lines += [f"  {f}" for f, _ in by_status["padded"]]
+    if by_status["error"]:
+        lines += ["", "Could not be checked:"]
+        lines += [f"  {f} -- {detail}" for f, detail in by_status["error"]]
+
+    print()
+    for line in lines:
+        print(line)
+    try:
+        # Logs\ of the current folder, like the backends' own logs.
+        log_dir = Path.cwd() / "Logs" / "convert_tiff"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"diagnose_{time.strftime('%Y%m%d_%H%M%S')}.log"
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"\nReport: {log_path}")
+    except OSError as e:
+        _say(f"WARNING: could not write the report: {e}", "yellow")
+    return 1 if by_status["error"] else 0
 
 
 def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
@@ -3187,16 +3412,19 @@ def _format_size(size_bytes: int) -> str:
 def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]],
                    manifest_workflow: Optional[Dict] = None,
                    manifest_default_mode: Optional[int] = None,
-                   autofind: Optional[Dict] = None) -> None:
+                   autofind: Optional[Dict] = None,
+                   diagnose: Optional[Dict] = None) -> None:
     """Record the last executed workflow for the 'Repeat last workflow' menu entry.
 
-    Only command-driven workflows (1-4, 8) are journaled: the interactive
-    Python workflows (5/6/7) re-ask their own questions and are not repeatable.
+    Command-driven workflows (1-4, 8) are journaled with their command lines;
+    Diagnose (7) with its settings (`diagnose`, no commands) -- a repeat of it only
+    reports. Restore/Delete OLD_TIFFs (5/6) re-ask their own questions and are not
+    repeatable.
     Commands are stored with dry-run stripped -- a repeat always runs for real.
     Manifest runs store no commands (None): a repeat re-reads the CSV through
     the loader guards instead of replaying command lines.
 
-    `manifest_workflow`/`manifest_default_mode`/`autofind` are written ALWAYS
+    `manifest_workflow`/`manifest_default_mode`/`autofind`/`diagnose` are written ALWAYS
     (None for the kinds that do not use them): keeping an older run's values
     around would let a repeat run with settings the wizard never answered.
     """
@@ -3210,11 +3438,12 @@ def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]],
     cfg.config.last_manifest_workflow = manifest_workflow
     cfg.config.last_manifest_default_mode = manifest_default_mode
     cfg.config.last_autofind = autofind
+    cfg.config.last_diagnose = diagnose
     cfg.save_config()
 
 
 _JOURNAL_FIELDS = ("kind", "label", "commands", "time", "manifest_path",
-                   "manifest_workflow", "manifest_default_mode", "autofind")
+                   "manifest_workflow", "manifest_default_mode", "autofind", "diagnose")
 
 
 def _journal_snapshot(cfg) -> Dict:
@@ -3228,11 +3457,16 @@ def _journal_snapshot(cfg) -> Dict:
         "manifest_workflow": c.last_manifest_workflow,
         "manifest_default_mode": c.last_manifest_default_mode,
         "autofind": c.last_autofind,
+        "diagnose": c.last_diagnose,
     }))
 
 
 def _journal_runnable(entry: Dict) -> bool:
-    return bool(entry.get("label") and (entry.get("commands") or entry.get("kind") == "manifest"))
+    if not entry.get("label"):
+        return False
+    if entry.get("kind") == "diagnose":
+        return isinstance(entry.get("diagnose"), dict) and bool(entry["diagnose"].get("roots"))
+    return bool(entry.get("commands") or entry.get("kind") == "manifest")
 
 
 WORKFLOW_OPTIONS = [
@@ -4684,6 +4918,10 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
     if not _journal_runnable(entry):
         _say("Nothing saved to run.", "yellow")
         return 1
+
+    if entry.get("kind") == "diagnose":
+        return _run_diagnose_journal(cfg, entry, title, unattended=unattended,
+                                     dry_run=dry_run)
 
     if entry.get("kind") == "manifest":
         manifest_path = entry.get("manifest_path")

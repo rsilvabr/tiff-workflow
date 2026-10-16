@@ -231,7 +231,8 @@ def test_diagnose_uses_the_capped_workers(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ct.concurrent.futures, "ThreadPoolExecutor", SpyPool)
 
-    answers = iter([str(in_dir), "4", "", "1"])
+    # folder, scope ('-' = everywhere), skip names ('-' = none), workers, temp dir, compress
+    answers = iter([str(in_dir), "-", "-", "4", "", "1"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
 
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)

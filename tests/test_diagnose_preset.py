@@ -1,0 +1,341 @@
+"""
+Diagnose as a preset (workflow 7 journalled, report only).
+
+Workflow 7 used to be a Python-only workflow outside the journal, so it could not be
+repeated or saved as a preset. It now records its settings (`diagnose`) and a repeat
+or preset re-scans the saved roots and REPORTS: it never runs the 16 -> 8-bit
+conversion, attended or not. Two new questions narrow the search -- a folder path
+the file must sit under (`_EXPORT/TIFF16`) and file-name patterns to skip
+(`*NXSTUDIO*`) -- and a cache keyed by size + mtime spares the files already checked.
+
+The scan tests are pure Python; the run tests need ImageMagick (real padded and real
+16-bit TIFFs, real round-trip check) and the CLI test needs the whole wizard.
+"""
+
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import convert_tiff as ct
+
+REPO = Path(__file__).resolve().parent.parent
+
+requires_magick = pytest.mark.skipif(shutil.which("magick") is None,
+                                     reason="ImageMagick (magick) required")
+requires_cli = pytest.mark.skipif(
+    shutil.which("magick") is None or shutil.which("exiftool") is None
+    or (shutil.which("pwsh") is None and shutil.which("powershell") is None),
+    reason="ImageMagick + exiftool + PowerShell required for the CLI run")
+
+
+# --- Helpers --------------------------------------------------------
+
+
+def _touch(path: Path, data: bytes = b"x") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def _padded(path: Path) -> Path:
+    """8-bit data stored as 16-bit -- what an 8-bit JPEG exported as TIFF16 gives."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp8 = path.with_name("_m8_" + path.stem + ".tif")
+    subprocess.run(["magick", "-size", "48x48", "gradient:red-blue", "-depth", "8", str(tmp8)],
+                   capture_output=True, check=True, timeout=120)
+    subprocess.run(["magick", str(tmp8), "-depth", "16", str(path)],
+                   capture_output=True, check=True, timeout=120)
+    tmp8.unlink()
+    return path
+
+
+def _real16(path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["magick", "-size", "48x48", "plasma:fractal", "-depth", "16", str(path)],
+                   capture_output=True, check=True, timeout=120)
+    return path
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _settings(root, scope="_EXPORT/TIFF16", skip="*NXSTUDIO*"):
+    return {"roots": [str(root)], "scope": scope, "skip_names": skip, "workers": 2,
+            "temp_dir": None, "compress_tmp": "none"}
+
+
+def _entry(settings):
+    return {"kind": "diagnose", "label": ct._diagnose_label(settings), "commands": None,
+            "time": "2026-10-17 12:00:00", "manifest_path": None, "manifest_workflow": None,
+            "manifest_default_mode": None, "autofind": None, "diagnose": settings}
+
+
+def _cfg():
+    return SimpleNamespace(config=ct.ToolConfig(ps_name="pwsh", ps_major=7),
+                           save_config=lambda: None)
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    """Config, cache and the report's Logs\\ all under tmp_path; no prompt may run."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+
+    def no_prompt(*a, **k):
+        raise AssertionError("an unattended Diagnose preset prompted")
+    monkeypatch.setattr("builtins.input", no_prompt)
+    return tmp_path
+
+
+def _tree(root: Path):
+    """The owner's layout: shoot folder with TIFFs beside _EXPORT and TIFF16 inside."""
+    shoot = root / "2025" / "250118_Shoot [FINAL]"
+    return {
+        "padded": shoot / "_EXPORT" / "TIFF16" / "DSC_0001.tif",
+        "real": shoot / "_EXPORT" / "TIFF16" / "DSC_0002.tif",
+        "nx": shoot / "_EXPORT" / "TIFF16" / "DSC_0003_NXstudio.TIF",
+        "beside": shoot / "DSC_0004.tif",
+        "other_export": shoot / "_EXPORT" / "AdobeRGB" / "DSC_0005.tif",
+        "backup": shoot / "_EXPORT" / "TIFF16" / "OLD_PADDED" / "DSC_0006.tif",
+    }
+
+
+# --- Discovery ------------------------------------------------------
+
+
+class TestTargets:
+    def test_scope_keeps_only_files_under_export_tiff16(self, tmp_path):
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        found = ct._diagnose_targets([tmp_path], "_EXPORT/TIFF16", "")
+        assert set(found) == {t["padded"], t["real"], t["nx"]}, \
+            "only TIFF16 files, never the backup folder, the shoot folder or another export"
+
+    def test_scope_accepts_either_slash_and_any_case(self, tmp_path):
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        a = ct._diagnose_targets([tmp_path], "_export\\tiff16", "")
+        b = ct._diagnose_targets([tmp_path], "_EXPORT/TIFF16", "")
+        assert a == b and a
+
+    def test_skip_names_is_case_insensitive(self, tmp_path):
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        found = ct._diagnose_targets([tmp_path], "_EXPORT/TIFF16", "*NXSTUDIO*")
+        assert t["nx"] not in found, "DSC_0003_NXstudio.TIF must match *NXSTUDIO*"
+        assert set(found) == {t["padded"], t["real"]}
+
+    def test_several_skip_patterns(self, tmp_path):
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        found = ct._diagnose_targets([tmp_path], "_EXPORT/TIFF16", "*nxstudio*; DSC_0001.*")
+        assert found == [t["real"]]
+
+    def test_root_already_inside_the_scope(self, tmp_path):
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        root = t["padded"].parent  # ...\_EXPORT\TIFF16 itself
+        found = ct._diagnose_targets([root], "_EXPORT/TIFF16", "")
+        assert set(found) == {t["padded"], t["real"], t["nx"]}
+
+    def test_no_scope_keeps_the_old_exclusions(self, tmp_path):
+        """Without a scope the search is what workflow 7 always did: the export tree
+        and the toolkit's own folders are skipped below the root."""
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        found = ct._diagnose_targets([tmp_path], "", "")
+        assert found == [t["beside"]]
+
+    def test_several_roots(self, tmp_path):
+        a = _touch(tmp_path / "2024" / "x" / "_EXPORT" / "TIFF16" / "a.tif")
+        b = _touch(tmp_path / "2025" / "y" / "_EXPORT" / "TIFF16" / "b.tif")
+        _touch(tmp_path / "2026" / "z" / "_EXPORT" / "TIFF16" / "c.tif")
+        found = ct._diagnose_targets([tmp_path / "2024", tmp_path / "2025"], "_EXPORT/TIFF16")
+        assert found == [a, b]
+
+
+# --- Journal --------------------------------------------------------
+
+
+class TestJournal:
+    def test_workflow_7_journals_its_settings(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        monkeypatch.setattr(ct, "_memory_capped_pool_workers", lambda req, *a, **k: req)
+        monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real 16-bit"))
+        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "1"])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        cfg = _cfg()
+
+        assert ct.run_diagnose_tiffs(cfg) is True
+
+        snap = ct._journal_snapshot(cfg)
+        assert snap["kind"] == "diagnose"
+        assert snap["commands"] is None
+        assert snap["diagnose"] == {"roots": [str(tmp_path.resolve())],
+                                    "scope": "_EXPORT/TIFF16", "skip_names": "*NXSTUDIO*",
+                                    "workers": 3, "temp_dir": None, "compress_tmp": "none"}
+        assert "[report only]" in snap["label"]
+        assert ct._journal_runnable(snap)
+
+    def test_a_later_workflow_clears_the_diagnose_settings(self):
+        cfg = _cfg()
+        ct._save_last_run(cfg, "diagnose", "d", None, diagnose=_settings("C:\\x"))
+        ct._save_last_run(cfg, "compress", "c", [["pwsh", "-File", "x.ps1"]])
+        assert cfg.config.last_diagnose is None
+
+    def test_a_diagnose_preset_survives_the_config_sanitiser(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / ".convert_tiff_config.json").write_text(json.dumps({"presets": {
+            "padded": _entry(_settings(tmp_path)),
+            "broken": {**_entry(_settings(tmp_path)), "diagnose": {"roots": []}},
+        }}), encoding="utf-8")
+        mgr = ct.ConfigManager()
+        assert list(mgr.config.presets) == ["padded"]
+
+
+# --- Running the journal --------------------------------------------
+
+
+@requires_magick
+class TestRun:
+    def test_unattended_reports_padded_and_touches_nothing(self, home, capsys):
+        t = _tree(home)
+        _padded(t["padded"])
+        _real16(t["real"])
+        _padded(t["nx"])
+        _padded(t["beside"])
+        before = {k: _sha(p) for k, p in t.items() if p.exists()}
+
+        rc = ct._run_journal(_cfg(), _entry(_settings(home)), "Preset: padded",
+                             unattended=True)
+
+        assert rc == 0
+        assert {k: _sha(p) for k, p in t.items() if p.exists()} == before, \
+            "a Diagnose preset must never change a file"
+        assert not any(home.rglob("OLD_PADDED")), "the 8-bit conversion ran"
+        reports = list((home / "Logs" / "convert_tiff").glob("diagnose_*.log"))
+        assert len(reports) == 1
+        text = reports[0].read_text(encoding="utf-8")
+        assert str(t["padded"]) in text
+        assert "Padded 8-bit: 1" in text and "Real 16-bit: 1" in text
+        assert str(t["nx"]) not in text, "NXSTUDIO files are skipped"
+        assert str(t["beside"]) not in text, "outside the scope"
+
+    def test_second_run_checks_only_new_or_changed_files(self, home, monkeypatch):
+        t = _tree(home)
+        _padded(t["padded"])
+        _real16(t["real"])
+        entry = _entry(_settings(home))
+        assert ct._run_journal(_cfg(), entry, "Preset: padded", unattended=True) == 0
+        cache = json.loads((home / ".convert_tiff_diagnose_cache.json").read_text(encoding="utf-8"))
+        assert {v["status"] for v in cache.values()} == {"padded", "real"}
+
+        checked = []
+        real_check = ct._is_real_16bit
+
+        def spy(path, *a, **k):
+            checked.append(Path(path).name)
+            return real_check(path, *a, **k)
+        monkeypatch.setattr(ct, "_is_real_16bit", spy)
+
+        assert ct._run_journal(_cfg(), entry, "Preset: padded", unattended=True) == 0
+        assert checked == [], "unchanged files were checked again"
+
+        _padded(t["real"])  # the file is replaced: new size/mtime, now padded
+        st = t["real"].stat()
+        os.utime(t["real"], ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
+        assert ct._run_journal(_cfg(), entry, "Preset: padded", unattended=True) == 0
+        assert checked == ["DSC_0002.tif"]
+        last = sorted((home / "Logs" / "convert_tiff").glob("diagnose_*.log"))[-1]
+        assert "Padded 8-bit: 2" in last.read_text(encoding="utf-8"), \
+            "the cached padded file must still be reported"
+
+    def test_errors_are_reported_never_cached(self, home):
+        t = _tree(home)
+        _touch(t["padded"], b"not a tiff")
+        rc = ct._run_journal(_cfg(), _entry(_settings(home)), "Preset: padded", unattended=True)
+        assert rc == 1, "a file that could not be checked must show in the exit code"
+        cache_file = home / ".convert_tiff_diagnose_cache.json"
+        cache = json.loads(cache_file.read_text(encoding="utf-8")) if cache_file.exists() else {}
+        assert cache == {}
+
+    def test_dry_run_checks_nothing(self, home, monkeypatch):
+        t = _tree(home)
+        _padded(t["padded"])
+        monkeypatch.setattr(ct, "_is_real_16bit",
+                            lambda *a, **k: pytest.fail("a dry run checked a file"))
+        rc = ct._run_journal(_cfg(), _entry(_settings(home)), "Preset: padded",
+                             unattended=True, dry_run=True)
+        assert rc == 0
+        assert not (home / ".convert_tiff_diagnose_cache.json").exists()
+
+    def test_missing_root_refuses(self, home):
+        rc = ct._run_journal(_cfg(), _entry(_settings(home / "gone")), "Preset: padded",
+                             unattended=True)
+        assert rc == 1
+
+    def test_attended_run_asks_once_and_never_offers_the_conversion(self, home, monkeypatch):
+        t = _tree(home)
+        _padded(t["padded"])
+        asked = []
+
+        def answer(prompt=""):
+            asked.append(prompt)
+            return "y"
+        monkeypatch.setattr("builtins.input", answer)
+        rc = ct._run_journal(_cfg(), _entry(_settings(home)), "Preset: padded")
+        assert rc == 0
+        assert asked == ["Run it now? [y/N]: "], f"unexpected prompts: {asked}"
+        assert not any(home.rglob("OLD_PADDED"))
+
+
+# --- CLI ------------------------------------------------------------
+
+
+@requires_cli
+def test_run_preset_cli_end_to_end(tmp_path):
+    t = _tree(tmp_path)
+    _padded(t["padded"])
+    _real16(t["real"])
+    (tmp_path / ".convert_tiff_config.json").write_text(
+        json.dumps({"presets": {"TIFF16 PADDED": _entry(_settings(tmp_path))}}),
+        encoding="utf-8")
+    env = os.environ.copy()
+    env["USERPROFILE"] = str(tmp_path)
+    env["HOME"] = str(tmp_path)
+
+    def run(*args):
+        return subprocess.run([sys.executable, str(REPO / "convert_tiff.py"), *args],
+                              cwd=str(tmp_path), env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=300)
+
+    listing = run("--list-presets")
+    assert "TIFF16 PADDED" in listing.stdout and "[report only]" in listing.stdout
+
+    r = run("--run-preset", "TIFF16 PADDED")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Padded 8-bit: 1" in r.stdout
+    assert "Traceback" not in r.stdout + r.stderr
