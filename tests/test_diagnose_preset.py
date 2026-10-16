@@ -424,3 +424,44 @@ class TestConversionChecksPixels:
         ct._compress_padded_files([padded], tmp_path / "staging", workers=1, cfg=_cfg())
         assert _depth(padded) == "8"
         assert (tmp_path / "OLD_PADDED" / "padded.tif").exists()
+
+
+# --- v2.6.2: no alias copies piling up in %TEMP% ------------------------------
+
+
+@requires_magick
+class TestBracketAliasesAreReleased:
+    """A '[FINAL]' folder makes every magick input go through a bracket-free alias in
+    %TEMP%. Across volumes the alias is a full COPY, and v2.6.1 kept every one (~3 per
+    file) until the run ended: 434 GB on the owner's C: during one Diagnose preset."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        alias_dir = tmp_path / "alias"
+        alias_dir.mkdir()
+        monkeypatch.setattr(ct, "_magick_alias_dir", alias_dir)
+        made = []
+
+        def copy_not_link(src, dst):  # behave like G: -> C:, where linking fails
+            made.append(dst)
+            raise OSError("cross-volume")
+        monkeypatch.setattr(ct.os, "link", copy_not_link)
+        return alias_dir, made
+
+    def test_diagnose_check_leaves_no_alias(self, tmp_path, monkeypatch):
+        alias_dir, made = self._setup(tmp_path, monkeypatch)
+        a = _padded(tmp_path / "250118_Shoot [FINAL]" / "_EXPORT" / "TIFF16" / "a.tif")
+        b = _real16(tmp_path / "250118_Shoot [FINAL]" / "_EXPORT" / "TIFF16" / "b.tif")
+
+        assert ct._is_real_16bit(a, tmp_path)[2].startswith("padded")
+        assert ct._is_real_16bit(b, tmp_path)[0] is True
+        assert list(alias_dir.iterdir()) == [], "alias copies were left in %TEMP%"
+        assert len(made) == 2, f"one alias per file, not one per magick call: {len(made)}"
+
+    def test_padded_conversion_leaves_no_alias(self, tmp_path, monkeypatch):
+        alias_dir, _ = self._setup(tmp_path, monkeypatch)
+        src = _padded(tmp_path / "Shoot [FINAL]" / "p.tif")
+        staging = tmp_path / "stg"
+        staging.mkdir()
+        status = ct._process_single_padded(src, staging)[2]
+        assert status == "ok", status
+        assert list(alias_dir.iterdir()) == []

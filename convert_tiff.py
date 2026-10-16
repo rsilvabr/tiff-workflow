@@ -70,6 +70,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -702,20 +703,34 @@ def _work_timeout(base_s: float, *paths) -> float:
 
 
 _magick_alias_dir: Optional[Path] = None
+# ONE lock for the one-time alias-dir creation. `with threading.Lock():` built a new lock
+# per call, so the worker pools raced it and made several alias dirs.
+_magick_alias_lock = threading.Lock()
+# Per-thread {source: alias} of the file being worked on (see _scoped_magick_aliases).
+_magick_alias_scope = threading.local()
 
 
 def _bracket_free_alias(path: Path) -> Optional[Path]:
     """Hard link (copy fallback) of `path` under a bracket-free name in %TEMP%.
 
     Exists because no '[' escape works on Windows ImageMagick (see _magick_spec).
-    Returns None on any failure -- callers fail closed. Aliases are wiped at exit.
+    Returns None on any failure -- callers fail closed. Inside a _scoped_magick_aliases
+    function one alias per source is made and deleted when it returns; outside one,
+    aliases are wiped at exit.
+
+    The hard link fails across volumes (a photo library on G:, %TEMP% on C:), and the
+    fallback is a FULL COPY of the TIFF: before the scope, a Diagnose over 5000 files
+    left ~3 copies of each in %TEMP% until the run ended -- 434 GB on 2026-10-17.
     """
     global _magick_alias_dir
-    import threading  # the worker pools race the one-time alias-dir creation
     try:
         if not path.is_file():
             return None
-        with threading.Lock():
+        scope = getattr(_magick_alias_scope, "items", None)
+        key = os.path.normcase(os.path.abspath(path))
+        if scope is not None and key in scope and scope[key].exists():
+            return scope[key]
+        with _magick_alias_lock:
             if _magick_alias_dir is None:
                 _magick_alias_dir = Path(tempfile.mkdtemp(prefix="magick_alias_"))
                 import atexit
@@ -726,9 +741,33 @@ def _bracket_free_alias(path: Path) -> Optional[Path]:
             os.link(path, alias)
         except OSError:
             shutil.copy2(path, alias)
+        if scope is not None:
+            scope[key] = alias
         return alias
     except Exception:
         return None
+
+
+def _scoped_magick_aliases(fn):
+    """Decorator for the per-file workers (diagnose check, padded conversion, OLD_TIFFs
+    compare): the bracket-free aliases made while `fn` runs are shared by its magick
+    calls and deleted when it returns, so a run holds at most one alias per worker.
+    A nested call leaves the cleanup to the outermost one."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        if getattr(_magick_alias_scope, "items", None) is not None:
+            return fn(*args, **kwargs)
+        _magick_alias_scope.items = {}
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            items, _magick_alias_scope.items = _magick_alias_scope.items, None
+            for alias in items.values():
+                try:
+                    alias.unlink()
+                except OSError:
+                    pass
+    return wrapper
 
 
 def _magick_spec(path) -> str:
@@ -1975,6 +2014,7 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
             "exif_other": exif_other, "icc": icc_hash}
 
 
+@_scoped_magick_aliases
 def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     """
     Compare two TIFFs pixel-by-pixel using RMSE.
@@ -2150,6 +2190,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     return True, f"IDENTICAL ({old_w}x{old_h}, {len(old_img)} image page(s), {note})"
 
 
+@_scoped_magick_aliases
 def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "none") -> tuple[bool, float, str]:
     """
     Check if a TIFF is real 16-bit or padded 8-bit (stretched to 16).
@@ -2876,6 +2917,7 @@ def _exiftool_copy_failed(stderr: str) -> bool:
     return False
 
 
+@_scoped_magick_aliases
 def _padded_pixels_status(orig: Path, new8: Path) -> Optional[str]:
     """None when page [0] of the 8-bit rewrite is pixel-identical to the original's;
     "pixel_mismatch" when it differs (the original is real 16-bit); "pixel_compare_failed"
@@ -2897,6 +2939,7 @@ def _padded_pixels_status(orig: Path, new8: Path) -> Optional[str]:
     return None
 
 
+@_scoped_magick_aliases
 def _process_single_padded(tiff_path, staging):
     """Process a single padded file. Returns (name, parent, status, size_orig, size_zip, ratio, exif_ok, error_msg, tmp8_path)."""
     name = tiff_path.name
