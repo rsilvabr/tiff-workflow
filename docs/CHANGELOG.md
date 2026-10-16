@@ -10,6 +10,16 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.6.1
+
+- The Diagnose cache is written every 25 files and when a run is stopped, not only at the
+  end, so an interrupted run keeps what it already checked
+- Workflow 7 from the menu uses the cache too: converting what a preset found no longer
+  re-checks the whole library
+- The padded 16 -> 8-bit conversion compares the rewrite with the original pixel by pixel
+  and keeps only identical results. It used to trust the Diagnose verdict, so a file
+  wrongly passed to it would have been rounded down to 8-bit
+
 ## v2.6
 
 One new feature; nothing changes for the other workflows.
