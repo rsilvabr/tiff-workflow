@@ -10,6 +10,16 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.6.2
+
+- **Temporary copies no longer pile up in `%TEMP%`.** ImageMagick cannot open a path with
+  `[` `]` on Windows (a `[FINAL]` folder), so the wizard reads such files through a
+  bracket-free alias in `%TEMP%`. When the photos sit on another drive than `%TEMP%` the alias
+  is a full copy, and every one was kept until the run ended -- about three copies per file. A
+  Diagnose over 5000 TIFFs filled 434 GB of the system drive. Each file now gets one alias,
+  deleted as soon as that file is done (Diagnose, the padded conversion, Delete OLD_TIFFs)
+- The one-time creation of the alias folder is properly locked (parallel workers made several)
+
 ## v2.6.1
 
 - The Diagnose cache is written every 25 files and when a run is stopped, not only at the
