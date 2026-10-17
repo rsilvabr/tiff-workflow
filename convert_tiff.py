@@ -1957,8 +1957,8 @@ def _tiff_page_geometry(path) -> Optional[List[Tuple[str, int, int]]]:
     """
     try:
         r = _run_captured(
-            ["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n", str(path)],
-            30, text=True,
+            ["magick", "identify", "-ping", "-format", "%[tiff:subfiletype]|%w|%h\n", str(path)],
+            _work_timeout(30, path), text=True,
         )
         if r.returncode != 0 or not r.stdout:
             return None
@@ -2097,8 +2097,8 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     def get_dimensions(path):
         try:
             result = _run_captured(
-                ["magick", "identify", "-format", "%w %h", f"{_magick_spec(path)}[0]"],
-                30, text=True
+                ["magick", "identify", "-ping", "-format", "%w %h", f"{_magick_spec(path)}[0]"],
+                _work_timeout(30, path), text=True
             )
             if result.returncode == 0:
                 parts = result.stdout.strip().split()
@@ -2113,8 +2113,8 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     def get_page_count(path):
         try:
             result = _run_captured(
-                ["magick", "identify", "-format", "%n\n", str(path)],
-                30, text=True
+                ["magick", "identify", "-ping", "-format", "%n\n", str(path)],
+                _work_timeout(30, path), text=True
             )
             if result.returncode == 0 and result.stdout:
                 return int(result.stdout.splitlines()[0].strip())
@@ -2273,8 +2273,8 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
     def get_depth(path):
         try:
             result = _run_captured(
-                ["magick", "identify", "-format", "%z", f"{_magick_spec(path)}[0]"],
-                30, text=True
+                ["magick", "identify", "-ping", "-format", "%z", f"{_magick_spec(path)}[0]"],
+                _work_timeout(30, path), text=True
             )
             if result.returncode == 0:
                 first = result.stdout.strip().split()[0]
@@ -2926,8 +2926,8 @@ def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
     """
     try:
         r = _run_captured(
-            ["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n", str(tiff_path)],
-            30, text=True,
+            ["magick", "identify", "-ping", "-format", "%[tiff:subfiletype]|%w|%h\n", str(tiff_path)],
+            _work_timeout(30, tiff_path), text=True,
         )
         if r.returncode != 0 or not r.stdout:
             return None
@@ -2962,8 +2962,8 @@ def _tiff_page_count(path) -> Optional[int]:
     `%n` prints once per frame, so "%n\\n" plus the first line is the only reliable form."""
     try:
         r = _run_captured(
-            ["magick", "identify", "-format", "%n\n", str(path)],
-            30, text=True,
+            ["magick", "identify", "-ping", "-format", "%n\n", str(path)],
+            _work_timeout(30, path), text=True,
         )
         if r.returncode != 0 or not r.stdout:
             return None
@@ -3196,8 +3196,8 @@ def _process_single_padded(tiff_path, staging):
             # with nothing verified.
             def _read_dims(path) -> Optional[tuple]:
                 r = _run_captured(
-                    ["magick", "identify", "-format", "%w %h\n", f"{_magick_spec(path)}[0]"],
-                    30, text=True
+                    ["magick", "identify", "-ping", "-format", "%w %h\n", f"{_magick_spec(path)}[0]"],
+                    _work_timeout(30, path), text=True
                 )
                 if r.returncode != 0 or not r.stdout:
                     return None
@@ -3219,8 +3219,8 @@ def _process_single_padded(tiff_path, staging):
             # dimension check above only looks at page [0].
             def _read_pages(path) -> Optional[int]:
                 r = _run_captured(
-                    ["magick", "identify", "-format", "%n\n", str(path)],
-                    30, text=True
+                    ["magick", "identify", "-ping", "-format", "%n\n", str(path)],
+                    _work_timeout(30, path), text=True
                 )
                 if r.returncode != 0 or not r.stdout:
                     return None

@@ -657,3 +657,33 @@ def test_budget_line_names_typical_and_largest(tmp_path, monkeypatch, capsys):
     assert pixels == sizes
     assert "typical file 32 MP" in out and "largest 220 MP" in out
     assert "the workers are not reduced" in out
+
+
+# --- the identify probes read the header only, with a size-scaled timeout ------
+
+
+def test_depth_probe_pings_and_scales_its_timeout(tmp_path, monkeypatch):
+    """A 782 MB film scan on a busy hard disk timed out the depth probe at a fixed
+    30 s: `identify` without -ping decodes the whole image."""
+    big = tmp_path / "scan.tif"
+    with open(big, "wb") as f:
+        f.seek(800 * 2**20 - 1)
+        f.write(b"\0")
+    seen = []
+
+    def fake(cmd, timeout, text=False, input=None):
+        seen.append((list(cmd), timeout))
+        return SimpleNamespace(returncode=0, stdout="8", stderr="")
+    monkeypatch.setattr(ct, "_run_captured", fake)
+    monkeypatch.setattr(ct, "_TIMEOUT_LOAD", 4)
+    ct._is_real_16bit(big, tmp_path)
+    cmd, timeout = seen[0]
+    assert cmd[:3] == ["magick", "identify", "-ping"], cmd
+    assert timeout > 30 + 800 * ct.TIMEOUT_S_PER_MB, timeout
+
+
+def test_every_identify_probe_pings():
+    src = (REPO / "convert_tiff.py").read_text(encoding="utf-8")
+    import re
+    calls = re.findall(r'\["magick", "identify", ([^\]]*)', src)
+    assert calls and all(c.startswith('"-ping"') for c in calls), calls

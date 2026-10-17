@@ -26,6 +26,11 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
   every worker for the largest file of the batch: one 220 MP scan among 32 MP photos made
   each worker count as 15 GB. Diagnose now keeps the requested workers and each check
   reserves the memory its own file needs; a large file waits for room (alone if it must)
+- **Large scans no longer time out the header probes.** `magick identify` (bit depth,
+  dimensions, page count, SubfileType) ran without `-ping`, so it decoded the whole image
+  under a fixed 30 s limit: 782 MB film scans on a busy hard disk failed with
+  "timed out after 30.0 seconds". The probes now read the header only and their limit grows
+  with the file size and the number of workers
 
 ## v2.6.2
 
