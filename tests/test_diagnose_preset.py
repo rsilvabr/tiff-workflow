@@ -589,3 +589,71 @@ def test_checks_report_time_left(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "25/60 checked in" in out and "50/60 checked in" in out
     assert "left" in out
+
+
+# --- v2.7.1: memory is budgeted per file, not by the largest file of the batch ---
+
+
+def _concurrency_probe(monkeypatch, delay=0.15):
+    import threading
+    import time as _t
+    state = {"now": 0, "peak": 0, "with_big": []}
+    lock = threading.Lock()
+
+    def fake_check(path, *a, **k):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+            if Path(path).name == "big.tif":
+                state["with_big"].append(state["now"])
+        _t.sleep(delay)
+        with lock:
+            state["now"] -= 1
+        return True, 0.5, "real 16-bit"
+    monkeypatch.setattr(ct, "_is_real_16bit", fake_check)
+    return state
+
+
+def test_small_files_use_every_worker_and_a_huge_one_runs_alone(tmp_path, monkeypatch):
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    state = _concurrency_probe(monkeypatch)
+    small = [tmp_path / f"s{i}.tif" for i in range(12)]
+    big = tmp_path / "big.tif"
+    files = small[:6] + [big] + small[6:]
+    bpp = ct._COMPARE_BYTES_PER_PIXEL
+    pixels = {os.path.normcase(os.path.abspath(f)): 30_000_000 for f in small}
+    pixels[os.path.normcase(os.path.abspath(big))] = 220_000_000
+    # room for 4 small checks at once, but not for the big one next to anything
+    budget = ct._MemoryBudget(4 * 30_000_000 * bpp)
+
+    results = ct._diagnose_pool(files, 4, None, "none", budget=budget, pixels=pixels)
+
+    assert len(results) == len(files)
+    assert state["peak"] == 4, f"small files did not use every worker: {state['peak']}"
+    assert state["with_big"] == [1], "the oversized file ran next to others"
+    assert budget.used == 0, "a reservation leaked"
+
+
+def test_budget_releases_when_a_check_fails(tmp_path, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("magick died")
+    monkeypatch.setattr(ct, "_is_real_16bit", boom)
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    budget = ct._MemoryBudget(10**9)
+    files = [tmp_path / f"{i}.tif" for i in range(5)]
+    results = ct._diagnose_pool(files, 2, None, "none", budget=budget, pixels={})
+    assert all(r[3].startswith("ERROR") for r in results)
+    assert budget.used == 0
+
+
+def test_budget_line_names_typical_and_largest(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(ct, "_available_memory_bytes", lambda: (40 * 2**30, "commit"))
+    sizes = {"a": 30_000_000, "b": 32_000_000, "c": 220_000_000}
+    monkeypatch.setattr(ct, "_image_pixels", lambda paths: dict(sizes))
+    budget, pixels = ct._memory_budget(["a", "b", "c"], ct._COMPARE_BYTES_PER_PIXEL, "16-bit check")
+    out = capsys.readouterr().out
+    assert budget.total == int(40 * 2**30 * ct.WORKER_MEMORY_FRACTION)
+    assert pixels == sizes
+    assert "typical file 32 MP" in out and "largest 220 MP" in out
+    assert "the workers are not reduced" in out

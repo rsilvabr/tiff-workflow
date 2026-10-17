@@ -199,26 +199,31 @@ def test_work_timeout_scales_with_load(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# T7 - the diagnose pool runs with the capped count
+# T7 - the diagnose pool budgets memory per file instead of lowering the workers
 # ---------------------------------------------------------------------------
 
 @requires_tools
-def test_diagnose_uses_the_capped_workers(tmp_path, monkeypatch):
-    """T7: run_diagnose_tiffs asks the cap with the requested workers and the
-    compare bytes-per-pixel, and the pool is created with what the cap returned."""
+def test_diagnose_uses_a_memory_budget(tmp_path, monkeypatch):
+    """T7 (v2.7.1): run_diagnose_tiffs asks the memory budget with the compare
+    bytes-per-pixel and runs the pool with the REQUESTED workers. Before, one 220 MP
+    scan in a batch of 32 MP photos sized every worker for 220 MP (4 -> 3 workers on
+    a machine with plenty of free RAM); each check now reserves its own estimate."""
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
     in_dir = tmp_path / "in"
     in_dir.mkdir()
     make_tiff(in_dir / "a.tif")
     make_tiff(in_dir / "b.tif")
 
-    cap_calls = []
+    calls = []
+    real_budget = ct._memory_budget
 
-    def fake_cap(requested, paths, bytes_per_pixel, what):
-        cap_calls.append((requested, [str(p) for p in paths], bytes_per_pixel, what))
-        return 1
+    def spy_budget(paths, bytes_per_pixel, what):
+        calls.append(([str(p) for p in paths], bytes_per_pixel, what))
+        return real_budget(paths, bytes_per_pixel, what)
 
-    monkeypatch.setattr(ct, "_memory_capped_pool_workers", fake_cap)
+    monkeypatch.setattr(ct, "_memory_budget", spy_budget)
+    monkeypatch.setattr(ct, "_memory_capped_pool_workers",
+                        lambda *a, **k: pytest.fail("Diagnose lowered the worker count again"))
     monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real"))
 
     seen_workers = []
@@ -238,12 +243,11 @@ def test_diagnose_uses_the_capped_workers(tmp_path, monkeypatch):
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
     assert ct.run_diagnose_tiffs(cfg) is True
 
-    assert cap_calls, "the worker cap was never consulted"
-    requested, paths, bpp, what = cap_calls[0]
-    assert requested == 4
+    assert calls, "the memory budget was never consulted"
+    paths, bpp, what = calls[0]
     assert bpp == ct._COMPARE_BYTES_PER_PIXEL
     assert sorted(Path(p).name for p in paths) == ["a.tif", "b.tif"]
-    assert seen_workers == [1], "the pool was not created with the capped count"
+    assert seen_workers == [4], "the pool must keep the requested workers"
 
 
 # ---------------------------------------------------------------------------

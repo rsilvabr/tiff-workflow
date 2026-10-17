@@ -631,11 +631,16 @@ def _say(msg: str, style: str = "") -> None:
 
 
 def _max_image_pixels(paths) -> int:
-    """Largest IFD0 width*height among `paths`, read in batches of 400 by exiftool
-    (-j). A file exiftool does not report, or reports without a size, counts as
-    _UNKNOWN_IMAGE_PIXELS -- an unknown size must never shrink the estimate."""
+    """Largest IFD0 width*height among `paths` (see _image_pixels)."""
+    return max(_image_pixels(paths).values(), default=0)
+
+
+def _image_pixels(paths) -> Dict[str, int]:
+    """{normcased absolute path: IFD0 width*height} for `paths`, read in batches of 400
+    by exiftool (-j). A file exiftool does not report, or reports without a size,
+    counts as _UNKNOWN_IMAGE_PIXELS -- an unknown size must never shrink the estimate."""
     paths = [str(p) for p in paths]
-    best = 0
+    sizes: Dict[str, int] = {}
     # On a hard disk each batch of 400 can take a minute: say what is happening and how
     # far it got, instead of a silent screen before the first result line.
     many = len(paths) > 400
@@ -669,9 +674,58 @@ def _max_image_pixels(paths) -> int:
                 except OSError:
                     pass
         for p in chunk:
-            px = seen.get(os.path.normcase(os.path.abspath(p)), 0)
-            best = max(best, px if px > 0 else _UNKNOWN_IMAGE_PIXELS)
-    return best
+            key = os.path.normcase(os.path.abspath(p))
+            px = seen.get(key, 0)
+            sizes[key] = px if px > 0 else _UNKNOWN_IMAGE_PIXELS
+    return sizes
+
+
+class _MemoryBudget:
+    """Bytes of memory the running ImageMagick jobs may hold together. A job reserves
+    its OWN estimate before it starts and waits while that would not fit, so small
+    files run on every worker and only a huge one waits for room -- instead of
+    sizing every worker for the largest file of the batch. A job larger than the
+    whole budget runs alone (it waits for the others to finish, never forever)."""
+
+    def __init__(self, total: int):
+        self.total = max(1, int(total))
+        self.used = 0
+        self._cv = threading.Condition()
+
+    def acquire(self, need: int) -> int:
+        need = min(max(0, int(need)), self.total)
+        with self._cv:
+            while self.used and self.used + need > self.total:
+                self._cv.wait()
+            self.used += need
+        return need
+
+    def release(self, held: int) -> None:
+        with self._cv:
+            self.used -= held
+            self._cv.notify_all()
+
+
+def _memory_budget(paths, bytes_per_pixel: int, what: str):
+    """(_MemoryBudget, {path: pixels}) for a pool over `paths`, or (None, {}) when the
+    cap is off or the available memory cannot be read. Prints the budget and what the
+    largest and the typical file need."""
+    if WORKER_MEMORY_FRACTION <= 0 or not paths:
+        return None, {}
+    avail, budget = _available_memory_bytes()
+    if avail is None:
+        _say("Memory: could not read the available memory -- workers not capped", "dim")
+        return None, {}
+    sizes = _image_pixels(paths)
+    total = avail * WORKER_MEMORY_FRACTION
+    ordered = sorted(sizes.values())
+    largest, typical = ordered[-1], ordered[len(ordered) // 2]
+    _say(f"Memory: {total / 2**30:.1f} GB for {what} jobs ({avail / 2**30:.1f} GB "
+         f"{_MEMORY_BUDGET_TEXT[budget]} x WORKER_MEMORY_FRACTION={WORKER_MEMORY_FRACTION}) "
+         f"| typical file {typical / 1e6:.0f} MP ~{typical * bytes_per_pixel / 2**30:.1f} GB, "
+         f"largest {largest / 1e6:.0f} MP ~{largest * bytes_per_pixel / 2**30:.1f} GB "
+         f"-- a large file waits for room, the workers are not reduced", "dim")
+    return _MemoryBudget(total), sizes
 
 
 def _memory_capped_pool_workers(requested: int, paths, bytes_per_pixel: int,
@@ -2419,16 +2473,27 @@ def _display_path(path: Path, roots=None) -> str:
 
 
 def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path],
-                   compress_tmp: str, on_result=None, roots=None) -> List[tuple]:
+                   compress_tmp: str, on_result=None, roots=None,
+                   budget: Optional["_MemoryBudget"] = None,
+                   pixels: Optional[Dict[str, int]] = None) -> List[tuple]:
     """Run _is_real_16bit over `tiff_files` with `workers` threads, printing one line
     per file (its path below `roots`, see _display_path). Returns
     [(path, is_real, rmse, detail)] in completion order. `on_result` is called with
     each result as it arrives (the Diagnose cache saves from it). On Ctrl+C the files
-    not started yet are cancelled instead of all being run first."""
+    not started yet are cancelled instead of all being run first. With `budget`, each
+    check first reserves its own estimate (`pixels` x _COMPARE_BYTES_PER_PIXEL)."""
     global _TIMEOUT_LOAD
 
     def process_one(tiff_path):
-        return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
+        if budget is None:
+            return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
+        key = os.path.normcase(os.path.abspath(tiff_path))
+        need = (pixels or {}).get(key, _UNKNOWN_IMAGE_PIXELS) * _COMPARE_BYTES_PER_PIXEL
+        held = budget.acquire(need)
+        try:
+            return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
+        finally:
+            budget.release(held)
 
     results = []
     total = len(tiff_files)
@@ -2588,16 +2653,17 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
 
     total_start = time.time() if DEBUG_TIMING else None
     if todo:
-        workers = _memory_capped_pool_workers(workers, todo, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
+        budget, pixels = _memory_budget(todo, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
         if RICH_AVAILABLE and console:
             console.print(f"\n[cyan]Diagnosing {len(todo)} TIFF file(s) with {workers} workers...[/cyan]")
         else:
             print(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...")
         if DIAGNOSE_CACHE:
             results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
-                                         roots=[folder])
+                                         roots=[folder], budget=budget, pixels=pixels)
         else:
-            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=[folder])
+            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=[folder],
+                                      budget=budget, pixels=pixels)
     statuses = [_diagnose_status(r[1], r[3]) for r in results]
     padded_files = [r[0] for r, s in zip(results, statuses) if s == "padded"]
     padded_count = len(padded_files)
@@ -2715,7 +2781,8 @@ def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[tuple], List[Pat
 
 
 def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
-                      temp_dir: Optional[Path], compress_tmp: str, roots=None) -> List[tuple]:
+                      temp_dir: Optional[Path], compress_tmp: str, roots=None,
+                      budget=None, pixels=None) -> List[tuple]:
     """_diagnose_pool over `todo`, recording each verdict in `cache` and writing the
     cache every _CACHE_SAVE_EVERY results and once more at the end -- also when the
     run is interrupted -- so a stopped run keeps what it already checked."""
@@ -2735,7 +2802,7 @@ def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
 
     try:
         return _diagnose_pool(todo, workers, temp_dir, compress_tmp, on_result=record,
-                              roots=roots)
+                              roots=roots, budget=budget, pixels=pixels)
     finally:
         if pending[0]:
             _save_diagnose_cache(cache)
@@ -2792,15 +2859,15 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
                 temp_dir = None
         workers = clamp_workers(d.get("workers") or cfg.config.default_workers,
                                 cfg.config.default_workers)
-        workers = _memory_capped_pool_workers(workers, todo, _COMPARE_BYTES_PER_PIXEL,
-                                              "16-bit check")
+        budget, pixels = _memory_budget(todo, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
         _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
         compress_tmp = d.get("compress_tmp") or "none"
         if DIAGNOSE_CACHE:
             results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
-                                         roots=roots)
+                                         roots=roots, budget=budget, pixels=pixels)
         else:
-            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=roots)
+            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=roots,
+                                      budget=budget, pixels=pixels)
 
     by_status = {"padded": [], "real": [], "other": [], "error": []}
     for f, is_real, rmse, detail in sorted(results, key=lambda r: str(r[0])):

@@ -389,6 +389,14 @@ starts (`Memory: ~N GB per worker | N GB available | workers N`), with a warning
 the count is reduced. An image whose size cannot be read counts as 150 MP, so an unknown
 size never shrinks the estimate.
 
+**Diagnose budgets per file instead.** A film-scan library mixes 30 MP photos with the odd
+200 MP scan, and sizing every worker for the largest one cut the workers on a machine with
+plenty of free RAM. Diagnose keeps the workers you asked for and gives the run a memory
+budget (available memory x `WORKER_MEMORY_FRACTION`); each check reserves its own estimate
+before it starts, so typical files run side by side and a huge scan waits until there is
+room -- alone, if it needs more than the whole budget. The line printed before the checks
+says the budget and what the typical and the largest file need.
+
 ---
 
 ## CLI Flags (all optional)

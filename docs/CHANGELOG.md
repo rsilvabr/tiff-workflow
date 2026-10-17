@@ -22,6 +22,10 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 - **No silent phases in Diagnose.** The folder search reports every few seconds (folders
   scanned, TIFFs found, elapsed), the image-size read for the memory estimate reports each
   batch, and the checks print `N/total checked in X -- about Y left` every 25 files
+- **Diagnose no longer cuts the workers because of one huge scan.** The memory cap sized
+  every worker for the largest file of the batch: one 220 MP scan among 32 MP photos made
+  each worker count as 15 GB. Diagnose now keeps the requested workers and each check
+  reserves the memory its own file needs; a large file waits for room (alone if it must)
 
 ## v2.6.2
 
