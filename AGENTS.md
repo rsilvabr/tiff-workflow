@@ -98,6 +98,20 @@ feature's semantics are in doubt, read jxl-photo's version and ask before
 inventing a new one.
 
 ## Verification
+- **ALWAYS test with hostile paths** (owner's rule, 2026-10-17: "SEMPRE da erro").
+  The owner's real library has every one of these, often in one path:
+  `G:\2019\190815_Filmbbb_伊豆沼_夏 [FINAL]\NORITSU\0014_14 (2).tif` -- Japanese,
+  `[ ]` brackets, spaces, `%`, parentheses, long paths, files on another drive
+  than `%TEMP%`. Every change that touches a path (discovery, magick, exiftool,
+  staging, moves, reports) gets a REAL test whose fixture path has Japanese
+  characters AND `[ ]` AND a space -- not only an ASCII `tmp_path`. Known traps:
+  exiftool reads its command line in the ANSI code page (Japanese arrives
+  mangled -> pass paths through a UTF-8 argfile, `-charset filename=utf8`:
+  `_run_exiftool`, the backends' argfiles); magick globs `[ ]` (bracket-free
+  alias, `_magick_spec`) and expands `%` (escape `%%`); a hard link cannot
+  cross drives (an alias becomes a full COPY -- release it per file); Windows'
+  260-character limit. Round 2026-10-17 shipped three such bugs (alias copies
+  filling C:, every conversion refused under `伊豆沼`, Delete OLD_TIFFs refused).
 On the owner's machine `py` is a Python 3.13 without pytest -- use `python` for
 the suite and the battery.
 - **Two suites, different jobs.** `pytest tests` is the real one: it drives
