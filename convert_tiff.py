@@ -2364,12 +2364,30 @@ def _diagnose_status(is_real: bool, detail: str) -> str:
     return "error"
 
 
+def _display_path(path: Path, roots=None) -> str:
+    """A file as the progress line shows it: from the scan root's own folder down
+    (`2025/Shoot [FINAL]/_EXPORT/TIFF16/a.tif`), so same-named files in different
+    sessions can be told apart. A long path keeps its first two and last three parts."""
+    for r in roots or ():
+        try:
+            Path(path).relative_to(r)
+            rel = Path(path).relative_to(Path(r).parent)
+        except ValueError:
+            continue
+        parts = rel.parts
+        if len(parts) > 5 and len(str(rel)) > 110:
+            parts = parts[:2] + ("...",) + parts[-3:]
+        return os.sep.join(parts)
+    return str(path)
+
+
 def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path],
-                   compress_tmp: str, on_result=None) -> List[tuple]:
+                   compress_tmp: str, on_result=None, roots=None) -> List[tuple]:
     """Run _is_real_16bit over `tiff_files` with `workers` threads, printing one line
-    per file. Returns [(path, is_real, rmse, detail)] in completion order. `on_result`
-    is called with each result as it arrives (the Diagnose cache saves from it). On
-    Ctrl+C the files not started yet are cancelled instead of all being run first."""
+    per file (its path below `roots`, see _display_path). Returns
+    [(path, is_real, rmse, detail)] in completion order. `on_result` is called with
+    each result as it arrives (the Diagnose cache saves from it). On Ctrl+C the files
+    not started yet are cancelled instead of all being run first."""
     global _TIMEOUT_LOAD
 
     def process_one(tiff_path):
@@ -2394,11 +2412,12 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
             status = _diagnose_status(is_real, detail)
             shown = {"padded": "PADDED", "real": "real 16-bit"}.get(status, detail)
             progress = f"[{len(results)}/{total}]"
+            where = _display_path(tiff_path, roots)
             if RICH_AVAILABLE and console:
                 color = {"padded": "yellow", "real": "dim"}.get(status, "red")
-                console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(tiff_path.name)}")
+                console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(where)}")
             else:
-                print(f"  {progress} {shown} - {tiff_path.name}")
+                print(f"  {progress} {shown} - {where}")
             if on_result is not None:
                 on_result(results[-1])
     except BaseException:
@@ -2532,9 +2551,10 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
         else:
             print(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...")
         if DIAGNOSE_CACHE:
-            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp)
+            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
+                                         roots=[folder])
         else:
-            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp)
+            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=[folder])
     statuses = [_diagnose_status(r[1], r[3]) for r in results]
     padded_files = [r[0] for r, s in zip(results, statuses) if s == "padded"]
     padded_count = len(padded_files)
@@ -2652,7 +2672,7 @@ def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[tuple], List[Pat
 
 
 def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
-                      temp_dir: Optional[Path], compress_tmp: str) -> List[tuple]:
+                      temp_dir: Optional[Path], compress_tmp: str, roots=None) -> List[tuple]:
     """_diagnose_pool over `todo`, recording each verdict in `cache` and writing the
     cache every _CACHE_SAVE_EVERY results and once more at the end -- also when the
     run is interrupted -- so a stopped run keeps what it already checked."""
@@ -2671,7 +2691,8 @@ def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
                 pending[0] = 0
 
     try:
-        return _diagnose_pool(todo, workers, temp_dir, compress_tmp, on_result=record)
+        return _diagnose_pool(todo, workers, temp_dir, compress_tmp, on_result=record,
+                              roots=roots)
     finally:
         if pending[0]:
             _save_diagnose_cache(cache)
@@ -2733,9 +2754,10 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
         compress_tmp = d.get("compress_tmp") or "none"
         if DIAGNOSE_CACHE:
-            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp)
+            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
+                                         roots=roots)
         else:
-            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp)
+            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=roots)
 
     by_status = {"padded": [], "real": [], "other": [], "error": []}
     for f, is_real, rmse, detail in sorted(results, key=lambda r: str(r[0])):

@@ -465,3 +465,42 @@ class TestBracketAliasesAreReleased:
         status = ct._process_single_padded(src, staging)[2]
         assert status == "ok", status
         assert list(alias_dir.iterdir()) == []
+
+
+# --- progress line names the folder, not only the file -----------------------
+
+
+class TestDisplayPath:
+    def test_starts_at_the_root_folder(self, tmp_path):
+        root = tmp_path / "2025"
+        f = root / "Shoot [FINAL]" / "_EXPORT" / "TIFF16" / "DSC_0001.tif"
+        assert ct._display_path(f, [root]) == os.sep.join(
+            ["2025", "Shoot [FINAL]", "_EXPORT", "TIFF16", "DSC_0001.tif"])
+
+    def test_picks_the_root_the_file_is_under(self, tmp_path):
+        a, b = tmp_path / "2024", tmp_path / "2025"
+        f = b / "S" / "x.tif"
+        assert ct._display_path(f, [a, b]).startswith("2025" + os.sep)
+
+    def test_long_path_keeps_session_and_file(self, tmp_path):
+        root = tmp_path / "2025"
+        f = root / ("S" * 60) / "a" / ("b" * 40) / "_EXPORT" / "TIFF16" / "DSC_0001.tif"
+        shown = ct._display_path(f, [root])
+        assert shown.startswith("2025" + os.sep + "S" * 60)
+        assert shown.endswith(os.sep.join(["_EXPORT", "TIFF16", "DSC_0001.tif"]))
+        assert "..." in shown
+
+    def test_outside_every_root_shows_the_full_path(self, tmp_path):
+        f = tmp_path / "elsewhere" / "x.tif"
+        assert ct._display_path(f, [tmp_path / "2025"]) == str(f)
+
+
+@requires_magick
+def test_same_named_files_are_told_apart_on_screen(home, capsys):
+    a = _padded(home / "2025" / "S1 [FINAL]" / "_EXPORT" / "TIFF16" / "DSC_0001.tif")
+    b = _padded(home / "2025" / "S2 [FINAL]" / "_EXPORT" / "TIFF16" / "DSC_0001.tif")
+    settings = _settings(home / "2025", skip="")
+    assert ct._run_journal(_cfg(), _entry(settings), "Preset: padded", unattended=True) == 0
+    out = capsys.readouterr().out
+    for f in (a, b):
+        assert ct._display_path(f, [home / "2025"]) in out, f"no folder shown for {f}"

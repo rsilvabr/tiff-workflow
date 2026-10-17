@@ -19,6 +19,9 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
   Diagnose over 5000 TIFFs filled 434 GB of the system drive. Each file now gets one alias,
   deleted as soon as that file is done (Diagnose, the padded conversion, Delete OLD_TIFFs)
 - The one-time creation of the alias folder is properly locked (parallel workers made several)
+- Diagnose's progress line shows the file's path below the scan root
+  (`2025\Shoot [FINAL]\_EXPORT\TIFF16\DSC_0001.tif`), not only its name, so same-named files
+  in different sessions can be told apart
 
 ## v2.6.1
 
