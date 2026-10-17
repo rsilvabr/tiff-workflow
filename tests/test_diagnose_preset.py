@@ -553,3 +553,39 @@ def test_toolkit_version_matches_the_newest_changelog_section():
     import re
     newest = re.search(r"^## v(\S+)", text, re.M).group(1)
     assert ct.TOOLKIT_VERSION == newest, (ct.TOOLKIT_VERSION, newest)
+
+
+# --- no silent phases: discovery, the size read and the checks report progress --
+
+
+def test_fmt_duration():
+    assert [ct._fmt_duration(s) for s in (5, 125, 3600 + 5 * 60)] == ["5s", "2m", "1h05m"]
+
+
+def test_discovery_says_what_it_does(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    _touch(tmp_path / "2019" / "a" / "x.tif")
+    ct._diagnose_targets([tmp_path / "2019"])
+    out = capsys.readouterr().out
+    assert "Searching for TIFFs under" in out
+    assert "Found 1 TIFF(s)" in out
+
+
+def test_size_read_reports_its_batches(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(ct, "_run_captured",
+                        lambda *a, **k: SimpleNamespace(returncode=0, stdout="[]", stderr=""))
+    ct._max_image_pixels([tmp_path / f"{i}.tif" for i in range(900)])
+    out = capsys.readouterr().out
+    assert "Reading the image size of 900 file(s)" in out
+    assert "sizes read: 400/900" in out and "sizes read: 800/900" in out
+
+
+def test_checks_report_time_left(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real 16-bit"))
+    files = [tmp_path / f"{i}.tif" for i in range(60)]
+    ct._diagnose_pool(files, 1, None, "none")
+    out = capsys.readouterr().out
+    assert "25/60 checked in" in out and "50/60 checked in" in out
+    assert "left" in out

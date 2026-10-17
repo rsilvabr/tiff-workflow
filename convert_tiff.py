@@ -636,7 +636,15 @@ def _max_image_pixels(paths) -> int:
     _UNKNOWN_IMAGE_PIXELS -- an unknown size must never shrink the estimate."""
     paths = [str(p) for p in paths]
     best = 0
+    # On a hard disk each batch of 400 can take a minute: say what is happening and how
+    # far it got, instead of a silent screen before the first result line.
+    many = len(paths) > 400
+    t0 = time.time()
+    if many:
+        _say(f"Reading the image size of {len(paths)} file(s) for the memory estimate...", "dim")
     for off in range(0, len(paths), 400):
+        if many and off:
+            _say(f"  sizes read: {off}/{len(paths)} ({time.time() - t0:.0f}s)", "dim")
         chunk = paths[off:off + 400]
         seen = {}
         argfile = None
@@ -2342,10 +2350,21 @@ def _diagnose_targets(roots, scope: str = "", skip_names: str = "") -> List[Path
     patterns = [p.lower() for p in _split_semicolons(skip_names)]
     import fnmatch
     found = []
+    roots = list(roots)
+    # A photo library on a hard disk takes minutes to walk: report every few seconds.
+    _say(f"Searching for TIFFs under {'; '.join(str(r) for r in roots)} ...", "dim")
+    t0 = last = time.time()
+    folders = 0
     for root in roots:
         root = Path(root)
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames[:] = [d for d in dirnames if d.lower() not in skip_dirs]
+            folders += 1
+            now = time.time()
+            if now - last >= 5:
+                last = now
+                _say(f"  {folders} folder(s) scanned, {len(found)} TIFF(s) so far "
+                     f"({now - t0:.0f}s) -- {Path(dirpath).name}", "dim")
             parts = [p.lower() for p in Path(dirpath).parts]
             if want and not any(parts[i:i + len(want)] == want
                                 for i in range(len(parts) - len(want) + 1)):
@@ -2357,6 +2376,7 @@ def _diagnose_targets(roots, scope: str = "", skip_names: str = "") -> List[Path
                 if any(fnmatch.fnmatchcase(low, p) for p in patterns):
                     continue
                 found.append(Path(dirpath) / name)
+    _say(f"  Found {len(found)} TIFF(s) in {folders} folder(s) ({time.time() - t0:.0f}s)", "dim")
     return sorted(found)
 
 
@@ -2369,6 +2389,16 @@ def _diagnose_status(is_real: bool, detail: str) -> str:
     if "not 16-bit" in detail:
         return "other"
     return "error"
+
+
+def _fmt_duration(seconds: float) -> str:
+    """`45s`, `12m`, `2h05m`."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
 def _display_path(path: Path, roots=None) -> str:
@@ -2402,6 +2432,7 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
 
     results = []
     total = len(tiff_files)
+    t_start = time.time()
     _TIMEOUT_LOAD = workers
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
     try:
@@ -2427,6 +2458,11 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
                 print(f"  {progress} {shown} - {where}")
             if on_result is not None:
                 on_result(results[-1])
+            done = len(results)
+            if done % 25 == 0 and done < total:
+                spent = time.time() - t_start
+                _say(f"  {done}/{total} checked in {_fmt_duration(spent)} -- about "
+                     f"{_fmt_duration(spent / done * (total - done))} left", "cyan")
     except BaseException:
         executor.shutdown(wait=False, cancel_futures=True)
         raise
