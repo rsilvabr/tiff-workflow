@@ -18,8 +18,10 @@ gitignored). If one exists:
   multi-step workflows (it gates step 2 on step 1's exit code). Presets
   (menu 5, `--run-preset`, `--list-presets`) are named journal snapshots run
   by `_run_journal`, the same runner as Repeat last. A Diagnose journal
-  (kind `diagnose`, settings in `diagnose`, no commands) is REPORT ONLY:
-  `_run_diagnose_journal` must never reach `_compress_padded_files`.
+  (kind `diagnose`, settings in `diagnose`, no commands) is REPORT ONLY unless its
+  settings carry `convert_padded: true` (an explicit workflow-7 answer, default no);
+  then `_run_diagnose_journal` calls `_compress_padded_files`, whose pixel gate
+  (`_padded_pixels_status`) and OLD_PADDED backup are what make that safe unattended.
 - `compress_tiff_zip.ps1` -- TIFF -> ZIP/Deflate, modes 0-9, in-place backups
   in `OLD_TIFFs/`, thumbnails, `-ExcludeFolders`.
   compress and both copy_exif backends also take `-InputDirFile` (one folder per

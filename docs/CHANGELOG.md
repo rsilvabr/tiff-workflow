@@ -31,6 +31,10 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
   under a fixed 30 s limit: 782 MB film scans on a busy hard disk failed with
   "timed out after 30.0 seconds". The probes now read the header only and their limit grows
   with the file size and the number of workers
+- **A Diagnose preset can convert what it finds.** Workflow 7 asks whether a repeat or
+  preset should also convert the padded files (default no). Answered yes, it runs the
+  menu's conversion right after the check, unattended too -- pixel-verified, originals in
+  `OLD_PADDED/` -- and the report says how many were converted
 
 ## v2.6.2
 

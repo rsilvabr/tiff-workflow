@@ -125,14 +125,20 @@ Workflow 7 uses the same verdict cache as the preset (below): a file already che
 unchanged since is not checked again. Running the preset first and converting from the menu
 afterwards therefore only re-reads the padded files, for the conversion itself.
 
-**As a preset (report only).** Workflow 7 is journalled like the others, so it can be
-repeated (menu 2) or saved as a preset (menu 5) and run with `--run-preset`. A repeat or
-preset re-scans the saved folder(s) with the saved answers and **only reports**: it never
-offers or runs the 8-bit rewrite, attended or not. The report -- counts plus the full path
-of every padded file and of every file that could not be checked -- is printed and written
-to `Logs\convert_tiff\diagnose_<timestamp>.log` under the current folder. Exit code `0`
-ran, `1` a folder is gone, the run was cancelled or a file could not be checked.
-`--dry-run` only counts the files.
+**As a preset.** Workflow 7 is journalled like the others, so it can be repeated (menu 2)
+or saved as a preset (menu 5) and run with `--run-preset`. A repeat or preset re-scans the
+saved folder(s) with the saved answers. The report -- counts plus the full path of every
+padded file and of every file that could not be checked -- is printed and written to
+`Logs\convert_tiff\diagnose_<timestamp>.log` under the current folder. Exit code `0` ran,
+`1` a folder is gone, the run was cancelled or a file could not be checked. `--dry-run`
+only counts the files and never converts.
+
+Workflow 7 asks one more question for this: **"Repeat/preset: also convert the padded files
+it finds?"** (default no, label `[report only]`). Answered yes (label `[converts padded]`), the
+repeat or preset runs the same conversion as the menu right after the check, unattended
+too: every file pixel-verified, scanner files with real extra pages refused, the original
+moved to `OLD_PADDED/`. The report adds `Converted to 8-bit now: N of M`. A preset saved by
+an earlier version has no answer and only reports.
 
 Diagnose remembers each verdict (real 16-bit, padded, not 16-bit) with the file's size
 and modification time in `.convert_tiff_diagnose_cache.json` next to the config, so the

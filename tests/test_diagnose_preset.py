@@ -183,7 +183,7 @@ class TestJournal:
             _touch(p)
         monkeypatch.setattr(ct, "_memory_capped_pool_workers", lambda req, *a, **k: req)
         monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real 16-bit"))
-        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "1"])
+        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "1", "n"])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         cfg = _cfg()
 
@@ -194,7 +194,8 @@ class TestJournal:
         assert snap["commands"] is None
         assert snap["diagnose"] == {"roots": [str(tmp_path.resolve())],
                                     "scope": "_EXPORT/TIFF16", "skip_names": "*NXSTUDIO*",
-                                    "workers": 3, "temp_dir": None, "compress_tmp": "none"}
+                                    "workers": 3, "temp_dir": None, "compress_tmp": "none",
+                                    "convert_padded": False}
         assert "[report only]" in snap["label"]
         assert ct._journal_runnable(snap)
 
@@ -362,8 +363,9 @@ class TestCacheServesTheConversion:
 
         monkeypatch.setattr(ct, "_is_real_16bit",
                             lambda *a, **k: pytest.fail("the menu re-checked a cached file"))
-        # folder, scope, skip names, workers, temp dir, compress-temp choice, convert?
-        answers = iter([str(home), "_EXPORT/TIFF16", "*NXSTUDIO*", "2", "", "1", "y"])
+        # folder, scope, skip names, workers, temp dir, compress-temp choice,
+        # preset converts?, convert now?
+        answers = iter([str(home), "_EXPORT/TIFF16", "*NXSTUDIO*", "2", "", "1", "n", "y"])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         assert ct.run_diagnose_tiffs(_cfg()) is True
 
@@ -687,3 +689,45 @@ def test_every_identify_probe_pings():
     import re
     calls = re.findall(r'\["magick", "identify", ([^\]]*)', src)
     assert calls and all(c.startswith('"-ping"') for c in calls), calls
+
+
+# --- a preset may convert what it finds (opt-in) -------------------------------
+
+
+@requires_cli
+class TestPresetConverts:
+    def test_unattended_preset_converts_padded_and_keeps_the_rest(self, home):
+        t = _tree(home)
+        _padded(t["padded"])
+        _real16(t["real"])
+        real_before = _sha(t["real"])
+        settings = {**_settings(home), "convert_padded": True}
+        entry = _entry(settings)
+        assert "[converts padded]" in entry["label"]
+
+        assert ct._run_journal(_cfg(), entry, "Preset: padded", unattended=True) == 0
+
+        assert _depth(t["padded"]) == "8", "the padded file was not converted"
+        assert (t["padded"].parent / "OLD_PADDED" / t["padded"].name).exists()
+        assert _sha(t["real"]) == real_before, "a real 16-bit file was touched"
+        report = sorted((home / "Logs" / "convert_tiff").glob("diagnose_*.log"))[-1]
+        assert "Converted to 8-bit now: 1 of 1" in report.read_text(encoding="utf-8")
+
+    def test_dry_run_never_converts(self, home):
+        t = _tree(home)
+        _padded(t["padded"])
+        before = _sha(t["padded"])
+        entry = _entry({**_settings(home), "convert_padded": True})
+        assert ct._run_journal(_cfg(), entry, "Preset: padded", unattended=True,
+                               dry_run=True) == 0
+        assert _sha(t["padded"]) == before
+        assert not any(home.rglob("OLD_PADDED"))
+
+    def test_a_preset_saved_without_the_answer_only_reports(self, home):
+        t = _tree(home)
+        _padded(t["padded"])
+        before = _sha(t["padded"])
+        entry = _entry(_settings(home))          # older preset: no convert_padded key
+        assert "[report only]" in entry["label"]
+        assert ct._run_journal(_cfg(), entry, "Preset: padded", unattended=True) == 0
+        assert _sha(t["padded"]) == before

@@ -236,8 +236,9 @@ def test_diagnose_uses_a_memory_budget(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ct.concurrent.futures, "ThreadPoolExecutor", SpyPool)
 
-    # folder, scope ('-' = everywhere), skip names ('-' = none), workers, temp dir, compress
-    answers = iter([str(in_dir), "-", "-", "4", "", "1"])
+    # folder, scope ('-' = everywhere), skip names ('-' = none), workers, temp dir,
+    # compress, preset converts?
+    answers = iter([str(in_dir), "-", "-", "4", "", "1", "n"])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
 
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)

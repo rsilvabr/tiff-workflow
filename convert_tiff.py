@@ -2638,9 +2638,16 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
         compress_map = {"1": "none", "2": "lzw", "3": "zip"}
         compress_tmp = compress_map.get(resp, "none")
 
+    convert_q = ("Repeat/preset: also convert the padded files it finds? (pixel-verified, "
+                 "originals kept in OLD_PADDED)")
+    if RICH_AVAILABLE and console:
+        convert_padded = Confirm.ask(f"\n[cyan]{escape(convert_q)}[/cyan]", default=False)
+    else:
+        convert_padded = input(f"\n{convert_q} [y/N]: ").strip().lower() == "y"
+
     settings = {"roots": [str(folder.resolve())], "scope": scope, "skip_names": skip_names,
                 "workers": workers, "temp_dir": str(temp_dir) if temp_dir else None,
-                "compress_tmp": compress_tmp}
+                "compress_tmp": compress_tmp, "convert_padded": convert_padded}
     _save_last_run(cfg, "diagnose", _diagnose_label(settings), None, diagnose=settings)
 
     # Same cache as the Diagnose preset: a file already checked and unchanged since is not
@@ -2724,7 +2731,8 @@ def _diagnose_label(settings: Dict) -> str:
     label = f"Diagnose TIFFs -- {settings.get('scope') or 'all folders'}"
     if settings.get("skip_names"):
         label += f", skip {settings['skip_names']}"
-    return f"{label} -- {where} [report only]"
+    return f"{label} -- {where} " + ("[converts padded]" if settings.get("convert_padded")
+                                      else "[report only]")
 
 
 def _diagnose_cache_path() -> Path:
@@ -2812,8 +2820,9 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
                           dry_run: bool = False) -> int:
     """A Diagnose repeat/preset: re-scan the saved roots and REPORT the padded files.
 
-    Never converts anything, attended or not -- the 16 -> 8-bit rewrite stays an
-    explicit answer inside workflow 7. Files whose verdict is cached (DIAGNOSE_CACHE)
+    Converts them only when the preset was saved with `convert_padded` (asked in
+    workflow 7, default no): the same _compress_padded_files as the menu, which
+    verifies every file's pixels and keeps the original in OLD_PADDED/. Files whose verdict is cached (DIAGNOSE_CACHE)
     and whose size and modification time did not change are not checked again. The
     report goes to Logs/convert_tiff/diagnose_<timestamp>.log under the current
     folder. 0 = ran, 1 = a root is
@@ -2834,8 +2843,13 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
     _say(f"  saved {entry.get('time')}", "dim")
     _say(f"  {len(files)} TIFF(s): {len(todo)} to check, {len(cached)} unchanged since "
          f"they were last checked")
-    _say("Report only: padded files are listed, never converted (convert them from "
-         "workflow 7 in the menu).", "yellow")
+    convert = bool(d.get("convert_padded"))
+    if convert:
+        _say("Padded files found are converted to 8-bit ZIP after the check -- each one "
+             "pixel-verified, the original kept in OLD_PADDED\\.", "yellow")
+    else:
+        _say("Report only: padded files are listed, never converted (convert them from "
+             "workflow 7 in the menu).", "yellow")
     if dry_run:
         _say("--dry-run: nothing checked.", "yellow")
         return 0
@@ -2883,6 +2897,16 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
              f"Padded 8-bit: {len(by_status['padded'])}",
              f"Other bit depth: {len(by_status['other'])}",
              f"Errors: {len(by_status['error'])}"]
+    if convert and by_status["padded"]:
+        padded = [f for f, _ in by_status["padded"]]
+        _say(f"\nConverting {len(padded)} padded file(s) to 8-bit ZIP...", "cyan")
+        temp_dir = Path(d["temp_dir"]) if d.get("temp_dir") else None
+        done = _compress_padded_files(padded, temp_dir, clamp_workers(
+            d.get("workers") or cfg.config.default_workers, cfg.config.default_workers), cfg)
+        n = (done or {}).get("converted", 0) if isinstance(done, dict) else 0
+        lines.insert(lines.index(f"Errors: {len(by_status['error'])}") + 1,
+                     f"Converted to 8-bit now: {n} of {len(padded)} (originals in OLD_PADDED\\; "
+                     f"the rest were kept -- see the lines above)")
     if by_status["padded"]:
         lines += ["", "Padded 8-bit (16-bit files holding 8-bit data):"]
         lines += [f"  {f}" for f, _ in by_status["padded"]]
@@ -3274,9 +3298,11 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     Compress padded 8-bit TIFFs to 8-bit ZIP.
     Converts 16-bit to 8-bit then ZIP compresses. Preserves EXIF via exiftool.
     Originals are backed up to an OLD_PADDED/ subfolder before being replaced.
-    Uses parallel processing with ThreadPoolExecutor.
+    Uses parallel processing with ThreadPoolExecutor. Returns {"converted": n} -- the
+    files actually replaced (a non-empty dict, so `if _compress_padded_files(...)` holds).
     """
     global _TIMEOUT_LOAD
+    converted = 0
     if temp_dir is None:
         temp_dir = Path(tempfile.gettempdir())
     # Run-scoped staging dir. A shared "compress_staging" meant the cleanup below wiped
@@ -3422,6 +3448,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                         print(f"    FAILED: could not move the converted file into place ({e}){restored}")
                     tmp8.unlink(missing_ok=True)
                     continue
+                converted += 1
                 if RICH_AVAILABLE and console:
                     console.print(f"    [dim]Original backed up: OLD_PADDED/{escape(backup_path.name)}[/dim]")
                 else:
@@ -3436,7 +3463,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     # Safe to wipe wholesale: the directory belongs to this run only.
     shutil.rmtree(staging, ignore_errors=True)
 
-    return True
+    return {"converted": converted}
 
 
 def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
