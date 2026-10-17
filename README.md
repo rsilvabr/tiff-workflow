@@ -332,7 +332,7 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ## Changelog
 
-**Latest release: v2.6.2** — files in folders with `[ ]` in the name no longer leave full temporary copies in `%TEMP%` during Diagnose, the padded conversion and Delete OLD_TIFFs. v2.6.1: Diagnose keeps its progress when stopped and the menu reuses it; the padded 8-bit conversion checks every file pixel by pixel. v2.6 made Diagnose TIFFs a preset (report only) with a folder-path scope and file-name skips.
+**Latest release: v2.7** — the padded 16 -> 8-bit conversion records itself in the photo's `xmpMM:History`. v2.6.2: files in folders with `[ ]` in the name no longer leave full temporary copies in `%TEMP%`; the Diagnose progress line shows the folder. v2.6 made Diagnose TIFFs a preset (report only) with a folder-path scope and file-name skips.
 
 - Full release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 - Per-bug technical detail: [`docs/bugs_fixed.md`](docs/bugs_fixed.md)

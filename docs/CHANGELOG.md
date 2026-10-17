@@ -10,6 +10,16 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.7
+
+- **The padded 16 -> 8-bit conversion records itself in the photo.** It appends one entry
+  to `xmpMM:History`, in the format jxl-photo uses: `Action=converted`, `When`,
+  `SoftwareAgent=tiff-workflow <version> (<link>)` and
+  `Parameters=convert_tiff: 16-bit padded -> 8-bit ZIP (pixel-identical)`. Earlier entries
+  (Capture One, ...) are kept, and the entry travels on into a jxl-photo master made from the
+  file. If the entry cannot be written, the original is kept, as for a failed EXIF copy.
+  Read it with `exiftool -struct -XMP-xmpMM:History file.tif`
+
 ## v2.6.2
 
 - **Temporary copies no longer pile up in `%TEMP%`.** ImageMagick cannot open a path with
