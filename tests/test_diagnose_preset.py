@@ -504,3 +504,52 @@ def test_same_named_files_are_told_apart_on_screen(home, capsys):
     out = capsys.readouterr().out
     for f in (a, b):
         assert ct._display_path(f, [home / "2025"]) in out, f"no folder shown for {f}"
+
+
+# --- v2.7: the padded conversion records itself in xmpMM:History --------------
+
+
+def _history(path: Path) -> list:
+    r = subprocess.run(["exiftool", "-j", "-struct", "-XMP-xmpMM:History", str(path)],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120)
+    hist = json.loads(r.stdout)[0].get("History") or []
+    return hist if isinstance(hist, list) else [hist]
+
+
+@requires_cli
+class TestPaddedHistory:
+    def test_one_entry_appended_earlier_ones_kept(self, tmp_path):
+        src = _padded(tmp_path / "photo.tif")
+        subprocess.run(["exiftool", "-q", "-overwrite_original",
+                        "-XMP-xmpMM:History+={Action=saved,When=2025-01-18T10:00:00+09:00,"
+                        "SoftwareAgent=Capture One 16.5}", "-EXIF:Artist=Owner", str(src)],
+                       capture_output=True, check=True, timeout=120)
+        assert len(_history(src)) == 1
+
+        ct._compress_padded_files([src], tmp_path / "staging", workers=1, cfg=_cfg())
+
+        assert _depth(src) == "8", "not converted"
+        hist = _history(src)
+        assert len(hist) == 2, f"History must gain exactly ONE entry (jxl-photo #531): {hist}"
+        assert hist[0]["SoftwareAgent"] == "Capture One 16.5"
+        new = hist[1]
+        assert new["Action"] == "converted"
+        assert new["SoftwareAgent"] == (f"{ct.TOOLKIT_NAME} {ct.TOOLKIT_VERSION} "
+                                        f"({ct.TOOLKIT_URL})")
+        assert "16-bit padded -> 8-bit" in new["Parameters"]
+        assert new.get("When")
+
+    def test_a_history_failure_keeps_the_original(self, tmp_path, monkeypatch):
+        src = _padded(tmp_path / "photo.tif")
+        before = _sha(src)
+        monkeypatch.setattr(ct, "_append_padded_history", lambda p: False)
+        ct._compress_padded_files([src], tmp_path / "staging", workers=1, cfg=_cfg())
+        assert _sha(src) == before
+        assert not (tmp_path / "OLD_PADDED").exists()
+
+
+def test_toolkit_version_matches_the_newest_changelog_section():
+    text = (REPO / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+    import re
+    newest = re.search(r"^## v(\S+)", text, re.M).group(1)
+    assert ct.TOOLKIT_VERSION == newest, (ct.TOOLKIT_VERSION, newest)

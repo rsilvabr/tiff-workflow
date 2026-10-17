@@ -16,6 +16,13 @@ Supports AutoFind for S3/S5 Pro folders, persistent config,
 and streaming output from PowerShell backends.
 """
 
+# Written into xmpMM:History by the padded 16 -> 8-bit conversion. Not a setting: it is
+# the release this file belongs to (tests/test_diagnose_preset.py pins it to the newest
+# docs/CHANGELOG.md section).
+TOOLKIT_NAME = "tiff-workflow"
+TOOLKIT_VERSION = "2.7"
+TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
+
 DEBUG_TIMING = False  # Set True to benchmark compression modes
 
 WORKER_MEMORY_FRACTION = 0.8
@@ -2939,6 +2946,32 @@ def _exiftool_copy_failed(stderr: str) -> bool:
     return False
 
 
+def _padded_history_arg() -> str:
+    """The exiftool assignment that appends this conversion to xmpMM:History, in the
+    format jxl-photo writes: Action, When, SoftwareAgent (tool, version, link),
+    Parameters. Earlier entries (Capture One, ...) are kept. Values are kept free of
+    the struct syntax characters (, { } [ ] |) instead of escaping them."""
+    from datetime import datetime
+    when = datetime.now().astimezone().isoformat(timespec="seconds")
+    agent = f"{TOOLKIT_NAME} {TOOLKIT_VERSION} ({TOOLKIT_URL})"
+    params = "convert_tiff: 16-bit padded -> 8-bit ZIP (pixel-identical)"
+    return ("-XMP-xmpMM:History+={Action=converted,When=" + when
+            + ",SoftwareAgent=" + agent + ",Parameters=" + params + "}")
+
+
+def _append_padded_history(path: Path) -> bool:
+    """Append the conversion's History entry to `path` (the staged 8-bit file). A
+    SEPARATE exiftool call on purpose: in the same call as `-tagsfromfile -all:all`, a
+    `+=` makes exiftool ADD the copied History to the one magick carried over, doubling
+    every earlier entry (jxl-photo #531). False when it could not be written."""
+    try:
+        r = _run_captured(["exiftool", "-q", "-overwrite_original", _padded_history_arg(),
+                           str(path)], _work_timeout(30, path), text=True)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0 and not _exiftool_copy_failed(r.stderr)
+
+
 @_scoped_magick_aliases
 def _padded_pixels_status(orig: Path, new8: Path) -> Optional[str]:
     """None when page [0] of the 8-bit rewrite is pixel-identical to the original's;
@@ -3026,6 +3059,12 @@ def _process_single_padded(tiff_path, staging):
         finally:
             if tag_temp:
                 Path(tag_temp).unlink(missing_ok=True)
+
+        # The only record that this file held 16-bit samples before. Not written means
+        # the metadata is not what was planned: the file is treated like a failed EXIF
+        # copy (original preserved).
+        if exif_ok:
+            exif_ok = _append_padded_history(tmp8)
 
         # magick drops the per-page SubfileType markers on rewrite, so a Capture One
         # thumbnail came back stamped PAGE and stopped being recognised as a thumbnail by
@@ -3232,9 +3271,9 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
             if not exif_ok:
                 # Do NOT overwrite original if EXIF was lost
                 if RICH_AVAILABLE and console:
-                    console.print(f"    [red]FAILED: EXIF copy failed — original preserved[/red]")
+                    console.print(f"    [red]FAILED: EXIF copy or History entry failed — original preserved[/red]")
                 else:
-                    print(f"    FAILED: EXIF copy failed — original preserved")
+                    print(f"    FAILED: EXIF copy or History entry failed — original preserved")
                 tmp8.unlink(missing_ok=True)
                 continue
 

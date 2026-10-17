@@ -113,6 +113,11 @@ When padded files are found, the workflow offers to rewrite them as 8-bit ZIP (o
 backed up to `OLD_PADDED/`). Before replacing a file, the rewrite is compared with the
 original pixel by pixel (`magick compare -metric AE`, page 0) and kept only when they are
 identical; a file that holds real 16-bit data is skipped with a message, never rounded down.
+Each converted file gets one new `xmpMM:History` entry (`Action=converted`,
+`SoftwareAgent=tiff-workflow <version> (<link>)`,
+`Parameters=convert_tiff: 16-bit padded -> 8-bit ZIP (pixel-identical)`), after the entries it
+already had; if it cannot be written, the original is kept. See it with
+`exiftool -struct -XMP-xmpMM:History file.tif`.
 Think twice inside an export tree that another tool reads (jxl-photo encodes
 `_EXPORT\TIFF16`): the backup folder sits next to the files -- exclude `OLD_PADDED` there.
 
