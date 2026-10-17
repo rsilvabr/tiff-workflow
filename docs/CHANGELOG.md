@@ -35,6 +35,15 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
   preset should also convert the padded files (default no). Answered yes, it runs the
   menu's conversion right after the check, unattended too -- pixel-verified, originals in
   `OLD_PADDED/` -- and the report says how many were converted
+- **Folder names in Japanese (or any non-ANSI script) work in the wizard's own steps.**
+  exiftool reads its command line in the ANSI code page, so under `伊豆沼_夏` every metadata
+  step failed: the padded conversion refused every file (`subfile_restore_failed`) and
+  Delete OLD_TIFFs refused every purge. All its exiftool calls now pass their arguments in a
+  UTF-8 argfile, as the PowerShell backends always did
+- **The padded conversion finishes each file as soon as it is ready** -- printed, backed up,
+  moved into place, with `N/total done -- about X left` every 25 files -- instead of
+  converting the whole batch first and replacing everything at the end; it also budgets
+  memory per file like Diagnose
 
 ## v2.6.2
 

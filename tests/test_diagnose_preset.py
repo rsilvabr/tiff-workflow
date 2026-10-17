@@ -731,3 +731,78 @@ class TestPresetConverts:
         assert "[report only]" in entry["label"]
         assert ct._run_journal(_cfg(), entry, "Preset: padded", unattended=True) == 0
         assert _sha(t["padded"]) == before
+
+
+# --- the conversion finishes each file as soon as it is ready -----------------
+
+
+def test_conversion_replaces_each_file_as_it_finishes(tmp_path, monkeypatch, capsys):
+    """v2.7 converted all files first and replaced/printed them only at the end: an
+    hour of blank screen on 472 scans, and every staged file kept until then."""
+    import time as _t
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(ct, "_memory_budget", lambda *a, **k: (None, {}))
+    srcs = [tmp_path / "Shoot" / f"p{i}.tif" for i in range(3)]
+    for s in srcs:
+        _touch(s, b"x" * 2000)
+    first_backup = srcs[0].parent / "OLD_PADDED" / srcs[0].name
+    seen_backup_before_next = []
+
+    def fake_single(tiff_path, staging):
+        if tiff_path != srcs[0]:
+            deadline = _t.time() + 5
+            while not first_backup.exists() and _t.time() < deadline:
+                _t.sleep(0.05)
+            seen_backup_before_next.append(first_backup.exists())
+        tmp8 = staging / f"tmp8_{tiff_path.name}"
+        tmp8.write_bytes(b"z" * 100)
+        return (tiff_path.name, tiff_path.parent, "ok", 2000, 100, 95.0, True, None, tmp8)
+    monkeypatch.setattr(ct, "_process_single_padded", fake_single)
+
+    done = ct._compress_padded_files(srcs, tmp_path / "staging", workers=1, cfg=_cfg())
+
+    assert done == {"converted": 3}
+    assert seen_backup_before_next and all(seen_backup_before_next), \
+        "a file was only replaced after the whole batch had been converted"
+    out = capsys.readouterr().out
+    assert f"Shoot{os.sep}p0.tif" in out, "the line must name the folder"
+
+
+# --- exiftool sees non-ASCII paths (argfile, -charset filename=utf8) ----------
+
+
+@requires_cli
+class TestNonAsciiPaths:
+    """exiftool reads its command line in the ANSI code page: under a Japanese folder
+    every metadata step failed and the padded conversion refused every file
+    (`subfile_restore_failed`) -- the owner's 472 Noritsu scans sit in such folders."""
+
+    def test_padded_file_under_a_japanese_folder_is_converted(self, tmp_path):
+        src = _padded(tmp_path / "190815_Filmbbb_伊豆沼_夏" / "NORITSU" / "0014_14.tif")
+        subprocess.run(["exiftool", "-q", "-overwrite_original", "-EXIF:Artist=Owner",
+                        src.name], cwd=str(src.parent), capture_output=True, check=True,
+                       timeout=120)
+        done = ct._compress_padded_files([src], tmp_path / "staging", workers=1, cfg=_cfg())
+        assert done == {"converted": 1}, "the file under a Japanese folder was refused"
+        assert _depth(src) == "8"
+        r = subprocess.run(["exiftool", "-s3", "-EXIF:Artist", src.name], cwd=str(src.parent),
+                           capture_output=True, text=True, timeout=120)
+        assert r.stdout.strip() == "Owner", "EXIF was not carried over"
+        assert len(_history_rel(src)) == 1
+
+    def test_metadata_compare_reads_a_japanese_path(self, tmp_path):
+        a = _padded(tmp_path / "松本城" / "a.tif")
+        b = tmp_path / "松本城" / "b.tif"
+        shutil.copy2(a, b)
+        match, detail = ct._compare_tiff_metadata(a, b)
+        assert match is True, detail
+
+
+def _history_rel(path: Path) -> list:
+    """xmpMM:History read with a relative name (cwd), so the test's own exiftool call does
+    not hit the very ANSI-command-line problem under test."""
+    r = subprocess.run(["exiftool", "-j", "-struct", "-XMP-xmpMM:History", path.name],
+                       cwd=str(path.parent), capture_output=True, text=True,
+                       encoding="utf-8", timeout=120)
+    hist = json.loads(r.stdout)[0].get("History") or []
+    return hist if isinstance(hist, list) else [hist]

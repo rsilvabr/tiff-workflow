@@ -1942,7 +1942,7 @@ class TestPythonSubfileRestoreMatchesPowerShell:
         assert '"%[tiff:subfiletype]' not in body, (
             "the restore is reading the property that cannot tell 'absent' from 0 again"
         )
-        assert '"exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType"' in body
+        assert '_run_exiftool(' in body and '["-a", "-G1", "-s", "-s", "-n", "-SubfileType"' in body
 
 
 class TestCopyExifProbesTheMainImage:
@@ -3078,6 +3078,10 @@ class TestAuditRound16PurgeMetadataGate:
     def _fake_run(subfile_by_name):
         def fake_run(cmd, **kwargs):
             cmd = [str(a) for a in cmd]
+            if cmd[0] == "exiftool" and "-@" in cmd:
+                # _run_exiftool passes everything in a UTF-8 argfile; read it back
+                lines = Path(cmd[cmd.index("-@") + 1]).read_text(encoding="utf-8").splitlines()
+                cmd = ["exiftool"] + [a for a in lines if a not in ("-charset", "filename=utf8")]
             if cmd[0] == "exiftool":
                 name = cmd[-1]
                 if "-SubfileType" in cmd:

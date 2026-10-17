@@ -532,6 +532,27 @@ def _run_captured(cmd, timeout, text=False, input=None):
     return _CompletedProcess(cmd, r.returncode, o, e)
 
 
+def _run_exiftool(args, timeout, text=False):
+    """exiftool with its arguments in a UTF-8 argfile (`-charset filename=utf8`).
+
+    On Windows exiftool reads its command line in the ANSI code page, so a path with
+    characters outside it -- `G:\\2019\\190815_Film_伊豆沼_夏\\...` -- arrived mangled
+    and could not be opened. Every write gate then failed closed: the padded conversion
+    refused every file under a Japanese folder name (`subfile_restore_failed`). An
+    argfile is read as UTF-8 and passes any name through; it is how _image_pixels has
+    always called exiftool."""
+    fd, argfile = tempfile.mkstemp(suffix=".args")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write("\n".join(["-charset", "filename=utf8"] + [str(a) for a in args]) + "\n")
+        return _run_captured(["exiftool", "-@", argfile], timeout, text=text)
+    finally:
+        try:
+            os.unlink(argfile)
+        except OSError:
+            pass
+
+
 # Memory helpers copied from jxl-photo's jxl_recompressor.py (v2.9.0); keep in step.
 
 def _windows_memory_status():
@@ -903,7 +924,7 @@ def _safe_tag_source(path: Path):
         # `-o` is format-expanded too, so a '%' anywhere in the temp dir breaks the container.
         return None, None
     try:
-        r = _run_captured(["exiftool", "-q", "-q", "-all:all", "-o", tmp, str(path)],
+        r = _run_exiftool(["-q", "-q", "-all:all", "-o", tmp, str(path)],
                           _work_timeout(60, path))
         if r.returncode != 0 or not Path(tmp).exists():
             Path(tmp).unlink(missing_ok=True)
@@ -2037,8 +2058,8 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
     """
     try:
         timeout = _work_timeout(30, path)
-        r = _run_captured(
-            ["exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(path)],
+        r = _run_exiftool(
+            ["-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(path)],
             timeout, text=True,
         )
         if r.returncode != 0:
@@ -2049,8 +2070,8 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
             if m:
                 subfile[int(m.group(1))] = int(m.group(2))
 
-        r = _run_captured(
-            ["exiftool", "-a", "-G1", "-s", "-EXIF:all", str(path)],
+        r = _run_exiftool(
+            ["-a", "-G1", "-s", "-EXIF:all", str(path)],
             timeout, text=True,
         )
         if r.returncode != 0:
@@ -2067,8 +2088,8 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
             else:
                 exif_other.add(m.group(1))
 
-        r = _run_captured(
-            ["exiftool", "-q", "-q", "-b", "-ICC_Profile", str(path)],
+        r = _run_exiftool(
+            ["-q", "-q", "-b", "-ICC_Profile", str(path)],
             timeout,
         )
         if r.returncode != 0:
@@ -3012,8 +3033,8 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     The PowerShell twin was fixed for exactly this; the mirror had been left behind.
     """
     try:
-        r = _run_captured(
-            ["exiftool", "-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(src_path)],
+        r = _run_exiftool(
+            ["-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(src_path)],
             30, text=True,
         )
         if r.returncode != 0:
@@ -3045,8 +3066,8 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     if not tags:
         return True
     try:
-        r = _run_captured(
-            ["exiftool", "-q", "-q", "-overwrite_original"] + tags + [str(dst_path)],
+        r = _run_exiftool(
+            ["-q", "-q", "-overwrite_original"] + tags + [str(dst_path)],
             30,
         )
         return r.returncode == 0
@@ -3092,7 +3113,7 @@ def _append_padded_history(path: Path) -> bool:
     `+=` makes exiftool ADD the copied History to the one magick carried over, doubling
     every earlier entry (jxl-photo #531). False when it could not be written."""
     try:
-        r = _run_captured(["exiftool", "-q", "-overwrite_original", _padded_history_arg(),
+        r = _run_exiftool(["-q", "-overwrite_original", _padded_history_arg(),
                            str(path)], _work_timeout(30, path), text=True)
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -3169,8 +3190,8 @@ def _process_single_padded(tiff_path, staging):
             if tag_source is None:
                 exif_ok = False
             else:
-                exif_result = _run_captured(
-                    ["exiftool", "-q", "-overwrite_original",
+                exif_result = _run_exiftool(
+                    ["-q", "-overwrite_original",
                      "-tagsfromfile", tag_source, "-all:all", "-unsafe",
                      "--Compression", "--BitsPerSample", "--SampleFormat",
                      str(tmp8)],
@@ -3312,37 +3333,38 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     staging = temp_dir / f"compress_staging_{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=True)
 
+    # Same per-file memory budget as Diagnose: the workers asked for run, and a huge scan
+    # waits for room instead of sizing every worker for itself.
+    budget, pixels = _memory_budget(padded_files, _COMPARE_BYTES_PER_PIXEL, "8-bit conversion")
+
     def _process_one(tiff_path):
-        return _process_single_padded(tiff_path, staging)
+        if budget is None:
+            return _process_single_padded(tiff_path, staging)
+        need = pixels.get(os.path.normcase(os.path.abspath(tiff_path)),
+                          _UNKNOWN_IMAGE_PIXELS) * _COMPARE_BYTES_PER_PIXEL
+        held = budget.acquire(need)
+        try:
+            return _process_single_padded(tiff_path, staging)
+        finally:
+            budget.release(held)
 
-    workers = _memory_capped_pool_workers(workers, padded_files, _COMPARE_BYTES_PER_PIXEL, "8-bit conversion")
+    total = len(padded_files)
+    t_start = time.time()
 
-    results = []
-    _TIMEOUT_LOAD = workers
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(_process_one, f): i for i, f in enumerate(padded_files)}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    results.append((futures[future], future.result()))
-                except Exception as e:
-                    f = padded_files[futures[future]]
-                    # audit round 16: the last slot is the staging path the result loop may
-                    # unlink; putting the SOURCE path there risked deleting the original.
-                    results.append((futures[future], (f.name, f.parent, "error", None, None, None, False, str(e), None)))
-    finally:
-        _TIMEOUT_LOAD = 1
-
-    results.sort(key=lambda x: x[0])
-
-    for i, (idx, result) in enumerate(results):
+    # Each file is finished -- printed, backed up, moved into place -- AS SOON AS its
+    # conversion is done. The pool used to convert every file first and only then print
+    # and replace them all: an hour of blank screen on a large batch, and every staged
+    # file held on the staging disk until the end.
+    def _finalize(i, result):
+        nonlocal converted
         name, parent, status, size_orig, size_zip, ratio, exif_ok, error_msg, tmp8 = result
         final_dst = parent / name
 
+        where = f"{parent.name}{os.sep}{name}"
         if RICH_AVAILABLE and console:
-            console.print(f"  [{i+1}/{len(padded_files)}] {escape(name)}")
+            console.print(f"  [{i+1}/{len(padded_files)}] {escape(where)}")
         else:
-            print(f"  [{i+1}/{len(padded_files)}] {name}")
+            print(f"  [{i+1}/{len(padded_files)}] {where}")
 
         if status == "magick_not_found":
             if RICH_AVAILABLE and console:
@@ -3404,7 +3426,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 else:
                     print(f"    FAILED: EXIF copy or History entry failed — original preserved")
                 tmp8.unlink(missing_ok=True)
-                continue
+                return
 
             if RICH_AVAILABLE and console:
                 console.print(f"    [green]OK[/green] {_format_size(size_orig)} -> {_format_size(size_zip)} ({ratio:.1f}% smaller, EXIF preserved)")
@@ -3429,7 +3451,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                     else:
                         print(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved")
                     tmp8.unlink(missing_ok=True)
-                    continue
+                    return
                 # Bare, this move took the whole workflow down with a traceback: the files
                 # after it were never processed and no summary was printed, while the original
                 # sat in OLD_PADDED/ looking like it had been replaced. Put the backup back and
@@ -3447,7 +3469,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                     else:
                         print(f"    FAILED: could not move the converted file into place ({e}){restored}")
                     tmp8.unlink(missing_ok=True)
-                    continue
+                    return
                 converted += 1
                 if RICH_AVAILABLE and console:
                     console.print(f"    [dim]Original backed up: OLD_PADDED/{escape(backup_path.name)}[/dim]")
@@ -3459,6 +3481,32 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 else:
                     print(f"    SKIPPED (ZIP larger than original)")
                 tmp8.unlink(missing_ok=True)
+
+
+    _TIMEOUT_LOAD = workers
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = {executor.submit(_process_one, f): i for i, f in enumerate(padded_files)}
+        for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
+            try:
+                result = future.result()
+            except Exception as e:
+                f = padded_files[futures[future]]
+                # audit round 16: the last slot is the staging path the result loop may
+                # unlink; putting the SOURCE path there risked deleting the original.
+                result = (f.name, f.parent, "error", None, None, None, False, str(e), None)
+            _finalize(done - 1, result)
+            if done % 25 == 0 and done < total:
+                spent = time.time() - t_start
+                _say(f"  {done}/{total} done in {_fmt_duration(spent)} -- about "
+                     f"{_fmt_duration(spent / done * (total - done))} left", "cyan")
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    finally:
+        _TIMEOUT_LOAD = 1
 
     # Safe to wipe wholesale: the directory belongs to this run only.
     shutil.rmtree(staging, ignore_errors=True)
