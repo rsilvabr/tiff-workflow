@@ -19,6 +19,17 @@ param(
     [double]$WorkerMemoryFraction = 0.8,  # Accepted for interface parity; this script is sequential and ignores it
     [string]$InputDirFile = ""       # UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)
 )
+
+# Console output as UTF-8 when it goes to a pipe (the wizard reads it). Without this the
+# OEM code page turned every Japanese folder name into '?' on screen -- the log file,
+# written as UTF-8, was always right. Only when redirected: an interactive console
+# keeps its own code page.
+if ([Console]::IsOutputRedirected) { try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { } }
+# PS 5.1 cannot enter a start-up folder whose name has "[ ]" (wildcards to it) and
+# silently starts in $PSHOME (System32) instead: the log, a relative -InputDir or
+# -OutputDir all pointed there. Re-enter the process's real folder, literally.
+$startDir = [System.IO.Directory]::GetCurrentDirectory()
+if ($PWD.ProviderPath -ne $startDir) { try { Set-Location -LiteralPath $startDir } catch { } }
 # ------------------------------------------------------------------
 
 
@@ -47,9 +58,11 @@ foreach ($entry in ($ExcludeFolders -split ';')) {
 
 # -- Logging -----------------------------------------------------------
 $scriptName = "Copy-S5Pro-Exif"
-$logDir     = Join-Path $PWD.Path "Logs\$scriptName"
+# [System.IO.Path], not Join-Path: PS 5.1 reads "[ ]" in the current folder as a
+# wildcard and the script died here, before Write-Log existed.
+$logDir     = [System.IO.Path]::Combine($PWD.ProviderPath, "Logs", $scriptName)
 [System.IO.Directory]::CreateDirectory($logDir) | Out-Null
-$logFile    = Join-Path $logDir "$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+$logFile    = [System.IO.Path]::Combine($logDir, "$(Get-Date -Format 'yyyyMMdd_HHmmss').log")
 
 function Write-Log {
     param([string]$msg, [string]$level = "INFO")

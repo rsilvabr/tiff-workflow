@@ -44,6 +44,12 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
   moved into place, with `N/total done -- about X left` every 25 files -- instead of
   converting the whole batch first and replacing everything at the end; it also budgets
   memory per file like Diagnose
+- **Japanese folder names show correctly on screen.** The backends' output reached the
+  wizard in the console's OEM code page, so `谷津バラ園` printed as `?????` (the log file was
+  always right). Each backend writes UTF-8 when its output is redirected
+- **PowerShell 5.1 started from a folder with `[ ]` in its name** silently began in
+  `System32` and died before its first log line; every backend now re-enters the real
+  start folder, and builds its log path with `[System.IO.Path]` instead of `Join-Path`
 
 ## v2.6.2
 
