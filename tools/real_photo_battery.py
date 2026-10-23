@@ -711,6 +711,25 @@ def c14(fixtures):
               make_t == make_s and model_t == model_s and make_t != "",
               ascii((make_t, make_s, model_t, model_s)))
 
+    # Round 23: -SkipIfTiffHasExif on FRESH exports must still write them -- it used to
+    # count the IFD0 tags every TIFF has as EXIF and skip every file (the second run
+    # above passes either way).
+    fj3 = SHELL_DIR / "fj3"
+    for s in sessions:
+        shutil.copytree(s, fj3 / s.name)
+    rc, _ = run("c14_run4", backend, ["-InputDir", ";".join(str(fj3 / s.name) for s in sessions),
+                                      "-SkipIfTiffHasExif", "-Workers", "2"])
+    check("C14: fresh exports with -SkipIfTiffHasExif: rc == 0", rc == 0, f"rc={rc}")
+    for tif in sorted(p for p in fj3.rglob("*")
+                      if p.is_file() and p.suffix.lower() in (".tif", ".tiff")):
+        rel = tif.relative_to(fj3)
+        pair = find_pair(tif)
+        if pair is None:
+            continue
+        a, b = exif_tag(tif, "-EXIF:DateTimeOriginal"), exif_tag(pair, "-EXIF:DateTimeOriginal")
+        check(f"C14: {rel} (fresh, -SkipIfTiffHasExif): EXIF written, not skipped",
+              a == b and a != "", ascii((a, b)))
+
 
 def run_checks_for_shell(shell, fixtures, A1, A2, raw_scan, tiff_scan):
     global CURRENT_SHELL, SHELL_DIR, LOGS

@@ -10,6 +10,16 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.7.1
+
+- **Copy EXIF: `-SkipIfTiffHasExif` works.** It checked for any EXIF tag, and in exiftool
+  that includes the basic tags every TIFF has (size, resolution), so it skipped every TIFF --
+  including the Hyper Utility exports it is meant for (451 of 451 on a real S5 Pro folder).
+  It now looks for camera EXIF only (the Exif IFD: exposure, aperture, dates). The wizard
+  never passes it, so wizard runs and presets were not affected (round 23)
+- The Copy EXIF reference says where its log goes (`Logs\Copy-S5Pro-Exif\` under the folder
+  the run starts from)
+
 ## v2.7
 
 - **The padded 16 -> 8-bit conversion records itself in the photo.** It appends one entry

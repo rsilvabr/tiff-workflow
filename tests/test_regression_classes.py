@@ -3152,5 +3152,54 @@ class TestAuditRound16PurgeMetadataGate:
         assert "metadata unreadable" in detail, detail
 
 
+def _read_tags_utf8(path, *tags):
+    """exiftool -s3 through a UTF-8 argfile: the fixture folder is Japanese."""
+    argfile = Path(path).parent.parent / f"_tags_{os.getpid()}.args"
+    argfile.write_text("\n".join(["-charset", "filename=utf8", "-s", "-s", "-s", "-f"]
+                                 + [f"-{t}" for t in tags] + [str(path)]) + "\n",
+                       encoding="utf-8")
+    try:
+        out = subprocess.run(["exiftool", "-@", str(argfile)], capture_output=True,
+                             timeout=120).stdout.decode("utf-8", "replace")
+    finally:
+        argfile.unlink()
+    return [line.strip() for line in out.splitlines()]
+
+
+@requires_shell
+@requires_tools
+@pytest.mark.parametrize("shell", SHELLS)
+class TestCopyExifSkipIfTiffHasExif:
+    """Round 23: -SkipIfTiffHasExif probed `-EXIF:all`, which in exiftool includes IFD0 --
+    the size, resolution and orientation every TIFF has -- so it skipped EVERY TIFF, the
+    Hyper Utility exports it exists for included (451 of 451 on a real S5 Pro folder). Only
+    camera EXIF (the Exif IFD: exposure, aperture, dates) counts as "already has EXIF"."""
+
+    def test_skips_only_a_tiff_with_camera_exif(self, tmp_path, shell):
+        script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+        # Built under a plain name and renamed: magick globs '[ ]' and expands '%'.
+        safe = tmp_path / "work"
+        safe.mkdir()
+        bare = safe / "_DSF0311.tif"            # a Hyper Utility export: IFD0 only
+        subprocess.run(["magick", "-size", "64x48", "gradient:", "-depth", "8", str(bare)],
+                       capture_output=True, check=True, timeout=120)
+        done = make_tiff(safe / "_DSF0312.tif")  # already carries camera EXIF
+        subprocess.run(["exiftool", "-q", "-overwrite_original", "-ExifIFD:ExposureTime=1/80",
+                        str(done)], capture_output=True, check=True, timeout=120)
+        for stem in ("_DSF0311", "_DSF0312"):
+            TestCopyExifVariantAndHeuristicNames._make_fuji_jpeg(safe / f"{stem}.jpg")
+        work = tmp_path / "伊豆沼 [S5pro] 100%"
+        safe.rename(work)
+
+        result = run_ps(shell, script, ["-InputDir", str(work), "-SkipIfTiffHasExif"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        assert "OK | _DSF0311.tif <= _DSF0311.jpg" in result.stdout, result.stdout
+        assert "SKIP (already has EXIF) | _DSF0312.tif" in result.stdout, result.stdout
+        assert _read_tags_utf8(work / "_DSF0311.tif", "IFD0:Make", "ExifIFD:DateTimeOriginal") \
+            == ["FUJIFILM", "2025:03:09 10:12:07"]
+        assert _read_tags_utf8(work / "_DSF0312.tif", "IFD0:Make") == ["TestCam"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

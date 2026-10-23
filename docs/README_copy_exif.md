@@ -48,7 +48,7 @@ powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -Workers 12
 # Dry-run
 powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -DryRun
 
-# Skip if TIFF already has EXIF (default: overwrite existing EXIF)
+# Skip TIFFs that already carry camera EXIF (default: overwrite existing EXIF)
 powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -SkipIfTiffHasExif
 
 # Compress TIFF to ZIP after copying EXIF
@@ -70,7 +70,7 @@ powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -Overwrite
 | `-Workers` | int | `8` | Parallel jobs (PS7 only) |
 | `-WorkerMemoryFraction` | double | `0.8` | Cap parallel workers so their ImageMagick compares fit in this share of the memory still free (0 = no cap; PS5 is sequential and ignores it) |
 | `-DryRun` | switch | off | Show what would be copied, don't modify anything |
-| `-SkipIfTiffHasExif` | switch | off | Skip TIFFs that already have EXIF data |
+| `-SkipIfTiffHasExif` | switch | off | Skip TIFFs that already carry camera EXIF (an Exif IFD: exposure, aperture, dates). The basic tags every TIFF has -- size, resolution, orientation, and the Make/Model some converters write -- do not count. Before v2.7.1 they did, and the option skipped every TIFF |
 | `-CompressZip` | switch | off | Compress TIFF to ZIP after copying EXIF |
 | `-Overwrite` | switch | off | Overwrite existing TIFFs |
 
@@ -95,6 +95,10 @@ alone. `-DryRun` skips the cap entirely (nothing runs).
 5. **Otherwise:** write EXIF directly to the original TIFF
 6. If `-CompressZip` is set, compress the TIFF (with EXIF) to ZIP format
 7. Verify EXIF was written
+
+Each run writes its log to `Logs\Copy-S5Pro-Exif\<timestamp>.log` under the **current
+folder** (the one you start it from), like the other backends -- the wizard runs from the
+scripts' folder. Calling the script from somewhere else puts its `Logs\` there.
 
 ### Pairing
 

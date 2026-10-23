@@ -937,7 +937,9 @@ function Invoke-S5ProFolder {
                 # pipeline, so $LASTEXITCODE could still hold an earlier command's value --
                 # and the check right below is the fail-closed gate that decides whether this
                 # TIFF may be overwritten. Read it all, check the exit code, then take [0].
-                $exifProbeRes = Invoke-ExifTool -Arguments @('-q','-q','-G1','-s','-EXIF:all',$p.Tiff)
+                # Camera EXIF only (the Exif IFD): -EXIF:all includes IFD0 -- the size and
+                # resolution every TIFF has -- and skipped every TIFF (round 23).
+                $exifProbeRes = Invoke-ExifTool -Arguments @('-q','-q','-G1','-s','-ExifIFD:all',$p.Tiff)
                 $exifProbeExit = $exifProbeRes.ExitCode
                 $firstExif = @($exifProbeRes.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })[0]
                 # Fail-closed: an unreadable TIFF must not be overwritten by the copy below

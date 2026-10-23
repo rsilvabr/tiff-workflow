@@ -20,7 +20,7 @@ and streaming output from PowerShell backends.
 # the release this file belongs to (tests/test_diagnose_preset.py pins it to the newest
 # docs/CHANGELOG.md section).
 TOOLKIT_NAME = "tiff-workflow"
-TOOLKIT_VERSION = "2.7"
+TOOLKIT_VERSION = "2.7.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes

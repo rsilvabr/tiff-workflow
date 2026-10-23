@@ -12,6 +12,23 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v2.7.1 - Audit Round 23
+
+### MEDIUM - Copy EXIF: -SkipIfTiffHasExif skipped every TIFF
+**Issue:** the gate probed `exiftool -EXIF:all`, and exiftool's EXIF group includes IFD0 --
+ImageWidth, resolution, orientation -- which every TIFF has. So `firstExif` was never empty
+and every TIFF was reported `SKIP (already has EXIF)`, the Hyper Utility exports the option
+exists for included: 451 of 451 on a real S5 Pro folder, nothing written. Only reachable from
+the command line (the wizard never passes the switch).
+- **Fix:** both copies probe `-ExifIFD:all` -- camera EXIF (exposure, aperture, dates) -- so
+  a TIFF with only IFD0 tags, Make/Model included, gets its EXIF and one that already has an
+  Exif IFD is skipped. The fail-closed exit-code gate is unchanged.
+- **Files:** `copy_exif_to_TIFF_ps5.ps1`, `copy_exif_to_TIFF_ps7.ps1`,
+  `tests/test_regression_classes.py` (`TestCopyExifSkipIfTiffHasExif`, both shells, a
+  Japanese/bracket/`%` folder; fails against v2.7: `Done: 0 OK | 2 skipped`),
+  `tools/real_photo_battery.py` (C14 runs fresh copies of the real Fuji sessions with the
+  switch and checks their EXIF was written; its second-run check passed either way)
+
 ## v2.5 - Audit Round 22
 
 ### LOW - A failed metadata dump left a partial MIE container in %TEMP%
