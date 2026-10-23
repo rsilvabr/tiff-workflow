@@ -18,8 +18,9 @@ Fixtures (never modified -- everything is copied to a scratch folder first):
     <fixtures>/raw_scan/*.tif  a 3-page film scan [image, reduced preview, IR MASK]
     <fixtures>/tiff_scan/*.tif a 2-page scan [image, reduced preview]
     <fixtures>/fuji_s3s5/<session>/   Fuji S3/S5 sessions: TIF + JPG and/or RAF
+    <fixtures>/TIFF_tagless/S5Pro/    S5 Pro TIFFs without a single tag + their JPGs
 
-A missing optional folder (raw_scan, tiff_scan, fuji_s3s5) skips its section
+A missing optional folder (raw_scan, tiff_scan, fuji_s3s5, TIFF_tagless) skips its section
 and the report says so. On the owner's machine the fixtures live in E:\\TESTE.
 
 The scratch folder (default <fixtures drive>\\tw_battery_<YYMMDD_HHMMSS>) is
@@ -729,6 +730,26 @@ def c14(fixtures):
         a, b = exif_tag(tif, "-EXIF:DateTimeOriginal"), exif_tag(pair, "-EXIF:DateTimeOriginal")
         check(f"C14: {rel} (fresh, -SkipIfTiffHasExif): EXIF written, not skipped",
               a == b and a != "", ascii((a, b)))
+
+    # S5 Pro TIFFs that lost EVERY tag (no Software, no Make, no EXIF; image + the
+    # 160x120 camera thumbnail page), as found in a real library: EXIF from the
+    # JPEG, both pages pixel-identical.
+    tagless = fixtures / "TIFF_tagless" / "S5Pro"
+    if not tagless.is_dir():
+        print("(no TIFF_tagless/S5Pro fixture: tagless check skipped)")
+        return
+    ft = SHELL_DIR / "ft" / "S5Pro"
+    shutil.copytree(tagless, ft)
+    rc, _ = run("c14_tagless", backend, ["-InputDir", str(ft), "-SkipIfTiffHasExif",
+                                         "-Workers", "2"])
+    check("C14: tagless S5 Pro TIFFs: rc == 0", rc == 0, f"rc={rc}")
+    for tif in sorted(p for p in ft.iterdir() if p.suffix.lower() in (".tif", ".tiff")):
+        pair = find_pair(tif)
+        a = exif_tag(tif, "-EXIF:DateTimeOriginal")
+        b = exif_tag(pair, "-EXIF:DateTimeOriginal") if pair else ""
+        same = all(pixels_equal(tagless / tif.name, tif, pg) for pg in (0, 1))
+        check(f"C14: tagless {tif.name}: EXIF from its JPEG, both pages unchanged",
+              a == b and a != "" and same, ascii((a, b, same)))
 
 
 def run_checks_for_shell(shell, fixtures, A1, A2, raw_scan, tiff_scan):
