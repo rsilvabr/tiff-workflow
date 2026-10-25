@@ -167,6 +167,9 @@ F:\2025\São Paulo\TIFF,F:\2025\São Paulo\TIFF,0
 
 ## Requirements & Installation
 
+> Rather not install Python and the tools? A Windows program packages
+> everything: see [tiff-workflow-exe](#related-project-tiff-workflow-as-a-windows-program).
+
 ### 1. External Tools (Download Executables, NOT Source Code)
 
 | Tool | Download URL | What to Download | Extract to |
@@ -301,6 +304,14 @@ On fast storage (SSD), processing cost >> I/O cost, so uncompressed is fastest. 
 | PATH still not working | Terminal not restarted | Close and reopen PowerShell completely |
 | "ERROR (exiftool check) — cannot detect compression" | exiftool can't read the file | `exiftool -s -s -s -Compression photo.tif` — should output: Deflate, LZW, or nothing (uncompressed) |
 | "ERROR (magick) — compression failed" | magick can't read the file | `magick identify -verbose photo.tif` — should display image info without errors |
+
+---
+
+## Related project: tiff-workflow as a Windows program
+
+[tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe) packages this toolkit as `tiff-workflow.exe`: no Python to install, and PowerShell 7, ExifTool and ImageMagick come in the same folder. Unzip and double-click for the wizard, or run the same scripts from a terminal (`tiff-workflow.exe compress -Mode 1 -InputDir ...`). The wizard and the four scripts inside are byte-for-byte those of a tiff-workflow release, and it passes the same real-photo battery. Presets are shared: both versions read the same settings file.
+
+This Python version, the one the author runs on their own archive, remains by far the more tested. Use the program if you would rather not install Python and the tools; otherwise use the scripts here.
 
 ---
 
