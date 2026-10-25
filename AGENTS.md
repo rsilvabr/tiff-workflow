@@ -207,3 +207,14 @@ same `<topic>` across the three.
 - An audit round is one `fix(audit-round-N): ...` commit plus its
   `docs/bugs_fixed.md` section.
 - Commit or push only when the owner asks.
+- **Every tiff-workflow release updates tiff-workflow-exe too** (owner's rule,
+  2026-10-25), in the sibling repo `../tiff-workflow-exe`: `TIFFWORKFLOW_TAG`
+  in its `build.py` set to the new tag and `PACKAGE_REVISION` back to 1, its
+  README "Current version" line and `docs/version_history.md`, then a tag
+  `vX.Y.Z-exe1`: GitHub Actions builds the zip with a build attestation and
+  creates a DRAFT release; `gh attestation verify` on the zip, then
+  `python tests/battery_on_exe.py --app <that zip, extracted>` (runs the
+  program from a hostile, internet-marked folder; must pass) before it is
+  published as a regular release. A bundled tool update (PowerShell,
+  ExifTool, ImageMagick: URL + SHA-256 in its `TOOLS`) goes the same way
+  with the next `PACKAGE_REVISION`.
