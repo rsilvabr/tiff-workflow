@@ -257,6 +257,9 @@ compression) can coexist instead of overwriting each other:
   runner — the two cannot drift apart.
 - A workflow that deletes sources keeps `[DELETES SOURCES]` in its label.
 - Presets live in the same `~/.convert_tiff_config.json` as the rest of the settings.
+- A preset runs the backends next to the wizard that starts it, not the ones of the
+  folder it was saved from: it keeps working after the toolkit is moved or updated
+  into another folder.
 
 ### Running a preset unattended (Task Scheduler)
 

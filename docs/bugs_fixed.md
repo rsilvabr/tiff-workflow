@@ -12,6 +12,23 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v2.7.2 - Audit Round 24
+
+### LOW - A preset ran the backend of the folder it was saved from
+**Issue:** a journal (Repeat last, presets) stores each command with the absolute path of
+its backend, and `_journaled_script_path` re-resolved only the two Copy EXIF backends (to
+follow the shell). Saved from another copy of the toolkit -- an older version, the same
+scripts moved, the config shared with another install -- a preset ran THAT copy's
+`compress_tiff_zip.ps1` / `generate_thumbnails.ps1`, while the wizard read its settings
+(`_backend_default`) from its own folder; once the old folder was gone, the run stopped
+with `Backend script no longer exists`.
+- **Fix:** every name in `BACKEND_SCRIPTS` resolves to `SCRIPT_DIR`; the Copy EXIF swap
+  is unchanged. The existence check still runs on the resolved path.
+- **Files:** `convert_tiff.py`, `tests/test_presets.py`
+  (`TestPresetRunsTheBackendNextToTheWizard`: a deleted folder and an older copy still on
+  disk whose backend leaves a marker, in a Japanese/bracket/`%` folder; both fail against
+  v2.7.1)
+
 ## v2.7.1 - Audit Round 23
 
 ### MEDIUM - Copy EXIF: -SkipIfTiffHasExif skipped every TIFF

@@ -495,6 +495,57 @@ class TestRunPresetCliEndToEnd:
 
 
 @requires_preset_cli
+class TestPresetRunsTheBackendNextToTheWizard:
+    """Round 24: a preset recorded the absolute path of its backend. Saved from
+    another copy (an older version, the program in another folder), it ran that
+    copy's backend -- or failed once that folder was gone."""
+
+    @staticmethod
+    def _tiff(tmp_path, in_dir):
+        # make_tiff's exiftool call takes the path on its command line (ANSI code
+        # page): made in a plain folder, then moved into the hostile one.
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        make_tiff(plain / "a.tif")
+        shutil.move(str(plain / "a.tif"), str(in_dir / "a.tif"))
+
+    @staticmethod
+    def _entry_from(in_dir, old_dir):
+        entry = _compress_entry(in_dir)
+        cmd = entry["commands"][0]
+        i = cmd.index("-File")
+        cmd[i + 1] = str(old_dir / "compress_tiff_zip.ps1")
+        return entry
+
+    def test_a_deleted_folder(self, tmp_path):
+        base = tmp_path / "伊豆沼 [旧] 100% copy"
+        in_dir = base / "in"
+        in_dir.mkdir(parents=True)
+        self._tiff(tmp_path, in_dir)
+        _write_preset_config(tmp_path, {"nightly": self._entry_from(in_dir, base / "gone")})
+
+        r = _run_cli(["--run-preset", "nightly"], tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert len(list((in_dir / "ZIP").glob("*.tif"))) == 1
+
+    def test_an_older_copy_still_on_disk(self, tmp_path):
+        base = tmp_path / "伊豆沼 [旧] 100% copy"
+        in_dir, old_dir = base / "in", base / "old version"
+        in_dir.mkdir(parents=True)
+        old_dir.mkdir()
+        self._tiff(tmp_path, in_dir)
+        marker = base / "old_backend_ran.txt"
+        (old_dir / "compress_tiff_zip.ps1").write_text(
+            f"Set-Content -LiteralPath '{marker}' -Value x\nexit 0\n", encoding="utf-8")
+        _write_preset_config(tmp_path, {"nightly": self._entry_from(in_dir, old_dir)})
+
+        r = _run_cli(["--run-preset", "nightly"], tmp_path)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert not marker.exists(), "the older copy's backend ran"
+        assert len(list((in_dir / "ZIP").glob("*.tif"))) == 1
+
+
+@requires_preset_cli
 class TestCliExitCodes:
     def test_cli_exit_codes(self, tmp_path):
         in_dir = tmp_path / "in"

@@ -20,7 +20,7 @@ and streaming output from PowerShell backends.
 # the release this file belongs to (tests/test_diagnose_preset.py pins it to the newest
 # docs/CHANGELOG.md section).
 TOOLKIT_NAME = "tiff-workflow"
-TOOLKIT_VERSION = "2.7.1"
+TOOLKIT_VERSION = "2.7.2"
 TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes
@@ -1463,11 +1463,18 @@ def _journaled_script_path(parts: List[str], ps_name: str) -> Path:
 
     The two Copy EXIF backends are not interchangeable -- one is the PS5 sequential
     implementation, the other drives PS7 runspaces -- so the script follows the shell we
-    are about to run, not the shell that happened to record the journal."""
+    are about to run, not the shell that happened to record the journal.
+
+    Every backend is the one next to this wizard, whatever folder the journal recorded
+    (round 24): a preset saved from another copy -- an older version, the program in
+    another folder, a folder since deleted -- ran that copy's backend, or failed with
+    "Backend script no longer exists", while the wizard planned with its own settings."""
     script = Path(parts[0])
     if script.name in ("copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"):
         return SCRIPT_DIR / ("copy_exif_to_TIFF_ps5.ps1" if ps_name == "powershell"
                              else "copy_exif_to_TIFF_ps7.ps1")
+    if script.name in BACKEND_SCRIPTS:
+        return SCRIPT_DIR / script.name
     return script
 
 

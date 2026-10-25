@@ -10,6 +10,13 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.7.2
+
+- **A preset runs the backends next to the wizard it is started from.** It used to run
+  the backend at the path recorded when it was saved: after moving or updating the
+  toolkit into another folder, a preset failed with "Backend script no longer exists", or
+  quietly ran the older copy if that folder was still there (round 24)
+
 ## v2.7.1
 
 - **Copy EXIF: `-SkipIfTiffHasExif` works.** It checked for any EXIF tag, and in exiftool
