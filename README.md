@@ -147,7 +147,9 @@ Process many folders in one run, each with its own mode, driven by a CSV you edi
 Source,Destination,Mode
 F:\2025\Recife\TIFF,F:\2025\Recife\ZIP_flat,2
 F:\2025\São Paulo\TIFF,F:\2025\São Paulo\TIFF,0
-# F:\2025\横浜\TIFF,F:\2025\横浜\TIFF,3
+F:\2025\横浜\TIFF,F:\2025\横浜\TIFF,3
+F:\2026\京都・嵐山 [FINAL]\TIFF,F:\2026\京都・嵐山 [FINAL]\TIFF,0
+# F:\2026\Outtakes (later)\TIFF,F:\2026\Outtakes (later)\TIFF,0
 ```
 
 **Workflow:**
