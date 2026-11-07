@@ -10,6 +10,17 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.7.3
+
+- **Compress notices originals left behind in `OLD_TIFFs`.** Modes 0 and 9 move a folder's
+  originals to `OLD_TIFFs` before writing the compressed copies; a run stopped by closing the
+  window or a power cut could leave some there with nothing in their place, and later runs did
+  not notice. Every run, in any mode, now lists them (`STRANDED`, also counted under `Done:`),
+  and `-RestoreStranded` puts them back -- the same run then compresses them (round 25)
+- **`tools/move_old_backups.py`**, the script that moves `OLD_PADDED` / `OLD_TIFFs` folders to
+  another drive, joins the repo and never moves a backup whose original is missing -- that
+  backup is the only copy (round 25)
+
 ## v2.7.2
 
 - **A preset runs the backends next to the wizard it is started from.** It used to run
