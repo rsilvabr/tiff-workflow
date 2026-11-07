@@ -36,7 +36,8 @@ param(
     [switch]$SkipCompressedWithThumb, # Skip TIFFs that are already compressed AND have thumbnail
     [string]$SrgbProfile = "",       # ICC profile used to convert wide-gamut sources; "" = auto-detect
     [double]$WorkerMemoryFraction = 0.8,  # Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap
-    [string]$InputDirFile = ""       # UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)
+    [string]$InputDirFile = "",      # UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)
+    [switch]$RestoreStranded         # Move originals stranded in OLD_TIFFs/ (nothing left in their place) back where they came from
 )
 
 # Console output as UTF-8 when it goes to a pipe (the wizard reads it). Without this the
@@ -301,6 +302,8 @@ $script:warnTotal      = 0
 $script:errTotal       = 0
 $script:dryTotal       = 0
 $script:total          = 0
+$script:strandedTotal  = 0
+$script:restoredTotal  = 0
 $script:multiPagePaths = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
 
 if ($GenerateThumbnail -and -not $srgbProfileResolved) {
@@ -326,6 +329,10 @@ function Write-RunSummary {
     Write-Log ""
     Write-Log ("-" * 50)
     Write-Log "Done: $($script:okTotal) OK | $($script:skipTotal) skipped | $($script:multiTotal) multi-page (not touched) | $($script:warnTotal) warnings | $($script:errTotal) errors | $($script:counterTotal)/$($script:total) processed$(if ($script:dryTotal -gt 0) { ' | ' + $script:dryTotal + ' dry-run (nothing written)' })"
+    # Audit round 25: repeated here, where a long run's reader looks.
+    if ($script:strandedTotal -gt $script:restoredTotal) {
+        Write-Log "STRANDED: $($script:strandedTotal - $script:restoredTotal) original(s) still in OLD_TIFFs with nothing in their place -- see the STRANDED lines above" "WARN"
+    }
 
     if ($script:multiTotal -gt 0) {
         Write-Log ""
@@ -551,6 +558,65 @@ function Get-Files-Mode9 {
     param([string]$root)
     Get-ChildItem -LiteralPath $root -File -Recurse:$true |
         Where-Object { $_.Extension -match '^\.(tif|tiff)$' }
+}
+
+function Find-StrandedOriginals {
+    <#
+    .SYNOPSIS
+        Backups in OLD_TIFFs/ whose original place is EMPTY: the only copy of that image.
+
+    .DESCRIPTION
+        Audit round 25. Modes 0/9 move every original of a folder to OLD_TIFFs/ before its
+        compressed copy is written. A run that dies in between without running the trap
+        (window closed, power loss, process killed -- the round 16 trap only covers Ctrl+C)
+        leaves those originals in OLD_TIFFs/ with nothing in the parent folder, and every
+        later run walks past them because discovery excludes OLD_TIFFs/. On 2026-08-03 that
+        stranded 365 originals; a backup tool later moved them off the disk.
+
+        A backup counts as stranded when none of its possible counterparts exists in the
+        parent folder: <stem>.tif / <stem>.tiff (a .tiff source is written as .tif), and for
+        a timestamped backup (<stem>_yyyyMMdd_HHmmss[_n], made when the name was taken) the
+        same for the base stem. Returns objects with Backup and Target (where a restore
+        would put it: the base stem with the backup's extension).
+    #>
+    param(
+        [string]$Root,
+        [bool]$Recurse,
+        [string[]]$BackupNames,
+        [string[]]$ExcludeNames
+    )
+    $found = [System.Collections.ArrayList]::new()
+    $dirs = @(Get-ChildItem -LiteralPath $Root -Directory -Recurse:$Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $BackupNames -contains $_.Name })
+    foreach ($d in $dirs) {
+        $parent = $d.Parent.FullName
+        if ($ExcludeNames -and $ExcludeNames.Count -gt 0 -and
+            (Test-PathExcluded -Directory $parent -Root $Root -Names $ExcludeNames)) { continue }
+        # A backup folder nested in another one is a backup of a backup: its parent is not
+        # where an original lived.
+        if (Test-PathExcluded -Directory $parent -Root $Root -Names $BackupNames) { continue }
+        $tiffs = @(Get-ChildItem -LiteralPath $d.FullName -File -ErrorAction SilentlyContinue |
+                   Where-Object { $_.Extension -match '^\.(tif|tiff)$' })
+        foreach ($b in $tiffs) {
+            $stem = [System.IO.Path]::GetFileNameWithoutExtension($b.Name)
+            $stems = @($stem)
+            if ($stem -match '^(.+)_\d{8}_\d{6}(_\d+)?$') { $stems += $Matches[1] }
+            $present = $false
+            foreach ($s in $stems) {
+                foreach ($ext in @('.tif', '.tiff')) {
+                    if (Test-Path -LiteralPath (Join-Path $parent "$s$ext")) { $present = $true; break }
+                }
+                if ($present) { break }
+            }
+            if (-not $present) {
+                [void]$found.Add([pscustomobject]@{
+                    Backup = $b.FullName
+                    Target = (Join-Path $parent "$($stems[-1])$($b.Extension)")
+                })
+            }
+        }
+    }
+    return $found
 }
 
 function Test-PathExcluded {
@@ -2304,6 +2370,62 @@ if ($Mode -eq 8 -and -not $DeleteSource) {
 }
 Write-Log "Mode: $Mode | Workers: $Workers | OutputDir: $(if ($OutputDir) { $OutputDir } else { '(in-place/flat)' }) | Staging: $(if ($StagingDir) { $StagingDir } else { 'disabled' }) | DryRun: $DryRun | SafeMode: $SafeMode | SkipLzw: $SkipLzwAsCompressed | Overwrite: $($Overwrite.IsPresent) | DeleteSource: $deleteLabel"
 
+# Audit round 25: originals stranded in OLD_TIFFs/ by a run that died between moving them
+# and writing their compressed copy (see Find-StrandedOriginals). Reported on EVERY run --
+# whatever the mode -- because discovery skips OLD_TIFFs/ and nothing else would ever notice
+# them; -RestoreStranded moves each one back, never over an existing file. Runs BEFORE
+# discovery, so a restored original is compressed by this same run.
+$script:strandedTotal = 0
+$script:restoredTotal = 0
+$seenStranded = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($inputRoot in $inputRoots) {
+    $stranded = @(Find-StrandedOriginals -Root $inputRoot -Recurse ($Mode -ne 0) `
+                    -BackupNames $script:toolOutputNames -ExcludeNames $script:excludeNames)
+    # One target claimed by two backups (an original and its timestamped namesake): which one
+    # is the original cannot be told from the names, so neither is moved.
+    $byTarget = @{}
+    foreach ($s in $stranded) {
+        $k = $s.Target.ToLowerInvariant()
+        if (-not $byTarget.ContainsKey($k)) { $byTarget[$k] = @() }
+        $byTarget[$k] += $s
+    }
+    foreach ($s in $stranded) {
+        if (-not $seenStranded.Add($s.Backup)) { continue }
+        $script:strandedTotal++
+        $script:warnTotal++
+        Write-Log "STRANDED (original in OLD_TIFFs, nothing in its place) | $($s.Backup)" "WARN"
+        if (-not $RestoreStranded) { continue }
+        if ($byTarget[$s.Target.ToLowerInvariant()].Count -gt 1) {
+            Write-Log "  not restored: more than one backup claims $($s.Target) -- move the right one by hand" "WARN"
+            continue
+        }
+        if ($DryRun) {
+            Write-Log "  DRY: would restore to $($s.Target)"
+            continue
+        }
+        if (Test-Path -LiteralPath $s.Target) {
+            Write-Log "  not restored: $($s.Target) appeared meanwhile" "WARN"
+            continue
+        }
+        try {
+            # No -Force: never over a file that appeared after the check above.
+            Move-Item -LiteralPath $s.Backup -Destination $s.Target -ErrorAction Stop
+            $script:restoredTotal++
+            Write-Log "  RESTORED (stranded original) | $($s.Target)" "WARN"
+        } catch {
+            $script:errTotal++
+            Write-Log "  RESTORE FAILED | $($s.Backup): $($_.Exception.Message)" "ERROR"
+        }
+    }
+}
+if ($script:strandedTotal -gt 0) {
+    if ($RestoreStranded -and -not $DryRun) {
+        Write-Log "STRANDED: $script:strandedTotal original(s) found in OLD_TIFFs with nothing in their place, $script:restoredTotal restored" "WARN"
+    } else {
+        Write-Log "STRANDED: $script:strandedTotal original(s) in OLD_TIFFs with nothing in their place (an interrupted run?). Run again with -RestoreStranded to move them back; never delete or move OLD_TIFFs away until then." "WARN"
+    }
+}
+
 # Collect files from all input directories
 $allFiles = @()
 $seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -2349,6 +2471,7 @@ if ($backupCount -gt 0) {
 if ($leftoverCount -gt 0) {
     Write-Log "Skipped $leftoverCount staged/temp file(s) left by an interrupted run" "WARN"
 }
+
 
 # Sorted by full path so duplicate-name claiming below (the _v2 renames) is deterministic
 # instead of depending on Get-ChildItem enumeration order (audit round 16).

@@ -12,6 +12,33 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v2.7.3 - Audit Round 25
+
+### HIGH - Originals stranded in OLD_TIFFs went unnoticed, and a backup script moved them off the disk
+**Issue:** modes 0/9 move every original of a folder to `OLD_TIFFs/` before writing its
+compressed copy. On 2026-08-03 a mode 9 run died in the middle of a 43-file group without a
+`Done:` or `Interrupted!` line (window closed / process killed: the round 16 trap only runs on
+Ctrl+C). 365 originals were left in `OLD_TIFFs/` with nothing in their place. The run 24
+minutes later ended "all SKIP": discovery excludes `OLD_TIFFs/` and the original place was
+empty, so nothing looked wrong. On 2026-10-17 `move_old_padded.py --folder OLD_TIFFs` moved
+every `OLD_TIFFs` file to a backup drive as a leftover -- including those 365 (and 2 more),
+the only copies. Nothing was lost (the move verifies and the drive was intact); the files
+were restored on 2026-11-07. Reproduced on real photos: a mode 9 run killed with
+`taskkill /T /F` leaves all six originals in `OLD_TIFFs/` and an empty folder.
+- **Fix:** `Find-StrandedOriginals` -- every run, in every mode, reports each `OLD_TIFFs`
+  file whose counterpart in the parent folder is missing (`STRANDED`, counted as a warning,
+  repeated under `Done:`), BEFORE discovery. `-RestoreStranded` moves them back (never over a
+  file; two backups claiming one place are both left alone), so the same run compresses
+  them. The move script is now in the repo as `tools/move_old_backups.py` (it was a local
+  `move_old_padded.py`, named after its first job, OLD_PADDED): it never moves a backup
+  whose original place is empty, re-checks right before each move, exits 1 when it kept
+  any, and `--folder` (OLD_PADDED / OLD_TIFFs) is required, with a destination per folder. Not changed yet: modes 0/9 still move the originals before compressing -- the
+  root cause, planned for the next round.
+- **Files:** `compress_tiff_zip.ps1`, `tools/move_old_backups.py`,
+  `tests/test_stranded_originals.py` (both shells, Japanese/bracket/`%` folder; all 8 fail
+  against v2.7.2), `tests/test_move_old_backups.py` (5 tests; the 4 safety tests fail against the old script),
+  `docs/README_compress_tiff_zip.md`
+
 ## v2.7.2 - Audit Round 24
 
 ### LOW - A preset ran the backend of the folder it was saved from

@@ -69,6 +69,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-ForceSequential` | switch | off | Force parallelism OFF (use if PS7 detected but want sequential) |
 | `-StagingDir` | string | `""` | SSD staging folder for faster I/O. Files moved to final destination after each group |
 | `-DuplicateAction` | string | `"Numbered"` | Mode 2 collision handling: `Skip`, `Numbered` (v2, v3...), or `Overwrite` |
+| `-RestoreStranded` | switch | off | Move originals stranded in `OLD_TIFFs/` (nothing left in their place, see [Stranded originals](#stranded-originals)) back where they came from, before this run's discovery -- so this run compresses them. Never over an existing file; a dry run only says what it would restore |
 | `-ExcludeFolders` | string | `""` | `';'`-separated folder **names** skipped during discovery, in every mode. Segment match (case-insensitive), evaluated **relative to `-InputDir`**: `_EXPORT` skips any `<root>\...\_EXPORT\...` tree but never `My_EXPORT_photos`, and never a folder *above* the root -- including the root's own name, so pointing the tool at `...\_EXPORT` to process it still works. Entries containing `\` or `/` are rejected -- names only, no paths. Every run logs `Excluded N file(s) under: ...` so an exclusion is never invisible |
 
 > **Performance note:** the compression probe (Deflate or not?) reads only the IFD0 header tag, but it used to spawn one exiftool process per file. Probing is now batched (~400 files per exiftool invocation, logged as `Compression probe: N/M file(s) in Xms`); files a batch could not answer fall back to the per-file probe, so decisions are identical, just faster.
@@ -214,6 +215,33 @@ One exclusion list now covers every mode.
 
 Staged and temporary files left behind by an interrupted run are skipped the same way, and both
 counts are logged.
+
+### Stranded originals
+
+Modes 0 and 9 move each folder's originals to `OLD_TIFFs/` **before** writing their compressed
+copies. A run that dies in between -- window closed, power loss, process killed (Ctrl+C is
+handled: the interrupt trap puts them back) -- leaves those originals in `OLD_TIFFs/` with
+**nothing in their place**: the backup is then the only copy of the image.
+
+Every run, in every mode, looks at the `OLD_TIFFs` folders it would walk past and logs each such
+file, plus a count at the start and again under `Done:`:
+
+```
+WARN | STRANDED (original in OLD_TIFFs, nothing in its place) | ...\OLD_TIFFs\DSC_0001.tif
+WARN | STRANDED: 1 original(s) in OLD_TIFFs with nothing in their place (an interrupted run?). Run again with -RestoreStranded ...
+```
+
+"Its place" is the folder above `OLD_TIFFs`: the same name, the other TIFF extension (a `.tiff`
+source is written as `.tif`), and the base name of a timestamped backup
+(`DSC_0001_20260803_081300.tif`, made when `DSC_0001.tif` was already in `OLD_TIFFs`). Mode 0
+looks only at `<InputDir>\OLD_TIFFs`; the other modes at every `OLD_TIFFs` below the root.
+`-ExcludeFolders` applies, and an `OLD_TIFFs` inside another one is never reported.
+
+`-RestoreStranded` moves each one back, never over an existing file. Two backups claiming the
+same place (an original and its timestamped namesake) are both left alone: which one is the
+original cannot be told from the names. **Until they are restored, do not delete `OLD_TIFFs` or
+move it to another drive** -- the wizard's *Delete OLD_TIFFs* already keeps a backup whose parent
+file is missing, and `tools/move_old_backups.py` refuses to move one (round 25).
 
 ---
 

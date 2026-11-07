@@ -45,6 +45,12 @@ pytest tests --cov=..
 ### `test_inputdir_file.py` covers
 - `-InputDirFile` end to end in the three backends (non-ASCII folder list), the refuse-both/missing/empty gates, and the wizard's spill rewrite plus its temp-file cleanup
 
+### `test_stranded_originals.py` covers
+- Round 25: originals left in `OLD_TIFFs/` with nothing in their place are reported in every mode (and mode 0 only at its own depth), `-RestoreStranded` puts them back and the same run compresses them, a dry run moves nothing, ambiguous and excluded backups are left alone (both shells, hostile folder)
+
+### `test_move_old_backups.py` covers
+- Round 25: `tools/move_old_backups.py` (formerly `move_old_padded.py`) never moves a backup whose original place is empty (same name, `.tif`/`.tiff`, `_vN` and timestamped backups, sidecars), re-checks before each move, exits 1 when it kept any; `--folder` is required and picks its own destination
+
 ### `test_exclude_folders_parity.py` covers
 - `Test-PathExcluded` in all four backends against jxl-photo's exclusion semantics (12-row table, both shells)
 
