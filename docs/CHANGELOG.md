@@ -10,6 +10,21 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.7.4
+
+- **Modes 0 and 9 keep each original in place until its compressed copy is ready.** The copy is
+  written beside it, checked, and only then is the original moved to `OLD_TIFFs` and the copy
+  put in its place. These modes used to move every original of the run to `OLD_TIFFs` first,
+  so a run stopped by closing the window or a power cut could leave folders without their
+  photos (the case v2.7.3 learned to detect). An edit saved to a photo during the run is kept
+  (round 26)
+- **A staging folder on another drive is safe in every mode.** A staged file now reaches its
+  place as a copy beside it plus a rename; before, mode 8 copied it straight over the original,
+  so a run stopped mid-copy could leave a damaged file (round 26)
+- **The wizard helps with stranded originals:** after a run that reports them it offers to
+  put them back, and *Restore OLD_TIFFs* can restore only those. The check is also faster
+  (round 26)
+
 ## v2.7.3
 
 - **Compress notices originals left behind in `OLD_TIFFs`.** Modes 0 and 9 move a folder's
