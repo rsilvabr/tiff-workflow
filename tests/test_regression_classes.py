@@ -1137,7 +1137,9 @@ class TestUndoOldTiffsResilience:
         return old
 
     def test_one_failure_does_not_abandon_the_rest(self, tmp_path, monkeypatch):
-        old = self._prepare(tmp_path, monkeypatch, ["y", "y", "n"])  # overwrite, move, keep dirs
+        # round 26: "restore only the stranded ones?" comes first -- no, restore ALL; then
+        # overwrite, move, keep dirs
+        old = self._prepare(tmp_path, monkeypatch, ["n", "y", "y", "n"])
 
         result = convert_tiff.run_undo_old_tiffs(SimpleNamespace(config=ToolConfig()))
 
@@ -1155,13 +1157,30 @@ class TestUndoOldTiffsResilience:
         (old / "photo.tif").write_bytes(b"data")
         monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
-        it = iter(["n", "y", "n"])
+        it = iter(["n", "n", "y", "n"])   # round 26: not stranded-only, then as before
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
 
         result = convert_tiff.run_undo_old_tiffs(SimpleNamespace(config=ToolConfig()))
 
         assert result is True
         assert (tmp_path / "photo.tif").read_bytes() == b"data"
+
+    def test_stranded_only_is_offered_first_and_restores_just_those(self, tmp_path, monkeypatch):
+        """Round 26: a backup whose original is in place stays in OLD_TIFFs/."""
+        old = tmp_path / "OLD_TIFFs"
+        old.mkdir()
+        (old / "lost.tif").write_bytes(b"L")
+        (old / "kept.tif").write_bytes(b"K")
+        (tmp_path / "kept.tif").write_bytes(b"compressed")
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: tmp_path)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        it = iter(["y"])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+
+        assert convert_tiff.run_undo_old_tiffs(SimpleNamespace(config=ToolConfig())) is True
+        assert (tmp_path / "lost.tif").read_bytes() == b"L"
+        assert (old / "kept.tif").read_bytes() == b"K"
+        assert (tmp_path / "kept.tif").read_bytes() == b"compressed"
 
 
 class TestSafeMoveNeverLosesBoth:
@@ -2954,30 +2973,34 @@ class TestAuditRound16InterruptRollback:
 
 
 class TestAuditRound16SkipRollbackIsVerified:
-    """"SKIP rollback (ZIP exists)" used to fire on the mere existence of FinalDst, so a
-    partial/corrupt write vetoed the rollback and stranded the original in OLD_TIFFs/.
-    Both rollback copies (PS7 parallel and PS5 sequential) now decode the output first."""
+    """Round 16: "SKIP rollback (ZIP exists)" fired on the mere existence of FinalDst, so a
+    corrupt write vetoed the rollback of an original that modes 0/9 had moved to OLD_TIFFs/
+    while planning. Round 26 removed that early move (and with it the rollback): the
+    invariant is now that an output which does not decode NEVER causes the original to be
+    archived. Both workers (PS7 parallel, PS5 sequential) decode-check the modes 0/9 output,
+    and both group-end blocks skip a task whose output failed before Complete-KeepOriginal."""
 
     def test_skip_rollback_is_gated_on_zip_integrity(self):
         source = (REPO / "compress_tiff_zip.ps1").read_text(encoding="ascii")
-        gated = re.findall(
-            r"Test-ZipIntegrity -Path \$t\.FinalDst[^}]*?"
-            r'Write-Log "SKIP rollback \(ZIP exists\)',
+        gate = re.findall(
+            r"elseif \(\$mode -eq 0 -or \$mode -eq 9\) \{[^}]*?"
+            r"Test-ZipIntegrity -Path \$writeDst[^}]*?\$integrityFailed = \$true",
             source, re.S,
         )
-        assert len(gated) == 2, (
-            "expected the integrity gate ahead of BOTH 'SKIP rollback (ZIP exists)' "
-            f"branches, found {len(gated)}"
+        assert len(gate) == 2, (
+            "expected the modes 0/9 decode gate in BOTH workers, found " f"{len(gate)}"
         )
-        corrupt = re.findall(
-            r'SKIP rollback \(ZIP exists\).{0,400}?'
-            r'Remove-Item -LiteralPath \$t\.FinalDst',
+        landing = re.findall(
+            r"\$integrityFailedDst\.Contains\(\$key\)\) \{\s*"
+            r"Remove-Item -LiteralPath \$written[^}]*?continue\s*\}\s*"
+            r"\$kErr = Complete-KeepOriginal",
             source, re.S,
         )
-        assert len(corrupt) == 2, (
-            "an output that fails the integrity check must be deleted before the "
-            "original is restored"
+        assert len(landing) == 2, (
+            "a copy that failed its check must be dropped BEFORE Complete-KeepOriginal "
+            "could archive the original, in both group-end blocks"
         )
+        assert 'MovedBy  = "mode0"' not in source, "the planning loop moves originals again"
 
 
 class TestAuditRound16OutputDirAndPageCount:

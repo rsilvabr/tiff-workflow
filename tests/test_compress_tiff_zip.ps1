@@ -317,10 +317,17 @@ Describe "compress_tiff_zip_v2.ps1 - Audit Round 16" {
         $content | Should -Match 'RESTORED \(interrupt cleanup\)'
     }
 
-    It "Rollback verifies an existing ZIP before skipping (corrupt output no longer vetoes rollback)" {
+    It "Modes 0/9 never archive an original behind an output that does not decode (round 16 -> 26)" {
+        # Round 16 made the rollback decode FinalDst before skipping it. Round 26 removed the
+        # early move to OLD_TIFFs (and the rollback with it): both workers decode-check the
+        # modes 0/9 output, and both group-end blocks drop a failed copy before
+        # Complete-KeepOriginal could archive the original.
+        $gate = Select-String -Path $script:ScriptPath -Pattern 'elseif \(\$mode -eq 0 -or \$mode -eq 9\) \{'
+        $gate.Count | Should -Be 2   # Process-TiffJob and the PS7 worker
+        $landing = Select-String -Path $script:ScriptPath -Pattern '\$kErr = Complete-KeepOriginal'
+        $landing.Count | Should -Be 2   # PS7 and PS5 group-end blocks
         $content = Get-Content $script:ScriptPath -Raw
-        $matches = Select-String -Path $script:ScriptPath -Pattern 'Test-ZipIntegrity -Path \$t\.FinalDst'
-        $matches.Count | Should -Be 2   # PS7 and PS5 rollback blocks
+        $content | Should -Not -Match 'MovedBy\s+=\s+"mode0"'
     }
 
     It "Magick probe timeout scales with input size (huge scans false-failed at 30s)" {

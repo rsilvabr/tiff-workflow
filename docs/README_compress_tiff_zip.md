@@ -216,12 +216,28 @@ One exclusion list now covers every mode.
 Staged and temporary files left behind by an interrupted run are skipped the same way, and both
 counts are logged.
 
+### When the original moves (modes 0/9, since round 26)
+
+The original stays in its place until its compressed copy exists: the copy is written to a
+temporary file next to it (or to `-StagingDir`), checked to decode, brought next to its
+destination, and only then is the original moved into `OLD_TIFFs/` and the copy renamed into
+its place. The original is also checked to be unchanged since the run read it (size and
+date); an edit saved meanwhile wins -- the copy is dropped and nothing is archived. A copy that
+fails to decode, or any error, never moves the original.
+
+Before round 26 these modes moved **every** original of the run to `OLD_TIFFs/` while planning,
+before compressing a single file, so for the whole run their places were empty.
+
+A file staged on **another drive** (`-StagingDir`, every mode) reaches its destination as a copy
+to a temporary file beside it, then a rename -- never a copy written straight over the
+destination. In mode 8 that destination is the original: a run killed mid-copy could leave a
+truncated file where the only copy of the image had been.
+
 ### Stranded originals
 
-Modes 0 and 9 move each folder's originals to `OLD_TIFFs/` **before** writing their compressed
-copies. A run that dies in between -- window closed, power loss, process killed (Ctrl+C is
-handled: the interrupt trap puts them back) -- leaves those originals in `OLD_TIFFs/` with
-**nothing in their place**: the backup is then the only copy of the image.
+Since round 26 the only moment an original is out of its place is between two renames on the
+same drive. Older versions (and a kill in that instant) could leave originals in
+`OLD_TIFFs/` with **nothing in their place**: the backup is then the only copy of the image.
 
 Every run, in every mode, looks at the `OLD_TIFFs` folders it would walk past and logs each such
 file, plus a count at the start and again under `Done:`:

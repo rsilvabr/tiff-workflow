@@ -12,6 +12,53 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v2.7.4 - Audit Round 26
+
+### HIGH - Modes 0/9 moved every original of the run to OLD_TIFFs before compressing any
+**Issue:** the round 25 root cause. The planning loop moved each original to `OLD_TIFFs/`
+and queued the task to read it from there, for the WHOLE run (all folders) before a single
+file was compressed; the compressed copy was then written into the empty original place.
+For the duration of the run the places were empty, and a run killed by anything but Ctrl+C
+stranded every unprocessed file (365 on 2026-08-03). Reproduced: `taskkill /T /F` seven
+seconds into a 6-file run left all six places empty.
+- **Fix:** nothing moves while planning. The worker writes a temp sibling of FinalDst (or the
+  staging file) and decode-checks it in both worker paths (`Test-ZipIntegrity`, parallel);
+  after each group `Complete-KeepOriginal` brings the copy next to its destination, checks
+  the original is unchanged since planning (size + LastWriteTimeUtc), moves the original
+  into `OLD_TIFFs/`, then renames the copy into place (and puts the original back if that
+  fails). The window is two renames on one volume; the round 16 rollback of early-moved
+  originals is gone with the early move. jxl-photo's rule: the irreversible step comes last.
+- **Files:** `compress_tiff_zip.ps1`, `tests/test_mode9_keep_original.py` (10 tests, both
+  shells: a killed run polled every 50 ms never leaves a place empty; an edit saved during
+  the run is never archived; normal and staged runs, `.tiff` sources, second run; all fail
+  against v2.7.3), `tests/test_regression_classes.py` and `tests/test_compress_tiff_zip.ps1`
+  (the round 16 rollback assertions rewritten to the new invariant), battery C15
+
+### MEDIUM - A staged file from another drive was copied straight over its destination
+**Issue:** with `-StagingDir` on another drive (the owner's preset: `E:\temp_tiff` for `G:\`)
+every staged file reached its destination with `Move-Item -Force`, which between drives is a
+copy written into the destination, then a delete. In mode 8 the destination is the original:
+a run killed mid-copy left a truncated file where the only copy of the image had been. Mode 8's
+automatic staging is created on the photos' drive for exactly this reason; an explicit one was
+not covered. Same in the legacy mode's staging loop.
+- **Fix:** `Move-FileIntoPlace` -- from another volume, copy to a temp sibling of the
+  destination (size checked), then rename it over the destination; all three staging loops.
+- **Files:** `compress_tiff_zip.ps1`, `tests/test_mode9_keep_original.py`, battery C15b (mode 8
+  with the photos on E: and the staging folder in %TEMP% on C:)
+
+### LOW - Wizard: no way to restore stranded originals, and option 5 restored everything
+- **Fix:** after a compress run that ends with `STRANDED: N ... still in OLD_TIFFs`, the wizard
+  offers to run it again with `-RestoreStranded` (interactive, non-dry runs only; presets and
+  dry runs get a hint). Option 5 first offers to restore only the stranded originals
+  (`_stranded_backups`, the same rule as the backend; never over a file; ambiguous pairs left).
+  `Find-StrandedOriginals` walks with .NET and `\\?\` paths: 0.2 s instead of 0.9-1.0 s on
+  G:\2025 with a warm cache (17.6 s cold under PS 5.1), and it no longer depends on Windows'
+  LongPathsEnabled for paths past 260 characters (enabled on the owner's PC, so the new
+  long-path test passes against v2.7.3 there too -- a guard, not a reproduced bug).
+- **Files:** `convert_tiff.py`, `compress_tiff_zip.ps1`, `tests/test_wizard_stranded.py`
+  (8 tests, all fail against v2.7.3), `tests/test_stranded_originals.py` (long paths),
+  `tests/test_regression_classes.py` (option 5 answers)
+
 ## v2.7.3 - Audit Round 25
 
 ### HIGH - Originals stranded in OLD_TIFFs went unnoticed, and a backup script moved them off the disk

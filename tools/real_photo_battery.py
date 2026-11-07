@@ -752,6 +752,95 @@ def c14(fixtures):
               a == b and a != "" and same, ascii((a, b, same)))
 
 
+def c15(A1, A2):
+    """Round 26: modes 0/9 archive an original only after its copy landed, and a staged
+    file from another drive never lands as a copy straight over the original."""
+    section(f"C15: mode 9 killed mid-run; mode 8 with staging on another drive [{CURRENT_SHELL}]")
+    k = SHELL_DIR / "m9kill"
+    srcs = [A1, A2, A1, A2, A1, A2]
+    files = [uncompressed(s, k / f"P{i:02d} ({i}) {s.stem}.tif") for i, s in enumerate(srcs)]
+    before = {f.name: md5(f) for f in files}
+    cmd = ([CURRENT_SHELL, "-NoProfile", "-File", str(REPO / "compress_tiff_zip.ps1"),
+            "-Mode", "9", "-InputDir", str(k), "-ForceSequential"])
+    if CURRENT_SHELL == "powershell":
+        cmd = convert_tiff._wrap_ps5_command(cmd)
+    p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, cwd=str(SHELL_DIR))
+    empty_seen = set()
+    stop = []
+
+    def watch():
+        streak = {f.name: 0 for f in files}
+        while not stop:
+            for f in files:
+                streak[f.name] = 0 if f.exists() else streak[f.name] + 1
+                if streak[f.name] >= 3:
+                    empty_seen.add(f.name)
+            time.sleep(0.05)
+    import threading
+    w = threading.Thread(target=watch, daemon=True)
+    w.start()
+    got_ok = False
+    log = []
+    for raw in iter(p.stdout.readline, b""):
+        line = raw.decode("utf-8", "replace")
+        log.append(line)
+        if "archived in OLD_TIFFs" in line or "OK (" in line:
+            got_ok = True
+            break
+    subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
+    p.wait(timeout=120)
+    time.sleep(0.3)
+    stop.append(1)
+    w.join(timeout=5)
+    (LOGS / f"{CURRENT_SHELL}__c15_killed.log").write_text("".join(log), encoding="utf-8")
+    check("C15: the killed run had finished a file first", got_ok)
+    check("C15: no original place was ever empty during the run", not empty_seen,
+          str(sorted(empty_seen)))
+    old = k / "OLD_TIFFs"
+    for f in files:
+        b = old / f.name
+        ok = f.exists() and (
+            (b.exists() and md5(b) == before[f.name]
+             and compression(f) in ("Deflate", "Adobe Deflate"))
+            or (not b.exists() and md5(f) == before[f.name]))
+        check(f"C15: after the kill {f.name}: original or verified copy in place", ok)
+    rc, out = run("c15_rerun", "compress_tiff_zip.ps1",
+                  ["-Mode", "9", "-InputDir", str(k), "-Workers", "2"])
+    check("C15: rerun rc == 0", rc == 0, f"rc={rc}")
+    check("C15: rerun finds nothing stranded", "STRANDED" not in out)
+    for f in files:
+        b = old / f.name
+        check(f"C15: {f.name}: compressed in place, backup md5 == original, pixels equal",
+              compression(f) in ("Deflate", "Adobe Deflate") and b.exists()
+              and md5(b) == before[f.name] and pixels_equal(b, f))
+
+    # b) mode 8 with -StagingDir on ANOTHER drive than the photos (the owner's preset:
+    #    E:\temp_tiff for G:\). The staged file must reach the original through a temp
+    #    sibling + rename, never as a copy written straight over it.
+    m8 = SHELL_DIR / "m8xvol"
+    f8 = [uncompressed(A1, m8 / A1.name), uncompressed(A2, m8 / A2.name)]
+    ref = {f.name: md5(f) for f in f8}
+    stage = Path(tempfile.gettempdir()) / f"tw_c15_{CURRENT_SHELL}_{os.getpid()}"
+    same_drive = Path(stage).drive.lower() == m8.drive.lower()
+    keep = SHELL_DIR / "m8xvol_ref"
+    for f in f8:
+        cp(f, keep / f.name)
+    rc, out = run("c15_mode8_xvol", "compress_tiff_zip.ps1",
+                  ["-Mode", "8", "-InputDir", str(m8), "-StagingDir", str(stage)])
+    check("C15: mode 8, staging on another drive: rc == 0"
+          + (" (NOTE: staging is on the same drive here)" if same_drive else ""),
+          rc == 0, f"rc={rc}")
+    for f in f8:
+        check(f"C15: mode 8 xvol {f.name}: Deflate in place, pixels equal to the original",
+              compression(f) in ("Deflate", "Adobe Deflate") and md5(f) != ref[f.name]
+              and pixels_equal(keep / f.name, f))
+    import re as _re
+    left = [p for p in m8.rglob("*") if _re.search(r"\.[0-9a-f]{8}_[0-9a-f]{12}\.tiff?$", p.name, _re.I)]
+    check("C15: mode 8 xvol left no temp sibling", not left, str(left))
+    shutil.rmtree(stage, ignore_errors=True)
+
+
 def run_checks_for_shell(shell, fixtures, A1, A2, raw_scan, tiff_scan):
     global CURRENT_SHELL, SHELL_DIR, LOGS
     CURRENT_SHELL = shell
@@ -782,6 +871,7 @@ def run_checks_for_shell(shell, fixtures, A1, A2, raw_scan, tiff_scan):
     c12(A1)
     c13(A1, A2)
     c14(fixtures)
+    c15(A1, A2)
 
 
 def pick_tiff16(fixtures):

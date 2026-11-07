@@ -126,6 +126,40 @@ def test_restore_in_a_dry_run_moves_nothing(tree, tmp_path, shell):
 
 
 @pytest.mark.parametrize("shell", SHELLS)
+def test_long_paths_are_seen_and_restored(tmp_path, shell):
+    """Round 26: past 260 characters Windows PowerShell 5.1's Get-ChildItem/Test-Path lost
+    the trail -- a backup whose original WAS in place could read as stranded, and a real
+    one could be missed. The detection now goes through \\\\?\\ in both shells."""
+    root = tmp_path / "root"
+    deep = root / HOSTILE
+    while len(str(deep)) < 250:
+        deep = deep / "長いフォルダ名 [x] 50%"
+    import os
+    def lp(p):
+        return "\\\\?\\" + str(p)
+    os.makedirs(lp(deep / "OLD_TIFFs"), exist_ok=True)
+    def put(p, seed):
+        a = np.random.default_rng(seed).integers(0, 255, size=(16, 16, 3), dtype=np.uint8)
+        buf = __import__("io").BytesIO()
+        tifffile.imwrite(buf, a, photometric="rgb", compression="zlib")
+        with open(lp(p), "wb") as f:
+            f.write(buf.getvalue())
+    put(deep / "OLD_TIFFs" / "healthy.tif", 1)
+    put(deep / "healthy.tif", 1)                       # its original place is NOT empty
+    put(deep / "OLD_TIFFs" / "lost.tif", 2)            # nothing in its place
+    assert len(str(deep / "OLD_TIFFs" / "healthy.tif")) > 260
+    r, out = run(shell, root, "-Mode", 8, "-DryRun", cwd=tmp_path)
+    names = sorted(Path(ln.split("| ", 1)[1].strip()).name for ln in stranded_lines(out))
+    assert names == ["lost.tif"], out[-3000:]
+    r, out = run(shell, root, "-Mode", 8, "-DryRun", "-RestoreStranded", cwd=tmp_path)
+    assert "DRY: would restore" in out
+    r, out = run(shell, root, "-Mode", 9, "-RestoreStranded", cwd=tmp_path)
+    assert os.path.exists(lp(deep / "lost.tif")), out[-3000:]
+    assert not os.path.exists(lp(deep / "OLD_TIFFs" / "lost.tif"))
+    assert "1 restored" in out
+
+
+@pytest.mark.parametrize("shell", SHELLS)
 def test_excluded_folders_and_mode0_depth(tree, tmp_path, shell):
     root, cam, old = tree
     # an excluded folder's backups are not looked at

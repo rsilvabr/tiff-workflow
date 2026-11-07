@@ -48,6 +48,12 @@ pytest tests --cov=..
 ### `test_stranded_originals.py` covers
 - Round 25: originals left in `OLD_TIFFs/` with nothing in their place are reported in every mode (and mode 0 only at its own depth), `-RestoreStranded` puts them back and the same run compresses them, a dry run moves nothing, ambiguous and excluded backups are left alone (both shells, hostile folder)
 
+### `test_mode9_keep_original.py` covers
+- Round 26: modes 0/9 archive an original only after its copy landed -- a killed run (both shells, sequential and parallel, polled every 50 ms) never leaves a place empty; an edit saved during the run is never archived; staged and in-place runs, `.tiff` sources, a second run; every staging loop lands through `Move-FileIntoPlace`
+
+### `test_wizard_stranded.py` covers
+- Round 26: the wizard offers `-RestoreStranded` after a run that ends with stranded originals (never on presets or dry runs; PS 5.1 `-Command` form), and option 5 can restore only the stranded ones (same rule as the backend, never over a file)
+
 ### `test_move_old_backups.py` covers
 - Round 25: `tools/move_old_backups.py` (formerly `move_old_padded.py`) never moves a backup whose original place is empty (same name, `.tif`/`.tiff`, `_vN` and timestamped backups, sidecars), re-checks before each move, exits 1 when it kept any; `--folder` is required and picks its own destination
 

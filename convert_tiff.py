@@ -20,7 +20,7 @@ and streaming output from PowerShell backends.
 # the release this file belongs to (tests/test_diagnose_preset.py pins it to the newest
 # docs/CHANGELOG.md section).
 TOOLKIT_NAME = "tiff-workflow"
-TOOLKIT_VERSION = "2.7.3"
+TOOLKIT_VERSION = "2.7.4"
 TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes
@@ -1664,6 +1664,52 @@ def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
     return _wrap_ps5_command(cmd[:j] + ["-File"] + new_parts), list_path
 
 
+# compress_tiff_zip.ps1's end-of-run line when originals are still stranded in OLD_TIFFs/
+# (audit round 25: Find-StrandedOriginals). The wizard offers -RestoreStranded on it.
+_STRANDED_LEFT_RE = re.compile(r"STRANDED: (\d+) original\(s\) still in OLD_TIFFs")
+
+
+def _with_restore_stranded(cmd: List[str]) -> List[str]:
+    """`cmd` plus -RestoreStranded, also for a PS 5.1 command wrapped in -Command."""
+    if len(cmd) >= 2 and cmd[-2] == "-Command":
+        return cmd[:-1] + [cmd[-1] + " -RestoreStranded"]
+    return cmd + ["-RestoreStranded"]
+
+
+def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[int]:
+    """After a compress run that left originals stranded in OLD_TIFFs/ (nothing in their
+    place: an earlier run was interrupted), offer to run it again with -RestoreStranded,
+    which moves them back and compresses them. Returns that run's exit code, or None when
+    nothing was run. Never asks on an unattended run (closed stdin, a preset) or a dry
+    run: it says what to do instead."""
+    if stranded <= 0 or not any("compress_tiff_zip" in str(c) for c in cmd):
+        return None
+    if any("-RestoreStranded" in str(c) for c in cmd):
+        return None
+    msg = (f"{stranded} original(s) are in OLD_TIFFs with nothing in their place -- left by an "
+           f"interrupted run. They are the only copy of those images.")
+    interactive = stdin is None and sys.stdin is not None and sys.stdin.isatty()
+    dry = any(str(c) == "-DryRun" or str(c).endswith(" -DryRun") or " -DryRun " in str(c)
+              for c in cmd)
+    if not interactive or dry:
+        hint = (" Run the same compress again with -RestoreStranded (or answer yes to this "
+                "question in an interactive, non-dry run) to put them back.")
+        if RICH_AVAILABLE and console:
+            console.print(f"[yellow]{escape(msg + hint)}[/yellow]")
+        else:
+            print(msg + hint)
+        return None
+    if RICH_AVAILABLE and console:
+        console.print(f"\n[yellow]{escape(msg)}[/yellow]")
+        yes = Confirm.ask("Put them back and compress them now?", default=True)
+    else:
+        print("\n" + msg)
+        yes = input("Put them back and compress them now? [Y/n]: ").strip().lower() in ("", "y", "yes", "s", "sim")
+    if not yes:
+        return None
+    return run_subprocess(_with_restore_stranded(cmd), stdin=stdin)
+
+
 def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
                    stdin=None) -> int:
     """Run command, stream output with Rich coloring. Has configurable timeout.
@@ -1674,7 +1720,9 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
     import sys
     import threading
 
+    original_cmd = list(cmd)
     cmd, _spill_path = _spill_long_input_dir(cmd)
+    stranded_left = [0]
 
     popen_kwargs = {
         "stdout": subprocess.PIPE,
@@ -1740,6 +1788,9 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
                 line = line.strip()
                 if not line:
                     continue
+                m = _STRANDED_LEFT_RE.search(line)
+                if m:
+                    stranded_left[0] = int(m.group(1))
                 if RICH_AVAILABLE and console:
                     if " OK " in line or "+ZIP" in line:
                         console.print(f"  [green]{escape(line)}[/green]")
@@ -1802,7 +1853,8 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
                 console.print(f"[red]WARNING: Process exited with code {process.returncode}[/red]")
             else:
                 print(f"WARNING: Process exited with code {process.returncode}")
-        return process.returncode
+        restored_rc = _offer_restore_stranded(original_cmd, stranded_left[0], stdin)
+        return process.returncode if restored_rc is None else restored_rc
     finally:
         if _spill_path:
             try:
@@ -1813,8 +1865,72 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
 
 # --- Undo OLD_TIFFs ------------------------------------------------
 
+_TIMESTAMPED_BACKUP_RE = re.compile(r"^(?P<base>.+)_\d{8}_\d{6}(?:_\d+)?$")
+
+
+def _restore_stranded_only(stranded) -> bool:
+    """Move each stranded backup to its target, never over a file; two backups claiming
+    one target (an original and its timestamped namesake) are both left alone."""
+    from collections import Counter
+    claims = Counter(str(t).lower() for _, t in stranded)
+    moved = kept = failed = 0
+    for f, target in stranded:
+        if claims[str(target).lower()] > 1:
+            kept += 1
+            line = f"  KEPT (more than one backup claims {target.name}; move the right one by hand): {f}"
+        elif target.exists():
+            kept += 1
+            line = f"  KEPT ({target.name} appeared meanwhile): {f}"
+        else:
+            try:
+                _safe_move(f, target)
+                moved += 1
+                line = f"  RESTORED: {target}"
+            except Exception as e:  # one unmovable file must not stop the rest
+                failed += 1
+                line = f"  FAILED: {f.name} -- {e}"
+        if RICH_AVAILABLE and console:
+            colour = "green" if line.startswith("  RESTORED") else ("red" if line.startswith("  FAILED") else "yellow")
+            console.print(f"[{colour}]{escape(line)}[/{colour}]")
+        else:
+            print(line)
+    summary = f"Done. Restored {moved} stranded original(s)" + \
+              (f", kept {kept}" if kept else "") + (f", FAILED {failed}" if failed else "") + "."
+    if RICH_AVAILABLE and console:
+        console.print(f"\n[{'green' if not failed else 'red'}]{escape(summary)}[/]")
+    else:
+        print("\n" + summary)
+    return failed == 0
+
+
+def _stranded_backups(old_dirs) -> list:
+    """(backup, target) for each TIFF in these OLD_TIFFs folders whose original place is
+    EMPTY -- the same rule as compress_tiff_zip.ps1's Find-StrandedOriginals (round 25):
+    no <stem>.tif / <stem>.tiff in the parent, nor the base stem of a timestamped backup
+    (<stem>_yyyyMMdd_HHmmss[_n]). Target = base stem + the backup's extension. A folder
+    nested in another OLD_TIFFs is a backup of a backup and is skipped."""
+    out = []
+    for od in old_dirs:
+        od = Path(od)
+        parent = od.parent
+        if parent.name.lower() in ("old_tiffs", "old_tiff"):
+            continue
+        for f in sorted(od.glob("*")):
+            if not f.is_file() or f.suffix.lower() not in (".tif", ".tiff"):
+                continue
+            stems = [f.stem]
+            m = _TIMESTAMPED_BACKUP_RE.match(f.stem)
+            if m:
+                stems.append(m.group("base"))
+            if any((parent / f"{s}{e}").exists() for s in stems for e in (".tif", ".tiff")):
+                continue
+            out.append((f, parent / f"{stems[-1]}{f.suffix}"))
+    return out
+
+
 def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
-    """Move TIFFs from OLD_TIFFs/ back to parent folder."""
+    """Move TIFFs from OLD_TIFFs/ back to parent folder -- all of them, or (round 26) only
+    the stranded ones: originals with nothing left in their place."""
     folder = step_folder(cfg, "Root folder to scan for OLD_TIFFs")
     if folder is None:
         return False
@@ -1845,6 +1961,21 @@ def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
         print(f"\nFound {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} TIFF(s):")
         for od in old_dirs:
             print(f"  {counts[od]:>4} TIFFs: {od}")
+
+    # Round 26: the usual reason to come here is an interrupted mode 0/9 run. Restoring
+    # EVERYTHING also brings back the originals of files that were compressed fine (and,
+    # with overwrite, puts them over the compressed copies); restoring only the stranded
+    # ones -- nothing in their place -- is what such a run needs.
+    stranded = _stranded_backups(old_dirs)
+    if stranded:
+        msg = (f"{len(stranded)} of them have NOTHING in their place (left by an interrupted "
+               f"run): restore only those?")
+        if RICH_AVAILABLE and console:
+            only = Confirm.ask(f"\n[yellow]{escape(msg)}[/yellow]", default=True)
+        else:
+            only = input(f"\n{msg} [Y/n]: ").strip().lower() not in ("n", "no", "nao", "não")
+        if only:
+            return _restore_stranded_only(stranded)
 
     if RICH_AVAILABLE and console:
         overwrite = Confirm.ask("\n[yellow]Overwrite existing files in parent folder?[/yellow]", default=False)

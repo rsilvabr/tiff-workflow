@@ -88,6 +88,20 @@ Runs Fuji: Copy EXIF first, then Fuji: Compress in sequence -- two steps in one 
 
 Move TIFFs from OLD_TIFFs/ subfolders back to their parent folders.
 
+When some of them have **nothing in their place** (originals left behind by an interrupted
+mode 0/9 run -- see *Stranded originals* in the compress reference), the first question is
+whether to restore only those (default yes). That restores them without touching the
+originals of files that were compressed fine, never over an existing file, and leaves alone two
+backups that claim the same name (an original and its timestamped namesake: move the right one
+by hand). Answer no to restore everything, as before.
+
+### Stranded originals after a compress run
+
+When a compress run ends with `STRANDED: N original(s) still in OLD_TIFFs ...`, the wizard asks
+whether to put them back and compress them now (it runs the same command again with
+`-RestoreStranded`). It never asks on a preset, a scheduled run or a dry run -- there it prints
+what to do instead.
+
 ### Delete OLD_TIFFs (option 6)
 
 Verify each TIFF in OLD_TIFFs matches the parent copy (via RMSE), then delete if identical.

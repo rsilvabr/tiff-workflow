@@ -585,38 +585,189 @@ function Find-StrandedOriginals {
         [string[]]$BackupNames,
         [string[]]$ExcludeNames
     )
+    # Audit round 26: a plain .NET walk instead of Get-ChildItem -Recurse -- it lists folders
+    # only, never descends INTO a backup folder (a nested one is a backup of a backup), skips
+    # junctions, and goes through the \\?\ prefix: Windows PowerShell 5.1 is not long-path
+    # aware, so past 260 characters Get-ChildItem dropped folders silently and Test-Path said
+    # "no original here" about a file that was there -- a false STRANDED.
     $found = [System.Collections.ArrayList]::new()
-    $dirs = @(Get-ChildItem -LiteralPath $Root -Directory -Recurse:$Recurse -ErrorAction SilentlyContinue |
-              Where-Object { $BackupNames -contains $_.Name })
+    $full = [System.IO.Path]::GetFullPath($Root)
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }      # keep "E:\" a drive root
+    $lp = if ($full.StartsWith('\\')) { '' } else { '\\?\' }   # UNC roots: as they are
+    $reparse = [System.IO.FileAttributes]::ReparsePoint
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($full)
+    $dirs = [System.Collections.Generic.List[string]]::new()
+    while ($stack.Count -gt 0) {
+        $cur = $stack.Pop()
+        try { $subs = [System.IO.Directory]::GetDirectories("$lp$cur") } catch { continue }
+        foreach ($sub in $subs) {
+            $plain = if ($lp) { $sub.Substring($lp.Length) } else { $sub }
+            $name = [System.IO.Path]::GetFileName($plain)
+            if ($BackupNames -contains $name) { $dirs.Add($plain); continue }
+            if (-not $Recurse) { continue }
+            try { if (([System.IO.File]::GetAttributes($sub) -band $reparse) -ne 0) { continue } } catch { continue }
+            $stack.Push($plain)
+        }
+    }
+    $dirs.Sort([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($d in $dirs) {
-        $parent = $d.Parent.FullName
+        $parent = [System.IO.Path]::GetDirectoryName($d)
         if ($ExcludeNames -and $ExcludeNames.Count -gt 0 -and
             (Test-PathExcluded -Directory $parent -Root $Root -Names $ExcludeNames)) { continue }
-        # A backup folder nested in another one is a backup of a backup: its parent is not
-        # where an original lived.
-        if (Test-PathExcluded -Directory $parent -Root $Root -Names $BackupNames) { continue }
-        $tiffs = @(Get-ChildItem -LiteralPath $d.FullName -File -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Extension -match '^\.(tif|tiff)$' })
-        foreach ($b in $tiffs) {
-            $stem = [System.IO.Path]::GetFileNameWithoutExtension($b.Name)
+        try { $files = [System.IO.Directory]::GetFiles("$lp$d") } catch { continue }
+        [System.Array]::Sort($files, [System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($bLong in $files) {
+            $bName = [System.IO.Path]::GetFileName($bLong)
+            $ext = [System.IO.Path]::GetExtension($bName)
+            if ($ext -notmatch '^\.(tif|tiff)$') { continue }
+            $stem = [System.IO.Path]::GetFileNameWithoutExtension($bName)
             $stems = @($stem)
             if ($stem -match '^(.+)_\d{8}_\d{6}(_\d+)?$') { $stems += $Matches[1] }
             $present = $false
             foreach ($s in $stems) {
-                foreach ($ext in @('.tif', '.tiff')) {
-                    if (Test-Path -LiteralPath (Join-Path $parent "$s$ext")) { $present = $true; break }
+                foreach ($e in @('.tif', '.tiff')) {
+                    # Combine, never "$parent\...": behind \\?\ Windows does not fold a
+                    # doubled backslash (a drive-root parent is "E:\").
+                    if ([System.IO.File]::Exists($lp + [System.IO.Path]::Combine($parent, "$s$e"))) { $present = $true; break }
                 }
                 if ($present) { break }
             }
             if (-not $present) {
                 [void]$found.Add([pscustomobject]@{
-                    Backup = $b.FullName
-                    Target = (Join-Path $parent "$($stems[-1])$($b.Extension)")
+                    Backup = [System.IO.Path]::Combine($d, $bName)
+                    Target = [System.IO.Path]::Combine($parent, "$($stems[-1])$ext")
+                    LongPrefix = $lp
                 })
             }
         }
     }
     return $found
+}
+
+function New-TempSiblingPath {
+    <#
+    .SYNOPSIS
+        A temporary name next to $Path (same folder, so same volume): <Path>.<run id>_<12 hex>.tif.
+        $script:leftoverNamePattern matches it, so a copy an interrupted run leaves behind is
+        never taken for a photo (nor for a stranded original).
+    #>
+    param([string]$Path)
+    return "$Path.$($script:runStagingId)_$([guid]::NewGuid().ToString('N').Substring(0, 12)).tif"
+}
+
+function Move-FileIntoPlace {
+    <#
+    .SYNOPSIS
+        Puts $From at $To so that $To is never a half-written file. Returns $null or an error.
+
+    .DESCRIPTION
+        Audit round 26. A move between two volumes is a copy then a delete, and Move-Item
+        -Force over an existing $To wrote the copy straight into it: a run killed mid-copy (a
+        cross-drive -StagingDir: mode 8 replacing an original, mode 9's staged output) left a
+        truncated file where the only copy of the image had been. jxl-photo's rule: the
+        irreversible step comes last, as an atomic rename on the destination volume. So a
+        file from another volume is first copied to a temp sibling of $To (size checked), and
+        only that sibling is renamed over $To. The source is removed after the rename.
+    #>
+    param([string]$From, [string]$To)
+    $fromRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($From))
+    $toRoot   = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($To))
+    if ($fromRoot -ieq $toRoot) {
+        try {
+            Move-Item -LiteralPath $From -Destination $To -Force -ErrorAction Stop
+            return $null
+        } catch { return "move failed: $($_.Exception.Message)" }
+    }
+    $tmp = New-TempSiblingPath -Path $To
+    try {
+        $size = (Get-Item -LiteralPath $From).Length
+        Copy-Item -LiteralPath $From -Destination $tmp -ErrorAction Stop
+        if ((Get-Item -LiteralPath $tmp).Length -ne $size) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            return "size mismatch after copy"
+        }
+        Move-Item -LiteralPath $tmp -Destination $To -Force -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return "copy failed: $($_.Exception.Message)"
+    }
+    Remove-Item -LiteralPath $From -Force -ErrorAction SilentlyContinue
+    return $null
+}
+
+function Complete-KeepOriginal {
+    <#
+    .SYNOPSIS
+        Modes 0/9: lands a verified compressed copy and only THEN archives the original in
+        OLD_TIFFs/. Returns $null on success, else the error text (the original is left, or
+        put back, in its place).
+
+    .DESCRIPTION
+        Audit round 26. Modes 0/9 used to move every original of the run to OLD_TIFFs/ while
+        planning, before a single file was compressed: for the whole run the original places
+        were empty, and a run killed by anything but Ctrl+C stranded all of them (365 on
+        2026-08-03). Now the worker writes to a temp sibling or the staging folder and checks
+        the output decodes; here, on the main thread:
+          1. the output is brought next to its destination as a temp sibling (Move-FileIntoPlace
+             rules: a copy from another volume is size-checked first);
+          2. the original must be unchanged since planning (size + LastWriteTimeUtc);
+          3. the original moves to OLD_TIFFs/ (unique name as before);
+          4. the temp sibling is renamed onto FinalDst -- for a .tif source the place the
+             original just left, so only the two renames on one volume ever leave it empty.
+        A failure in 4 puts the original back. The interrupt trap tracks the original from 3
+        to 4; a kill in that instant is what Find-StrandedOriginals reports.
+    #>
+    param(
+        [string]$Written,
+        [string]$Src,
+        [string]$FinalDst,
+        [string]$KeepDir,
+        [long]$SrcLength,
+        [long]$SrcWriteTicks
+    )
+    if (-not (Test-Path -LiteralPath $Written)) { return "compressed file missing: $Written" }
+    $tmp = New-TempSiblingPath -Path $FinalDst
+    $err = Move-FileIntoPlace -From $Written -To $tmp
+    if ($err) { return $err }
+    $si = Get-Item -LiteralPath $Src -ErrorAction SilentlyContinue
+    if (-not $si -or $si.Length -ne $SrcLength -or $si.LastWriteTimeUtc.Ticks -ne $SrcWriteTicks) {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return "the original changed or vanished while it was being compressed - left as it is"
+    }
+    if (-not (Test-Path -LiteralPath $KeepDir)) { [System.IO.Directory]::CreateDirectory($KeepDir) | Out-Null }
+    $srcName = [System.IO.Path]::GetFileName($Src)
+    $backup = Join-Path $KeepDir $srcName
+    if (Test-Path -LiteralPath $backup) {
+        $base = Join-Path $KeepDir "$([System.IO.Path]::GetFileNameWithoutExtension($srcName))_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
+        $ext = [System.IO.Path]::GetExtension($srcName)
+        $backup = "$base$ext"
+        $n = 1
+        while (Test-Path -LiteralPath $backup) { $backup = "${base}_${n}$ext"; $n++ }
+    }
+    $track = @{ Backup = $backup; Original = $Src; FinalDst = $FinalDst }
+    try {
+        Move-Item -LiteralPath $Src -Destination $backup -ErrorAction Stop
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return "could not move the original to OLD_TIFFs: $($_.Exception.Message)"
+    }
+    [void]$script:movedOriginals.Add($track)
+    try {
+        Move-Item -LiteralPath $tmp -Destination $FinalDst -Force -ErrorAction Stop
+    } catch {
+        $msg = $_.Exception.Message
+        try {
+            Move-Item -LiteralPath $backup -Destination $Src -ErrorAction Stop
+            [void]$script:movedOriginals.Remove($track)
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            return "could not put the compressed file in place ($msg) - original restored"
+        } catch {
+            return "could not put the compressed file in place ($msg) - ORIGINAL LEFT IN OLD_TIFFs: $backup"
+        }
+    }
+    [void]$script:movedOriginals.Remove($track)
+    return $null
 }
 
 function Test-PathExcluded {
@@ -1615,8 +1766,8 @@ function Process-TiffJob {
     # both resolve finalDst == srcPath and went straight to `magick src -compress zip src`,
     # with no backup and no verification. Backup-TiffMetadata already treats the same
     # condition as in-place in every mode -- the two halves of the guard disagreed.
-    # Modes 0/9 are unaffected: their source is already safe in OLD_TIFFs/, so srcPath
-    # points there and this condition is false.
+    # Modes 0/9 are unaffected: they write a temp sibling of FinalDst (audit round 26), so
+    # writeDst never equals srcPath and Complete-KeepOriginal lands the copy.
     $inPlaceFinalDst = $null
     if ($writeDst -eq $srcPath) {
         $inPlaceFinalDst = $writeDst
@@ -1823,6 +1974,12 @@ function Process-TiffJob {
         if ($mode8Ok) {
             if ($deleteSource) { $canDeleteSource = $true }
         } else {
+            $integrityFailed = $true
+        }
+    } elseif ($mode -eq 0 -or $mode -eq 9) {
+        # Audit round 26: the original is archived in OLD_TIFFs/ only after this copy lands,
+        # so it must decode first. Checked here, in the worker, to keep the decode parallel.
+        if (-not (Test-ZipIntegrity -Path $writeDst -TimeoutSec $script:MagickTimeout)) {
             $integrityFailed = $true
         }
     }
@@ -2237,7 +2394,10 @@ if ($Mode -lt 0) {
                             if (-not (Test-Path -LiteralPath (Split-Path $destPath -Parent))) {
                                 [System.IO.Directory]::CreateDirectory((Split-Path $destPath -Parent)) | Out-Null
                             }
-                            Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
+                            # Audit round 26: never a copy straight onto the destination -- a
+                        # cross-volume -StagingDir made that copy+delete over the original.
+                        $mvErr = Move-FileIntoPlace -From $stagePath -To $destPath
+                        if ($mvErr) { throw $mvErr }
                             if ((Test-Path -LiteralPath $destPath) -and ((Get-Item -LiteralPath $destPath).Length -eq $stageSize)) {
                                 $moved++
                             } else {
@@ -2403,13 +2563,15 @@ foreach ($inputRoot in $inputRoots) {
             Write-Log "  DRY: would restore to $($s.Target)"
             continue
         }
-        if (Test-Path -LiteralPath $s.Target) {
+        $lp = $s.LongPrefix
+        if ([System.IO.File]::Exists("$lp$($s.Target)")) {
             Write-Log "  not restored: $($s.Target) appeared meanwhile" "WARN"
             continue
         }
         try {
-            # No -Force: never over a file that appeared after the check above.
-            Move-Item -LiteralPath $s.Backup -Destination $s.Target -ErrorAction Stop
+            # File.Move never overwrites: a file that appeared after the check above stays.
+            # Through \\?\ (round 26): PS 5.1's Move-Item cannot reach a path past 260 chars.
+            [System.IO.File]::Move("$lp$($s.Backup)", "$lp$($s.Target)")
             $script:restoredTotal++
             Write-Log "  RESTORED (stranded original) | $($s.Target)" "WARN"
         } catch {
@@ -2688,7 +2850,8 @@ foreach ($f in $files) {
     $writeLen = if ($writeDst) { $writeDst.Length } else { 0 }
     if ($writeDst -and $writeDst -eq $f.FullName) { $writeLen += 26 }
     $finalLen2 = if ($finalDst) { $finalDst.Length } else { 0 }
-    if ($finalDst -and $finalDst -eq $f.FullName) { $finalLen2 += 26 }
+    # Modes 0/9 always land through a temp sibling of FinalDst (audit round 26)
+    if ($finalDst -and ($finalDst -eq $f.FullName -or $Mode -eq 0 -or $Mode -eq 9)) { $finalLen2 += 26 }
     $tooLong = $null
     $tooLongLen = 0
     if ($writeLen -gt 259) { $tooLong = $writeDst; $tooLongLen = $writeLen }
@@ -2749,11 +2912,10 @@ foreach ($f in $files) {
             }
         }
 
-        # SafeMode multi-page check runs HERE, before the original is moved to OLD_TIFFs/.
-        # Doing it inside the worker (as before) meant a multi-page TIFF was already moved
-        # by the time it was rejected: it was reported as "skipped" while actually sitting
-        # in OLD_TIFFs/ with nothing left in the original folder, and MULTI is not an ERROR
-        # so the rollback never restored it.
+        # SafeMode multi-page check runs HERE, while planning. It was moved here when this
+        # loop still moved originals to OLD_TIFFs/ (a multi-page TIFF rejected in the worker
+        # sat in OLD_TIFFs/ reported as "skipped"); since round 26 nothing moves before
+        # the copy lands, and checking here still saves the worker a file it would refuse.
         $safeChecked = $false
         if ($SafeMode) {
             $pc = Get-TiffPageCount -Path $f.FullName -TimeoutSec $MagickTimeout
@@ -2775,47 +2937,32 @@ foreach ($f in $files) {
             $safeChecked = $true
         }
 
-        # "Destination exists" must be decided HERE too, before the original is moved to
-        # OLD_TIFFs/: the worker checks it as well, but by then the source already sits in
-        # OLD_TIFFs/ and SKIP is not an ERROR, so the rollback never restored it (same class
-        # as the MULTI bug above). A .tiff source whose .tif sibling already exists was the
-        # concrete case: original stranded in OLD_TIFFs, log saying "skipped".
+        # "Destination exists" is decided HERE too (same history as the MULTI check above:
+        # a .tiff source whose .tif sibling already existed was once stranded in OLD_TIFFs
+        # with the log saying "skipped").
         if ((Test-Path -LiteralPath $finalDst) -and -not $Overwrite -and ($finalDst -ne $f.FullName)) {
             Process-Results @("SKIP (exists) | $($f.Name)")
             continue
         }
 
-        # In dry-run, do not move -- just queue with original path
+        # Audit round 26: nothing moves here any more. The original stays in place until its
+        # compressed copy has been written, decoded and put next to it; Complete-KeepOriginal
+        # (after each group) archives it in OLD_TIFFs/ and renames the copy into place. This
+        # loop used to move EVERY original of the run to OLD_TIFFs/ before compressing any,
+        # so a run killed by anything but Ctrl+C stranded them all (365 on 2026-08-03).
         if (-not $DryRun) {
-            $oldTiffDir = Join-Path $f.DirectoryName "OLD_TIFFs"
-            if (-not (Test-Path -LiteralPath $oldTiffDir)) {
-                [System.IO.Directory]::CreateDirectory($oldTiffDir) | Out-Null
-            }
-            $oldSrc = Join-Path $oldTiffDir $f.Name
-            if (Test-Path -LiteralPath $oldSrc) {
-                $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-                $counter = 1
-                $baseOldSrc = Join-Path $oldTiffDir "$($f.BaseName)_$timestamp"
-                $oldSrc = "$baseOldSrc$($f.Extension)"
-                while (Test-Path -LiteralPath $oldSrc) {
-                    $oldSrc = "${baseOldSrc}_${counter}$($f.Extension)"
-                    $counter++
-                }
-            }
-            Move-Item -LiteralPath $f.FullName -Destination $oldSrc -Force
-            if (-not (Test-Path -LiteralPath $oldSrc)) {
-                Process-Results @("ERROR (move to OLD_TIFFs failed) | $($f.Name)")
-                continue
-            }
-            # Tracked so the interrupt trap can restore it if no verified output lands (audit round 16)
-            [void]$script:movedOriginals.Add(@{ Backup = $oldSrc; Original = $f.FullName; FinalDst = $finalDst })
+            # Without -StagingDir the worker writes a temp sibling of FinalDst (same volume,
+            # matched by $script:leftoverNamePattern), never FinalDst itself: for a .tif source
+            # that IS the original.
+            $keepWrite = if ($StagingDir) { $writeDst } else { New-TempSiblingPath -Path $finalDst }
             $tasks += @{
-                Src      = $oldSrc
-                WriteDst = $writeDst
+                Src      = $f.FullName
+                WriteDst = $keepWrite
                 FinalDst = $finalDst
                 Name     = $f.Name
-                MovedBy  = "mode0"
-                OldTiffBackup = $f.FullName
+                KeepOriginalDir = (Join-Path $f.DirectoryName "OLD_TIFFs")
+                SrcLength       = $f.Length
+                SrcWriteTicks   = $f.LastWriteTimeUtc.Ticks
                 GenerateThumb = $script:GenerateThumbnail
                 ThumbSize = $script:ThumbSize
                 ThumbQuality = $script:ThumbQuality
@@ -2882,8 +3029,8 @@ if ($tasks.Count -eq 0) {
 $script:memoryWorkerCap = 0
 if ($script:IS_PS7 -and -not $DryRun) {
     # Only an in-place write (WriteDst == Src) or mode 8's delete gate runs a pixel
-    # compare in the workers; modes 0/9 already moved the source to OLD_TIFFs/ and only
-    # decode-check the output (Test-ZipIntegrity).
+    # compare in the workers; modes 0/9 keep the original in OLD_TIFFs/ and only
+    # decode-check the output (Test-ZipIntegrity) before it lands.
     $needsCompare = ($Mode -eq 8) -or (@($tasks | Where-Object { $_.WriteDst -eq $_.Src }).Count -gt 0)
     $bpp = if ($needsCompare) { $script:CompareBytesPerPixel } else { $script:ConvertBytesPerPixel }
     $script:memoryWorkerCap = Get-MemoryCappedWorkers -Requested $Workers -Paths @($tasks | ForEach-Object { $_.Src }) -BytesPerPixel $bpp -Fraction $WorkerMemoryFraction
@@ -3046,7 +3193,7 @@ foreach ($group in $groupedTasks) {
             # already inside a ZIP/ folder) would destroy the only copy if magick died
             # mid-write: compress to a temp sibling and replace the original only after the
             # verification below. Same guard the legacy worker has always had; modes 0/9 are
-            # unaffected because their source already sits in OLD_TIFFs/.
+            # unaffected: they write a temp sibling of FinalDst (audit round 26).
             $inPlaceFinalDst = $null
             if ($writeDst -eq $srcPath) {
                 $inPlaceFinalDst = $writeDst
@@ -3232,6 +3379,12 @@ foreach ($group in $groupedTasks) {
                 } else {
                     $integrityFailed = $true
                 }
+            } elseif ($mode -eq 0 -or $mode -eq 9) {
+                # Audit round 26: the original is archived in OLD_TIFFs/ only after this copy
+                # lands, so it must decode first (same gate as the sequential worker).
+                if (-not (Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers)) {
+                    $integrityFailed = $true
+                }
             }
             $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
             $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
@@ -3269,13 +3422,12 @@ foreach ($group in $groupedTasks) {
             Process-Results @($resultText)
         }
 
-        # Move from staging to final destination before rollback, so rollback can check FinalDst.
-        # $groupErrs is computed AFTER this block and after the mode 8 deletes: measuring it here
-        # meant a failed staging move never triggered the rollback below, leaving the original
-        # stranded in OLD_TIFFs/ with no output and no ROLLBACK line.
+        # Move from staging to final destination (modes 0/9: Complete-KeepOriginal, below).
         if ($StagingDir -and -not $DryRun) {
             $moved = 0
             foreach ($t in $groupTasks) {
+                # Modes 0/9 land through Complete-KeepOriginal below (audit round 26)
+                if ($t.KeepOriginalDir) { continue }
                 $key = $t.FinalDst.ToLowerInvariant()
                 if (-not $script:stagingMap.ContainsKey($key)) { continue }
                 if ($integrityFailedDst.Contains($key)) {
@@ -3290,7 +3442,10 @@ foreach ($group in $groupedTasks) {
                 if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
                     try {
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
-                        Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
+                        # Audit round 26: never a copy straight onto the destination -- a
+                        # cross-volume -StagingDir made that copy+delete over the original.
+                        $mvErr = Move-FileIntoPlace -From $stagePath -To $destPath
+                        if ($mvErr) { throw $mvErr }
                         if (Test-Path -LiteralPath $destPath) {
                             $destSize = (Get-Item -LiteralPath $destPath).Length
                             if ($destSize -eq $stageSize) {
@@ -3314,6 +3469,35 @@ foreach ($group in $groupedTasks) {
                 }
             }
             if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $groupDir" }
+        }
+
+        # Audit round 26: modes 0/9 -- the copy lands first, THEN the original goes to
+        # OLD_TIFFs/ (Complete-KeepOriginal). A task whose worker failed, skipped or wrote a
+        # copy that does not decode never touches its original; its leftover is dropped.
+        if (-not $DryRun) {
+            $kept = 0
+            foreach ($t in $groupTasks) {
+                if (-not $t.KeepOriginalDir) { continue }
+                $key = $t.FinalDst.ToLowerInvariant()
+                $written = if ($StagingDir) {
+                    if ($script:stagingMap.ContainsKey($key)) { Join-Path $StagingDir $script:stagingMap[$key].StagingName } else { $null }
+                } else { $t.WriteDst }
+                if (-not $written -or -not (Test-Path -LiteralPath $written)) { continue }
+                if ($errorSrcPaths.Contains($t.Src) -or $integrityFailedDst.Contains($key)) {
+                    Remove-Item -LiteralPath $written -Force -ErrorAction SilentlyContinue
+                    continue
+                }
+                $kErr = Complete-KeepOriginal -Written $written -Src $t.Src -FinalDst $t.FinalDst `
+                            -KeepDir $t.KeepOriginalDir -SrcLength $t.SrcLength -SrcWriteTicks $t.SrcWriteTicks
+                if ($kErr) {
+                    $script:errTotal++
+                    Remove-Item -LiteralPath $written -Force -ErrorAction SilentlyContinue
+                    Write-Log "ERROR (keep original) | $($t.Name) | $kErr" "ERROR"
+                } else {
+                    $kept++
+                }
+            }
+            if ($kept -gt 0) { Write-Log "  -> $kept original(s) archived in OLD_TIFFs after their compressed copy landed" }
         }
 
         # Mode 8: delete source files only after successful move to final destination
@@ -3351,46 +3535,6 @@ foreach ($group in $groupedTasks) {
             if ($deletedCount -gt 0) { Write-Log "  -> Deleted $deletedCount source file(s) after successful move" }
         }
 
-        # Rollback: if errors occurred on files moved to OLD_TIFFs, restore originals only when FinalDst is missing
-        $groupErrs = $script:errTotal - $errBefore
-        if ($groupErrs -gt 0) {
-            $failedCount = 0
-            foreach ($t in $groupTasks) {
-                if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup -and $errorSrcPaths.Contains($t.Src)) {
-                    if (Test-Path -LiteralPath $t.FinalDst) {
-                        # Audit round 16: "exists" is not "valid" -- a partial/corrupt write
-                        # left at FinalDst used to veto the rollback and strand the original
-                        # in OLD_TIFFs/. Verify a full decode; a file that fails is deleted
-                        # and the original restored below.
-                        if (Test-ZipIntegrity -Path $t.FinalDst -TimeoutSec $MagickTimeout) {
-                            Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
-                            # Settled: verified output landed, the interrupt trap leaves it alone
-                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
-                            continue
-                        }
-                        Remove-Item -LiteralPath $t.FinalDst -Force -ErrorAction SilentlyContinue
-                        Write-Log "Rollback: deleted corrupt output | $($t.Name)" "WARN"
-                    }
-                    if (Test-Path -LiteralPath $t.Src) {
-                        try {
-                            $origDst = $t.OldTiffBackup
-                            if (-not (Test-Path -LiteralPath (Split-Path $origDst -Parent))) {
-                                [System.IO.Directory]::CreateDirectory((Split-Path $origDst -Parent)) | Out-Null
-                            }
-                            Move-Item -LiteralPath $t.Src -Destination $origDst -Force -ErrorAction Stop
-                            # Settled: original restored, nothing left for the interrupt trap
-                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
-                            Write-Log "ROLLBACK (restored from OLD_TIFFs) | $($t.Name)" "WARN"
-                            $failedCount++
-                        } catch {
-                            $script:errTotal++
-                            Write-Log "ROLLBACK FAILED | $($t.Name): $($_.Exception.Message)" "ERROR"
-                        }
-                    }
-                }
-            }
-            if ($failedCount -gt 0) { Write-Log "  -> Rolled back $failedCount file(s) from OLD_TIFFs" "WARN" }
-        }
     } else {
         # PS5.1: sequential (no -Parallel support)
         $errBefore = $script:errTotal
@@ -3415,13 +3559,12 @@ foreach ($group in $groupedTasks) {
             Process-Results @($resultText)
         }
 
-        # Move from staging to final destination before rollback, so rollback can check FinalDst.
-        # $groupErrs is computed AFTER this block and after the mode 8 deletes: measuring it here
-        # meant a failed staging move never triggered the rollback below, leaving the original
-        # stranded in OLD_TIFFs/ with no output and no ROLLBACK line.
+        # Move from staging to final destination (modes 0/9: Complete-KeepOriginal, below).
         if ($StagingDir -and -not $DryRun) {
             $moved = 0
             foreach ($t in $groupTasks) {
+                # Modes 0/9 land through Complete-KeepOriginal below (audit round 26)
+                if ($t.KeepOriginalDir) { continue }
                 $key = $t.FinalDst.ToLowerInvariant()
                 if (-not $script:stagingMap.ContainsKey($key)) { continue }
                 if ($integrityFailedDst.Contains($key)) {
@@ -3436,7 +3579,10 @@ foreach ($group in $groupedTasks) {
                 if ((Test-Path -LiteralPath $stagePath) -and $stagePath -ne $destPath) {
                     try {
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
-                        Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
+                        # Audit round 26: never a copy straight onto the destination -- a
+                        # cross-volume -StagingDir made that copy+delete over the original.
+                        $mvErr = Move-FileIntoPlace -From $stagePath -To $destPath
+                        if ($mvErr) { throw $mvErr }
                         if (Test-Path -LiteralPath $destPath) {
                             $destSize = (Get-Item -LiteralPath $destPath).Length
                             if ($destSize -eq $stageSize) {
@@ -3460,6 +3606,35 @@ foreach ($group in $groupedTasks) {
                 }
             }
             if ($moved -gt 0) { Write-Log "  -> Moved $moved file(s) -> $groupDir" }
+        }
+
+        # Audit round 26: modes 0/9 -- the copy lands first, THEN the original goes to
+        # OLD_TIFFs/ (Complete-KeepOriginal). A task whose worker failed, skipped or wrote a
+        # copy that does not decode never touches its original; its leftover is dropped.
+        if (-not $DryRun) {
+            $kept = 0
+            foreach ($t in $groupTasks) {
+                if (-not $t.KeepOriginalDir) { continue }
+                $key = $t.FinalDst.ToLowerInvariant()
+                $written = if ($StagingDir) {
+                    if ($script:stagingMap.ContainsKey($key)) { Join-Path $StagingDir $script:stagingMap[$key].StagingName } else { $null }
+                } else { $t.WriteDst }
+                if (-not $written -or -not (Test-Path -LiteralPath $written)) { continue }
+                if ($errorSrcPaths.Contains($t.Src) -or $integrityFailedDst.Contains($key)) {
+                    Remove-Item -LiteralPath $written -Force -ErrorAction SilentlyContinue
+                    continue
+                }
+                $kErr = Complete-KeepOriginal -Written $written -Src $t.Src -FinalDst $t.FinalDst `
+                            -KeepDir $t.KeepOriginalDir -SrcLength $t.SrcLength -SrcWriteTicks $t.SrcWriteTicks
+                if ($kErr) {
+                    $script:errTotal++
+                    Remove-Item -LiteralPath $written -Force -ErrorAction SilentlyContinue
+                    Write-Log "ERROR (keep original) | $($t.Name) | $kErr" "ERROR"
+                } else {
+                    $kept++
+                }
+            }
+            if ($kept -gt 0) { Write-Log "  -> $kept original(s) archived in OLD_TIFFs after their compressed copy landed" }
         }
 
         # Mode 8: delete source files only after successful move to final destination
@@ -3497,47 +3672,6 @@ foreach ($group in $groupedTasks) {
             if ($deletedCount -gt 0) { Write-Log "  -> Deleted $deletedCount source file(s) after successful move" }
         }
 
-        # Rollback for PS5: restore originals only for tasks that reported ERROR and have no FinalDst
-        $groupErrs = $script:errTotal - $errBefore
-        if ($groupErrs -gt 0) {
-            $failedCount = 0
-            foreach ($t in $groupTasks) {
-                if ($t.MovedBy -eq "mode0" -and $t.OldTiffBackup -and $errorSrcPaths.Contains($t.Src)) {
-                    if (Test-Path -LiteralPath $t.FinalDst) {
-                        # Audit round 16: "exists" is not "valid" -- a partial/corrupt write
-                        # left at FinalDst used to veto the rollback and strand the original
-                        # in OLD_TIFFs/. Verify a full decode; a file that fails is deleted
-                        # and the original restored below.
-                        if (Test-ZipIntegrity -Path $t.FinalDst -TimeoutSec $MagickTimeout) {
-                            Write-Log "SKIP rollback (ZIP exists) | $($t.Name)" "INFO"
-                            # Settled: verified output landed, the interrupt trap leaves it alone
-                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
-                            continue
-                        }
-                        Remove-Item -LiteralPath $t.FinalDst -Force -ErrorAction SilentlyContinue
-                        Write-Log "Rollback: deleted corrupt output | $($t.Name)" "WARN"
-                    }
-                    if (Test-Path -LiteralPath $t.Src) {
-                        try {
-                            $origDst = $t.OldTiffBackup
-                            if (-not (Test-Path -LiteralPath (Split-Path $origDst -Parent))) {
-                                [System.IO.Directory]::CreateDirectory((Split-Path $origDst -Parent)) | Out-Null
-                            }
-                            Move-Item -LiteralPath $t.Src -Destination $origDst -Force -ErrorAction Stop
-                            # Settled: original restored, nothing left for the interrupt trap
-                            foreach ($mv in @($script:movedOriginals.ToArray())) { if ($mv.Backup -eq $t.Src) { [void]$script:movedOriginals.Remove($mv) } }
-                            Write-Log "ROLLBACK (restored from OLD_TIFFs) | $($t.Name)" "WARN"
-                            $failedCount++
-                        } catch {
-                            $script:errTotal++
-                            $errMsg = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
-                            Write-Log "ROLLBACK FAILED | $($t.Name): $errMsg" "ERROR"
-                        }
-                    }
-                }
-            }
-            if ($failedCount -gt 0) { Write-Log "  -> Rolled back $failedCount file(s) from OLD_TIFFs" "WARN" }
-        }
     }
 }
 

@@ -55,6 +55,14 @@ gitignored). If one exists:
   line comments stripped); `_KNOWN_DIVERGENT` lists the annotated exceptions.
 - **Never `return` at script scope.** It exits 0 and discards the
   `$errTotal -gt 0 -> exit 1` contract that `convert_tiff.py` relies on.
+- **The irreversible step comes last** (jxl-photo's rule; rounds 25-26). An original
+  leaves its place only after its replacement is written, checked and sitting next to it
+  on the same volume, and the swap is a rename: modes 0/9 land through
+  `Complete-KeepOriginal` (never move originals while planning again), every staging loop
+  through `Move-FileIntoPlace` (never `Move-Item -Force` from another drive onto a file).
+  Every run reports originals left in `OLD_TIFFs/` with nothing in their place
+  (`Find-StrandedOriginals`); never delete or move an `OLD_TIFFs` backup whose place is
+  empty (`tools/move_old_backups.py`, the wizard's Delete OLD_TIFFs).
 - **Gates that authorise destroying data fail CLOSED**: a timeout, a non-zero
   exit or unparseable output is a failure, never a pass (`Test-ZipIntegrity`,
   `Get-TiffPageCount`, `_compare_tiff_metadata`, `_process_single_padded`).
