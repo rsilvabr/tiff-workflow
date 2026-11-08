@@ -9,6 +9,8 @@ Unified TIFF processing toolkit with four complementary workflows:
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
+**Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; PowerShell 7, ExifTool and ImageMagick included.
+
 ---
  
 ## Why compress TIFFs to Deflate?

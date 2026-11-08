@@ -206,7 +206,9 @@ same `<topic>` across the three.
   `git log --grep audit-round`.
 - `docs/CHANGELOG.md` -- per release. `tests/README.md` -- what each suite pins.
 - `RELEASE_vX.Y.md` (root, gitignored) -- notes pasted into the GitHub release
-  with `gh release create --notes-file`.
+  with `gh release create --notes-file`. Their FIRST line points to the Windows
+  program (owner's rule, 2026-11-08):
+  `> **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — the same scripts with PowerShell 7, ExifTool and ImageMagick included.`
 
 ## Commits and releases
 - Commits carry the repo owner's authorship only -- **no `Co-Authored-By`,
