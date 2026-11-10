@@ -24,6 +24,121 @@ param(
 $script:ToolkitVersion = '2.8.0'
 $script:ToolkitUrl = 'https://github.com/rsilvabr/tiff-workflow'
 
+# Settings overlay (.tiff_workflow_settings.json): the ONLY names it can change in this script,
+# each with the type/range it must have. Never a safety or per-run setting (Mode, InputDir,
+# OutputDir, StagingDir, Workers, DryRun, SafeMode, SkipLzwAsCompressed, Overwrite,
+# DeleteSource, ...): tests/test_settings_overlay.py pins that. convert_tiff.py parses this
+# block, one entry per line.
+# OVERLAY-SPECS-BEGIN
+$script:OverlaySpecs = @{
+    'MagickTimeout' = 'int:1:'
+    'WorkerMemoryFraction' = 'float:0:2'
+}
+# OVERLAY-SPECS-END
+
+function Get-SettingsOverlay {
+    param([string]$Section, [hashtable]$Specs, [string]$ScriptRoot)
+    # The settings overlay: .tiff_workflow_settings.json changes the settings at the top of the
+    # scripts without editing them. Returns @{ Path; Values; Warnings }; NEVER throws -- a file
+    # that cannot be read changes nothing and says so. Only names in $Specs are taken, each
+    # checked against its spec (int/float/intstr:lo:hi, bool, name, path?); nothing that deletes,
+    # overwrites or is chosen per run is ever in a spec table. The file is the env variable
+    # TIFFWORKFLOW_SETTINGS (set but blank = no overlay), else next to the scripts, else the
+    # user profile. [System.IO.File], not Test-Path/Get-Content: "[ ]" in a folder name is a
+    # wildcard to them.
+    $result = @{ Path = ''; Values = @{}; Warnings = @() }
+    try {
+        $fileName = '.tiff_workflow_settings.json'
+        $envPath = [System.Environment]::GetEnvironmentVariable('TIFFWORKFLOW_SETTINGS')
+        if ($null -ne $envPath) {
+            if ([string]::IsNullOrWhiteSpace($envPath)) { return $result }
+            $path = $envPath
+        } else {
+            $path = $fileName
+            if ($ScriptRoot) { $path = [System.IO.Path]::Combine($ScriptRoot, $fileName) }
+            if (-not [System.IO.File]::Exists($path)) {
+                $userHome = $env:USERPROFILE
+                if (-not $userHome) { $userHome = [System.Environment]::GetFolderPath('UserProfile') }
+                if ($userHome) { $path = [System.IO.Path]::Combine($userHome, $fileName) }
+            }
+        }
+        $result.Path = $path
+        if (-not [System.IO.File]::Exists($path)) { return $result }
+        $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false))
+        # PS 5.1 unrolls a root array into its elements: look at the text, not at the object
+        $first = $text.TrimStart([char[]]@(0xFEFF, 32, 9, 13, 10))
+        if ($first.Length -eq 0 -or $first[0] -ne [char]123) { throw 'not a JSON object' }
+        $root = ConvertFrom-Json -InputObject $text
+        $sect = $null
+        foreach ($p in $root.PSObject.Properties) { if ($p.Name -ceq $Section) { $sect = $p.Value } }
+        if ($null -eq $sect) { return $result }
+        if ($sect -isnot [pscustomobject]) { throw "the '$Section' entry is not an object" }
+        foreach ($p in $sect.PSObject.Properties) {
+            $name = $p.Name
+            $v = $p.Value
+            if (-not (@($Specs.Keys) -ccontains $name)) {
+                $result.Warnings += "$name is not a setting the overlay can change in $Section; ignored"
+                continue
+            }
+            $parts = ([string]$Specs[$name]).Split(':')
+            $kind = $parts[0]
+            $lo = $null
+            $hi = $null
+            if ($parts.Count -ge 3) {
+                if ($parts[1] -ne '') { $lo = [double]::Parse($parts[1], [System.Globalization.CultureInfo]::InvariantCulture) }
+                if ($parts[2] -ne '') { $hi = [double]::Parse($parts[2], [System.Globalization.CultureInfo]::InvariantCulture) }
+            }
+            $ok = $false
+            $checked = $null
+            $expected = 'a setting the overlay cannot change'
+            $isWhole = ($v -is [int]) -or ($v -is [long])
+            $isNum = $isWhole -or ($v -is [double]) -or ($v -is [decimal])
+            if ($kind -eq 'int' -or $kind -eq 'intstr' -or $kind -eq 'float') {
+                $expected = 'a whole number'
+                if ($kind -eq 'float') { $expected = 'a number' }
+                if ($null -ne $lo -and $null -ne $hi) { $expected += " from $($parts[1]) to $($parts[2])" }
+                elseif ($null -ne $lo) { $expected += " of at least $($parts[1])" }
+                if ($isWhole -or ($kind -eq 'float' -and $isNum)) {
+                    $num = [double]$v
+                    $inRange = (($null -eq $lo) -or ($num -ge $lo)) -and (($null -eq $hi) -or ($num -le $hi))
+                    # the scripts' [int] parameters: nothing outside Int32
+                    if ($kind -ne 'float' -and ($num -lt -2147483648 -or $num -gt 2147483647)) { $inRange = $false }
+                    if ($inRange) {
+                        $ok = $true
+                        if ($kind -eq 'float') { $checked = $num }
+                        elseif ($kind -eq 'int') { $checked = [int]$v }
+                        else { $checked = ([int]$v).ToString([System.Globalization.CultureInfo]::InvariantCulture) }
+                    }
+                }
+            } elseif ($kind -eq 'bool') {
+                $expected = 'true or false'
+                if ($v -is [bool]) { $ok = $true; $checked = $v }
+            } elseif ($kind -eq 'name') {
+                $expected = 'a folder or file name (no path separators)'
+                if ($v -is [string]) {
+                    $s = $v.Trim()
+                    if ($s -ne '' -and $s -ne '.' -and $s -ne '..' -and $s.IndexOfAny([char[]]'/\:*?"<>|') -lt 0) { $ok = $true; $checked = $s }
+                }
+            } elseif ($kind -eq 'path?') {
+                $expected = 'a path, or null'
+                if ($null -eq $v) { $ok = $true; $checked = '' }
+                elseif ($v -is [string] -and $v.Trim() -ne '') { $ok = $true; $checked = $v.Trim() }
+            }
+            if ($ok) {
+                $result.Values[$name] = $checked
+            } else {
+                $shown = 'null'
+                if ($null -ne $v) { $shown = ConvertTo-Json -InputObject $v -Compress -Depth 2 }
+                $result.Warnings += "$name = $shown is not valid ($expected); the script's value is kept"
+            }
+        }
+    } catch {
+        $result.Values = @{}
+        $result.Warnings = @("$($result.Path): not read ($($_.Exception.Message)); no setting changed")
+    }
+    return $result
+}
+
 # Console output as UTF-8 when it goes to a pipe (the wizard reads it). Without this the
 # OEM code page turned every Japanese folder name into '?' on screen -- the log file,
 # written as UTF-8, was always right. Only when redirected: an interactive console
@@ -38,6 +153,25 @@ $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 # -OutputDir all pointed there. Re-enter the process's real folder, literally.
 $startDir = [System.IO.Directory]::GetCurrentDirectory()
 if ($PWD.ProviderPath -ne $startDir) { try { Set-Location -LiteralPath $startDir } catch { } }
+# The overlay is applied before anything reads a parameter. A -Param given on the command line
+# always beats it; an invalid entry never stops the run (Get-SettingsOverlay warns instead).
+$script:Overlay = Get-SettingsOverlay -Section 'copy_exif' -Specs $script:OverlaySpecs -ScriptRoot $PSScriptRoot
+$script:OverlayApplied = @()
+foreach ($overlayName in @($script:Overlay.Values.Keys)) {
+    if ($PSBoundParameters.ContainsKey($overlayName)) { continue }
+    try {
+        Set-Variable -Name $overlayName -Value $script:Overlay.Values[$overlayName]
+        $script:OverlayApplied += $overlayName
+    } catch {
+        $script:Overlay.Warnings += "$overlayName could not be set ($($_.Exception.Message)); the script's value is kept"
+    }
+}
+$script:OverlayInfo = ''
+if ($script:OverlayApplied.Count -gt 0) {
+    $script:OverlayInfo = "Script settings overlay: $($script:Overlay.Path): $($script:OverlayApplied.Count) value(s): $((@($script:OverlayApplied) | Sort-Object) -join ', ')"
+    Write-Host $script:OverlayInfo
+}
+foreach ($overlayWarning in $script:Overlay.Warnings) { Write-Host "WARNING: settings overlay: $overlayWarning" -ForegroundColor Yellow }
 # ------------------------------------------------------------------
 
 
@@ -1114,6 +1248,8 @@ $seenInputDirs = [System.Collections.Generic.HashSet[string]]::new([System.Strin
 $inputDirs = @($inputDirs | Where-Object { $seenInputDirs.Add($_) })
 
 Write-Log "tiff-workflow $script:ToolkitVersion | copy_exif_to_TIFF_ps5.ps1 | PowerShell $($PSVersionTable.PSVersion)"
+if ($script:OverlayInfo) { Write-Log $script:OverlayInfo }
+foreach ($overlayWarning in $script:Overlay.Warnings) { Write-Log "settings overlay: $overlayWarning" "WARN" }
 Write-Log "Log: $logFile"
 
 foreach ($m in $missingRoots) { Write-Log "ERROR: input directory not found: $m" "ERROR" }

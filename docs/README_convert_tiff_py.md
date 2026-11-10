@@ -46,6 +46,26 @@ a backup, so it requires an explicit confirmation.
 
 **Workers** are clamped to 1-64, the range the PowerShell backends accept.
 
+**Advanced options.** Right after the basic questions (Workers, staging, dry-run, safe mode,
+...) every compress and Copy EXIF workflow asks `Advanced options? [y/N]`. The default is
+**No** and then nothing changes. On yes it lists the backend parameters no other step asks,
+with what each one is right now (this run, the settings file, or the script's own default):
+
+| Option | Backend | What it is |
+|---|---|---|
+| `-MagickTimeout` | compress, Copy EXIF | seconds one `magick` call may run before it is killed (whole number >= 1) |
+| `-WorkerMemoryFraction` | compress, Copy EXIF | share of the free memory the workers may use, `0`-`2` (`0` = no cap; above `1` trusts the memory estimate) |
+| `-SrgbProfile` | compress | ICC file used to convert wide-gamut sources; empty = auto-detect |
+| `-FailOnWarn` | Copy EXIF | exit 1 when a file only produced a warning or had no JPEG |
+
+Type a number, then a value; `-` takes your change back; `0` is done. A value is checked
+before it is kept (the same rules as the settings file below) and a wrong one says what was
+expected and is not stored. **Only an option you change is passed to the script, and it is
+passed explicitly even when it equals the default** -- an option you did not touch is not on
+the command line, so the script's own setting (or the settings file) applies. The choice is
+part of the workflow, so Repeat last, presets and the manifest runs carry it. In the combined
+workflow (4) the Copy EXIF options go to step 1 and the compress ones to step 2.
+
 **Thumbnail Options (v1.2+):**
 - Generate embedded thumbnails? [y/N]
 - Configure thumbnail settings? [y/N]
@@ -398,7 +418,8 @@ Config saved to `~/.convert_tiff_config.json`:
   answered; written by the check itself, nothing to edit
 
 The wizard's defaults for Safe mode, LZW, thumbnails and duplicate names are read from the
-backends' own `param()` defaults — edit them there.
+backends' own `param()` defaults — edit them there, or change them without editing a file in
+the [settings file](#script-settings-main-menu-6) below.
 
 The wizard's own workflows that run ImageMagick in parallel (Diagnose, the padded-8-bit
 compress, Delete OLD_TIFFs) are capped by memory instead of by the worker count alone. Two
@@ -423,6 +444,61 @@ budget (available memory x `WORKER_MEMORY_FRACTION`); each check reserves its ow
 before it starts, so typical files run side by side and a huge scan waits until there is
 room -- alone, if it needs more than the whole budget. The line printed before the checks
 says the budget and what the typical and the largest file need.
+
+---
+
+## Script settings (main menu 6)
+
+The settings at the top of the scripts -- folder names, timeouts, thumbnail defaults -- can be
+changed **without editing a `.ps1`/`.py`**: they live in one JSON file, read by this wizard
+and by all four PowerShell backends (Windows PowerShell 5.1 and 7), and menu **[6]** edits it.
+
+```json
+{
+  "compress_tiff_zip":   { "ZipSubfolderName": "ZIPPED", "ThumbQuality": 90, "MagickTimeout": 120 },
+  "copy_exif":           { "MagickTimeout": 120 },
+  "generate_thumbnails": { "Size": 128, "Format": "png" },
+  "convert_tiff":        { "CONVERT_TIMEOUT_S": 120, "DIAGNOSE_CACHE": false }
+}
+```
+
+**Where the file is** (first that applies): the path in the environment variable
+`TIFFWORKFLOW_SETTINGS` (**set but empty = no overlay at all**), else
+`.tiff_workflow_settings.json` next to the scripts if it is there, else the same name in the
+user profile (`%USERPROFILE%`). Menu 6 shows which one it is using. `copy_exif` is one section
+for both `copy_exif_to_TIFF_ps5.ps1` and `_ps7.ps1`.
+
+**What it can change** -- only the names in each script's `OVERLAY-SPECS` block (an
+`# OVERLAY-SPECS-BEGIN` ... `END` table at the top of the `.ps1`), each with a type and range:
+
+| Section | Names |
+|---|---|
+| `compress_tiff_zip` | `ZipSuffix`, `ZipSubfolderName`, `ExportMarker`, `ExportZipSubfolder`, `ExportTiffSubfolder` (folder/file names), `CapWorkers` (0-64), `MagickTimeout`, `ThumbSize` (whole numbers >= 1), `ThumbQuality` (1-100), `ThumbFormat` (name), `SrgbProfile` (path or `null`), `WorkerMemoryFraction` (0-2) |
+| `copy_exif` | `MagickTimeout`, `WorkerMemoryFraction` |
+| `generate_thumbnails` | `Size`, `Quality`, `Format`, `SrgbProfile` |
+| `convert_tiff` | `WORKER_MEMORY_FRACTION`, `WORKER_MEMORY_LIMIT` (`both`, `commit`, `physical`), `DIAGNOSE_CACHE`, `CONVERT_TIMEOUT_S`, `COMPARE_TIMEOUT_S`, `TIMEOUT_S_PER_MB` |
+
+**What it can never change:** anything that deletes, overwrites or is chosen per run -- `Mode`,
+the input/output/staging folders, `Workers`, `DryRun`, `SafeMode`, `SkipLzwAsCompressed`,
+`Overwrite`, `DeleteSource`, `DuplicateAction`, `ForceParallel`/`ForceSequential`,
+`RestoreStranded`, the thumbnail on/off switches, `FailOnWarn`, `ExcludeFolders`. A name that is
+not in a script's table is ignored with a warning.
+
+**It never stops a run.** A file that cannot be read (bad JSON, the root is not an object), an
+unknown name or a value of the wrong type or range changes nothing -- the script keeps its own
+value and says so: `WARNING: settings overlay: ...` on the console and in the script's log,
+which also names the file and the settings it did change (`Script settings overlay: <file>: N
+value(s): ...`). **A `-Param` on the command line always beats the file**, and so does anything
+the wizard passes for the run.
+
+**Menu 6** lists a script's settings with the value written in the script, the value from the
+file (`-` when it has none) and a one-line help; pick a number, type a value (`-` = back to the
+script's value, `0` = back). The value is checked as the scripts will check it; the file is
+written whole through a temp file and `os.replace` in its own folder, keeping every section and
+key it does not know. A file that exists and cannot be parsed is **not touched**: the menu
+says why and stops. A change to a script applies to its next run; a change to the `convert_tiff`
+section applies the next time the wizard starts. The folder names are also what discovery skips
+as this toolkit's own output (`ZIP`, `_EXPORT`, ...), so a changed name counts at once.
 
 ---
 

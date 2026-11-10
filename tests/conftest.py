@@ -11,6 +11,10 @@ from pathlib import Path
 import tempfile
 import os
 
+# convert_tiff applies its own overlay section when it is imported (test modules import it at
+# collection, before any fixture runs): switch the overlay off for that too.
+os.environ["TIFFWORKFLOW_SETTINGS"] = ""
+
 
 @pytest.fixture(autouse=True)
 def _isolated_diagnose_cache(tmp_path, monkeypatch):
@@ -26,6 +30,23 @@ def _no_release_check(monkeypatch):
     """The menu's new-release check asks GitHub; no test may touch the network. Tests of the
     check itself delete this variable and monkeypatch convert_tiff._latest_release_tag."""
     monkeypatch.setenv("TIFFWORKFLOW_NO_UPDATE_CHECK", "1")
+
+
+@pytest.fixture(autouse=True)
+def _no_settings_overlay(monkeypatch):
+    """The settings overlay (.tiff_workflow_settings.json) is read by convert_tiff and by every
+    PowerShell backend a test starts: set-but-empty turns it OFF, so the owner's real file
+    never reaches a test. A test that wants an overlay sets TIFFWORKFLOW_SETTINGS itself."""
+    monkeypatch.setenv("TIFFWORKFLOW_SETTINGS", "")
+
+
+@pytest.fixture(autouse=True)
+def _no_advanced_screen(monkeypatch):
+    """Tests script the wizard's prompts one by one; the per-run Advanced options question
+    would eat an answer. It answers "No" (nothing stored) here; tests/test_wizard_registry.py
+    keeps the real function in REAL_ADVANCED."""
+    import convert_tiff
+    monkeypatch.setattr(convert_tiff, "step_advanced_options", lambda cfg, wf: True)
 
 
 @pytest.fixture

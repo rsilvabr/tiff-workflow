@@ -63,6 +63,8 @@ The wizard supports **AutoFind** — automatically locates folders matching patt
 
 **New-release notice:** the main menu looks once a day for a newer release (one anonymous request to GitHub, nothing else sent; never for `--run-preset`). Turn it off with `"check_for_updates": false` in `~/.convert_tiff_config.json` or the environment variable `TIFFWORKFLOW_NO_UPDATE_CHECK` — see [the notice](docs/README_convert_tiff_py.md#new-release-notice).
 
+**Script settings without editing a script:** folder names (`ZIP`, `_EXPORT`, ...), timeouts, thumbnail defaults and a few more live in one JSON file, `.tiff_workflow_settings.json` — next to the scripts, in your user profile, or wherever the environment variable `TIFFWORKFLOW_SETTINGS` points (set to an empty value it switches the file off). The wizard's main menu **[6]** edits it, and the four `.ps1` read it too, in PowerShell 5.1 and 7. It can **never** change anything that deletes, overwrites or skips a safety check (`SafeMode`, `Overwrite`, `DeleteSource`, `Mode`, the folders, `Workers`, ...); a bad file or value changes nothing and is reported, and a `-Param` on the command line always wins — see [Script settings](docs/README_convert_tiff_py.md#script-settings-main-menu-6).
+
 ### Direct PowerShell (no Python required)
 
 ```powershell

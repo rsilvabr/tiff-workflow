@@ -1,0 +1,289 @@
+{
+  "c_mode0_one_folder_everything": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "0",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-StagingDir",
+      "D:\\stage dir",
+      "-Workers",
+      "4",
+      "-CapWorkers",
+      "2",
+      "-DryRun",
+      "-SafeMode:$true",
+      "-SkipLzwAsCompressed:$false"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '0' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -StagingDir 'D:\\stage dir' -Workers '4' -CapWorkers '2' -DryRun -SafeMode:$true -SkipLzwAsCompressed:$false"
+    ]
+  },
+  "c_mode2_two_folders_output_dup_workers_over_max": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "2",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%;E:\\second session\\一時",
+      "-OutputDir",
+      "D:\\out [x]",
+      "-DuplicateAction",
+      "Numbered",
+      "-Workers",
+      "64",
+      "-ExcludeFolders",
+      "ZIP;OLD_TIFFs",
+      "-SafeMode:$false",
+      "-SkipLzwAsCompressed:$true"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '2' -InputDir 'D:\\写真 [FINAL] x\\2019 100%;E:\\second session\\一時' -OutputDir 'D:\\out [x]' -DuplicateAction 'Numbered' -Workers '64' -ExcludeFolders 'ZIP;OLD_TIFFs' -SafeMode:$false -SkipLzwAsCompressed:$true"
+    ]
+  },
+  "c_mode8_delete_overwrite_force_parallel": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "8",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-Workers",
+      "8",
+      "-CapWorkers",
+      "0",
+      "-Overwrite",
+      "-DeleteSource",
+      "-ForceParallel"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '8' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -Workers '8' -CapWorkers '0' -Overwrite -DeleteSource -ForceParallel"
+    ]
+  },
+  "c_mode1_force_sequential_workers_zero": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "1",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-CapWorkers",
+      "0",
+      "-ForceSequential"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '1' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -CapWorkers '0' -ForceSequential"
+    ]
+  },
+  "c_thumbnail_every_key": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "1",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-GenerateThumbnail",
+      "-ThumbSize",
+      "512",
+      "-ThumbQuality",
+      "90",
+      "-ThumbFormat",
+      "png",
+      "-ThumbPage",
+      "1",
+      "-SkipCompressedWithThumb"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '1' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -GenerateThumbnail -ThumbSize '512' -ThumbQuality '90' -ThumbFormat 'png' -ThumbPage '1' -SkipCompressedWithThumb"
+    ]
+  },
+  "c_thumbnail_no_thumb_keys": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "1",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-GenerateThumbnail"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '1' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -GenerateThumbnail"
+    ]
+  },
+  "c_thumbnail_off_keys_present": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "1",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '1' -InputDir 'D:\\写真 [FINAL] x\\2019 100%'"
+    ]
+  },
+  "c_empty_workflow_no_folders": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1'"
+    ]
+  },
+  "c_odd_values": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\compress_tiff_zip.ps1",
+      "-Mode",
+      "0",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-Workers",
+      "6",
+      "-CapWorkers",
+      "3",
+      "-ForceParallel"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\compress_tiff_zip.ps1' -Mode '0' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -Workers '6' -CapWorkers '3' -ForceParallel"
+    ]
+  },
+  "e_every_key_extra_flags": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\copy_exif_to_TIFF_ps7.ps1",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-Workers",
+      "3",
+      "-StagingDir",
+      "D:\\stage dir",
+      "-OutputDir",
+      "D:\\out [x]",
+      "-DryRun",
+      "-SkipIfTiffHasExif",
+      "-CompressZip",
+      "-SafeMode:$false",
+      "-SkipLzwAsCompressed:$true",
+      "-Overwrite",
+      "-ExcludeFolders",
+      "ZIP;OLD_TIFFs",
+      "-AutoFind",
+      "-FolderPattern",
+      "*Fuji*"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\copy_exif_to_TIFF_ps5.ps1' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -Workers '3' -StagingDir 'D:\\stage dir' -OutputDir 'D:\\out [x]' -DryRun -SkipIfTiffHasExif -CompressZip -SafeMode:$false -SkipLzwAsCompressed:$true -Overwrite -ExcludeFolders 'ZIP;OLD_TIFFs' -AutoFind -FolderPattern '*Fuji*'"
+    ]
+  },
+  "e_empty_workflow_no_folders": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\copy_exif_to_TIFF_ps7.ps1"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\copy_exif_to_TIFF_ps5.ps1'"
+    ]
+  },
+  "e_two_folders_workers_over_max_safe_true": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\copy_exif_to_TIFF_ps7.ps1",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%;E:\\second session\\一時",
+      "-Workers",
+      "64",
+      "-SafeMode:$true"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\copy_exif_to_TIFF_ps5.ps1' -InputDir 'D:\\写真 [FINAL] x\\2019 100%;E:\\second session\\一時' -Workers '64' -SafeMode:$true"
+    ]
+  },
+  "e_odd_values": {
+    "pwsh": [
+      "pwsh",
+      "-NoProfile",
+      "-File",
+      "<SCRIPT_DIR>\\copy_exif_to_TIFF_ps7.ps1",
+      "-InputDir",
+      "D:\\写真 [FINAL] x\\2019 100%",
+      "-Workers",
+      "6"
+    ],
+    "powershell": [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "& '<SCRIPT_DIR>\\copy_exif_to_TIFF_ps5.ps1' -InputDir 'D:\\写真 [FINAL] x\\2019 100%' -Workers '6'"
+    ]
+  }
+}

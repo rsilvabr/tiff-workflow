@@ -70,6 +70,7 @@ import hashlib
 import io
 import json
 import locale
+import math
 import os
 import platform
 import re
@@ -82,7 +83,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 try:
     from rich.console import Console
@@ -102,6 +103,243 @@ except ImportError:
 # --- Paths ---------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
+
+
+# --- Settings overlay ----------------------------------------------
+#
+# `.tiff_workflow_settings.json` changes the settings at the top of the scripts WITHOUT
+# editing them (jxl-photo's overlay, same rules). Sections: compress_tiff_zip, copy_exif (one
+# section for the ps5 and ps7 scripts), generate_thumbnails, convert_tiff. Only the names in a
+# script's OVERLAY-SPECS block (or _OVERLAY_SETTINGS below) are ever taken: nothing that
+# deletes, overwrites or is chosen per run (Mode, SafeMode, DeleteSource, ...). A value that
+# does not pass its spec, an unreadable file, an unknown name: the script's own value stays and
+# a warning says so; it never stops a run. A `-Param` on the command line always beats the file.
+
+_SETTINGS_OVERLAY_FILE = ".tiff_workflow_settings.json"
+_SETTINGS_OVERLAY_ENV = "TIFFWORKFLOW_SETTINGS"
+_OVERLAY_INT_MAX = 2147483647   # the scripts' [int] parameters; the PowerShell reader caps here too
+_OVERLAY_NAME_FORBIDDEN = '/\\:*?"<>|'
+
+#: script file -> its section of the overlay file
+_OVERLAY_SECTIONS = {
+    "compress_tiff_zip.ps1": "compress_tiff_zip",
+    "copy_exif_to_TIFF_ps5.ps1": "copy_exif",
+    "copy_exif_to_TIFF_ps7.ps1": "copy_exif",
+    "generate_thumbnails.ps1": "generate_thumbnails",
+}
+
+
+def _settings_overlay_path() -> Optional[Path]:
+    """The overlay file to read (it may not exist), or None when TIFFWORKFLOW_SETTINGS is
+    set but empty (overlay OFF). Same order as the PowerShell reader: the variable, then next
+    to the scripts if the file is there, then the user profile."""
+    env = os.environ.get(_SETTINGS_OVERLAY_ENV)
+    if env is not None:
+        return Path(env) if env.strip() else None
+    portable = SCRIPT_DIR / _SETTINGS_OVERLAY_FILE
+    if portable.is_file():
+        return portable
+    if platform.system() == "Windows":
+        home = Path(os.environ.get("USERPROFILE") or Path.home())
+    else:
+        home = Path.home()
+    return home / _SETTINGS_OVERLAY_FILE
+
+
+def _settings_overlay_section(path: Optional[Path], section: str) -> Optional[dict]:
+    """{name: value} of `section` of the overlay file at `path`; None when there is no path,
+    no file or no such section. Raises ValueError/OSError for a file that cannot be read or
+    whose root or section is not a JSON object."""
+    if path is None or not path.is_file():
+        return None
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    sect = data.get(section)
+    if sect is None:
+        return None
+    if not isinstance(sect, dict):
+        raise ValueError(f"the '{section}' entry is not an object")
+    return sect
+
+
+def _overlay_bound(text: str):
+    return None if text.strip() == "" else float(text) if "." in text else int(text)
+
+
+def _overlay_value(spec: str, value):
+    """`value` (from JSON) checked against an overlay spec: (True, the value to use) or
+    (False, what it should have been). Grammar -- identical to the PowerShell reader:
+    int:lo:hi | float:lo:hi | intstr:lo:hi (a JSON int; the value used is its string) |
+    bool | name | path? | choice:a|b|c (Python only). A bool is never a number; an int must
+    fit the scripts' [int] parameters."""
+    kind, _, rest = spec.partition(":")
+    if kind == "choice":
+        options = rest.split("|")
+        if isinstance(value, str) and value in options:
+            return True, value
+        return False, "one of " + ", ".join(options)
+    if kind == "bool":
+        return (True, value) if isinstance(value, bool) else (False, "true or false")
+    if kind in ("int", "float", "intstr"):
+        lo_t, _, hi_t = rest.partition(":")
+        lo, hi = _overlay_bound(lo_t), _overlay_bound(hi_t)
+        if isinstance(value, bool):
+            ok = False
+        elif kind == "float":
+            try:
+                ok = isinstance(value, (int, float)) and math.isfinite(value)
+            except OverflowError:    # an int too large for a float
+                ok = False
+        else:
+            ok = isinstance(value, int) and -_OVERLAY_INT_MAX - 1 <= value <= _OVERLAY_INT_MAX
+        if ok and (lo is None or value >= lo) and (hi is None or value <= hi):
+            if kind == "float":
+                return True, float(value)
+            return True, (str(value) if kind == "intstr" else value)
+        what = "a number" if kind == "float" else "a whole number"
+        if lo is not None and hi is not None:
+            what += f" from {lo_t} to {hi_t}"
+        elif lo is not None:
+            what += f" of at least {lo_t}"
+        return False, what
+    if kind == "name":
+        if isinstance(value, str):
+            v = value.strip()
+            if v and v not in (".", "..") and not any(ch in v for ch in _OVERLAY_NAME_FORBIDDEN):
+                return True, v
+        return False, "a folder or file name (no path separators)"
+    if kind == "path?":
+        if value is None:
+            return True, ""
+        if isinstance(value, str) and value.strip():
+            return True, value.strip()
+        return False, "a path, or null"
+    return False, "a setting the overlay cannot change"
+
+
+def _parse_setting_text(spec: str, text: str):
+    """What the user typed for a setting of this spec, as the JSON value _overlay_value then
+    checks; raises ValueError for text that is not that kind at all. An empty answer (or
+    none/null) for a `path?` is null."""
+    kind = spec.partition(":")[0]
+    t = text.strip()
+    if kind == "path?" and (t == "" or t.lower() in ("none", "null")):
+        return None
+    if kind == "bool":
+        if t.lower() in ("y", "yes", "true", "on", "1"):
+            return True
+        if t.lower() in ("n", "no", "false", "off", "0"):
+            return False
+        raise ValueError("answer yes or no")
+    if kind in ("int", "intstr"):
+        return int(t)
+    if kind == "float":
+        return float(t)
+    return t
+
+
+_OVERLAY_SPEC_LINE = re.compile(r"^\s*'(\w+)'\s*=\s*'([^']*)'\s*$")
+
+
+def _ps_overlay_specs(script_name: str) -> Dict[str, str]:
+    """{name: spec} from the OVERLAY-SPECS block of a backend; {} when the file cannot be
+    read or has none."""
+    try:
+        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    specs: Dict[str, str] = {}
+    inside = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped == "# OVERLAY-SPECS-BEGIN":
+            inside = True
+        elif stripped == "# OVERLAY-SPECS-END":
+            break
+        elif inside:
+            m = _OVERLAY_SPEC_LINE.match(line)
+            if m:
+                specs[m.group(1)] = m.group(2)
+    return specs
+
+
+def _overlay_scan(script_name: str):
+    """(path, {name: checked value}, [warning, ...]) of the overlay for a backend. Never
+    raises: an unreadable overlay is ([], no values, one warning)."""
+    path = None
+    try:
+        path = _settings_overlay_path()
+        section = _settings_overlay_section(path, _OVERLAY_SECTIONS[script_name])
+    except Exception as e:
+        return path, {}, [f"{path}: not read ({e}); no setting changed"]
+    values: Dict[str, object] = {}
+    warnings: List[str] = []
+    specs = _ps_overlay_specs(script_name)
+    for name, value in (section or {}).items():
+        spec = specs.get(name)
+        if spec is None:
+            warnings.append(f"{name} is not a setting the overlay can change in "
+                            f"{_OVERLAY_SECTIONS[script_name]}; ignored")
+            continue
+        ok, checked = _overlay_value(spec, value)
+        if not ok:
+            warnings.append(f"{name} = {json.dumps(value, ensure_ascii=False)} is not "
+                            f"valid ({checked}); the script's value is kept")
+            continue
+        values[name] = checked
+    return path, values, warnings
+
+
+def _overlay_values(script_name: str) -> Dict[str, object]:
+    """{name: checked value} the overlay gives a backend. No cache (a save from the Script
+    settings menu counts at once). Never raises."""
+    try:
+        return _overlay_scan(script_name)[1]
+    except Exception:
+        return {}
+
+
+#: What the overlay may change in this file's own settings: name -> spec. A setting that is
+#: not here keeps the value written above.
+_OVERLAY_SETTINGS = {
+    "WORKER_MEMORY_FRACTION": "float:0:2",   # 0 = no cap; above 1 trusts the estimate (jxl-photo: 0-2)
+    "WORKER_MEMORY_LIMIT": "choice:both|commit|physical",
+    "DIAGNOSE_CACHE": "bool",
+    "CONVERT_TIMEOUT_S": "int:1:",
+    "COMPARE_TIMEOUT_S": "int:1:",
+    "TIMEOUT_S_PER_MB": "float:0.01:",
+}
+
+
+def _apply_settings_overlay(namespace: dict) -> dict:
+    """Apply the `convert_tiff` section to `namespace` (this module's globals(), right here:
+    the settings above are already defined and nothing has read them yet). Returns
+    {"path", "applied", "warnings"} for the start-up notice. Never raises."""
+    result = {"path": None, "applied": [], "warnings": []}
+    try:
+        result["path"] = _settings_overlay_path()
+        section = _settings_overlay_section(result["path"], "convert_tiff")
+    except Exception as e:
+        result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
+        return result
+    for name, value in (section or {}).items():
+        spec = _OVERLAY_SETTINGS.get(name)
+        if spec is None:
+            result["warnings"].append(f"{name} is not a setting the overlay can change in "
+                                      f"convert_tiff; ignored")
+            continue
+        ok, checked = _overlay_value(spec, value)
+        if not ok:
+            result["warnings"].append(f"{name} = {json.dumps(value, ensure_ascii=False)} is not "
+                                      f"valid ({checked}); the script's value is kept")
+            continue
+        namespace[name] = checked
+        result["applied"].append(name)
+    return result
+
+
+_SETTINGS_OVERLAY = _apply_settings_overlay(globals())
 
 
 # --- Config -------------------------------------------------------
@@ -631,11 +869,62 @@ def _ps_param_defaults(script_name: str) -> Dict[str, object]:
     return out
 
 
+@functools.lru_cache(maxsize=None)
+def _ps_param_names(script_name: str) -> Tuple[str, ...]:
+    """Every parameter name of the script's top param() block, in order -- also the
+    [switch] ones and those without a default (which _ps_param_defaults does not see).
+    () when the file cannot be read."""
+    try:
+        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ()
+    names: List[str] = []
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            inside = line.lstrip().lower().startswith("param(")
+            continue
+        if line.strip() == ")":
+            break
+        m = re.match(r"^\s*(?:\[[^\]]*\]\s*)*\$(\w+)", line)
+        if m:
+            names.append(m.group(1))
+    return tuple(names)
+
+
+@functools.lru_cache(maxsize=None)
+def _ps_param_comments(script_name: str) -> Dict[str, str]:
+    """name -> the trailing `# comment` of the parameter's line in the param() block (the
+    one-line help the Script settings screen shows); {} when the file cannot be read."""
+    try:
+        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    out: Dict[str, str] = {}
+    inside = False
+    for line in text.splitlines():
+        if not inside:
+            inside = line.lstrip().lower().startswith("param(")
+            continue
+        if line.strip() == ")":
+            break
+        m = re.match(r"^\s*(?:\[[^\]]*\]\s*)*\$(\w+)[^#]*#\s*(.*?)\s*$", line)
+        if m:
+            out[m.group(1)] = m.group(2)
+    return out
+
+
 def _backend_default(script_name: str, param: str):
     """The default of `param` as written in `script_name`'s param() block; the
     shipped value from _BACKEND_PARAM_FALLBACKS only when it cannot be read or has
-    another type than the fallback (a typo must not reach a command line)."""
+    another type than the fallback (a typo must not reach a command line). A value the
+    settings overlay gives that backend (it passed its spec) wins over the param() block, as
+    it does when the script runs -- but only with the fallback's type."""
     fallback = _BACKEND_PARAM_FALLBACKS[(script_name, param)]
+    if script_name in _OVERLAY_SECTIONS:
+        over = _overlay_values(script_name).get(param)
+        if over is not None and type(over) is type(fallback):
+            return over
     val = _ps_param_defaults(script_name).get(param)
     if val is None or type(val) is not type(fallback):
         return fallback
@@ -655,6 +944,13 @@ def _tool_output_names() -> set:
 #: Folder names that hold this toolkit's own output. Discovery skips them, but only BELOW
 #: the folder the user pointed at -- see _is_tool_output_path.
 _TOOL_OUTPUT_PARTS = _tool_output_names()
+
+
+def _refresh_tool_output_parts() -> None:
+    """Recompute _TOOL_OUTPUT_PARTS (the Script settings menu calls it after a save: a changed
+    ZipSubfolderName / ExportMarker / ExportZipSubfolder must be skipped by discovery too)."""
+    global _TOOL_OUTPUT_PARTS
+    _TOOL_OUTPUT_PARTS = _tool_output_names()
 
 
 def _is_tool_output_path(path: Path, root: Path) -> bool:
@@ -1448,6 +1744,123 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
     return True
 
 
+# --- Advanced options (per run) -------------------------------------
+
+def _advanced_backends(workflow: Dict) -> List[str]:
+    """The REGISTRY backends this run will launch (the Advanced screen lists their
+    level-"advanced" options): compress for every compress origin, copy_exif for Copy EXIF
+    and the combined workflow."""
+    backends: List[str] = []
+    if _supports_cap_workers(workflow):
+        backends.append("compress")
+    if workflow.get("origin") in ("copy_exif", "both"):
+        backends.append("copy_exif")
+    return backends
+
+
+def _backend_script(cfg: ToolConfig, backend: str) -> str:
+    if backend == "compress":
+        return "compress_tiff_zip.ps1"
+    return ("copy_exif_to_TIFF_ps5.ps1" if cfg.config.ps_name == "powershell"
+            else "copy_exif_to_TIFF_ps7.ps1")
+
+
+def _advanced_current(cfg: ToolConfig, workflow: Dict, backend: str, opt: "Opt"):
+    """(value, where) an Advanced option has right now: what this run edited, else what the
+    settings file gives the backend, else the script's own default."""
+    mine = _advanced_value(workflow, backend, opt.param)
+    if mine is not None:
+        return mine, "this run"
+    script = _backend_script(cfg, backend)
+    over = _overlay_values(script).get(opt.param)
+    if over is not None:
+        return over, "settings file"
+    return _ps_param_defaults(script).get(opt.param), "script"
+
+
+def _advanced_shown(value, opt: "Opt") -> str:
+    if opt.value_spec == "bool":
+        return "on" if value else "off"
+    if value is None or value == "":
+        return "(auto)" if opt.value_spec == "path?" else "-"
+    return str(value)
+
+
+def _ui_say(text: str) -> None:
+    if RICH_AVAILABLE and console:
+        console.print(escape(text))
+    else:
+        print(text)
+
+
+def _ui_ask(prompt: str, default: str = "") -> str:
+    if RICH_AVAILABLE and console:
+        return Prompt.ask(f"[cyan]{escape(prompt)}[/cyan]", default=default).strip()
+    return input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
+
+
+def step_advanced_options(cfg: ToolConfig, workflow: Dict) -> bool:
+    """Per-run Advanced options: the backend parameters no other step asks (timeouts, memory
+    share, ...). Default No -- then nothing is stored and the run is exactly what it was. Only
+    an option the user EDITS is stored, in workflow["advanced"][backend][param], and it is then
+    passed explicitly even when it equals the default (AGENTS.md, round 17); an option that
+    was not edited is not passed. Each value is checked with the overlay's spec grammar."""
+    backends = _advanced_backends(workflow)
+    rows = [(b, o) for b in backends for o in REGISTRY[b] if o.level == "advanced"]
+    if not rows:
+        return True
+    if RICH_AVAILABLE and console:
+        wanted = Confirm.ask("[cyan]Advanced options?[/cyan] (timeouts, memory share, ...)",
+                             default=False)
+    else:
+        wanted = input("Advanced options? (timeouts, memory share, ...) [y/N]: "
+                       ).strip().lower() in ("y", "yes")
+    if not wanted:
+        return True
+    while True:
+        _ui_say("Advanced options (only the ones you change are passed to the script):")
+        for n, (backend, opt) in enumerate(rows, 1):
+            value, where = _advanced_current(cfg, workflow, backend, opt)
+            _ui_say(f"  {n}. [{backend}] {opt.label} (-{opt.param}) = "
+                     f"{_advanced_shown(value, opt)}  ({where})")
+            _ui_say(f"       {opt.help}")
+        pick = _ui_ask("Number to change (0 = done)", "0")
+        if pick in ("", "0"):
+            return True
+        if not pick.isdigit() or not 1 <= int(pick) <= len(rows):
+            _ui_say(f"No option {pick!r}.")
+            continue
+        backend, opt = rows[int(pick) - 1]
+        expected = _overlay_value(opt.value_spec, object())[1]
+        text = _ui_ask(f"New value for -{opt.param} ({expected}; '-' = leave it to the "
+                        f"script; empty = no change)", "")
+        if text == "":
+            continue
+        adv = workflow.get("advanced")
+        if text == "-":
+            if isinstance(adv, dict) and isinstance(adv.get(backend), dict):
+                adv[backend].pop(opt.param, None)
+                if not adv[backend]:
+                    adv.pop(backend)
+                if not adv:
+                    workflow.pop("advanced")
+            continue
+        try:
+            parsed = _parse_setting_text(opt.value_spec, text)
+        except ValueError as e:
+            _ui_say(f"Not changed: {e}.")
+            continue
+        ok, checked = _overlay_value(opt.value_spec, parsed)
+        if not ok:
+            _ui_say(f"Not changed: -{opt.param} must be {checked}.")
+            continue
+        if not isinstance(adv, dict):
+            adv = workflow["advanced"] = {}
+        if not isinstance(adv.get(backend), dict):
+            adv[backend] = {}
+        adv[backend][opt.param] = checked
+
+
 # --- Summary Panel ------------------------------------------------
 
 def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
@@ -1655,67 +2068,260 @@ def _rebuild_journaled_command(parts: List[str], ps_name: str,
     return cmd
 
 
+# --- Option Registry -----------------------------------------------
+#
+# Every parameter of every backend is described once, here; ONE generic builder
+# (_emit_opt / _emit_all) turns a workflow dict into the argv. The tuple ORDER is the order the
+# old hand-written builders emitted, so a command line is byte-identical for the same workflow
+# (tests/test_wizard_registry.py, the golden file). A parameter that is not in REGISTRY must be
+# in NOT_OFFERED with the reason -- the coverage test fails on a new backend parameter nobody
+# decided about.
+
+@dataclass(frozen=True)
+class Opt:
+    param: str           # the .ps1 parameter, without the dash
+    key: str             # slot in the workflow dict; "advanced.<param>" for the Advanced screen's
+    kind: str            # how _emit_opt turns the value into argv (see _emit_opt)
+    group: str           # "run", "files", "safety", "thumbnail", "performance"
+    level: str           # "asked" (a wizard step asks it), "advanced" (the Advanced screen),
+                         # "overlay" (settings file only), "internal" (set by the workflow)
+    label: str
+    help: str
+    value_spec: str = ""  # advanced only: the overlay spec syntax (_overlay_value)
+    when: Optional[Callable[[Dict], bool]] = None
+    danger: bool = False  # a setting that deletes or overwrites: never from the overlay
+
+
+def _thumb_on(workflow: Dict) -> bool:
+    return bool(workflow.get("generate_thumbnail"))
+
+
+def _advanced_value(workflow: Dict, backend: str, param: str):
+    """The Advanced screen's value for `param`, or None. A malformed `advanced` entry (a
+    hand-edited preset) is None, never an error."""
+    adv = workflow.get("advanced")
+    per_backend = adv.get(backend) if isinstance(adv, dict) else None
+    return per_backend.get(param) if isinstance(per_backend, dict) else None
+
+
+def _emit_opt(opt: Opt, workflow: Dict, folders: Optional[List[Path]] = None,
+              backend: str = "") -> List[str]:
+    """The argv words `opt` contributes for `workflow`, [] when it contributes none.
+
+    kind: input (-InputDir from `folders`: none / one / ';'-joined) | value (when truthy) |
+    notnone | int_notnone | workers (clamped to the backend's range, when truthy) | flag
+    (a switch, when truthy) | true_flag (when == True) | bool (-P:$true / -P:$false, when the
+    value is a bool: passed even when it equals the default, audit round 17) | true_bool
+    (-P:$true, when truthy) | none (overlay-only or internal: nothing).
+
+    An "advanced.<param>" value lives in workflow["advanced"][backend]; it is checked against
+    its value_spec again here and DROPPED when it does not pass (a preset edited by hand must
+    not put garbage on a command line: the script's own value then applies)."""
+    if opt.when is not None and not opt.when(workflow):
+        return []
+    p = "-" + opt.param
+    kind = opt.kind
+    if kind == "none":
+        return []
+    if kind == "input":
+        if folders and len(folders) == 1:
+            return [p, str(folders[0])]
+        if folders and len(folders) > 1:
+            # Pass as semicolon-separated list, the script handles each
+            return [p, ";".join(str(f) for f in folders)]
+        return []
+    if opt.key.startswith("advanced."):
+        v = _advanced_value(workflow, backend, opt.key[len("advanced."):])
+        if v is not None and opt.value_spec:
+            ok, v = _overlay_value(opt.value_spec, v)
+            if not ok:
+                return []
+    else:
+        v = workflow.get(opt.key)
+    if kind == "value":
+        return [p, str(v)] if v else []
+    if kind == "notnone":
+        return [p, str(v)] if v is not None else []
+    if kind == "int_notnone":
+        return [p, str(int(v))] if v is not None else []
+    if kind == "workers":
+        return [p, str(clamp_workers(v))] if v else []
+    if kind == "flag":
+        return [p] if v else []
+    if kind == "true_flag":
+        return [p] if v == True else []  # noqa: E712 -- 1 == True is the old behaviour
+    if kind == "bool":
+        return [p + (":$true" if v else ":$false")] if isinstance(v, bool) else []
+    if kind == "true_bool":
+        return [p + ":$true"] if v else []
+    raise ValueError(f"unknown option kind {kind!r} for -{opt.param}")
+
+
+def _emit_all(backend: str, workflow: Dict, folders: Optional[List[Path]] = None) -> List[str]:
+    """The whole argv tail of `backend` ("compress" or "copy_exif"), in REGISTRY order."""
+    argv: List[str] = []
+    for opt in REGISTRY[backend]:
+        argv += _emit_opt(opt, workflow, folders, backend)
+    return argv
+
+
+_ADV_MAGICK = Opt("MagickTimeout", "advanced.MagickTimeout", "notnone", "performance", "advanced",
+                  "ImageMagick timeout (seconds)",
+                  "How long one magick call may run before it is killed. Raise it for very "
+                  "large scans on a slow disk.", value_spec="int:1:")
+_ADV_MEMORY = Opt("WorkerMemoryFraction", "advanced.WorkerMemoryFraction", "notnone",
+                  "performance", "advanced", "Memory share for the workers (0-2)",
+                  "Caps the parallel workers so their ImageMagick processes fit in this share "
+                  "of the free memory; 0 = no cap; above 1 trusts the estimate.", value_spec="float:0:2")
+
+REGISTRY: Dict[str, Tuple[Opt, ...]] = {
+    "compress": (
+        Opt("Mode", "mode", "notnone", "run", "internal", "Mode", "The compress mode 0-9."),
+        Opt("InputDir", "folders", "input", "run", "asked", "Input folder(s)",
+            "Where the TIFFs are; several folders are passed ';'-joined."),
+        # Mode 2 (flat) writes into the input root when -OutputDir is missing, which mixes
+        # the flattened copies with the sources and overwrites root-level TIFFs in place.
+        Opt("OutputDir", "output_dir", "value", "files", "asked", "Output folder",
+            "Where mode 2 (flat) and the export modes write."),
+        Opt("DuplicateAction", "duplicate_action", "value", "files", "asked", "Duplicate action",
+            "What to do when the output file already exists: Skip, Numbered or Overwrite."),
+        Opt("StagingDir", "staging", "value", "performance", "asked", "Staging folder",
+            "A fast (SSD) folder the work is done in before the result lands."),
+        Opt("Workers", "workers", "workers", "performance", "asked", "Workers",
+            "Parallel workers (1-64)."),
+        Opt("CapWorkers", "cap_workers", "int_notnone", "performance", "asked", "Cap workers",
+            "Clamp the parallel workers to this value; 0 = no cap."),
+        Opt("ExcludeFolders", "exclude_folders", "value", "files", "asked", "Exclude folders",
+            "';'-separated folder NAMES to skip during discovery."),
+        Opt("DryRun", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
+        # Passed explicitly whenever the wizard decided it -- even when it equals the
+        # default: omitting it let a backend whose own default was edited run with a
+        # different value than the summary showed (audit round 17, the jxl-photo #467 class).
+        Opt("SafeMode", "safe_mode", "bool", "safety", "asked", "Safe mode",
+            "Skip multi-page TIFFs.", danger=True),
+        Opt("SkipLzwAsCompressed", "skip_lzw", "bool", "files", "asked", "Skip LZW",
+            "Treat LZW files as already compressed and ignore them."),
+        Opt("Overwrite", "overwrite", "flag", "safety", "asked", "Overwrite",
+            "Replace an existing output.", danger=True),
+        Opt("DeleteSource", "delete_source", "flag", "safety", "asked", "Delete source",
+            "Mode 8: delete the source after the output is verified.", danger=True),
+        Opt("ForceParallel", "force_parallel", "true_flag", "performance", "asked",
+            "Force parallel", "Parallelism ON (PowerShell 5.1 with pwsh available)."),
+        Opt("ForceSequential", "force_sequential", "true_flag", "performance", "asked",
+            "Force sequential", "Parallelism OFF (PowerShell 7)."),
+        Opt("GenerateThumbnail", "generate_thumbnail", "flag", "thumbnail", "asked",
+            "Generate thumbnail", "Embed an sRGB thumbnail page in the TIFF."),
+        Opt("ThumbSize", "thumb_size", "value", "thumbnail", "asked", "Thumbnail size",
+            "Pixels.", when=_thumb_on),
+        Opt("ThumbQuality", "thumb_quality", "value", "thumbnail", "asked", "Thumbnail quality",
+            "JPEG quality 1-100.", when=_thumb_on),
+        Opt("ThumbFormat", "thumb_format", "value", "thumbnail", "asked", "Thumbnail format",
+            "jpg, png, ...", when=_thumb_on),
+        Opt("ThumbPage", "thumb_page", "value", "thumbnail", "internal", "Thumbnail page",
+            "Page position of the embedded thumbnail (>= 1).", when=_thumb_on),
+        Opt("SkipCompressedWithThumb", "skip_compressed_with_thumb", "flag", "thumbnail",
+            "asked", "Skip compressed with thumbnail",
+            "Skip TIFFs that are already compressed AND have a thumbnail.", when=_thumb_on),
+        # Advanced screen (per run, passed explicitly when edited):
+        _ADV_MAGICK,
+        Opt("SrgbProfile", "advanced.SrgbProfile", "value", "thumbnail", "advanced",
+            "sRGB ICC profile", "ICC file used to convert wide-gamut sources; empty = "
+            "auto-detect.", value_spec="path?"),
+        _ADV_MEMORY,
+        # Settings file only (decision 6: the discovery must know the folder names, so they
+        # are not per-run):
+        Opt("ZipSuffix", "", "none", "files", "overlay", "ZIP suffix", "Mode 4 folder suffix."),
+        Opt("ZipSubfolderName", "", "none", "files", "overlay", "ZIP subfolder name",
+            "Modes 1/3 subfolder name."),
+        Opt("ExportMarker", "", "none", "files", "overlay", "Export marker",
+            "Modes 6/7 export folder marker."),
+        Opt("ExportZipSubfolder", "", "none", "files", "overlay", "Export ZIP subfolder",
+            "Mode 6 subfolder inside the export folder."),
+        Opt("ExportTiffSubfolder", "", "none", "files", "overlay", "Export TIFF subfolder",
+            "Mode 7 TIFF subfolder inside the export folder."),
+    ),
+    "copy_exif": (
+        Opt("InputDir", "folders", "input", "run", "asked", "Input folder(s)",
+            "The Fuji session folders (';'-joined)."),
+        Opt("Workers", "workers", "workers", "performance", "asked", "Workers",
+            "Parallel workers (1-64)."),
+        Opt("StagingDir", "staging", "value", "performance", "asked", "Staging folder",
+            "A fast (SSD) folder the work is done in before the result lands."),
+        Opt("OutputDir", "output_dir", "value", "files", "asked", "Output folder",
+            "Where the result is written."),
+        Opt("DryRun", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
+        Opt("SkipIfTiffHasExif", "skip_exif", "flag", "files", "asked", "Skip if TIFF has EXIF",
+            "Leave a TIFF that already carries EXIF alone."),
+        Opt("CompressZip", "compress_zip", "flag", "run", "asked", "Compress to ZIP",
+            "Compress the TIFF in the same pass."),
+        Opt("SafeMode", "safe_mode", "bool", "safety", "asked", "Safe mode",
+            "Skip multi-page TIFFs.", danger=True),
+        # -SkipLzwAsCompressed is a [switch] in the Copy EXIF backends (a [bool] in
+        # compress_tiff_zip.ps1): its default is OFF by type, so only "yes" is passed.
+        Opt("SkipLzwAsCompressed", "skip_lzw", "true_bool", "files", "asked", "Skip LZW",
+            "Treat LZW files as already compressed and ignore them."),
+        Opt("Overwrite", "overwrite", "flag", "safety", "asked", "Overwrite",
+            "Replace an existing output.", danger=True),
+        # step_basic_params asks this for every workflow. It used to be dropped here, so in
+        # workflow 4 the exclusion applied to the Compress step and silently not to the
+        # Copy EXIF step of the same run.
+        Opt("ExcludeFolders", "exclude_folders", "value", "files", "asked", "Exclude folders",
+            "';'-separated folder NAMES to skip during discovery."),
+        _ADV_MAGICK,
+        _ADV_MEMORY,
+        Opt("FailOnWarn", "advanced.FailOnWarn", "flag", "run", "advanced", "Fail on warning",
+            "Exit 1 when a file only produced a warning or was missing its JPEG.",
+            value_spec="bool"),
+    ),
+    "thumbnails": (
+        # Registered for the coverage test only: run_generate_thumbnails builds its two
+        # command lines inline (not through the workflow dict).
+        Opt("InputDir", "", "none", "run", "asked", "Input folder", "Where the TIFFs are."),
+        Opt("Size", "", "none", "thumbnail", "asked", "Size", "Pixels."),
+        Opt("Quality", "", "none", "thumbnail", "asked", "Quality", "JPEG quality 1-100."),
+        Opt("Format", "", "none", "thumbnail", "asked", "Format", "jpg, png, ..."),
+        Opt("Page", "", "none", "thumbnail", "asked", "Page", "0 = first, or all."),
+        Opt("Workers", "", "none", "performance", "asked", "Workers", "Parallel workers."),
+        Opt("OutputDir", "", "none", "files", "asked", "Output folder",
+            "Empty = next to each TIFF."),
+        Opt("ExcludeFolders", "", "none", "files", "asked", "Exclude folders",
+            "';'-separated folder NAMES to skip."),
+        Opt("SrgbProfile", "", "none", "thumbnail", "overlay", "sRGB ICC profile",
+            "ICC file used to convert wide-gamut sources; empty = auto-detect."),
+    ),
+}
+
+#: Parameters the wizard deliberately never offers: {backend: {param: why}}.
+NOT_OFFERED: Dict[str, Dict[str, str]] = {
+    "compress": {
+        "InputDirFile": "run_subprocess spills -InputDir here",
+        "RestoreStranded": "own flow (_offer_restore_stranded and menu option 5)",
+    },
+    "copy_exif": {
+        "InputDirFile": "run_subprocess spills -InputDir here",
+        "AutoFind": "the wizard runs its own AutoFind",
+        "FolderPattern": "the wizard runs its own AutoFind",
+        "IccPolicy": "no documented values; the backend only captures it",
+    },
+    "thumbnails": {
+        "Remove": "own flow, the remove branch of run_generate_thumbnails",
+        "Recursive": "asked inline by run_generate_thumbnails, not through the workflow dict",
+        "DryRun": "asked inline by run_generate_thumbnails, not through the workflow dict",
+    },
+}
+
+#: backend key -> the script(s) whose param() blocks the coverage test compares with it
+REGISTRY_SCRIPTS = {
+    "compress": ("compress_tiff_zip.ps1",),
+    "copy_exif": ("copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"),
+    "thumbnails": ("generate_thumbnails.ps1",),
+}
+
+
 def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: str = "pwsh") -> List[str]:
-    """Build powershell command for compress_tiff_zip.ps1."""
+    """Build powershell command for compress_tiff_zip.ps1 (the argv comes from REGISTRY)."""
     script = SCRIPT_DIR / "compress_tiff_zip.ps1"
-    cmd = [ps_name, "-NoProfile", "-File", str(script)]
-
-    if workflow.get("mode") is not None:
-        cmd += ["-Mode", str(workflow["mode"])]
-
-    if folders and len(folders) == 1:
-        cmd += ["-InputDir", str(folders[0])]
-    elif folders and len(folders) > 1:
-        # Pass as semicolon-separated list, script handles each
-        folder_list = ";".join(str(f) for f in folders)
-        cmd += ["-InputDir", folder_list]
-
-    # Mode 2 (flat) writes into the input root when -OutputDir is missing, which mixes
-    # the flattened copies with the sources and overwrites root-level TIFFs in place.
-    if workflow.get("output_dir"):
-        cmd += ["-OutputDir", workflow["output_dir"]]
-    if workflow.get("duplicate_action"):
-        cmd += ["-DuplicateAction", str(workflow["duplicate_action"])]
-
-    if workflow.get("staging"):
-        cmd += ["-StagingDir", workflow["staging"]]
-    if workflow.get("workers"):
-        cmd += ["-Workers", str(clamp_workers(workflow["workers"]))]
-    if workflow.get("cap_workers") is not None:
-        cmd += ["-CapWorkers", str(int(workflow["cap_workers"]))]
-    if workflow.get("exclude_folders"):
-        cmd += ["-ExcludeFolders", workflow["exclude_folders"]]
-    if workflow.get("dry_run"):
-        cmd += ["-DryRun"]
-    # Passed explicitly whenever the wizard decided it -- even when it equals the
-    # default: omitting it let a backend whose own default was edited run with a
-    # different value than the summary showed (audit round 17, the jxl-photo #467 class).
-    if isinstance(workflow.get("safe_mode"), bool):
-        cmd += ["-SafeMode:$true" if workflow["safe_mode"] else "-SafeMode:$false"]
-    if isinstance(workflow.get("skip_lzw"), bool):
-        cmd += ["-SkipLzwAsCompressed:$true" if workflow["skip_lzw"] else "-SkipLzwAsCompressed:$false"]
-    if workflow.get("overwrite"):
-        cmd += ["-Overwrite"]
-    if workflow.get("delete_source"):
-        cmd += ["-DeleteSource"]
-    if workflow.get("force_parallel") == True:
-        cmd += ["-ForceParallel"]
-    if workflow.get("force_sequential") == True:
-        cmd += ["-ForceSequential"]
-    
-    # Thumbnail generation
-    if workflow.get("generate_thumbnail"):
-        cmd += ["-GenerateThumbnail"]
-        if workflow.get("thumb_size"):
-            cmd += ["-ThumbSize", str(workflow["thumb_size"])]
-        if workflow.get("thumb_quality"):
-            cmd += ["-ThumbQuality", str(workflow["thumb_quality"])]
-        if workflow.get("thumb_format"):
-            cmd += ["-ThumbFormat", str(workflow["thumb_format"])]
-        if workflow.get("thumb_page"):
-            cmd += ["-ThumbPage", str(workflow["thumb_page"])]
-        if workflow.get("skip_compressed_with_thumb"):
-            cmd += ["-SkipCompressedWithThumb"]
+    cmd = [ps_name, "-NoProfile", "-File", str(script)] + _emit_all("compress", workflow, folders)
 
     if ps_name == "powershell":
         cmd = _wrap_ps5_command(cmd)
@@ -1729,39 +2335,7 @@ def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_fl
         script = SCRIPT_DIR / "copy_exif_to_TIFF_ps5.ps1"
     else:
         script = SCRIPT_DIR / "copy_exif_to_TIFF_ps7.ps1"
-    cmd = [ps_name, "-NoProfile", "-File", str(script)]
-
-    if folders and len(folders) == 1:
-        cmd += ["-InputDir", str(folders[0])]
-    elif folders and len(folders) > 1:
-        folder_list = ";".join(str(f) for f in folders)
-        cmd += ["-InputDir", folder_list]
-
-    if workflow.get("workers"):
-        cmd += ["-Workers", str(clamp_workers(workflow["workers"]))]
-    if workflow.get("staging"):
-        cmd += ["-StagingDir", workflow["staging"]]
-    if workflow.get("output_dir"):
-        cmd += ["-OutputDir", workflow["output_dir"]]
-    if workflow.get("dry_run"):
-        cmd += ["-DryRun"]
-    if workflow.get("skip_exif"):
-        cmd += ["-SkipIfTiffHasExif"]
-    if workflow.get("compress_zip"):
-        cmd += ["-CompressZip"]
-    if isinstance(workflow.get("safe_mode"), bool):
-        cmd += ["-SafeMode:$true" if workflow["safe_mode"] else "-SafeMode:$false"]
-    # -SkipLzwAsCompressed is a [switch] in the Copy EXIF backends (a [bool] in
-    # compress_tiff_zip.ps1): its default is OFF by type, so only "yes" is passed.
-    if workflow.get("skip_lzw"):
-        cmd += ["-SkipLzwAsCompressed:$true"]
-    if workflow.get("overwrite"):
-        cmd += ["-Overwrite"]
-    # step_basic_params asks this for every workflow. It used to be dropped here, so in
-    # workflow 4 the exclusion applied to the Compress step and silently not to the
-    # Copy EXIF step of the same run.
-    if workflow.get("exclude_folders"):
-        cmd += ["-ExcludeFolders", workflow["exclude_folders"]]
+    cmd = [ps_name, "-NoProfile", "-File", str(script)] + _emit_all("copy_exif", workflow, folders)
 
     if extra_flags:
         cmd += extra_flags
@@ -4206,6 +4780,7 @@ def show_main_menu(cfg) -> str:
         ("3", "Run from manifest (CSV)", has_manifests),
         ("4", "Check dependencies again", True),
         ("5", f"Presets ({len(presets)} saved)", True),
+        ("6", "Script settings", True),
     ]
     # An answer that came in while an earlier screen was busy (the check runs in the background).
     poll = getattr(cfg, "update_poll", None)
@@ -4974,6 +5549,7 @@ def run_manifest_workflow(cfg) -> bool:
         "dry_run": False,
     }
     step_basic_params(cfg, workflow)
+    step_advanced_options(cfg, workflow)
 
     # Collision policy for mode-2 (flattened) entries, same as the wizard.
     if any(m == 2 for _, _, m in entries):
@@ -5100,6 +5676,7 @@ def run_free_compress(cfg: ToolConfig) -> bool:
 
     # Basic params
     step_basic_params(cfg, workflow)
+    step_advanced_options(cfg, workflow)
 
     # Thumbnail generation option. The defaults come from the backend's own param()
     # block; "Configure? No" adds no thumb_* keys at all, so the backend runs on its
@@ -5246,6 +5823,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
 
     # Basic params
     step_basic_params(cfg, workflow)
+    step_advanced_options(cfg, workflow)
 
     # Summary + confirm
     if not step_confirm(workflow, cfg):
@@ -5790,6 +6368,208 @@ def _clean_preset_name(raw: str) -> Optional[str]:
     return name
 
 
+# --- Script settings menu (main menu 6) ------------------------------
+
+#: (overlay section, menu label, script whose OVERLAY-SPECS block and param() comments it shows)
+_OVERLAY_MENU = [
+    ("compress_tiff_zip", "Compress TIFFs (compress_tiff_zip.ps1)", "compress_tiff_zip.ps1"),
+    ("copy_exif", "Copy EXIF (copy_exif_to_TIFF_ps5.ps1 and _ps7.ps1)", "copy_exif_to_TIFF_ps7.ps1"),
+    ("generate_thumbnails", "Generate thumbnails (generate_thumbnails.ps1)", "generate_thumbnails.ps1"),
+    ("convert_tiff", "This wizard (convert_tiff.py)", None),
+]
+
+_CONVERT_SETTING_HELP = {
+    "WORKER_MEMORY_FRACTION": "Share of the available memory the Python workflows' parallel workers may use; 0 = no cap.",
+    "WORKER_MEMORY_LIMIT": "Which memory reading that share is taken from: both, commit or physical.",
+    "DIAGNOSE_CACHE": "Diagnose remembers each TIFF's verdict between runs.",
+    "CONVERT_TIMEOUT_S": "Base timeout (seconds) of a magick depth/format conversion.",
+    "COMPARE_TIMEOUT_S": "Base timeout (seconds) of a magick compare (RMSE).",
+    "TIMEOUT_S_PER_MB": "Seconds added to a whole-file magick/exiftool timeout per MB of input.",
+}
+
+
+def _convert_tiff_script_values() -> Dict[str, object]:
+    """The value each overlay-able convert_tiff.py setting has WRITTEN in this file (the live
+    module value may already be the overlay's)."""
+    import ast
+    try:
+        text = Path(__file__).read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    out: Dict[str, object] = {}
+    for name in _OVERLAY_SETTINGS:
+        m = re.search(rf"^{name} = (.+?)\s*(?:#.*)?$", text, re.M)
+        if m:
+            try:
+                out[name] = ast.literal_eval(m.group(1))
+            except (ValueError, SyntaxError):
+                pass
+    return out
+
+
+def _write_overlay_file(path: Path, data: Dict) -> None:
+    """The overlay file, written whole through a temp file + os.replace in its own folder: a
+    run starting meanwhile reads the old file or the new one, never half of it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tiff_workflow_settings_", suffix=".tmp",
+                               dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _read_overlay_data(path: Path):
+    """(data, problem): the whole overlay file as a dict ({} when it does not exist yet), or
+    ({}, why) when it exists and cannot be read as a JSON object -- never to be overwritten."""
+    if not path.is_file():
+        return {}, None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as e:
+        return {}, str(e)
+    if not isinstance(data, dict):
+        return {}, "it is not a JSON object"
+    return data, None
+
+
+def _overlay_menu_rows(section: str, script: Optional[str]):
+    """[(name, spec, script value, help)] of one section, in the script's own order."""
+    if script is None:
+        values = _convert_tiff_script_values()
+        return [(n, s, values.get(n), _CONVERT_SETTING_HELP.get(n, ""))
+                for n, s in _OVERLAY_SETTINGS.items()]
+    defaults = _ps_param_defaults(script)
+    helps = _ps_param_comments(script)
+    return [(n, s, defaults.get(n), helps.get(n, "")) for n, s in _ps_overlay_specs(script).items()]
+
+
+def _overlay_json_value(spec: str, parsed, checked):
+    """What the file stores: the JSON value the user meant (an intstr is a JSON int; a path
+    left empty is null), normalised the way the scripts read it."""
+    kind = spec.partition(":")[0]
+    if kind == "intstr":
+        return parsed
+    if kind == "path?":
+        return None if parsed is None else checked
+    return checked
+
+
+def _edit_overlay_section(path: Path, section: str, label: str, script: Optional[str]) -> None:
+    rows = _overlay_menu_rows(section, script)
+    if not rows:
+        _ui_say(f"No setting of {label} can be changed from the settings file "
+                f"(its OVERLAY-SPECS block could not be read).")
+        return
+    while True:
+        data, problem = _read_overlay_data(path)
+        if not problem and data.get(section) is not None and not isinstance(data.get(section), dict):
+            problem = f"the '{section}' entry is not an object"
+        if problem:
+            _ui_say(f"{path} cannot be read ({problem}). Fix or delete it first; nothing was "
+                    f"written, and the scripts ignore it meanwhile.")
+            return
+        sect = data.get(section) or {}
+        _ui_say(f"{label} -- its settings ('script' = the value written in the script, "
+                f"'file' = this settings file):")
+        for n, (name, spec, script_value, help_text) in enumerate(rows, 1):
+            if name in sect:
+                ok, _checked = _overlay_value(spec, sect[name])
+                file_part = json.dumps(sect[name], ensure_ascii=False) + ("" if ok else "  (REFUSED: the scripts keep their own value)")
+            else:
+                file_part = "-"
+            _ui_say(f"  {n:>2}. {name} = script: {json.dumps(script_value, ensure_ascii=False)} | "
+                    f"file: {file_part} | {spec}")
+            if help_text:
+                _ui_say(f"        {help_text}")
+        pick = _ui_ask("Number to change (0 = back)", "0")
+        if pick in ("", "0"):
+            return
+        if not pick.isdigit() or not 1 <= int(pick) <= len(rows):
+            _ui_say(f"No setting {pick!r}.")
+            continue
+        name, spec, script_value, help_text = rows[int(pick) - 1]
+        expected = _overlay_value(spec, object())[1]
+        text = _ui_ask(f"New value for {name} ({expected}; '-' = back to the script's value; "
+                       f"empty = no change)", "")
+        if text == "":
+            continue
+        if text == "-":
+            if name not in sect:
+                continue
+            new_sect = {k: v for k, v in sect.items() if k != name}
+            stored = None
+        else:
+            try:
+                parsed = _parse_setting_text(spec, text)
+            except ValueError as e:
+                _ui_say(f"Not changed: {e}.")
+                continue
+            ok, checked = _overlay_value(spec, parsed)
+            if not ok:
+                _ui_say(f"Not changed: {name} must be {checked}.")
+                continue
+            stored = _overlay_json_value(spec, parsed, checked)
+            new_sect = dict(sect)
+            new_sect[name] = stored
+        if new_sect:
+            data[section] = new_sect
+        else:
+            data.pop(section, None)
+        try:
+            _write_overlay_file(path, data)
+        except OSError as e:
+            _ui_say(f"Could not write {path}: {e}")
+            return
+        _ui_say(f"{name}: " + ("back to the script's value" if text == "-"
+                               else f"{json.dumps(stored, ensure_ascii=False)} (settings file)"))
+        # discovery skips this toolkit's own folders: a changed folder name counts at once
+        _refresh_tool_output_parts()
+        if section == "convert_tiff":
+            _ui_say("This wizard's own settings apply the next time the wizard starts.")
+
+
+def script_settings_menu(cfg) -> None:
+    """Main menu 6: the scripts' own settings (folder names, timeouts, thumbnail defaults, ...)
+    changed in `.tiff_workflow_settings.json` instead of the .py/.ps1 files. Every script
+    checks each value again when it starts and never takes a safety or per-run setting from
+    the file (Mode, SafeMode, Overwrite, DeleteSource, Workers, ...)."""
+    env = os.environ.get(_SETTINGS_OVERLAY_ENV)
+    if env is not None and not env.strip():
+        _ui_say(f"The settings overlay is OFF: {_SETTINGS_OVERLAY_ENV} is set and empty. "
+                f"Unset it to use a settings file.")
+        return
+    path = _settings_overlay_path()
+    data, problem = _read_overlay_data(path)
+    if problem:
+        _ui_say(f"{path} cannot be read ({problem}). Fix or delete it first; nothing was "
+                f"written, and the scripts ignore it meanwhile.")
+        return
+    _ui_say("Script settings -- the scripts' own defaults, without editing them.")
+    _ui_say(f"File: {path}" + ("" if path.is_file() else "  (does not exist yet; the first change creates it)"))
+    _ui_say("A change applies to the next run of that script. A value typed on a command line, "
+            "and everything this wizard asks per run, still wins. Deletion, overwriting, safe "
+            "mode and the other safety settings are never taken from this file.")
+    while True:
+        for n, (_section, label, _script) in enumerate(_OVERLAY_MENU, 1):
+            _ui_say(f"  {n}. {label}")
+        pick = _ui_ask("Which script's settings (0 = back)", "0")
+        if pick in ("", "0"):
+            return
+        if not pick.isdigit() or not 1 <= int(pick) <= len(_OVERLAY_MENU):
+            _ui_say(f"No entry {pick!r}.")
+            continue
+        section, label, script = _OVERLAY_MENU[int(pick) - 1]
+        _edit_overlay_section(path, section, label, script)
+
+
 def presets_menu(cfg) -> None:
     """Named snapshots of the last workflow (main menu option 5), so several
     recurring jobs (a nightly manifest sync, a one-off shoot) can coexist
@@ -5891,6 +6671,17 @@ def presets_menu(cfg) -> None:
         _say("Not a valid option.", "red")
 
 
+def _overlay_notice() -> None:
+    """What the settings file changed in THIS file's own settings (applied at import), and every
+    entry it refused -- said once at start-up, never when there is nothing to say."""
+    result = _SETTINGS_OVERLAY
+    if result.get("applied"):
+        _say(f"Script settings overlay: {result['path']}: {len(result['applied'])} value(s): "
+             f"{', '.join(sorted(result['applied']))}")
+    for warning in result.get("warnings", ()):
+        _say(f"WARNING: settings overlay: {warning}", "yellow")
+
+
 def main():
     # Plain print() on a legacy Windows console (cp850/cp1252) raises
     # UnicodeEncodeError on non-ANSI paths (e.g. 横浜) -- a crash in the middle of a
@@ -5938,6 +6729,8 @@ def main():
             line = f"    {preset.get('label', '')}" + (f"  (saved {saved})" if saved else "")
             print(f"{name}\n{line}")
         sys.exit(0)
+
+    _overlay_notice()
 
     # Detect PowerShell version at startup
     ps_major, ps_name, ps_version = detect_powershell_version()
@@ -5997,6 +6790,10 @@ def main():
 
         if choice == "5":
             presets_menu(cfg)
+            continue
+
+        if choice == "6":
+            script_settings_menu(cfg)
             continue
 
         if choice == "3":

@@ -80,6 +80,20 @@ gitignored). If one exists:
 - The wizard reads a backend default with `_backend_default(script, param)`;
   its `_BACKEND_PARAM_FALLBACKS` is used only when the `.ps1` cannot be read,
   and `tests/test_settings_literals.py` pins it to the scripts.
+- **The settings overlay** `.tiff_workflow_settings.json` (env
+  `TIFFWORKFLOW_SETTINGS`, blank = off; else next to the scripts; else the
+  user profile) changes those settings without editing a file. It is read by
+  `convert_tiff.py` (`_OVERLAY_SETTINGS`) and by every `.ps1`
+  (`Get-SettingsOverlay`, identical in the four scripts, no literal braces in
+  its strings). Only the names in a script's `OVERLAY-SPECS` block are taken:
+  **never add a safety or per-run parameter to one** (tests/test_settings_overlay.py
+  T6 pins the forbidden list). A `-Param` on the command line wins; a bad file
+  or value changes nothing and warns. Tests and the battery switch it off.
+- **Every backend parameter is in `REGISTRY` or in `NOT_OFFERED`** (with the
+  reason) in `convert_tiff.py`; the argv comes from `_emit_all`, in REGISTRY
+  order. `tests/test_wizard_registry.py` fails on a new parameter nobody
+  decided about, and its golden file `tests/data/wizard_registry_golden.json`
+  is never regenerated.
 
 ## Tool traps (verified, all silent)
 - **exiftool `-tagsfromfile SRCFILE` expands printf codes** in SRCFILE: `%o`

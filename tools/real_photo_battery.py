@@ -48,6 +48,11 @@ from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
+# The settings overlay (.tiff_workflow_settings.json) OFF, for this process and every backend
+# it starts: the checks expect the scripts' own defaults (ZIP/, _EXPORT, ...), and the owner's
+# file must never change what the battery measures. Set before convert_tiff is imported, which
+# applies its own section on import.
+os.environ["TIFFWORKFLOW_SETTINGS"] = ""
 import convert_tiff  # noqa: E402  (the repo root must be on sys.path first)
 
 try:  # folder names with Japanese characters must not kill the console print
