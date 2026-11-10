@@ -21,7 +21,7 @@ param(
 )
 # The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
 # requires the same value in every script and in convert_tiff.py's TOOLKIT_VERSION.
-$script:ToolkitVersion = '2.8.0'
+$script:ToolkitVersion = '2.9.0'
 $script:ToolkitUrl = 'https://github.com/rsilvabr/tiff-workflow'
 
 # Settings overlay (.tiff_workflow_settings.json): the ONLY names it can change in this script,

@@ -510,7 +510,7 @@ python convert_tiff.py --help             # Show help
 python convert_tiff.py --list-presets     # List saved presets and exit
 python convert_tiff.py --run-preset NAME  # Run a preset unattended and exit
 python convert_tiff.py --run-preset NAME --dry-run
-python convert_tiff.py --version          # Print the release (tiff-workflow 2.8.0) and exit
+python convert_tiff.py --version          # Print the release (tiff-workflow 2.9.0) and exit
 ```
 
 No CLI flags are required -- the wizard is fully interactive. `--run-preset` and
@@ -529,7 +529,7 @@ When the main menu opens, the wizard looks once a day for a newer release of the
 GitHub and, if there is one, adds a line and a **[U]** entry that opens the release page:
 
 ```
-A new release is out: v2.9.0 (this copy is 2.8.0) -- [U] in the menu opens its page.
+A new release is out: v2.10.0 (this copy is 2.9.0) -- [U] in the menu opens its page.
 ```
 
 - It is **one anonymous request** to `api.github.com` (`releases/latest`; a generic

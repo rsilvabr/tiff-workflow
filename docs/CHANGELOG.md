@@ -10,6 +10,23 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.9.0
+
+- **A settings file instead of editing the scripts.** The settings at the top of the scripts
+  -- folder names (`ZIP`, `_EXPORT`, ...), timeouts, thumbnail defaults, the memory share of the
+  workers -- can live in `.tiff_workflow_settings.json`, next to the scripts or in your user
+  profile (or wherever `TIFFWORKFLOW_SETTINGS` points). The wizard and the four PowerShell
+  scripts read it, in PowerShell 5.1 and 7, so an update no longer means re-applying your
+  edits. Main menu **[6] Script settings** edits it. It can never change anything that deletes,
+  overwrites or skips a safety check; a bad file or value changes nothing and is reported, and
+  a `-Param` typed on a command line still wins
+- **Advanced options per run:** after the basic parameters the wizard offers the options it
+  never asked (ImageMagick timeout, sRGB profile, memory share, fail on warnings). Only what
+  you change is passed; presets and Repeat last keep it
+- Every option of every script is now known to the wizard in one place, and a test fails when
+  a script gains one nobody decided about. The commands the wizard builds are byte for byte
+  the same as before
+
 ## v2.8.0
 
 - **exiftool works when the Windows temp folder has characters outside the system's code page**

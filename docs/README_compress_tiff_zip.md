@@ -323,7 +323,7 @@ format of the wizard's padded 16 -> 8-bit conversion and of jxl-photo:
 ```
 Action=converted
 When=2026-11-10T22:04:16+09:00
-SoftwareAgent=tiff-workflow 2.8.0 (https://github.com/rsilvabr/tiff-workflow)
+SoftwareAgent=tiff-workflow 2.9.0 (https://github.com/rsilvabr/tiff-workflow)
 Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (legacy mode: "legacy"; with a
                                                              thumbnail: "... + thumbnail page")
 ```
@@ -342,11 +342,11 @@ Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (legacy mode: "legac
 
 ## Logging
 
-Logs written to `Logs/compress_tiff_zip/<timestamp>.log` in the current working directory. Each run appends to a new timestamped file. The first line of every backend log names the release, the script and the PowerShell version: `tiff-workflow 2.8.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9`.
+Logs written to `Logs/compress_tiff_zip/<timestamp>.log` in the current working directory. Each run appends to a new timestamped file. The first line of every backend log names the release, the script and the PowerShell version: `tiff-workflow 2.9.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9`.
 
 Sample output:
 ```
-10:23:45 | INFO | tiff-workflow 2.8.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9
+10:23:45 | INFO | tiff-workflow 2.9.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9
 10:23:45 | INFO | Log: Logs/compress_tiff_zip/20240415_102345.log
 10:23:45 | INFO | Mode: 3 | Workers: 8 | OutputDir: (in-place/flat) | Staging: disabled | DryRun: False | SafeMode: True | SkipLzw: False | Overwrite: False | DeleteSource: OFF
 10:23:45 | INFO | Found: 150 TIFF(s)
