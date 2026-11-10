@@ -94,6 +94,15 @@ gitignored). If one exists:
 - **PS5 cannot bind `-Switch:$false` through `-File`**: the switch arrives as a
   string and stays ON. Route PS5 through `_wrap_ps5_command` (tests:
   `run_ps_switched`).
+- **exiftool reads its command line in the ANSI code page -- an argfile PATH
+  too** (round 27): `-@ <argfile>` failed on every call when `%TEMP%` held a
+  character outside it. Every call sends the argfile's CONTENT on stdin,
+  `exiftool -@ -` (`ReadAllText($f) | exiftool -@ -`; `input=` in Python).
+  **PS 5.1 pipes to a native program with `$OutputEncoding` = us-ascii**: it is
+  set to `UTF8Encoding($false)` at script scope and as the first statement of
+  every `-Parallel` block. A test that reads tags must not put a Japanese path
+  on exiftool's command line either (`exif_stdin` in
+  `tests/test_exiftool_stdin.py`).
 - Windows' 260-character path limit: staged names in mode 8 blew past it
   (round 13). Keep generated names short.
 
@@ -216,6 +225,10 @@ same `<topic>` across the three.
   README's Acknowledgments.
 - An audit round is one `fix(audit-round-N): ...` commit plus its
   `docs/bugs_fixed.md` section.
+- The release number lives in five places: `TOOLKIT_VERSION` in
+  `convert_tiff.py` and `$script:ToolkitVersion` in the four `.ps1`
+  (`tests/test_version_parity.py`), and it must match the newest
+  `docs/CHANGELOG.md` section (`tests/test_diagnose_preset.py`).
 - Commit or push only when the owner asks.
 - **Every tiff-workflow release updates tiff-workflow-exe too** (owner's rule,
   2026-10-25), in the sibling repo `../tiff-workflow-exe`: `TIFFWORKFLOW_TAG`
@@ -228,3 +241,11 @@ same `<topic>` across the three.
   published as a regular release. A bundled tool update (PowerShell,
   ExifTool, ImageMagick: URL + SHA-256 in its `TOOLS`) goes the same way
   with the next `PACKAGE_REVISION`.
+
+## Pending list
+The owner keeps one list of everything still pending, across all repos, in
+`../PENDENCIAS.md` (the folder above this repo, outside git, in Portuguese).
+Read it when asked what is left to do. When work here finishes an item, leaves
+something for later, or waits on a decision from the owner, update that file in
+the same session: remove what is done, add what is new. It is private: never
+copy its contents into tracked files, commits or release notes.
