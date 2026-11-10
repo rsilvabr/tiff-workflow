@@ -10,6 +10,24 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.8.0
+
+- **exiftool works when the Windows temp folder has characters outside the system's code page**
+  (a user name in Japanese, Greek, Polish...). Every exiftool call used to fail there --
+  compress refused every file with "cannot detect compression", Copy EXIF with "exiftool
+  EXIF", and the wizard's checks could not read any tag. Nothing was ever written wrong: the
+  runs stopped with an error. exiftool now gets its arguments on stdin (round 27)
+- **Every TIFF compress rewrites records it in the photo's `xmpMM:History`** (tool, version,
+  date, mode), like the padded 16 -> 8-bit conversion since v2.7. Earlier entries (Capture One,
+  scanner software) are kept, a second run adds nothing, and a file whose entry cannot be
+  written is still a good ZIP (a `WARN`). About half a second to a second per file
+- **The release is in every script and log:** `python convert_tiff.py --version`, the main
+  menu's title, and the first line of each backend's log and of the wizard's own reports
+- **New-release notice:** the main menu looks once a day, in the background, for a newer
+  release and offers `U` to open its page. One anonymous request to GitHub, nothing else sent;
+  never for `--run-preset`. Off with `"check_for_updates": false` in the config file or the
+  environment variable `TIFFWORKFLOW_NO_UPDATE_CHECK`
+
 ## v2.7.4
 
 - **Modes 0 and 9 keep each original in place until its compressed copy is ready.** The copy is

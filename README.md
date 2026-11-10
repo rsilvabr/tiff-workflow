@@ -59,6 +59,10 @@ The wizard supports **AutoFind** — automatically locates folders matching patt
 
 **Presets:** save the last workflow under a name (main menu **[5]**) and run it unattended with `python convert_tiff.py --run-preset NAME` — see [Presets](docs/README_convert_tiff_py.md#presets-menu-5).
 
+**Version:** `python convert_tiff.py --version` prints the release; it is also in the menu title and on the first line of every log.
+
+**New-release notice:** the main menu looks once a day for a newer release (one anonymous request to GitHub, nothing else sent; never for `--run-preset`). Turn it off with `"check_for_updates": false` in `~/.convert_tiff_config.json` or the environment variable `TIFFWORKFLOW_NO_UPDATE_CHECK` — see [the notice](docs/README_convert_tiff_py.md#new-release-notice).
+
 ### Direct PowerShell (no Python required)
 
 ```powershell
@@ -347,7 +351,7 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ## Changelog
 
-**Latest release: v2.7.4** — modes 0/9 keep each original in place until its compressed copy is ready, and a staging folder on another drive never writes over an original; the wizard offers to restore originals an interrupted run left behind. v2.7.3: compress lists originals that an interrupted mode 0/9 run left in `OLD_TIFFs` with nothing in their place, and `-RestoreStranded` puts them back; the script that moves backup folders to another drive never moves such a file. v2.7.2: a preset runs the backends next to the wizard, so it keeps working after the toolkit moves to another folder. v2.7.1: Copy EXIF's `-SkipIfTiffHasExif` no longer skips every TIFF. v2.7: the padded 16 -> 8-bit conversion records itself in the photo's `xmpMM:History`. v2.6.2: files in folders with `[ ]` in the name no longer leave full temporary copies in `%TEMP%`; the Diagnose progress line shows the folder. v2.6 made Diagnose TIFFs a preset (report only) with a folder-path scope and file-name skips.
+**Latest release: v2.8.0** — exiftool works when the Windows temp folder has characters outside the system's code page; every TIFF compress rewrites records it in the photo's `xmpMM:History`; the release is in every script and log (`--version`); the menu tells you when a newer release is out. v2.7.4: modes 0/9 keep each original in place until its compressed copy is ready, and a staging folder on another drive never writes over an original; the wizard offers to restore originals an interrupted run left behind. v2.7.3: compress lists originals that an interrupted mode 0/9 run left in `OLD_TIFFs` with nothing in their place, and `-RestoreStranded` puts them back; the script that moves backup folders to another drive never moves such a file. v2.7.2: a preset runs the backends next to the wizard, so it keeps working after the toolkit moves to another folder. v2.7.1: Copy EXIF's `-SkipIfTiffHasExif` no longer skips every TIFF. v2.7: the padded 16 -> 8-bit conversion records itself in the photo's `xmpMM:History`. v2.6.2: files in folders with `[ ]` in the name no longer leave full temporary copies in `%TEMP%`; the Diagnose progress line shows the folder. v2.6 made Diagnose TIFFs a preset (report only) with a folder-path scope and file-name skips.
 
 - Full release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 - Per-bug technical detail: [`docs/bugs_fixed.md`](docs/bugs_fixed.md)
