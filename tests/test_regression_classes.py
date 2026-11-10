@@ -3102,8 +3102,9 @@ class TestAuditRound16PurgeMetadataGate:
         def fake_run(cmd, **kwargs):
             cmd = [str(a) for a in cmd]
             if cmd[0] == "exiftool" and "-@" in cmd:
-                # _run_exiftool passes everything in a UTF-8 argfile; read it back
-                lines = Path(cmd[cmd.index("-@") + 1]).read_text(encoding="utf-8").splitlines()
+                # _run_exiftool sends everything as a UTF-8 argfile on stdin (`-@ -`); read it back
+                assert cmd[cmd.index("-@") + 1] == "-", "the argfile must go on stdin, not by path"
+                lines = kwargs["input"].decode("utf-8").splitlines()
                 cmd = ["exiftool"] + [a for a in lines if a not in ("-charset", "filename=utf8")]
             if cmd[0] == "exiftool":
                 name = cmd[-1]

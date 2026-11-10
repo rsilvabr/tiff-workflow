@@ -20,7 +20,7 @@ and streaming output from PowerShell backends.
 # the release this file belongs to (tests/test_diagnose_preset.py pins it to the newest
 # docs/CHANGELOG.md section).
 TOOLKIT_NAME = "tiff-workflow"
-TOOLKIT_VERSION = "2.7.4"
+TOOLKIT_VERSION = "2.8.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes
@@ -155,6 +155,12 @@ class ToolConfig:
     # manifest_path, manifest_workflow, manifest_default_mode, autofind, diagnose,
     # saved_at}.
     presets: Optional[Dict[str, Dict]] = None
+    # The menu's "a new release is out" line (see _update_check_start): GitHub is asked at
+    # most once a day, and only when this is true. Also off with the environment variable
+    # TIFFWORKFLOW_NO_UPDATE_CHECK (any non-empty value). Edited in the config file.
+    check_for_updates: bool = True
+    update_checked_on: str = ""       # YYYY-MM-DD of the last answer GitHub gave
+    update_latest_seen: str = ""      # the tag it answered
     ps_major: int = 0  # detected at startup, not persisted
     ps_name: str = "powershell"  # "pwsh" or "powershell", not persisted
 
@@ -165,6 +171,13 @@ class ConfigManager:
     def __init__(self):
         self.config_path = self._get_config_path()
         self.config = ToolConfig()
+        # Every write of the config file holds this lock: the release check answers from a
+        # background thread (save_update_answer) while the menu thread may save too.
+        self._save_lock = threading.Lock()
+        # Release-notice state of this run (see _update_check_start): the poll function and
+        # the (tag, page URL) of a newer release, when there is one.
+        self.update_poll = None
+        self.update_available = None
         self._load_config()
 
     def _get_config_path(self) -> Path:
@@ -220,18 +233,180 @@ class ConfigManager:
 
     def save_config(self) -> None:
         try:
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            data = asdict(self.config)
-            # Runtime-detected fields, not persisted
-            data.pop("ps_major", None)
-            data.pop("ps_name", None)
-            with open(self.config_path, 'w') as f:
-                json.dump(data, f, indent=2)
+            with self._save_lock:
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                data = asdict(self.config)
+                # Runtime-detected fields, not persisted
+                data.pop("ps_major", None)
+                data.pop("ps_name", None)
+                with open(self.config_path, 'w') as f:
+                    json.dump(data, f, indent=2)
         except Exception as e:
             # audit round 16: same story on save -- a config that silently never
             # persisted looked exactly like one that did.
             print(f"WARNING: could not save config file {self.config_path}: {e}",
                   file=sys.stderr)
+
+    def save_update_answer(self, checked_on: str, tag: Optional[str]) -> None:
+        """Keep a release lookup's answer, from any thread: set the two fields in memory,
+        then rewrite ONLY those two keys in the file on disk (read, change, write through a
+        temp file + os.replace, under the save lock). The background thread must never
+        serialise the whole config while the menu thread changes it -- it would write a stale
+        copy of everything else (presets, the journal). A file that exists but does not parse
+        is left alone. Raises OSError when the file cannot be written; the caller decides."""
+        with self._save_lock:
+            self.config.update_checked_on = checked_on
+            if tag:
+                self.config.update_latest_seen = tag
+            data: Dict = {}
+            if self.config_path.exists():
+                try:
+                    with open(self.config_path, encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception:
+                    return
+                if not isinstance(data, dict):
+                    return
+            data["update_checked_on"] = self.config.update_checked_on
+            data["update_latest_seen"] = self.config.update_latest_seen
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=str(self.config_path.parent),
+                                       prefix=".convert_tiff_config.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp, self.config_path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+
+
+# --- New-release notice -------------------------------------------------
+# Model: jxl-photo's _update_notice family (v2.25.1), without the jxl-thumb part. GitHub is
+# asked for the latest release with one anonymous request: a generic User-Agent, no token,
+# nothing else sent. Off with check_for_updates = false in the config or the environment
+# variable TIFFWORKFLOW_NO_UPDATE_CHECK. Only the interactive menu asks: --run-preset,
+# --list-presets and --version never touch the network.
+
+_UPDATE_OWNER = "rsilvabr"
+_UPDATE_TIMEOUT = 3          # seconds: a slow or absent network stays silent
+_UPDATE_ENV = "TIFFWORKFLOW_NO_UPDATE_CHECK"
+
+
+def _update_check_off(cfg) -> bool:
+    return (not cfg.config.check_for_updates) or bool(os.environ.get(_UPDATE_ENV))
+
+
+def _update_repo() -> str:
+    """The repository whose releases this copy follows: the Windows program (a frozen
+    build) follows tiff-workflow-exe, the scripts follow tiff-workflow."""
+    return "tiff-workflow-exe" if getattr(sys, "frozen", False) else "tiff-workflow"
+
+
+def _version_key(text: Optional[str]):
+    """(major, minor, patch, final) of "v2.7.4", "2.7.4_beta1" or "v2.7.4-exe1" (the exe's
+    package revision is ignored: exe2 of the same release is not news here), or None. A
+    beta sorts before its release."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+)?(?:-exe\d+)?$", (text or "").strip())
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if m.group(4) else 1)
+
+
+def _latest_release_tag(repo: str, timeout: float = _UPDATE_TIMEOUT) -> Optional[str]:
+    """The tag of the repository's latest release (GitHub leaves pre-releases out of
+    "latest"), or None on any failure: no network, a timeout, a rate limit, an answer that
+    is not what it should be. Sends no personal data: a generic User-Agent, no token."""
+    import urllib.request
+    url = f"https://api.github.com/repos/{_UPDATE_OWNER}/{repo}/releases/latest"
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "tiff-workflow-update-check"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read(65536).decode("utf-8"))
+        tag = data.get("tag_name") if isinstance(data, dict) else None
+        return tag if isinstance(tag, str) and _version_key(tag) else None
+    except Exception:
+        return None
+
+
+def _kept_update_notice(cfg, checked_before: bool = False) -> Optional[Tuple[str, str]]:
+    """(the menu line, the release page URL) from the answer kept in the config (no network),
+    or None. checked_before: the answer came from an earlier run, so the line says when."""
+    if _update_check_off(cfg):
+        return None
+    latest = cfg.config.update_latest_seen
+    mine, theirs = _version_key(TOOLKIT_VERSION), _version_key(latest)
+    if not mine or not theirs or theirs <= mine:
+        return None
+    url = f"https://github.com/{_UPDATE_OWNER}/{_update_repo()}/releases/latest"
+    line = (f"A new release is out: {latest} (this copy is {TOOLKIT_VERSION}) -- "
+            f"[U] in the menu opens its page.")
+    if checked_before and cfg.config.update_checked_on:
+        line += f" (Checked by an earlier run on {cfg.config.update_checked_on}.)"
+    return (line, url)
+
+
+def _update_check_start(cfg):
+    """The daily release lookup without making the menu wait: GitHub is asked in a background
+    thread, which KEEPS the answer itself (save_update_answer) as soon as it is in, so the
+    next run shows it even when this one is closed first. A day counts only once GitHub
+    answered: no network, a timeout or a rate limit leave the day unmarked and the next run
+    asks again. Returns poll(wait=0.0) -> the notice or None: until the answer is in, the one
+    an earlier run kept (with its date); after it, the fresh one. Off: no thread, no notice.
+    Already asked today: no thread."""
+    if _update_check_off(cfg):
+        return lambda wait=0.0: None
+    from datetime import date
+    today = date.today().isoformat()
+    if cfg.config.update_checked_on == today:
+        notice = _kept_update_notice(cfg, checked_before=True)
+        return lambda wait=0.0: notice
+    fresh: Dict[str, bool] = {"answered": False}
+
+    def _ask():
+        tag = _latest_release_tag(_update_repo())
+        if tag:
+            try:
+                cfg.save_update_answer(today, tag)
+            except Exception:
+                pass
+            fresh["answered"] = True
+
+    worker = threading.Thread(target=_ask, name="update-check", daemon=True)
+    worker.start()
+
+    def poll(wait: float = 0.0):
+        if worker.is_alive():
+            worker.join(wait)
+        answered = not worker.is_alive() and fresh["answered"]
+        return _kept_update_notice(cfg, checked_before=not answered)
+    return poll
+
+
+def _update_check_now(cfg) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """Menu 4: ask GitHub now (whatever was asked today) and keep the answer. Returns
+    (the line to print, the notice or None)."""
+    if _update_check_off(cfg):
+        return ("Release check: off (check_for_updates in the config file, or "
+                f"{_UPDATE_ENV}).", None)
+    from datetime import date
+    tag = _latest_release_tag(_update_repo())
+    if not tag:
+        return (f"Release check: GitHub did not answer (this copy is {TOOLKIT_VERSION}).", None)
+    try:
+        cfg.save_update_answer(date.today().isoformat(), tag)
+    except Exception:
+        pass
+    notice = _kept_update_notice(cfg)
+    if notice:
+        return (notice[0], notice)
+    return (f"Release check: up to date ({tag} is the latest release; this copy is "
+            f"{TOOLKIT_VERSION}).", None)
 
 
 # --- PowerShell Version Detection -----------------------------------
@@ -540,17 +715,12 @@ def _run_exiftool(args, timeout, text=False):
     and could not be opened. Every write gate then failed closed: the padded conversion
     refused every file under a Japanese folder name (`subfile_restore_failed`). An
     argfile is read as UTF-8 and passes any name through; it is how _image_pixels has
-    always called exiftool."""
-    fd, argfile = tempfile.mkstemp(suffix=".args")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write("\n".join(["-charset", "filename=utf8"] + [str(a) for a in args]) + "\n")
-        return _run_captured(["exiftool", "-@", argfile], timeout, text=text)
-    finally:
-        try:
-            os.unlink(argfile)
-        except OSError:
-            pass
+    always called exiftool.
+
+    The argfile goes on STDIN (`-@ -`), not as a temp file (audit round 27): its PATH on
+    the command line is read in the ANSI code page too, and a %TEMP% outside it failed."""
+    data = ("\n".join(["-charset", "filename=utf8"] + [str(a) for a in args]) + "\n").encode("utf-8")
+    return _run_captured(["exiftool", "-@", "-"], timeout, text=text, input=data)
 
 
 # Memory helpers copied from jxl-photo's jxl_recompressor.py (v2.9.0); keep in step.
@@ -673,13 +843,11 @@ def _image_pixels(paths) -> Dict[str, int]:
             _say(f"  sizes read: {off}/{len(paths)} ({time.time() - t0:.0f}s)", "dim")
         chunk = paths[off:off + 400]
         seen = {}
-        argfile = None
         try:
-            fd, argfile = tempfile.mkstemp(suffix=".args")
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write("\n".join(["-charset", "filename=utf8", "-j", "-n",
-                                   "-IFD0:ImageWidth", "-IFD0:ImageHeight"] + chunk) + "\n")
-            r = _run_captured(["exiftool", "-@", argfile], _work_timeout(60), text=True)
+            # The argfile goes on stdin (`-@ -`), see _run_exiftool (audit round 27).
+            data = ("\n".join(["-charset", "filename=utf8", "-j", "-n",
+                               "-IFD0:ImageWidth", "-IFD0:ImageHeight"] + chunk) + "\n").encode("utf-8")
+            r = _run_captured(["exiftool", "-@", "-"], _work_timeout(60), text=True, input=data)
             for entry in json.loads(r.stdout or "[]"):
                 try:
                     px = int(entry.get("ImageWidth") or 0) * int(entry.get("ImageHeight") or 0)
@@ -688,12 +856,6 @@ def _image_pixels(paths) -> Dict[str, int]:
                 seen[os.path.normcase(os.path.abspath(str(entry.get("SourceFile", ""))))] = px
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
-        finally:
-            if argfile:
-                try:
-                    os.unlink(argfile)
-                except OSError:
-                    pass
         for p in chunk:
             key = os.path.normcase(os.path.abspath(p))
             px = seen.get(key, 0)
@@ -3082,6 +3244,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"diagnose_{time.strftime('%Y%m%d_%H%M%S')}.log"
         with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"{TOOLKIT_NAME} {TOOLKIT_VERSION}\n")
             f.write("\n".join(lines) + "\n")
         print(f"\nReport: {log_path}")
     except OSError as e:
@@ -4043,8 +4206,18 @@ def show_main_menu(cfg) -> str:
         ("3", "Run from manifest (CSV)", has_manifests),
         ("4", "Check dependencies again", True),
         ("5", f"Presets ({len(presets)} saved)", True),
-        ("0", "Exit", True),
     ]
+    # An answer that came in while an earlier screen was busy (the check runs in the background).
+    poll = getattr(cfg, "update_poll", None)
+    if poll and not getattr(cfg, "update_available", None):
+        late = poll()
+        if late:
+            _say(late[0], "yellow")
+            cfg.update_available = (cfg.config.update_latest_seen, late[1])
+    if getattr(cfg, "update_available", None):
+        options.append(("U", f"Update available: {cfg.update_available[0]} -- open the release page",
+                        True))
+    options.append(("0", "Exit", True))
 
     if RICH_AVAILABLE and console:
         table = Table(show_header=False, box=None)
@@ -4054,10 +4227,11 @@ def show_main_menu(cfg) -> str:
         for key, desc, available in options:
             status_str = "" if available else "[dim](unavailable)[/dim]"
             table.add_row(key, desc, status_str)
-        console.print(Panel(table, title="Main Menu", border_style="green"))
+        console.print(Panel(table, title=f"Main Menu -- {TOOLKIT_NAME} {TOOLKIT_VERSION}",
+                            border_style="green"))
         return Prompt.ask("Select option", choices=[o[0] for o in options if o[2]])
 
-    print("\n--- Main Menu ---")
+    print(f"\n--- Main Menu -- {TOOLKIT_NAME} {TOOLKIT_VERSION} ---")
     for key, desc, available in options:
         status_str = "" if available else " [UNAVAILABLE]"
         print(f"[{key}] {desc}{status_str}")
@@ -4750,6 +4924,7 @@ def _render_manifest_summary(entry_reports: List[Dict], ok_count: int,
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"manifest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         with open(log_path, 'w', encoding='utf-8') as f:
+            f.write(f"{TOOLKIT_NAME} {TOOLKIT_VERSION}\n")
             f.write("\n".join(lines))
             f.write("\n\nChild logs: Logs/compress_tiff_zip/ (one per entry)\n")
         print(f"Combined log: {log_path}")
@@ -5739,6 +5914,9 @@ def main():
                         help="List saved presets and exit")
     parser.add_argument("--dry-run", action="store_true",
                         help="With --run-preset: simulate (-DryRun) instead of running")
+    parser.add_argument("--version", action="version",
+                        version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}",
+                        help="Print the release and exit")
     args = parser.parse_args()
 
     # A stray --dry-run would otherwise be ignored -- the worst outcome is a real
@@ -5777,6 +5955,15 @@ def main():
 
     show_environment_panel(cfg)
 
+    # A new release? Menu runs only: --run-preset, --list-presets and --version have
+    # returned above and never ask the network. Asked in the background: the menu waits half
+    # a second at most; until the answer is in it shows the one an earlier run kept.
+    cfg.update_poll = _update_check_start(cfg)
+    upd = cfg.update_poll(0.5)
+    if upd:
+        _say(upd[0], "yellow")
+        cfg.update_available = (cfg.config.update_latest_seen, upd[1])
+
     while True:
         choice = show_main_menu(cfg)
 
@@ -5787,11 +5974,25 @@ def main():
                 print("Done.")
             break
 
+        if choice == "U":
+            import webbrowser
+            try:
+                webbrowser.open(cfg.update_available[1])
+            except Exception:
+                _say(f"Could not open a browser: {cfg.update_available[1]}", "yellow")
+            continue
+
         if choice == "4":
             ps_major, ps_name, ps_version = detect_powershell_version()
             cfg.config.ps_major = ps_major
             cfg.config.ps_name = ps_name
             show_environment_panel(cfg)
+            # ...and the releases, now (the daily background ask may be a day old).
+            line, notice = _update_check_now(cfg)
+            _say(line, "yellow" if notice else "")
+            cfg.update_poll = None          # this answer stands
+            cfg.update_available = ((cfg.config.update_latest_seen, notice[1])
+                                    if notice else None)
             continue
 
         if choice == "5":

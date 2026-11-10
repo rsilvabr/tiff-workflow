@@ -19,12 +19,20 @@ param(
     [double]$WorkerMemoryFraction = 0.8,  # Accepted for interface parity; this script is sequential and ignores it
     [string]$InputDirFile = ""       # UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)
 )
+# The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
+# requires the same value in every script and in convert_tiff.py's TOOLKIT_VERSION.
+$script:ToolkitVersion = '2.8.0'
+$script:ToolkitUrl = 'https://github.com/rsilvabr/tiff-workflow'
 
 # Console output as UTF-8 when it goes to a pipe (the wizard reads it). Without this the
 # OEM code page turned every Japanese folder name into '?' on screen -- the log file,
 # written as UTF-8, was always right. Only when redirected: an interactive console
 # keeps its own code page.
 if ([Console]::IsOutputRedirected) { try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { } }
+# exiftool gets its argfile on stdin (`-@ -`): an argfile PATH on its command line is read in
+# the ANSI code page and breaks for a %TEMP% outside it (audit round 27). PS 5.1 encodes what it
+# pipes to a native program with $OutputEncoding, which is us-ascii there.
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 # PS 5.1 cannot enter a start-up folder whose name has "[ ]" (wildcards to it) and
 # silently starts in $PSHOME (System32) instead: the log, a relative -InputDir or
 # -OutputDir all pointed there. Re-enter the process's real folder, literally.
@@ -225,8 +233,8 @@ function ConvertTo-MagickPathSpec {
 function Invoke-ExifTool {
     <#
     .SYNOPSIS
-        Runs exiftool with its arguments routed through a UTF-8 `-@` argfile and returns
-        @{ ExitCode = [int]; Output = $null/string/array }.
+        Runs exiftool with its arguments routed through a UTF-8 `-@` argfile read on stdin and
+        returns @{ ExitCode = [int]; Output = $null/string/array }.
 
     .DESCRIPTION
         The main copy/probe/restore calls used to pass file names as raw argv, so a non-ASCII
@@ -234,7 +242,9 @@ function Invoke-ExifTool {
         now goes through a per-call argfile: `-charset filename=utf8` first, then one argument
         per line (options and operands on their own lines, paths as-is), UTF-8 without BOM
         (WriteAllText's default encoding) -- the same pattern compress_tiff_zip.ps1 uses for
-        every exiftool call. -MergeStderr folds stderr into Output, for the callers whose
+        every exiftool call. The argfile's CONTENT is piped to `exiftool -@ -`: its PATH on the
+        command line is read in the ANSI code page and breaks for a %TEMP% outside it (audit
+        round 27). -MergeStderr folds stderr into Output, for the callers whose
         fail-closed 'Error opening file' check reads the combined stream.
 
     .NOTES
@@ -250,9 +260,9 @@ function Invoke-ExifTool {
     try {
         [System.IO.File]::WriteAllText($argFile, ((@('-charset', 'filename=utf8') + $Arguments) -join "`n") + "`n")
         if ($MergeStderr) {
-            $out = exiftool -@ $argFile 2>&1
+            $out = [System.IO.File]::ReadAllText($argFile) | exiftool -@ - 2>&1
         } else {
-            $out = exiftool -@ $argFile 2>$null
+            $out = [System.IO.File]::ReadAllText($argFile) | exiftool -@ - 2>$null
         }
         return @{ ExitCode = $LASTEXITCODE; Output = $out }
     } finally {
@@ -398,7 +408,7 @@ function Backup-TiffMetadata {
     $argMeta = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
-        exiftool -@ $argMeta | Out-Null
+        [System.IO.File]::ReadAllText($argMeta) | exiftool -@ - | Out-Null
         # A failed dump can still leave a PARTIAL container behind; remove it so nothing
         # downstream mistakes it for a complete backup.
         if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue; return @{ Needed = $true; Path = $null } }
@@ -513,7 +523,7 @@ function Restore-TiffSubfileTypes {
     $argRead = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SubfileType`n$SrcPath`n")
-        $readOut = exiftool -@ $argRead 2>$null
+        $readOut = [System.IO.File]::ReadAllText($argRead) | exiftool -@ - 2>$null
         if ($LASTEXITCODE -ne 0) { return $false }
     } finally {
         Remove-Item $argRead -Force -ErrorAction SilentlyContinue
@@ -540,7 +550,7 @@ function Restore-TiffSubfileTypes {
     $argFile = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argFile, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n$($tags -join "`n")`n$DstPath`n")
-        $out = exiftool -@ $argFile 2>&1
+        $out = [System.IO.File]::ReadAllText($argFile) | exiftool -@ - 2>&1
         return ($LASTEXITCODE -eq 0)
     } finally {
         Remove-Item $argFile -Force -ErrorAction SilentlyContinue
@@ -1103,6 +1113,7 @@ if ($inputDirEntries.Count -gt 0) {
 $seenInputDirs = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 $inputDirs = @($inputDirs | Where-Object { $seenInputDirs.Add($_) })
 
+Write-Log "tiff-workflow $script:ToolkitVersion | copy_exif_to_TIFF_ps5.ps1 | PowerShell $($PSVersionTable.PSVersion)"
 Write-Log "Log: $logFile"
 
 foreach ($m in $missingRoots) { Write-Log "ERROR: input directory not found: $m" "ERROR" }

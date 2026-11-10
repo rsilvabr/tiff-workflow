@@ -315,12 +315,38 @@ process per file. Same timeout semantics, ~36% faster end-to-end on small files.
 
 ---
 
+## Edit history in the file (`xmpMM:History`)
+
+Every TIFF this script **rewrites** gets one entry appended to its `xmpMM:History`, in the
+format of the wizard's padded 16 -> 8-bit conversion and of jxl-photo:
+
+```
+Action=converted
+When=2026-11-10T22:04:16+09:00
+SoftwareAgent=tiff-workflow 2.8.0 (https://github.com/rsilvabr/tiff-workflow)
+Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (legacy mode: "legacy"; with a
+                                                             thumbnail: "... + thumbnail page")
+```
+
+- Earlier entries (Capture One, scanner software) are kept, never doubled: the entry is its
+  own exiftool call, after the tag copy.
+- It is written to the new file before the page-count, integrity and pixel checks, so those
+  check the final bytes; the original still leaves its place only after every check passed.
+- Only a file this run wrote: skipped files, multi-page files left alone and dry runs get none,
+  and a second run over the output adds nothing (it skips the already-ZIP file).
+- Always on (no switch). Cost on real files: 0.5-0.9 s per file, 2-15 % of the compression.
+- If the entry cannot be written the file is still a good ZIP: the line is a `WARN` ending
+  in `[history not written]`, never an `ERROR`.
+
+---
+
 ## Logging
 
-Logs written to `Logs/compress_tiff_zip/<timestamp>.log` in the current working directory. Each run appends to a new timestamped file.
+Logs written to `Logs/compress_tiff_zip/<timestamp>.log` in the current working directory. Each run appends to a new timestamped file. The first line of every backend log names the release, the script and the PowerShell version: `tiff-workflow 2.8.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9`.
 
 Sample output:
 ```
+10:23:45 | INFO | tiff-workflow 2.8.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9
 10:23:45 | INFO | Log: Logs/compress_tiff_zip/20240415_102345.log
 10:23:45 | INFO | Mode: 3 | Workers: 8 | OutputDir: (in-place/flat) | Staging: disabled | DryRun: False | SafeMode: True | SkipLzw: False | Overwrite: False | DeleteSource: OFF
 10:23:45 | INFO | Found: 150 TIFF(s)

@@ -57,6 +57,21 @@ pytest tests --cov=..
 ### `test_move_old_backups.py` covers
 - Round 25: `tools/move_old_backups.py` (formerly `move_old_padded.py`) never moves a backup whose original place is empty (same name, `.tif`/`.tiff`, `_vN` and timestamped backups, sidecars), re-checks before each move, exits 1 when it kept any; `--folder` is required and picks its own destination
 
+### `test_exiftool_stdin.py` covers
+- Round 27: exiftool never gets an argfile PATH on its command line (it reads it in the ANSI code page). Static: no `exiftool -@ $` left in a `.ps1`, `$OutputEncoding` set at script scope and first in every `-Parallel` block, Python only passes `"-@", "-"`. Real (needs a non-UTF-8 ANSI code page): `%TEMP%` set to `一時 Ωμ ąę [x] 100%`, compress modes 1/8/0 and copy_exif `-CompressZip` under both shells (and the parallel blocks), and `_tiff_metadata_signature` / `_image_pixels` with `tempfile.tempdir` there. Defines `exif_stdin`, the helper the other tests use to read tags with a Japanese path
+
+### `test_dry_run_creates_nothing.py` covers
+- A `-DryRun` creates no staging/output folder and changes nothing in the fixture folder: compress modes 1/2/8, copy_exif `-CompressZip -StagingDir`, generate_thumbnails (both shells, hostile folder). A pin, not a regression: it passes before round 27 too (there is no `TEMP_DIR` setting here, unlike jxl-photo #613/#614)
+
+### `test_version_parity.py` covers
+- `$script:ToolkitVersion` in all four `.ps1` equals `convert_tiff.TOOLKIT_VERSION` (the release bumps five places at once); `convert_tiff.py --version` prints `tiff-workflow <version>` and exits 0; every backend's `-DryRun` log carries `tiff-workflow <version> | <script>.ps1 | PowerShell <n>` (both shells)
+
+### `test_compress_history.py` covers
+- The `xmpMM:History` entry `compress_tiff_zip.ps1` appends (both shells, hostile folder, a `%` in the file name), in all three worker paths (PS 5.1 sequential, PS 7 sequential, the mode `-Parallel` block, the legacy sequential and `-Parallel` blocks): exactly one entry in the padded conversion's format, earlier entries kept and not doubled (jxl-photo #531), a second mode 0 run adds nothing, mode 8 `-DeleteSource` and `-GenerateThumbnail` (page markers intact), the Delete OLD_TIFFs gate still accepts the pair, and a static check that the helper is wired into every path
+
+### `test_release_notice.py` covers
+- The menu's new-release notice with **no network** (`_latest_release_tag` monkeypatched): newer/same/older/beta/exe tags, a day without an answer stays unmarked, one answer per day, the background thread keeps a late answer and writes only its two config keys, `--run-preset`/`--list-presets`/`--version` never ask, the environment variable and `check_for_updates` switch it off. `conftest.py` sets `TIFFWORKFLOW_NO_UPDATE_CHECK=1` for every other test
+
 ### `test_exclude_folders_parity.py` covers
 - `Test-PathExcluded` in all four backends against jxl-photo's exclusion semantics (12-row table, both shells)
 

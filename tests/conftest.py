@@ -21,6 +21,13 @@ def _isolated_diagnose_cache(tmp_path, monkeypatch):
                         lambda: tmp_path / ".convert_tiff_diagnose_cache.json")
 
 
+@pytest.fixture(autouse=True)
+def _no_release_check(monkeypatch):
+    """The menu's new-release check asks GitHub; no test may touch the network. Tests of the
+    check itself delete this variable and monkeypatch convert_tiff._latest_release_tag."""
+    monkeypatch.setenv("TIFFWORKFLOW_NO_UPDATE_CHECK", "1")
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""

@@ -226,17 +226,20 @@ def subfiletype_by_ifd(p):
 
 
 def exif_tag(path, tag):
-    """One tag via a UTF-8 -@ argfile so non-ASCII and '%' paths stay intact."""
-    with tempfile.NamedTemporaryFile("w", suffix=".args", delete=False,
-                                     encoding="utf-8", newline="\n") as fh:
-        fh.write("\n".join(["-charset", "filename=utf8", "-s", "-s", "-s", tag,
-                            str(path)]) + "\n")
-        argfile = fh.name
-    try:
-        r = subprocess.run(["exiftool", "-@", argfile], capture_output=True, timeout=120)
-    finally:
-        os.unlink(argfile)
+    """One tag via a UTF-8 argfile on stdin (`-@ -`) so non-ASCII and '%' paths stay
+    intact, whatever code page the command line or %TEMP% is in (audit round 27)."""
+    data = ("\n".join(["-charset", "filename=utf8", "-s", "-s", "-s", tag,
+                       str(path)]) + "\n").encode("utf-8")
+    r = subprocess.run(["exiftool", "-@", "-"], input=data, capture_output=True, timeout=120)
     return r.stdout.decode("utf-8", "replace").strip()
+
+
+def tw_history_count(p):
+    """How many xmpMM:History entries of `p` were written by tiff-workflow. The agent is
+    `tiff-workflow <version> (<url>)`: one `tiff-workflow ` (with the space) per entry.
+    Counted, not assumed to be 0 or 1: a real photo may already carry entries (Capture
+    One, an earlier toolkit run), and those must be kept, never doubled."""
+    return exif_tag(p, "-XMP-xmpMM:HistorySoftwareAgent").count("tiff-workflow ")
 
 
 def find_pair(tif):
@@ -327,6 +330,7 @@ def c1(A1, A2):
     files = [uncompressed(A1, m0 / A1.name), uncompressed(A2, m0 / A2.name)]
     before = {f.name: md5(f) for f in files}
     before_meta = {f.name: meta(f) for f in files}
+    before_hist = {f.name: tw_history_count(f) for f in files}
 
     rc, _ = run("c1_run1", "compress_tiff_zip.ps1",
                 ["-Mode", "0", "-InputDir", str(m0), "-Workers", "2"])
@@ -334,6 +338,9 @@ def c1(A1, A2):
     for f in files:
         comp = compression(f)
         check(f"C1: {f.name}: Deflate in place", comp in ("Deflate", "Adobe Deflate"), comp)
+        n_hist = tw_history_count(f)
+        check(f"C1: {f.name}: History: one tiff-workflow entry added",
+              n_hist == before_hist[f.name] + 1, f"{before_hist[f.name]} -> {n_hist}")
         old = m0 / "OLD_TIFFs" / f.name
         check(f"C1: {f.name}: OLD_TIFFs backup exists", old.is_file())
         if old.is_file():
@@ -351,6 +358,8 @@ def c1(A1, A2):
     check("C1: second run rc == 0", rc == 0, f"rc={rc}")
     check("C1: second run: output md5 unchanged",
           {f.name: md5(f) for f in files} == md5_1)
+    check("C1: second run: History unchanged",
+          all(tw_history_count(f) == before_hist[f.name] + 1 for f in files))
     check("C1: second run: OLD_TIFFs list unchanged",
           sorted(p.name for p in (m0 / "OLD_TIFFs").glob("*")) == old_list1)
 
@@ -361,6 +370,7 @@ def c2(A1, A2):
     files = [small(A1, m1 / A1.name), small(A2, m1 / A2.name)]
     src_md5 = {f.name: md5(f) for f in files}
     src_meta = {f.name: meta(f) for f in files}
+    src_hist = {f.name: tw_history_count(f) for f in files}
 
     rc, _ = run("c2_run1", "compress_tiff_zip.ps1",
                 ["-Mode", "1", "-InputDir", str(m1), "-Workers", "2"])
@@ -369,6 +379,9 @@ def c2(A1, A2):
         out = m1 / "ZIP" / f.name
         check(f"C2: {f.name}: ZIP output exists", out.is_file())
         if out.is_file():
+            n_hist = tw_history_count(out)
+            check(f"C2: {f.name}: History: one tiff-workflow entry added",
+                  n_hist == src_hist[f.name] + 1, f"{src_hist[f.name]} -> {n_hist}")
             comp = compression(out)
             check(f"C2: {f.name}: output is Deflate", comp in ("Deflate", "Adobe Deflate"), comp)
             check(f"C2: {f.name}: pixels equal", pixels_equal(f, out))

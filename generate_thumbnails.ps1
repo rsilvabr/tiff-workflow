@@ -15,6 +15,10 @@ param(
     [string]$SrgbProfile = "",  # ICC profile used to convert wide-gamut sources; "" = auto-detect
     [string]$ExcludeFolders = ""# ';'-separated folder NAMES to skip during discovery
 )
+# The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
+# requires the same value in every script and in convert_tiff.py's TOOLKIT_VERSION.
+$script:ToolkitVersion = '2.8.0'
+$script:ToolkitUrl = 'https://github.com/rsilvabr/tiff-workflow'
 
 # Console output as UTF-8 when it goes to a pipe (the wizard reads it). Without this the
 # OEM code page turned every Japanese folder name into '?' on screen -- the log file,
@@ -46,6 +50,7 @@ function Write-Log {
     }
     [System.IO.File]::AppendAllText($logFile, $line + [System.Environment]::NewLine)
 }
+Write-Log "tiff-workflow $script:ToolkitVersion | generate_thumbnails.ps1 | PowerShell $($PSVersionTable.PSVersion)"
 # -----------------------------------------------------------------
 
 # -- Prerequisite checks -------------------------------------------

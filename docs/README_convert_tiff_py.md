@@ -392,6 +392,10 @@ Config saved to `~/.convert_tiff_config.json`:
 - `presets` -- named snapshots of the journal above (menu 5 and `--run-preset`)
 - `last_exclude_folders` -- last `-ExcludeFolders` list. The wizard asks once per workflow and
   offers this as the default; a fresh install defaults to nothing excluded
+- `check_for_updates` -- `true` (default) lets the main menu look for a new release (see
+  [New-release notice](#new-release-notice)); set it to `false` to turn that off
+- `update_checked_on` / `update_latest_seen` -- the day GitHub last answered and the tag it
+  answered; written by the check itself, nothing to edit
 
 The wizard's defaults for Safe mode, LZW, thumbnails and duplicate names are read from the
 backends' own `param()` defaults — edit them there.
@@ -430,11 +434,40 @@ python convert_tiff.py --help             # Show help
 python convert_tiff.py --list-presets     # List saved presets and exit
 python convert_tiff.py --run-preset NAME  # Run a preset unattended and exit
 python convert_tiff.py --run-preset NAME --dry-run
+python convert_tiff.py --version          # Print the release (tiff-workflow 2.8.0) and exit
 ```
 
 No CLI flags are required -- the wizard is fully interactive. `--run-preset` and
 `--list-presets` are for Task Scheduler/cron: see
-[Presets (menu 5)](#presets-menu-5).
+[Presets (menu 5)](#presets-menu-5). `--version` prints before any config, menu, dependency
+check or network access.
+
+The release is also in the main menu's title, on the first line of the logs the wizard
+writes (`Logs/convert_tiff/`), and on the first line of every backend's log.
+
+---
+
+## New-release notice
+
+When the main menu opens, the wizard looks once a day for a newer release of the project on
+GitHub and, if there is one, adds a line and a **[U]** entry that opens the release page:
+
+```
+A new release is out: v2.9.0 (this copy is 2.8.0) -- [U] in the menu opens its page.
+```
+
+- It is **one anonymous request** to `api.github.com` (`releases/latest`; a generic
+  `User-Agent: tiff-workflow-update-check`, no token, nothing else sent), made in a
+  background thread with a 3-second timeout; the menu waits at most half a second. No
+  network, a timeout or a rate limit are silent, and the day is only counted once GitHub
+  answered, so the next run asks again.
+- The Windows program (`tiff-workflow-exe`) follows its own releases; the scripts follow
+  `tiff-workflow`. A re-packaged build of the same release (`-exe2`) is not news.
+- Menu **[4] Check dependencies again** asks GitHub too, right then.
+- `--run-preset`, `--list-presets` and `--version` never ask, so a scheduled run does not
+  touch the network.
+- **To turn it off:** `"check_for_updates": false` in `~/.convert_tiff_config.json`, or set
+  the environment variable `TIFFWORKFLOW_NO_UPDATE_CHECK` to any non-empty value.
 
 ---
 

@@ -39,12 +39,20 @@ param(
     [string]$InputDirFile = "",      # UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)
     [switch]$RestoreStranded         # Move originals stranded in OLD_TIFFs/ (nothing left in their place) back where they came from
 )
+# The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
+# requires the same value in every script and in convert_tiff.py's TOOLKIT_VERSION.
+$script:ToolkitVersion = '2.8.0'
+$script:ToolkitUrl = 'https://github.com/rsilvabr/tiff-workflow'
 
 # Console output as UTF-8 when it goes to a pipe (the wizard reads it). Without this the
 # OEM code page turned every Japanese folder name into '?' on screen -- the log file,
 # written as UTF-8, was always right. Only when redirected: an interactive console
 # keeps its own code page.
 if ([Console]::IsOutputRedirected) { try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { } }
+# exiftool gets its argfile on stdin (`-@ -`): an argfile PATH on its command line is read in
+# the ANSI code page and breaks for a %TEMP% outside it (audit round 27). PS 5.1 encodes what it
+# pipes to a native program with $OutputEncoding, which is us-ascii there.
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 # PS 5.1 cannot enter a start-up folder whose name has "[ ]" (wildcards to it) and
 # silently starts in $PSHOME (System32) instead: the log, a relative -InputDir or
 # -OutputDir all pointed there. Re-enter the process's real folder, literally.
@@ -102,7 +110,7 @@ function Get-MaxImagePixels {
             $prevEnc = $null
             try { $prevEnc = [Console]::OutputEncoding; [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
             try {
-                $out = exiftool -@ $argFile 2>$null
+                $out = [System.IO.File]::ReadAllText($argFile) | exiftool -@ - 2>$null
             } finally {
                 if ($prevEnc) { try { [Console]::OutputEncoding = $prevEnc } catch { } }
             }
@@ -306,6 +314,7 @@ $script:strandedTotal  = 0
 $script:restoredTotal  = 0
 $script:multiPagePaths = [System.Collections.Concurrent.ConcurrentBag[string]]::new()
 
+Write-Log "tiff-workflow $script:ToolkitVersion | compress_tiff_zip.ps1 | PowerShell $($PSVersionTable.PSVersion)"
 if ($GenerateThumbnail -and -not $srgbProfileResolved) {
     Write-Log "WARN: no sRGB ICC profile found -- embedded thumbnails from wide-gamut sources (ProPhoto, AdobeRGB) will have shifted colours. Pass -SrgbProfile <path.icc> to fix." "WARN"
 }
@@ -1001,7 +1010,7 @@ function Get-CompressionMap {
         try {
             $argLines = @("-charset", "filename=utf8", "-T", "-Directory", "-FileName", "-IFD0:Compression") + $chunk
             [System.IO.File]::WriteAllLines($argFile, $argLines, [System.Text.UTF8Encoding]::new($false))
-            $out = exiftool -@ $argFile 2>$null
+            $out = [System.IO.File]::ReadAllText($argFile) | exiftool -@ - 2>$null
             if ($LASTEXITCODE -ne 0) { continue }   # whole chunk falls back to per-file probes
             foreach ($line in @($out)) {
                 $cols = "$line" -split "`t", 3
@@ -1318,7 +1327,7 @@ function Backup-TiffMetadata {
     $argMeta = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
-        exiftool -@ $argMeta | Out-Null
+        [System.IO.File]::ReadAllText($argMeta) | exiftool -@ - | Out-Null
         # A failed dump can still leave a PARTIAL container behind; remove it so nothing
         # downstream mistakes it for a complete backup.
         if ($LASTEXITCODE -ne 0) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue; return @{ Needed = $true; Path = $null } }
@@ -1440,7 +1449,7 @@ function Restore-TiffSubfileTypes {
     $argRead = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SubfileType`n$SrcPath`n")
-        $readOut = exiftool -@ $argRead 2>$null
+        $readOut = [System.IO.File]::ReadAllText($argRead) | exiftool -@ - 2>$null
         if ($LASTEXITCODE -ne 0) { return $false }
     } finally {
         Remove-Item $argRead -Force -ErrorAction SilentlyContinue
@@ -1467,7 +1476,7 @@ function Restore-TiffSubfileTypes {
     $argFile = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argFile, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n$($tags -join "`n")`n$DstPath`n")
-        $out = exiftool -@ $argFile 2>&1
+        $out = [System.IO.File]::ReadAllText($argFile) | exiftool -@ - 2>&1
         return ($LASTEXITCODE -eq 0)
     } finally {
         Remove-Item $argFile -Force -ErrorAction SilentlyContinue
@@ -1504,7 +1513,7 @@ function Set-TiffThumbMarkers {
     $argRead = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SubfileType`n$SrcPath`n")
-        $readOut = exiftool -@ $argRead 2>$null
+        $readOut = [System.IO.File]::ReadAllText($argRead) | exiftool -@ - 2>$null
         if ($LASTEXITCODE -ne 0) { return $false }
     } finally {
         Remove-Item $argRead -Force -ErrorAction SilentlyContinue
@@ -1519,10 +1528,34 @@ function Set-TiffThumbMarkers {
     $argFile = [System.IO.Path]::GetTempFileName()
     try {
         [System.IO.File]::WriteAllText($argFile, "-charset`nfilename=utf8`n-q`n-q`n-overwrite_original`n$mainTag`n-IFD1:SubfileType#=1`n$DstPath`n")
-        $out = exiftool -@ $argFile 2>&1
+        $out = [System.IO.File]::ReadAllText($argFile) | exiftool -@ - 2>&1
         return ($LASTEXITCODE -eq 0)
     } finally {
         Remove-Item $argFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Add-TiffHistoryEntry {
+    <#
+    .SYNOPSIS
+        Appends this rewrite to xmpMM:History (Action, When, SoftwareAgent, Parameters -- the
+        format of convert_tiff.py's padded conversion and of jxl-photo). Earlier entries
+        (Capture One, scanner software) are kept. Its OWN exiftool call on purpose: in the same
+        call as `-tagsfromfile -all:all`, `+=` doubles every copied entry (jxl-photo #531).
+        $true when written. Never throws.
+        The values must stay free of the struct syntax characters (, { } [ ] |).
+        Re-inject into ForEach-Object -Parallel runspaces with:
+            ${function:Add-TiffHistoryEntry} = $using:HistoryFnDef
+    #>
+    param([string]$Path, [string]$Agent, [string]$Parameters)
+    try {
+        $when = [DateTimeOffset]::Now.ToString('yyyy-MM-ddTHH:mm:sszzz', [System.Globalization.CultureInfo]::InvariantCulture)
+        $assign = "-XMP-xmpMM:History+={Action=converted,When=$when,SoftwareAgent=$Agent,Parameters=$Parameters}"
+        $text = "-charset`nfilename=utf8`n-q`n-overwrite_original`n$assign`n$Path`n"
+        $out = "$($text | exiftool -@ - 2>&1)"
+        return ($LASTEXITCODE -eq 0 -and $out -notmatch 'Error')
+    } catch {
+        return $false
     }
 }
 
@@ -1639,6 +1672,10 @@ $script:MetaBackupFnDef    = ${function:Backup-TiffMetadata}.ToString()
 $script:RestoreSubfileFnDef = ${function:Restore-TiffSubfileTypes}.ToString()
 $script:ThumbMarkerFnDef   = ${function:Set-TiffThumbMarkers}.ToString()
 $script:ThumbSafeFnDef     = ${function:Test-ThumbnailSafeSource}.ToString()
+$script:HistoryFnDef       = ${function:Add-TiffHistoryEntry}.ToString()
+# xmpMM:History SoftwareAgent of every file this run rewrites (Add-TiffHistoryEntry). A plain
+# script-scope variable so the -Parallel blocks can read it with $using:historyAgent.
+$historyAgent = "tiff-workflow $script:ToolkitVersion ($script:ToolkitUrl)"
 
 # -- Process one TIFF -> ZIP job ------------------------------------
 
@@ -1672,7 +1709,7 @@ function Process-TiffJob {
         $argComp = [System.IO.Path]::GetTempFileName()
         try {
             [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-IFD0:Compression`n$srcPath`n")
-            $comp = exiftool -@ $argComp 2>$null
+            $comp = [System.IO.File]::ReadAllText($argComp) | exiftool -@ - 2>$null
             $exifExit = $LASTEXITCODE
         } finally {
             Remove-Item $argComp -Force -ErrorAction SilentlyContinue
@@ -1785,6 +1822,7 @@ function Process-TiffJob {
     $exifWarn = $false
     $thumbMarkerFailed = $false
     $subfileRestoreFailed = $false
+    $historyFailed = $false
     if ($generateThumb) {
         # Always read the main image from page 0; the thumbnail is appended after it.
         # The '[0]' suffix makes this a filename SPEC, so '%' has to be escaped here
@@ -1887,7 +1925,7 @@ function Process-TiffJob {
         # ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
         # exiftool gives when the tagsfromfile source could not be opened -- it still exits 0.
         [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
-        $copyOut = "$(exiftool -@ $argCopy 2>&1)"
+        $copyOut = "$([System.IO.File]::ReadAllText($argCopy) | exiftool -@ - 2>&1)"
         $copyExit = $LASTEXITCODE
     } finally {
         Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
@@ -1902,6 +1940,16 @@ function Process-TiffJob {
         if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $script:MagickTimeout)) {
             $subfileRestoreFailed = $true
         }
+    }
+
+    # xmpMM:History: this rewrite, in its own exiftool call (see Add-TiffHistoryEntry). Before the
+    # page-count / integrity / pixel gates, so they check the final bytes; the irreversible step
+    # (the move, the delete, the archive) stays last. A failed entry is a WARN, never an ERROR.
+    # `${mode}`: "$mode:" would be read as a scope-qualified variable.
+    $historyParams = if ($mode -lt 0) { "compress_tiff_zip legacy: ZIP (Deflate)" } else { "compress_tiff_zip mode ${mode}: ZIP (Deflate)" }
+    if ($generateThumb -and -not $noThumbNote) { $historyParams += " + thumbnail page" }
+    if (-not (Add-TiffHistoryEntry -Path $writeDst -Agent $historyAgent -Parameters $historyParams)) {
+        $historyFailed = $true
     }
 
     # Audit round 16: modes 1-7 ship without a pixel gate, so a magick rewrite that silently
@@ -1986,8 +2034,9 @@ function Process-TiffJob {
 
     $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
     $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
-    $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
-        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote | $name"
+    $historyNote = if ($historyFailed) { " [history not written]" } else { "" }
+    $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed -or $historyFailed) {
+        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote$historyNote | $name"
     } else {
         "OK ($comp -> ZIP)$noThumbNote$thumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
     }
@@ -2085,6 +2134,7 @@ if ($Mode -lt 0) {
 
             if ($script:IS_PS7) {
                 $results = $groupFiles | ForEach-Object -Parallel {
+                    $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
                     $src       = $_.FullName
                     $name      = $_.Name
                     # Functions from the parent scope are not visible inside -Parallel runspaces
@@ -2098,6 +2148,7 @@ if ($Mode -lt 0) {
                     ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
                     ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
                     ${function:Set-TiffThumbMarkers}       = $using:ThumbMarkerFnDef
+                    ${function:Add-TiffHistoryEntry}       = $using:HistoryFnDef
                     ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
                     $writeDirL = $using:writeDir
                     $finalDirL = $using:finalDir
@@ -2115,6 +2166,7 @@ if ($Mode -lt 0) {
                     $thumbPageL = $using:ThumbPage
                     $skipCompThumbL = $using:SkipCompressedWithThumb
                     $srgbProfileL = $using:srgbProfileResolved
+                    $historyAgentL = $using:historyAgent
 
                     $stem = [System.IO.Path]::GetFileNameWithoutExtension($name)
                     $ext = [System.IO.Path]::GetExtension($name)
@@ -2133,7 +2185,7 @@ if ($Mode -lt 0) {
                     $argComp = [System.IO.Path]::GetTempFileName()
                     try {
                         [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-IFD0:Compression`n$src`n")
-                        $comp = exiftool -@ $argComp 2>$null
+                        $comp = [System.IO.File]::ReadAllText($argComp) | exiftool -@ - 2>$null
                         $exifExit = $LASTEXITCODE
                     } finally {
                         Remove-Item $argComp -Force -ErrorAction SilentlyContinue
@@ -2223,6 +2275,7 @@ if ($Mode -lt 0) {
                     $exifWarn = $false
                     $thumbMarkerFailed = $false
                     $subfileRestoreFailed = $false
+                    $historyFailed = $false
                     if ($genThumbL) {
                         # Always read the main image from page 0; the thumbnail is appended after
                         # it. '[0]' makes this a filename SPEC, so '%' must be escaped here and in
@@ -2301,7 +2354,7 @@ if ($Mode -lt 0) {
                         # ONE -q: the second suppresses the warning that is the only signal
                         # exiftool gives for an unreadable tagsfromfile source (it exits 0).
                         [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
-                        $copyOut = "$(exiftool -@ $argCopy 2>&1)"
+                        $copyOut = "$([System.IO.File]::ReadAllText($argCopy) | exiftool -@ - 2>&1)"
                         $copyExit = $LASTEXITCODE
                     } finally {
                         Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
@@ -2315,6 +2368,14 @@ if ($Mode -lt 0) {
                         if (-not (Restore-TiffSubfileTypes -SrcPath $src -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
                             $subfileRestoreFailed = $true
                         }
+                    }
+
+                    # xmpMM:History -- see the Process-TiffJob twin (this block is legacy mode only,
+                    # so there is no $mode to read).
+                    $historyParams = "compress_tiff_zip legacy: ZIP (Deflate)"
+                    if ($genThumbL -and -not $noThumbNote) { $historyParams += " + thumbnail page" }
+                    if (-not (Add-TiffHistoryEntry -Path $writeDst -Agent $historyAgentL -Parameters $historyParams)) {
+                        $historyFailed = $true
                     }
 
                     if ($inPlaceFinalDst) {
@@ -2350,8 +2411,9 @@ if ($Mode -lt 0) {
 
                     $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
                     $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
-                    $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
-                        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote | $name"
+                    $historyNote = if ($historyFailed) { " [history not written]" } else { "" }
+                    $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed -or $historyFailed) {
+                        "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote$historyNote | $name"
                     } else {
                         "OK ($comp -> ZIP)$noThumbNote$thumbNote | $name"
                     }
@@ -2878,7 +2940,7 @@ foreach ($f in $files) {
             $argComp = [System.IO.Path]::GetTempFileName()
             try {
                 [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-IFD0:Compression`n$($f.FullName)`n")
-                $comp = exiftool -@ $argComp 2>$null
+                $comp = [System.IO.File]::ReadAllText($argComp) | exiftool -@ - 2>$null
                 $exifExit = $LASTEXITCODE
             } finally {
                 Remove-Item $argComp -Force -ErrorAction SilentlyContinue
@@ -3068,6 +3130,7 @@ foreach ($group in $groupedTasks) {
     if ($useParallel) {
         # PS7+: use parallel threads, collect results then process sequentially
         $parallelResults = $groupTasks | ForEach-Object -Parallel {
+            $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
             $t = $_
             # Functions from the parent scope are not visible inside -Parallel runspaces
             ${function:Invoke-MagickWithTimeout}      = $using:MagickTimeoutFnDef
@@ -3080,6 +3143,7 @@ foreach ($group in $groupedTasks) {
             ${function:Backup-TiffMetadata}         = $using:MetaBackupFnDef
             ${function:Restore-TiffSubfileTypes}    = $using:RestoreSubfileFnDef
             ${function:Set-TiffThumbMarkers}       = $using:ThumbMarkerFnDef
+            ${function:Add-TiffHistoryEntry}       = $using:HistoryFnDef
             ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
             $srcPath = $t.Src
             $writeDst = $t.WriteDst
@@ -3098,6 +3162,7 @@ foreach ($group in $groupedTasks) {
             $thumbPage = $using:ThumbPage
             $skipCompressedWithThumb = $using:SkipCompressedWithThumb
             $srgbProfileL = $using:srgbProfileResolved
+            $historyAgentL = $using:historyAgent
             # Run-scoped id for the in-place temp sibling below. The other two workers already
             # prefixed it; this one did not, so a file left by an interrupted run here could not
             # be told apart from a photo (and discovery then compressed it as one).
@@ -3112,7 +3177,7 @@ foreach ($group in $groupedTasks) {
                 $argComp = [System.IO.Path]::GetTempFileName()
                 try {
                     [System.IO.File]::WriteAllText($argComp, "-charset`nfilename=utf8`n-s`n-s`n-s`n-IFD0:Compression`n$srcPath`n")
-                    $comp = exiftool -@ $argComp 2>$null
+                    $comp = [System.IO.File]::ReadAllText($argComp) | exiftool -@ - 2>$null
                     $exifExit = $LASTEXITCODE
                 } finally {
                     Remove-Item $argComp -Force -ErrorAction SilentlyContinue
@@ -3206,6 +3271,7 @@ foreach ($group in $groupedTasks) {
             $exifWarn = $false
             $thumbMarkerFailed = $false
             $subfileRestoreFailed = $false
+            $historyFailed = $false
             if ($generateThumb) {
                 # Always read the main image from page 0; the thumbnail is appended after it.
                 # '[0]' makes this a filename SPEC, so '%' must be escaped here and in every
@@ -3296,7 +3362,7 @@ foreach ($group in $groupedTasks) {
                 # ONE -q: the second suppresses the warning that is the only signal exiftool
                 # gives for an unreadable tagsfromfile source (it exits 0).
                 [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
-                $copyOut = "$(exiftool -@ $argCopy 2>&1)"
+                $copyOut = "$([System.IO.File]::ReadAllText($argCopy) | exiftool -@ - 2>&1)"
                 $copyExit = $LASTEXITCODE
             } finally {
                 Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
@@ -3309,6 +3375,14 @@ foreach ($group in $groupedTasks) {
                 if (-not (Restore-TiffSubfileTypes -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $magickTimeout)) {
                     $subfileRestoreFailed = $true
                 }
+            }
+
+            # xmpMM:History -- see the Process-TiffJob twin (before the gates, a WARN on failure).
+            # `${mode}`: "$mode:" would be read as a scope-qualified variable.
+            $historyParams = if ($mode -lt 0) { "compress_tiff_zip legacy: ZIP (Deflate)" } else { "compress_tiff_zip mode ${mode}: ZIP (Deflate)" }
+            if ($generateThumb -and -not $noThumbNote) { $historyParams += " + thumbnail page" }
+            if (-not (Add-TiffHistoryEntry -Path $writeDst -Agent $historyAgentL -Parameters $historyParams)) {
+                $historyFailed = $true
             }
 
             # Audit round 16: modes 1-7 ship without a pixel gate, so a rewrite that silently
@@ -3388,8 +3462,9 @@ foreach ($group in $groupedTasks) {
             }
             $markerNote = if ($thumbMarkerFailed) { " [thumb marker failed]" } else { "" }
             $subfileNote = if ($subfileRestoreFailed) { " [subfiletype restore failed]" } else { "" }
-            $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed) {
-                "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote | $name"
+            $historyNote = if ($historyFailed) { " [history not written]" } else { "" }
+            $resultText = if ($exifWarn -or $thumbMarkerFailed -or $subfileRestoreFailed -or $historyFailed) {
+                "WARN (exiftool failed, ZIP ok)$noThumbNote$thumbNote$markerNote$subfileNote$historyNote | $name"
             } else {
                 "OK ($comp -> ZIP)$noThumbNote$thumbNote$(if ($canDeleteSource) { ' [SOURCE DELETED]' } else { '' }) | $name"
             }

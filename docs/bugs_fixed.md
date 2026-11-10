@@ -12,6 +12,31 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v2.8.0 - Audit Round 27
+
+### HIGH - Every exiftool call failed when `%TEMP%` held a character outside the ANSI code page
+**Issue:** exiftool reads its command line in the ANSI code page, and every exiftool call of
+the toolkit passed `-@ <argfile>` with the argfile in `%TEMP%`. A `%TEMP%` with characters the
+code page lacks (a Windows user name in Japanese, Greek, Polish...) gave
+`Error opening arg file C:\...\?? O? ae [x] 100%\probe.args` on EVERY call:
+- `compress_tiff_zip.ps1` modes 1 and 8: every file `ERROR (exiftool check) | cannot detect
+  compression`, exit 1;
+- both copy_exif backends with `-CompressZip`: every file `ERROR (exiftool EXIF)`, exit 1;
+- `convert_tiff.py`: the metadata purge gate returned "cannot know" and refused.
+
+It fails closed: nothing was written, no file was touched. The same bug as jxl-photo #553.
+- **Fix:** the argfile's CONTENT goes on stdin (`exiftool -@ -`), always, not only when the
+  path is outside the code page: one code path, no code-page detection to get wrong in
+  PowerShell. The scripts pipe `[System.IO.File]::ReadAllText($argFile)`; PowerShell 5.1 encodes
+  what it pipes with `$OutputEncoding`, which is `us-ascii` there, so every script sets it to
+  UTF-8 without BOM at script scope and as the first statement of every `-Parallel` block.
+  Python (`_run_exiftool`, `_image_pixels`, the battery's `exif_tag`) sends the bytes as
+  `input=`.
+- **Files:** `compress_tiff_zip.ps1` (14 call sites, 2 `-Parallel` blocks),
+  `copy_exif_to_TIFF_ps5.ps1` (5), `copy_exif_to_TIFF_ps7.ps1` (6, 1 block),
+  `convert_tiff.py`, `tools/real_photo_battery.py`, `tests/test_exiftool_stdin.py` (real runs
+  under both shells with `%TEMP%` set to `一時 Ωμ ąę [x] 100%` -- all fail against v2.7.4)
+
 ## v2.7.4 - Audit Round 26
 
 ### HIGH - Modes 0/9 moved every original of the run to OLD_TIFFs before compressing any
