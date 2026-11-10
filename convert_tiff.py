@@ -146,13 +146,31 @@ def _settings_overlay_path() -> Optional[Path]:
     return home / _SETTINGS_OVERLAY_FILE
 
 
+def _overlay_object_pairs(pairs):
+    """json object_pairs_hook for the overlay file. audit round 28: the PowerShell readers
+    refuse the WHOLE file when an object has an empty "" key or two keys that differ only
+    in case (a PowerShell object cannot hold them), so the wizard planned with a value the
+    backends never applied. Refuse the same files here. Exact duplicates keep the last
+    value in every reader."""
+    seen = {}
+    for k, _v in pairs:
+        if k == "":
+            raise ValueError('an empty "" key')
+        low = k.casefold()
+        if low in seen and seen[low] != k:
+            raise ValueError(f"keys that differ only in case: '{seen[low]}' and '{k}'")
+        seen.setdefault(low, k)
+    return dict(pairs)
+
+
 def _settings_overlay_section(path: Optional[Path], section: str) -> Optional[dict]:
     """{name: value} of `section` of the overlay file at `path`; None when there is no path,
     no file or no such section. Raises ValueError/OSError for a file that cannot be read or
     whose root or section is not a JSON object."""
     if path is None or not path.is_file():
         return None
-    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    data = json.loads(path.read_text(encoding="utf-8-sig"),
+                      object_pairs_hook=_overlay_object_pairs)
     if not isinstance(data, dict):
         raise ValueError("not a JSON object")
     sect = data.get(section)
@@ -765,7 +783,14 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
                 tiffs = [f for f in path.glob("*.tif") if f.stat().st_size > 0] + \
                         [f for f in path.glob("*.tiff") if f.stat().st_size > 0]
                 if tiffs:
-                    results[path] = len(tiffs)
+                    if ";" in str(path):
+                        # audit round 28: the folder list reaches the backends ';'-joined,
+                        # so '2019;S5pro' was split and ANOTHER folder ('2019') compressed,
+                        # one the screen never showed. step_folder refuses ';' too.
+                        _say(f"  SKIPPED (';' in the path cannot be passed to the backends): "
+                             f"{path}", "yellow")
+                    else:
+                        results[path] = len(tiffs)
                 break
     return dict(sorted(results.items(), key=lambda x: x[0].name))
 
@@ -817,6 +842,7 @@ _BACKEND_PARAM_FALLBACKS = {
     ("compress_tiff_zip.ps1", "ThumbSize"): 256,
     ("compress_tiff_zip.ps1", "ThumbQuality"): "85",
     ("compress_tiff_zip.ps1", "ThumbFormat"): "jpg",
+    ("compress_tiff_zip.ps1", "ZipSuffix"): "_ZIP",
     ("compress_tiff_zip.ps1", "ZipSubfolderName"): "ZIP",
     ("compress_tiff_zip.ps1", "ExportZipSubfolder"): "ZIP",
     ("compress_tiff_zip.ps1", "ExportMarker"): "_EXPORT",
@@ -1382,7 +1408,12 @@ def _safe_tag_source(path: Path):
         # `-o` is format-expanded too, so a '%' anywhere in the temp dir breaks the container.
         return None, None
     try:
-        r = _run_exiftool(["-q", "-q", "-all:all", "-o", tmp, str(path)],
+        # audit round 28: the container does not carry IPTC:CodedCharacterSet unless it is
+        # copied by name; without it UTF-8 IPTC text (伊豆沼) was stored as Latin '???'.
+        # A redirect copies it only when the source has one (no IPTC block is invented).
+        r = _run_exiftool(["-q", "-q", "-all:all",
+                           "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet",
+                           "-o", tmp, str(path)],
                           _work_timeout(60, path))
         if r.returncode != 0 or not Path(tmp).exists():
             Path(tmp).unlink(missing_ok=True)
@@ -1612,7 +1643,11 @@ def step_folder(cfg: ToolConfig, prompt_text: str = "Input folder") -> Optional[
             print(f"ERROR: Folder path contains ';' which is not supported: {p}")
         return None
     cfg.config.last_input_dir = str(p.resolve())
-    return p
+    # audit round 28: ABSOLUTE, never the text as typed. A relative answer ("photos") went
+    # into the preset journal as -InputDir photos, and --run-preset from another folder --
+    # the Task Scheduler starts in System32 -- compressed a different folder. abspath, not
+    # resolve(): a mapped or SUBST drive stays the letter the user typed.
+    return Path(os.path.abspath(p))
 
 
 # --- Basic Parameters ---------------------------------------------
@@ -2010,6 +2045,33 @@ def _unwrap_ps5_invocation(invocation: str) -> Optional[List[str]]:
     return out or None
 
 
+def _parts_replace_sources(parts: List[str]) -> bool:
+    """True when a journaled command line deletes or replaces its source files: it binds
+    -DeleteSource, or runs compress mode 8 (which puts the ZIP over each .tif it read --
+    the manifest path has always counted a mode-8 row as deleting).
+
+    audit round 28: the refusal used to look for the exact word "-DeleteSource", so an
+    edited preset with -deletesource, the abbreviation -DeleteS (PowerShell binds any
+    unambiguous prefix) or -DeleteSource:$true passed, and mode 8 without the switch was
+    not noticed at all. Read the way PowerShell binds: case-insensitive, any prefix of at
+    least two letters ("-D" alone is ambiguous with -DryRun), an explicit :$false is off.
+    Fail closed: an unreadable -Mode value next to the name counts as mode 8."""
+    for i, a in enumerate(parts):
+        m = re.fullmatch(r"-([A-Za-z]+)(?::(.*))?", str(a))
+        if not m:
+            continue
+        name, inline = m.group(1).lower(), m.group(2)
+        if len(name) >= 2 and "deletesource".startswith(name):
+            if inline is None or inline.strip().lower() not in ("$false", "false", "0"):
+                return True
+        if len(name) >= 2 and "mode".startswith(name):
+            value = inline if inline is not None else (str(parts[i + 1]) if i + 1 < len(parts) else "")
+            value = value.strip().strip("'\"")
+            if not value.isdigit() or int(value) == 8:
+                return True
+    return False
+
+
 def _journal_parts(cmd: List[str]) -> Optional[List[str]]:
     """Reduce a built PowerShell command line to its shell-neutral [script, *args].
 
@@ -2132,6 +2194,12 @@ def _emit_opt(opt: Opt, workflow: Dict, folders: Optional[List[Path]] = None,
         return []
     if opt.key.startswith("advanced."):
         v = _advanced_value(workflow, backend, opt.key[len("advanced."):])
+        # audit round 28: an EDITED path? option left empty (stored as "") means "auto-detect
+        # for this run" -- the screen says so -- and must reach the backend as -P "" (bound,
+        # so it also beats the settings file). It was dropped (a falsy "value", and "" fails
+        # the spec check below), and the backend used the settings file's profile instead.
+        if v == "" and opt.value_spec == "path?" and kind == "value":
+            return [p, ""]
         if v is not None and opt.value_spec:
             ok, v = _overlay_value(opt.value_spec, v)
             if not ok:
@@ -2644,7 +2712,13 @@ def _stranded_backups(old_dirs) -> list:
     EMPTY -- the same rule as compress_tiff_zip.ps1's Find-StrandedOriginals (round 25):
     no <stem>.tif / <stem>.tiff in the parent, nor the base stem of a timestamped backup
     (<stem>_yyyyMMdd_HHmmss[_n]). Target = base stem + the backup's extension. A folder
-    nested in another OLD_TIFFs is a backup of a backup and is skipped."""
+    nested in another OLD_TIFFs is a backup of a backup and is skipped.
+
+    audit round 28: a timestamped name is a COLLISION COPY only when the backup it collided
+    with -- <base>.tif / <base>.tiff -- is in the same OLD_TIFFs folder; that is the only
+    case in which compress renames. Otherwise the stamp is part of the photo's own name
+    (Scan_20190815_143000.tif, every phone export): it was restored as Scan.tif, or -- with
+    an unrelated Scan.tif next to it -- never reported at all."""
     out = []
     for od in old_dirs:
         od = Path(od)
@@ -2656,7 +2730,7 @@ def _stranded_backups(old_dirs) -> list:
                 continue
             stems = [f.stem]
             m = _TIMESTAMPED_BACKUP_RE.match(f.stem)
-            if m:
+            if m and any((od / f"{m.group('base')}{e}").exists() for e in (".tif", ".tiff")):
                 stems.append(m.group("base"))
             if any((parent / f"{s}{e}").exists() for s in stems for e in (".tif", ".tiff")):
                 continue
@@ -2926,7 +3000,16 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
         values. Per page because an added/regenerated thumbnail page legitimately
         carries tags page 0 never had,
       - the ICC profile, as a SHA-256 of its raw bytes (identity; verified to survive
-        a magick ZIP recompress byte-for-byte).
+        a magick ZIP recompress byte-for-byte),
+      - audit round 28: every XMP and IPTC value (identity). The gate read EXIF only, so a
+        kept file that had lost its keywords and captions -- or held them as '???' after a
+        trip through the MIE container -- still purged the last good copy. The only XMP
+        a rewrite by this toolkit changes is xmpMM:History (one entry appended; checked on
+        real mode-9 rewrites of Lightroom and Capture One exports), so those keys are
+        left out and nothing else is,
+      - audit round 28: the per-page sample layout (_tiff_sample_layout): a neutral RGB
+        page magick collapsed to one gray channel is pixel-identical through magick's own
+        decode, so the RMSE compare passed it.
     None means "cannot know" -- missing exiftool, unreadable tags -- and the caller
     must treat it as a refusal, never as "metadata matches". Fail closed.
     """
@@ -2972,10 +3055,30 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
         if isinstance(icc, str):  # mocked subprocess results are str
             icc = icc.encode()
         icc_hash = hashlib.sha256(icc).hexdigest() if icc else None
+
+        r = _run_exiftool(
+            ["-a", "-G1", "-s", "-j", "-XMP:all", "-IPTC:all", str(path)],
+            timeout, text=True,
+        )
+        if r.returncode != 0:
+            return None
+        rows = json.loads(r.stdout or "[]")
+        if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+            return None
+        # XMP-x:XMPToolkit: a source without XMP gets a packet when the History entry is
+        # written, and its header names the writer (exiftool).
+        xmp_iptc = {k: v for k, v in rows[0].items()
+                    if k not in ("SourceFile", "XMP-x:XMPToolkit")
+                    and not k.startswith("XMP-xmpMM:History")}
+
+        layout = _tiff_sample_layout(path)
+        if layout is None:
+            return None
     except Exception:
         return None
     return {"subfile": subfile, "exif_pages": exif_pages,
-            "exif_other": exif_other, "icc": icc_hash}
+            "exif_other": exif_other, "icc": icc_hash,
+            "xmp_iptc": xmp_iptc, "layout": layout}
 
 
 @_scoped_magick_aliases
@@ -3102,6 +3205,16 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
                            f"{sorted(old_meta['exif_other'])} vs {sorted(new_meta['exif_other'])})")
         if old_meta["icc"] != new_meta["icc"]:
             return False, "ICC_PROFILE_MISMATCH"
+        old_x, new_x = old_meta.get("xmp_iptc"), new_meta.get("xmp_iptc")
+        if old_x is None or new_x is None:
+            return False, "XMP/IPTC unreadable -- refusing purge"
+        if old_x != new_x:
+            diff = sorted(k for k in set(old_x) | set(new_x) if old_x.get(k) != new_x.get(k))
+            return False, f"XMP_IPTC_MISMATCH ({', '.join(diff[:5])}{' ...' if len(diff) > 5 else ''})"
+        layout_diff = _sample_layout_diff(old_meta.get("layout"), new_meta.get("layout"),
+                                          pages=list(pairs))
+        if layout_diff:
+            return False, f"SAMPLE_LAYOUT_MISMATCH ({layout_diff})"
         return True, ""
 
     if old_pages == new_pages:
@@ -3331,11 +3444,14 @@ def _diagnose_targets(roots, scope: str = "", skip_names: str = "") -> List[Path
 
 def _diagnose_status(is_real: bool, detail: str) -> str:
     """"padded", "real", "other" (not 16-bit) or "error"."""
-    if not is_real and "padded" in detail.lower():
+    # audit round 28: matched on the verdict text _is_real_16bit writes, never by substring:
+    # an error detail can quote the PATH, and an unreadable file in a folder named
+    # "...padded..." was listed (and offered for conversion) as PADDED.
+    if not is_real and (detail or "").startswith("padded 8-bit"):
         return "padded"
     if is_real:
         return "real"
-    if "not 16-bit" in detail:
+    if re.fullmatch(r"\d+-bit \(not 16-bit\)", detail or ""):
         return "other"
     return "error"
 
@@ -3738,7 +3854,9 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
     _say(f"  saved {entry.get('time')}", "dim")
     _say(f"  {len(files)} TIFF(s): {len(todo)} to check, {len(cached)} unchanged since "
          f"they were last checked")
-    convert = bool(d.get("convert_padded"))
+    # audit round 28: only the boolean the wizard saves turns conversion on -- "false",
+    # "no" or 0 in an edited preset used to convert by truthiness.
+    convert = d.get("convert_padded") is True
     if convert:
         _say("Padded files found are converted to 8-bit ZIP after the check -- each one "
              "pixel-verified, the original kept in OLD_PADDED\\.", "yellow")
@@ -3758,6 +3876,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
             return 1
 
     results = list(cached)
+    conv_failed = []
     if todo:
         temp_dir = Path(d["temp_dir"]) if d.get("temp_dir") else None
         if temp_dir is not None:
@@ -3795,13 +3914,28 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
     if convert and by_status["padded"]:
         padded = [f for f, _ in by_status["padded"]]
         _say(f"\nConverting {len(padded)} padded file(s) to 8-bit ZIP...", "cyan")
+        # audit round 28: the check phase falls back to the system temp when the saved
+        # temp_dir cannot be made; this phase re-read the saved value and ended in a
+        # traceback. Same fallback here.
         temp_dir = Path(d["temp_dir"]) if d.get("temp_dir") else None
+        if temp_dir is not None:
+            try:
+                temp_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                _say(f"Cannot use temp dir {temp_dir}: {e} -- using system temp.", "yellow")
+                temp_dir = None
         done = _compress_padded_files(padded, temp_dir, clamp_workers(
             d.get("workers") or cfg.config.default_workers, cfg.config.default_workers), cfg)
         n = (done or {}).get("converted", 0) if isinstance(done, dict) else 0
+        conv_failed = list((done or {}).get("failed", [])) if isinstance(done, dict) else []
         lines.insert(lines.index(f"Errors: {len(by_status['error'])}") + 1,
                      f"Converted to 8-bit now: {n} of {len(padded)} (originals in OLD_PADDED\\; "
                      f"the rest were kept -- see the lines above)")
+        if conv_failed:
+            # audit round 28: a failed conversion used to exit 0 and the log never said
+            # which file it was.
+            lines += ["", "Conversion FAILED (original kept as it was):"]
+            lines += [f"  {f} -- {why}" for f, why in conv_failed]
     if by_status["padded"]:
         lines += ["", "Padded 8-bit (16-bit files holding 8-bit data):"]
         lines += [f"  {f}" for f, _ in by_status["padded"]]
@@ -3823,7 +3957,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         print(f"\nReport: {log_path}")
     except OSError as e:
         _say(f"WARNING: could not write the report: {e}", "yellow")
-    return 1 if by_status["error"] else 0
+    return 1 if (by_status["error"] or conv_failed) else 0
 
 
 def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
@@ -3950,6 +4084,107 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
         return False
 
 
+def _tiff_sample_layout(path) -> Optional[List[Dict]]:
+    """Per-page sample layout of a TIFF, or None when it cannot be read (fail closed).
+
+    audit round 28: ImageMagick's TIFF writer silently reduces a page whose every pixel has
+    R=G=B (B&W film scanned or exported as RGB) to ONE gray channel -- keeping the RGB ICC
+    profile -- and writes a 4-sample neutral RGB+IR scan as 2 samples, half of each row
+    lost. Every pixel gate here compares through magick's own decode, where gray and
+    neutral RGB are equal, so none of them could see it. Python mirror of
+    Get-TiffSampleLayout in the PowerShell backends.
+
+    One dict per main IFD (IFD0, IFD1, ... -- SubIFDs are not pages), in order:
+      cls   -- "gray" (Photometric 0/1), "rgb" (2, or 6 = YCbCr, which magick writes as
+               RGB), else the Photometric number as text,
+      spp   -- SamplesPerPixel (absent = 1, the TIFF default),
+      alpha -- the ExtraSamples values that are alpha (1 associated, 2 unassociated);
+               0 (unspecified) and an absent tag are not alpha,
+      bits  -- BitsPerSample as printed (absent = "1").
+    """
+    try:
+        r = _run_exiftool(
+            ["-a", "-G1", "-s", "-s", "-n", "-SamplesPerPixel", "-PhotometricInterpretation",
+             "-ExtraSamples", "-BitsPerSample", str(path)],
+            _work_timeout(30, path), text=True,
+        )
+        if r.returncode != 0:
+            return None
+    except Exception:
+        return None
+    pages: Dict[int, Dict[str, str]] = {}
+    for line in (r.stdout or "").splitlines():
+        m = re.match(r"^\[IFD(\d+)\]\s+(SamplesPerPixel|PhotometricInterpretation|ExtraSamples|BitsPerSample):\s*(.*?)\s*$",
+                     line.strip())
+        if m:
+            pages.setdefault(int(m.group(1)), {})[m.group(2)] = m.group(3)
+    if not pages or sorted(pages) != list(range(len(pages))):
+        return None
+    out = []
+    for i in range(len(pages)):
+        p = pages[i]
+        photo = p.get("PhotometricInterpretation", "").strip()
+        if not photo:
+            return None
+        cls = "gray" if photo in ("0", "1") else "rgb" if photo in ("2", "6") else photo
+        try:
+            spp = int(p.get("SamplesPerPixel", "1").strip() or "1")
+        except ValueError:
+            return None
+        alpha = tuple(v for v in p.get("ExtraSamples", "").split() if v in ("1", "2"))
+        bits = " ".join(p.get("BitsPerSample", "1").split()) or "1"
+        out.append({"cls": cls, "spp": spp, "alpha": alpha, "bits": bits})
+    return out
+
+
+def _magick_keep_type_args(layout: Optional[List[Dict]]) -> List[str]:
+    """The magick write options that stop the TIFF writer from changing the sample layout.
+
+    Python mirror of Get-MagickKeepTypeArgs. `-type` is a WRITE setting that applies to
+    every page of the output (per-page parentheses do not scope it -- verified on 7.1.2-27),
+    so it is passed only when every page wants the same one: all RGB without alpha ->
+    TrueColor (a neutral RGB+IR scan keeps its 4 samples, pixel-identical), all RGB with
+    alpha -> TrueColorAlpha, plus `tiff:alpha=associated` when every alpha is associated
+    (magick otherwise relabels it unassociated). A mixed file (RGB page + gray IR page)
+    gets nothing; the layout gate after the write refuses it if magick changed a page.
+    `-define colorspace:auto-grayscale=false` does NOT stop the reduction.
+    """
+    if not layout or any(p["cls"] != "rgb" for p in layout):
+        return []
+    with_alpha = [p for p in layout if p["alpha"]]
+    if not with_alpha:
+        return ["-type", "TrueColor"]
+    if len(with_alpha) != len(layout):
+        return []
+    args = ["-type", "TrueColorAlpha"]
+    if all(set(p["alpha"]) == {"1"} for p in layout):
+        args += ["-define", "tiff:alpha=associated"]
+    return args
+
+
+def _sample_layout_diff(src: Optional[List[Dict]], dst: Optional[List[Dict]],
+                        pages=None, compare_bits: bool = True) -> Optional[str]:
+    """None when `dst` keeps the sample layout of `src`, else a short reason (fail closed:
+    an unreadable side is a difference). `pages` = list of (src_page, dst_page) pairs to
+    compare; default every page, and then the page COUNTS must match too.
+    `compare_bits` is False only for the padded 16 -> 8-bit conversion."""
+    if src is None or dst is None:
+        return "sample layout unreadable"
+    if pages is None:
+        if len(src) != len(dst):
+            return f"{len(src)} -> {len(dst)} pages"
+        pages = [(i, i) for i in range(len(src))]
+    for sp, dp in pages:
+        if sp >= len(src) or dp >= len(dst):
+            return f"page {sp} missing"
+        a, b = src[sp], dst[dp]
+        keys = ("cls", "spp", "alpha", "bits") if compare_bits else ("cls", "spp", "alpha")
+        for k in keys:
+            if a[k] != b[k]:
+                return f"page {sp} {k} {a[k]} -> {b[k]}"
+    return None
+
+
 def _exiftool_copy_failed(stderr: str) -> bool:
     """True when exiftool's stderr says tags were NOT (fully) written.
 
@@ -4040,10 +4275,20 @@ def _process_single_padded(tiff_path, staging):
         status = "multi_page_refused" if extras_ok is False else "page_layout_unreadable"
         return (name, parent, status, None, None, None, False, None, tmp8)
 
+    # audit round 28: magick reduces an all-neutral RGB page to one gray channel (and writes
+    # a neutral RGB+IR scan with half its samples), and the pixel gate below compares through
+    # magick's own decode, which cannot tell them apart. Read the layout first (fail closed),
+    # pin it with -type, and compare it again after the write.
+    src_layout = _tiff_sample_layout(tiff_path)
+    if src_layout is None:
+        return (name, parent, "layout_unreadable", None, None, None, False, None, tmp8)
+    type_args = _magick_keep_type_args(src_layout)
+
     try:
         try:
             result = _run_captured(
-                ["magick", str(tiff_path), "-depth", "8", "-compress", "zip", _magick_spec(tmp8)],
+                ["magick", str(tiff_path), "-depth", "8"] + type_args
+                + ["-compress", "zip", _magick_spec(tmp8)],
                 _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
@@ -4067,7 +4312,10 @@ def _process_single_padded(tiff_path, staging):
             else:
                 exif_result = _run_exiftool(
                     ["-q", "-overwrite_original",
-                     "-tagsfromfile", tag_source, "-all:all", "-unsafe",
+                     "-tagsfromfile", tag_source, "-all:all",
+                     # audit round 28: -all:all does not copy IPTC:CodedCharacterSet, so
+                     # UTF-8 IPTC (伊豆沼) was re-encoded as Latin and came back '???'.
+                     "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe",
                      "--Compression", "--BitsPerSample", "--SampleFormat",
                      str(tmp8)],
                     _work_timeout(30, tiff_path), text=True
@@ -4155,6 +4403,12 @@ def _process_single_padded(tiff_path, staging):
                 status = "page_count_mismatch"
                 return (name, parent, status, None, None, None, False, None, tmp8)
 
+            # audit round 28: same samples per pixel, colour model and alpha kind on every
+            # page (the depth changes on purpose). See _tiff_sample_layout.
+            if _sample_layout_diff(src_layout, _tiff_sample_layout(tmp8), compare_bits=False):
+                status = "layout_changed"
+                return (name, parent, status, None, None, None, False, None, tmp8)
+
             # The 8-bit rewrite must hold exactly the pixels of the original. Nothing above
             # looks at pixels: the verdict that called the file "padded" may be a cached one
             # (DIAGNOSE_CACHE), and a file that is really 16-bit must never be replaced by
@@ -4189,16 +4443,94 @@ def _process_single_padded(tiff_path, staging):
                 pass
 
 
+def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
+    """Put the verified 8-bit file at `final_dst` and keep the original as `backup_path`.
+    Returns (error_or_None, note_or_None); on an error the original is in its place.
+
+    audit round 28 -- the irreversible step comes last (jxl-photo's rule, the one rounds
+    25-26 applied to the PowerShell backends):
+      1. the converted file is brought NEXT TO the photo first, under a temp name
+         (<name>.<8 hex>_<12 hex>.tif, which every backend skips as a leftover); from
+         another volume that is a copy, size-checked -- a kill here leaves the original
+         untouched and only that sibling behind;
+      2. the original gets a second name in OLD_PADDED/ -- a HARD LINK, nothing is copied
+         or moved, so the photo never leaves its place;
+      3. the sibling is renamed over the photo (os.replace: one atomic rename).
+    At every instant the photo's name holds either the original or the converted file.
+    Where a hard link is impossible (FAT/exFAT, some network shares) step 2 is a rename
+    instead, and only the instant between the two renames leaves the place empty.
+    Never shutil.move: on a locked file it falls back to copy + delete and left a full
+    copy in OLD_PADDED/ while reporting the backup as failed.
+    """
+    sibling = final_dst.with_name(
+        f"{final_dst.name}.{uuid.uuid4().hex[:8]}_{uuid.uuid4().hex[:12]}.tif")
+    try:
+        try:
+            os.replace(str(tmp8), str(sibling))
+        except OSError:
+            size = tmp8.stat().st_size
+            shutil.copyfile(str(tmp8), str(sibling))
+            if sibling.stat().st_size != size:
+                raise OSError("size mismatch after copy")
+            tmp8.unlink(missing_ok=True)
+    except Exception as e:
+        sibling.unlink(missing_ok=True)
+        return f"could not bring the converted file next to the original ({e}) — original preserved", None
+
+    linked = False
+    try:
+        os.link(str(final_dst), str(backup_path))
+        linked = True
+    except OSError:
+        pass
+    if linked:
+        try:
+            os.replace(str(sibling), str(final_dst))
+        except OSError as e:
+            try:
+                backup_path.unlink()
+            except OSError:
+                pass
+            sibling.unlink(missing_ok=True)
+            return f"could not move the converted file into place ({e}) — original preserved", None
+        return None, None
+
+    try:
+        os.replace(str(final_dst), str(backup_path))
+    except OSError as e:
+        sibling.unlink(missing_ok=True)
+        return f"backup to OLD_PADDED failed ({e}) — original preserved", None
+    try:
+        os.replace(str(sibling), str(final_dst))
+    except OSError as e:
+        try:
+            os.replace(str(backup_path), str(final_dst))
+            restored = " — original restored"
+        except OSError:
+            restored = f" — ORIGINAL LEFT IN OLD_PADDED/{backup_path.name}"
+        sibling.unlink(missing_ok=True)
+        return f"could not move the converted file into place ({e}){restored}", None
+    return None, "(no hard link on this drive: the original was renamed into OLD_PADDED/)"
+
+
 def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg: ToolConfig):
     """
     Compress padded 8-bit TIFFs to 8-bit ZIP.
     Converts 16-bit to 8-bit then ZIP compresses. Preserves EXIF via exiftool.
     Originals are backed up to an OLD_PADDED/ subfolder before being replaced.
     Uses parallel processing with ThreadPoolExecutor. Returns {"converted": n} -- the
-    files actually replaced (a non-empty dict, so `if _compress_padded_files(...)` holds).
+    files actually replaced (a non-empty dict, so `if _compress_padded_files(...)` holds),
+    and "failed": [(path, reason)] for every file that should have been converted and was
+    not (refusals such as real 16-bit data or a multi-page scan are not failures).
     """
     global _TIMEOUT_LOAD
     converted = 0
+    failed = []
+    _FAILED_STATUSES = ("magick_not_found", "error", "magick_error", "missing",
+                        "page_layout_unreadable", "subfile_restore_failed",
+                        "integrity_error", "dimension_mismatch", "dimension_unreadable",
+                        "page_count_mismatch", "pixel_compare_failed",
+                        "layout_unreadable", "layout_changed")
     if temp_dir is None:
         temp_dir = Path(tempfile.gettempdir())
     # Run-scoped staging dir. A shared "compress_staging" meant the cleanup below wiped
@@ -4234,6 +4566,8 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
         nonlocal converted
         name, parent, status, size_orig, size_zip, ratio, exif_ok, error_msg, tmp8 = result
         final_dst = parent / name
+        if status in _FAILED_STATUSES:
+            failed.append((final_dst, status + (f": {error_msg}" if error_msg else "")))
 
         where = f"{parent.name}{os.sep}{name}"
         if RICH_AVAILABLE and console:
@@ -4288,7 +4622,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 print(f"    {msg}")
         elif status in ("integrity_error", "dimension_mismatch",
                         "dimension_unreadable", "page_count_mismatch",
-                        "pixel_compare_failed"):
+                        "pixel_compare_failed", "layout_unreadable", "layout_changed"):
             if RICH_AVAILABLE and console:
                 console.print(f"    [red]FAILED: {status}[/red]")
             else:
@@ -4300,6 +4634,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                     console.print(f"    [red]FAILED: EXIF copy or History entry failed — original preserved[/red]")
                 else:
                     print(f"    FAILED: EXIF copy or History entry failed — original preserved")
+                failed.append((final_dst, "EXIF copy or History entry failed"))
                 tmp8.unlink(missing_ok=True)
                 return
 
@@ -4309,7 +4644,12 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 print(f"    OK {_format_size(size_orig)} -> {_format_size(size_zip)} ({ratio:.1f}% smaller, EXIF preserved)")
 
             if size_zip < size_orig:
-                # Back up the original to OLD_PADDED/ before replacing (lossy 16 -> 8-bit)
+                # Back up the original to OLD_PADDED/ and replace it (lossy 16 -> 8-bit).
+                # audit round 28: the irreversible step comes last. The original used to go
+                # to OLD_PADDED/ FIRST and the converted file was then moved in from the
+                # staging folder -- across volumes a copy straight into the photo's name, so
+                # a kill left the place empty or holding a truncated file, and nothing
+                # reported it. Now: see _land_padded_conversion.
                 backup_dir = parent / "OLD_PADDED"
                 try:
                     backup_dir.mkdir(exist_ok=True)
@@ -4319,32 +4659,25 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                         while (backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}").exists():
                             v += 1
                         backup_path = backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}"
-                    _safe_move(final_dst, backup_path)
                 except Exception as e:
                     if RICH_AVAILABLE and console:
                         console.print(f"    [red]FAILED: backup to OLD_PADDED failed ({escape(str(e))}) — original preserved[/red]")
                     else:
                         print(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved")
+                    failed.append((final_dst, f"backup to OLD_PADDED failed ({e})"))
                     tmp8.unlink(missing_ok=True)
                     return
-                # Bare, this move took the whole workflow down with a traceback: the files
-                # after it were never processed and no summary was printed, while the original
-                # sat in OLD_PADDED/ looking like it had been replaced. Put the backup back and
-                # carry on with the next file -- run_undo_old_tiffs already works this way.
-                try:
-                    _safe_move(tmp8, final_dst)
-                except Exception as e:
-                    try:
-                        _safe_move(backup_path, final_dst)
-                        restored = " -- original restored"
-                    except Exception:
-                        restored = f" -- ORIGINAL LEFT IN OLD_PADDED/{backup_path.name}"
+                err, note = _land_padded_conversion(tmp8, final_dst, backup_path)
+                if err:
                     if RICH_AVAILABLE and console:
-                        console.print(f"    [red]FAILED: could not move the converted file into place ({escape(str(e))}){escape(restored)}[/red]")
+                        console.print(f"    [red]FAILED: {escape(err)}[/red]")
                     else:
-                        print(f"    FAILED: could not move the converted file into place ({e}){restored}")
+                        print(f"    FAILED: {err}")
+                    failed.append((final_dst, err))
                     tmp8.unlink(missing_ok=True)
                     return
+                if note:
+                    _say(f"    {note}", "yellow")
                 converted += 1
                 if RICH_AVAILABLE and console:
                     console.print(f"    [dim]Original backed up: OLD_PADDED/{escape(backup_path.name)}[/dim]")
@@ -4386,7 +4719,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     # Safe to wipe wholesale: the directory belongs to this run only.
     shutil.rmtree(staging, ignore_errors=True)
 
-    return {"converted": converted}
+    return {"converted": converted, "failed": failed}
 
 
 def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
@@ -5176,6 +5509,11 @@ def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -
     output FOLDER. Only modes 2/4/5 are resolved -- every other mode writes
     inside the Source tree and never reaches the collision scan."""
     parent = f.parent
+    # audit round 28: the folder names are the backend's own settings (script or settings
+    # file), never a copy of their defaults -- an edited ZipSuffix / ZipSubfolderName made
+    # this scan look at a folder the backend never writes.
+    zip_suffix = str(_backend_default("compress_tiff_zip.ps1", "ZipSuffix"))
+    zip_sub = str(_backend_default("compress_tiff_zip.ps1", "ZipSubfolderName"))
     if mode == 2:
         # Mode 2 is recursive-FLAT: every file under the source lands in the
         # Destination (or the input root when the cell is empty).
@@ -5183,15 +5521,15 @@ def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -
     if mode == 4:
         name = parent.name
         if re.search(r"_tiff$", name, re.IGNORECASE):
-            new_name = re.sub(r"_tiff$", "_ZIP", name, flags=re.IGNORECASE)
+            new_name = name[:-len("_tiff")] + zip_suffix
         elif name.lower() == "tiff":
             # Mirrors Resolve-Output: a folder named exactly "TIFF" has no stem, so the
             # suffix rule would produce a leading-underscore "_ZIP".
-            new_name = "ZIP"
+            new_name = zip_sub
         elif re.search(r".tiff$", name, re.IGNORECASE):
-            new_name = re.sub(r"tiff$", "_ZIP", name, flags=re.IGNORECASE)
+            new_name = name[:-len("tiff")] + zip_suffix
         else:
-            new_name = name + "_ZIP"
+            new_name = name + zip_suffix
         return parent.parent / new_name
     if mode == 5:
         grandparent = parent.parent
@@ -5204,7 +5542,7 @@ def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -
             inside = False  # different drives
         if not inside:
             grandparent = src_root
-        return grandparent / "ZIP"
+        return grandparent / zip_sub
     return None
 
 
@@ -6007,6 +6345,9 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
         return False
     cfg.config.last_input_dir = str(p.resolve())
     cfg.save_config()
+    # audit round 28: the backend gets (and a preset saves) the absolute path, never "."
+    # or a relative answer -- see step_folder.
+    input_dir = os.path.abspath(p)
 
     # Remove mode: skip the generation questions entirely
     if RICH_AVAILABLE and console:
@@ -6288,15 +6629,15 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
     # Read the flag from the neutral parts: under powershell.exe every argument is folded
     # into one -Command string, so a membership test on the command list never matched and
     # the DELETES-SOURCES warning was silently skipped on PS5.
-    deletes = (not dry_run) and any("-DeleteSource" in p for p in parts_list)
+    deletes = (not dry_run) and any(_parts_replace_sources(p) for p in parts_list)
     if dry_run:
         for parts in parts_list:
             if "-DryRun" not in parts:
                 parts.append("-DryRun")
     if unattended and deletes:
-        _say("Refused: this preset deletes source files (-DeleteSource). That needs a "
-             "confirmation, which cannot be given unattended -- run it from the "
-             "menu, or pass --dry-run.", "red")
+        _say("Refused: this preset deletes or replaces source files (-DeleteSource or "
+             "mode 8). That needs a confirmation, which cannot be given unattended -- run "
+             "it from the menu, or pass --dry-run.", "red")
         return 1
 
     run_cmds = [_rebuild_journaled_command(p, cfg.config.ps_name, non_interactive=unattended)
@@ -6313,7 +6654,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
         else:
             console.print("[yellow]Note: dry-run is never inherited -- this runs for real.[/yellow]")
         if deletes:
-            console.print("[red]WARNING: this workflow DELETES source files (-DeleteSource).[/red]")
+            console.print("[red]WARNING: this workflow DELETES or REPLACES source files (-DeleteSource / mode 8).[/red]")
         if not unattended and not Confirm.ask("Run it now?", default=False):
             console.print("[dim]Cancelled.[/dim]")
             return 1
@@ -6328,7 +6669,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
         else:
             print("Note: dry-run is never inherited -- this runs for real.")
         if deletes:
-            print("WARNING: this workflow DELETES source files (-DeleteSource).")
+            print("WARNING: this workflow DELETES or REPLACES source files (-DeleteSource / mode 8).")
         if not unattended and input("Run it now? [y/N]: ").strip().lower() != "y":
             print("Cancelled.")
             return 1

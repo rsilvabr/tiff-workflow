@@ -91,12 +91,17 @@ def test_stranded_backups_use_the_compress_rule(tmp_path):
     put(old / "b.tif"); put(cam / "b.tif")               # healthy
     put(old / "c.tiff"); put(cam / "c.tif")              # .tiff written as .tif: healthy
     put(old / "d_20260803_081300.tif"); put(cam / "d.tif")
-    put(old / "e_20260803_081300_1.tif")                 # stranded, restores as e.tif
+    # audit round 28 (#16): a date stamp is a collision rename only next to the backup it
+    # collided with; otherwise it is the photo's own name and restores as such.
+    put(old / "d.tif")                                   # the backup d_... collided with
+    put(old / "e_20260803_081300_1.tif"); put(old / "e.tif")  # both stranded, both claim e.tif
+    put(old / "f_20260803_081300.tif"); put(cam / "f.tif")    # its OWN name: stranded
     put(old / "OLD_TIFFs" / "z.tif")                     # backup of a backup: ignored
     put(old / "notes.txt")
     res = ct._stranded_backups([old, old / "OLD_TIFFs"])
     assert sorted((f.name, t.name) for f, t in res) == [
-        ("a.tif", "a.tif"), ("e_20260803_081300_1.tif", "e.tif")]
+        ("a.tif", "a.tif"), ("e.tif", "e.tif"), ("e_20260803_081300_1.tif", "e.tif"),
+        ("f_20260803_081300.tif", "f_20260803_081300.tif")]
 
 
 def test_restore_stranded_only_never_overwrites_and_leaves_ambiguity(tmp_path):

@@ -249,7 +249,10 @@ WARN | STRANDED: 1 original(s) in OLD_TIFFs with nothing in their place (an inte
 
 "Its place" is the folder above `OLD_TIFFs`: the same name, the other TIFF extension (a `.tiff`
 source is written as `.tif`), and the base name of a timestamped backup
-(`DSC_0001_20260803_081300.tif`, made when `DSC_0001.tif` was already in `OLD_TIFFs`). Mode 0
+(`DSC_0001_20260803_081300.tif`, made when `DSC_0001.tif` was already in `OLD_TIFFs`) -- only
+when `DSC_0001.tif` is still in `OLD_TIFFs`; otherwise the stamp is part of the photo's own name
+(`Scan_20190815_143000.tif`, a phone's `IMG_20190815_143000.tif`) and it is restored under that
+name (round 28). Mode 0
 looks only at `<InputDir>\OLD_TIFFs`; the other modes at every `OLD_TIFFs` below the root.
 `-ExcludeFolders` applies, and an `OLD_TIFFs` inside another one is never reported.
 
@@ -286,9 +289,9 @@ Files are written to staging with UUID names, then moved to final destination af
 
 ## Delete Source (Mode 8)
 
-Mode 8 deletes the original TIFF after successful ZIP compression. **Mode 8 always requires a staging directory** to avoid overwriting the original before verification. If `-StagingDir` is not provided, a temporary directory under `%TEMP%` is used and you are prompted to confirm.
+Mode 8 deletes the original TIFF after successful ZIP compression. **Mode 8 always requires a staging directory** to avoid overwriting the original before verification. If `-StagingDir` is not provided, a temporary `_cs8_<8 hex>` folder is used -- inside the input folder when there is one input root (same volume, so the final move is a rename), else under `%TEMP%` -- and you are prompted to confirm.
 
-The staged ZIP is **always verified** with `magick <file> null:` (full pixel decode) before the move — including the degraded paths (`[no thumb]` fallback, `WARN (exiftool failed, ZIP ok)`). If the integrity check fails, times out, or cannot be determined, the staged file is discarded, an error is logged (exit code 1), and the original is preserved.
+The staged ZIP is **always verified** with `magick <file> null:` (full pixel decode) and a pixel compare before the move — including the `[no thumb]` fallback. A staged ZIP whose metadata restore failed never replaces the original: `ERROR (metadata restore failed - source preserved)` (round 28; it used to be a `WARN` with the file without EXIF moved over the original). If the integrity check fails, times out, or cannot be determined, the staged file is discarded, an error is logged (exit code 1), and the original is preserved.
 
 Deletion only happens if:
 1. ZIP file was created successfully in staging

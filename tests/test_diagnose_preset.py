@@ -761,7 +761,7 @@ def test_conversion_replaces_each_file_as_it_finishes(tmp_path, monkeypatch, cap
 
     done = ct._compress_padded_files(srcs, tmp_path / "staging", workers=1, cfg=_cfg())
 
-    assert done == {"converted": 3}
+    assert done == {"converted": 3, "failed": []}
     assert seen_backup_before_next and all(seen_backup_before_next), \
         "a file was only replaced after the whole batch had been converted"
     out = capsys.readouterr().out
@@ -783,7 +783,7 @@ class TestNonAsciiPaths:
                         src.name], cwd=str(src.parent), capture_output=True, check=True,
                        timeout=120)
         done = ct._compress_padded_files([src], tmp_path / "staging", workers=1, cfg=_cfg())
-        assert done == {"converted": 1}, "the file under a Japanese folder was refused"
+        assert done == {"converted": 1, "failed": []}, "the file under a Japanese folder was refused"
         assert _depth(src) == "8"
         r = subprocess.run(["exiftool", "-s3", "-EXIF:Artist", src.name], cwd=str(src.parent),
                            capture_output=True, text=True, timeout=120)

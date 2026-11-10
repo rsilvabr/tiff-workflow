@@ -312,9 +312,11 @@ a hang.
 | **Dry-run** | off unless you pass `--dry-run`. It is **never** inherited from the stored run |
 | **Exit code** | `0` ran (or nothing to do), `1` failed or refused, `2` no such preset (available names are printed) |
 
-- A preset that deletes sources (`-DeleteSource`, or a manifest with a mode-8 row) is
-  **refused** unattended (exit 1) unless you pass `--dry-run`: the confirmation cannot
-  be given without a console. Run those from the menu.
+- A preset that deletes or replaces sources (`-DeleteSource` in any spelling PowerShell
+  binds -- any case, an abbreviation such as `-DeleteS`, `-DeleteSource:$true` -- compress
+  mode 8, or a manifest with a mode-8 row) is **refused** unattended (exit 1) unless you
+  pass `--dry-run`: the confirmation cannot be given without a console. Run those from the
+  menu.
 - There is no `--overwrite`: the stored command already carries `-Overwrite` if the
   wizard asked for it, and an override has no clear meaning for the backends. A preset
   runs exactly as it was saved.
@@ -484,8 +486,15 @@ the input/output/staging folders, `Workers`, `DryRun`, `SafeMode`, `SkipLzwAsCom
 `RestoreStranded`, the thumbnail on/off switches, `FailOnWarn`, `ExcludeFolders`. A name that is
 not in a script's table is ignored with a warning.
 
-**It never stops a run.** A file that cannot be read (bad JSON, the root is not an object), an
-unknown name or a value of the wrong type or range changes nothing -- the script keeps its own
+A folder name in the file can never turn a copy mode into an in-place replace either: when an
+overlay `ZipSuffix`, `ZipSubfolderName` or `Export*` name makes an output resolve onto its own
+source, compress refuses that file (round 28).
+
+**It never stops a run.** A file that cannot be read (bad JSON -- strict JSON in UTF-8 for the
+wizard and every backend alike: no comments, trailing commas, single quotes, `0x10` or `010` --
+the root is not an object), an
+unknown name, a value of the wrong type or range, or an `SrgbProfile` that does not exist
+changes nothing -- the script keeps its own
 value and says so: `WARNING: settings overlay: ...` on the console and in the script's log,
 which also names the file and the settings it did change (`Script settings overlay: <file>: N
 value(s): ...`). **A `-Param` on the command line always beats the file**, and so does anything

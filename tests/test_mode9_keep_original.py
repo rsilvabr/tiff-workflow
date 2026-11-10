@@ -204,5 +204,8 @@ def test_every_staging_move_goes_through_move_file_into_place():
     assert "Move-Item -Force -LiteralPath $stagePath -Destination $destPath" not in s
     body = re.search(r"function Move-FileIntoPlace \{(.*?)\n\}\n", s, re.S).group(1)
     i_copy = body.index("Copy-Item -LiteralPath $From -Destination $tmp")
-    i_rename = body.index("Move-Item -LiteralPath $tmp -Destination $To -Force")
+    # audit round 28: the rename is one MoveFileEx(REPLACE_EXISTING), never Move-Item -Force
+    # (which deletes $To first)
+    i_rename = body.index("Move-FileReplacing -From $tmp -To $To")
+    assert "Move-Item" not in re.sub(r"<#.*?#>", "", body, flags=re.S).replace("# Audit round 28: Move-FileReplacing, never Move-Item -Force", "")
     assert i_copy < i_rename

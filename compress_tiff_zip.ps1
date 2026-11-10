@@ -94,7 +94,72 @@ function Get-SettingsOverlay {
         }
         $result.Path = $path
         if (-not [System.IO.File]::Exists($path)) { return $result }
-        $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false))
+        # Audit round 28: the three readers (the wizard and PowerShell 5.1/7) must agree on what
+        # a bad file is, or the wizard plans with one value and the backend runs another.
+        # ConvertFrom-Json takes comments, trailing commas, single quotes, bare keys, 0x10 and
+        # 010 (7 reads it as octal), and ReadAllText took UTF-16 and turned ANSI bytes into
+        # U+FFFD; Python's json refuses all of them. So: strict UTF-8 (a UTF-8 BOM is allowed),
+        # then the JSON grammar Python's json.loads accepts, then ConvertFrom-Json.
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        if ($text.Length -gt 0 -and [int]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
+        function Skip-JsonSpace($st) {
+            while ($st.P -lt $st.T.Length) {
+                $c = [int]$st.T[$st.P]
+                if ($c -ne 32 -and $c -ne 9 -and $c -ne 10 -and $c -ne 13) { break }
+                $st.P++
+            }
+        }
+        function Read-JsonString($st) {
+            $m = $st.Str.Match($st.T, $st.P)
+            if (-not $m.Success) { throw "not valid JSON (a string at character $($st.P))" }
+            $st.P += $m.Length
+        }
+        function Read-JsonValue($st, [int]$depth) {
+            if ($depth -gt 64) { throw 'not valid JSON (nested too deeply)' }
+            Skip-JsonSpace $st
+            if ($st.P -ge $st.T.Length) { throw 'not valid JSON (it ends too early)' }
+            $c = [int]$st.T[$st.P]
+            if ($c -eq 123 -or $c -eq 91) {
+                $close = 93
+                if ($c -eq 123) { $close = 125 }
+                $st.P++
+                Skip-JsonSpace $st
+                if ($st.P -lt $st.T.Length -and [int]$st.T[$st.P] -eq $close) { $st.P++; return }
+                while ($true) {
+                    if ($c -eq 123) {
+                        Skip-JsonSpace $st
+                        Read-JsonString $st
+                        Skip-JsonSpace $st
+                        if ($st.P -ge $st.T.Length -or [int]$st.T[$st.P] -ne 58) { throw "not valid JSON (':' expected at character $($st.P))" }
+                        $st.P++
+                    }
+                    Read-JsonValue $st ($depth + 1)
+                    Skip-JsonSpace $st
+                    if ($st.P -ge $st.T.Length) { throw 'not valid JSON (it ends too early)' }
+                    $d = [int]$st.T[$st.P]
+                    $st.P++
+                    if ($d -eq $close) { return }
+                    if ($d -ne 44) { throw "not valid JSON (character $($st.P - 1))" }
+                }
+            }
+            if ($c -eq 34) { Read-JsonString $st; return }
+            foreach ($word in @('true', 'false', 'null', 'NaN', 'Infinity', '-Infinity')) {
+                if ([string]::CompareOrdinal($st.T, $st.P, $word, 0, $word.Length) -eq 0) { $st.P += $word.Length; return }
+            }
+            $m = $st.Num.Match($st.T, $st.P)
+            if (-not $m.Success) { throw "not valid JSON (character $($st.P))" }
+            $st.P += $m.Length
+        }
+        $st = @{
+            T = $text
+            P = 0
+            Str = [regex]::new('\G"(?:[^"\\\x00-\x1F]|\\["\\/bfnrt]|\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])*"')
+            Num = [regex]::new('\G-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?')
+        }
+        Read-JsonValue $st 0
+        Skip-JsonSpace $st
+        if ($st.P -lt $st.T.Length) { throw "not valid JSON (text after the end, character $($st.P))" }
         # PS 5.1 unrolls a root array into its elements: look at the text, not at the object
         $first = $text.TrimStart([char[]]@(0xFEFF, 32, 9, 13, 10))
         if ($first.Length -eq 0 -or $first[0] -ne [char]123) { throw 'not a JSON object' }
@@ -411,6 +476,14 @@ function Resolve-SrgbProfile {
 
 # Plain (non-$script:) variable: ForEach-Object -Parallel can only capture with $using:<name>.
 $srgbProfileResolved = Resolve-SrgbProfile -Explicit $SrgbProfile
+# Audit round 28: a profile path from the settings overlay that does not exist stopped EVERY
+# run, thumbnails or not -- the overlay must never stop a run. Warn and auto-detect instead;
+# a -SrgbProfile typed on the command line still fails.
+if ($SrgbProfile -and -not $srgbProfileResolved -and ($script:OverlayApplied -contains 'SrgbProfile')) {
+    Write-Host "WARNING: settings overlay: SrgbProfile not found: $SrgbProfile; using the auto-detected profile" -ForegroundColor Yellow
+    $SrgbProfile = ""
+    $srgbProfileResolved = Resolve-SrgbProfile -Explicit ""
+}
 if ($SrgbProfile -and -not $srgbProfileResolved) {
     Write-Host "ERROR: -SrgbProfile not found: $SrgbProfile" -ForegroundColor Red
     exit 1
@@ -731,8 +804,10 @@ function Find-StrandedOriginals {
         A backup counts as stranded when none of its possible counterparts exists in the
         parent folder: <stem>.tif / <stem>.tiff (a .tiff source is written as .tif), and for
         a timestamped backup (<stem>_yyyyMMdd_HHmmss[_n], made when the name was taken) the
-        same for the base stem. Returns objects with Backup and Target (where a restore
-        would put it: the base stem with the backup's extension).
+        same for the base stem -- but only when OLD_TIFFs/ also holds <base> itself (audit
+        round 28: otherwise the stamp is part of the photo's own name). Returns objects with
+        Backup and Target (where a restore would put it: that stem with the backup's
+        extension).
     #>
     param(
         [string]$Root,
@@ -778,7 +853,17 @@ function Find-StrandedOriginals {
             if ($ext -notmatch '^\.(tif|tiff)$') { continue }
             $stem = [System.IO.Path]::GetFileNameWithoutExtension($bName)
             $stems = @($stem)
-            if ($stem -match '^(.+)_\d{8}_\d{6}(_\d+)?$') { $stems += $Matches[1] }
+            # Audit round 28: a _yyyyMMdd_HHmmss[_n] name is only a collision copy of <base>
+            # when <base> itself is in this backup folder (that is what forced the stamp).
+            # Otherwise it is the photo's own name -- Scan_20190815_143000.tif, a phone's
+            # IMG_20190815_143000.tif -- and used to be restored as Scan.tif / IMG.tif, or
+            # hidden by an unrelated IMG.tif in the parent folder.
+            if ($stem -match '^(.+)_\d{8}_\d{6}(_\d+)?$') {
+                $base = $Matches[1]
+                foreach ($e in @('.tif', '.tiff')) {
+                    if ([System.IO.File]::Exists($lp + [System.IO.Path]::Combine($d, "$base$e"))) { $stems += $base; break }
+                }
+            }
             $present = $false
             foreach ($s in $stems) {
                 foreach ($e in @('.tif', '.tiff')) {
@@ -828,9 +913,11 @@ function Move-FileIntoPlace {
     param([string]$From, [string]$To)
     $fromRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($From))
     $toRoot   = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($To))
+    # Audit round 28: Move-FileReplacing, never Move-Item -Force -- that deletes $To first and
+    # renames after, so a kill in between left the place of the photo empty.
     if ($fromRoot -ieq $toRoot) {
         try {
-            Move-Item -LiteralPath $From -Destination $To -Force -ErrorAction Stop
+            Move-FileReplacing -From $From -To $To
             return $null
         } catch { return "move failed: $($_.Exception.Message)" }
     }
@@ -842,7 +929,7 @@ function Move-FileIntoPlace {
             Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
             return "size mismatch after copy"
         }
-        Move-Item -LiteralPath $tmp -Destination $To -Force -ErrorAction Stop
+        Move-FileReplacing -From $tmp -To $To
     } catch {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
         return "copy failed: $($_.Exception.Message)"
@@ -909,7 +996,7 @@ function Complete-KeepOriginal {
     }
     [void]$script:movedOriginals.Add($track)
     try {
-        Move-Item -LiteralPath $tmp -Destination $FinalDst -Force -ErrorAction Stop
+        Move-FileReplacing -From $tmp -To $FinalDst
     } catch {
         $msg = $_.Exception.Message
         try {
@@ -1472,7 +1559,7 @@ function Backup-TiffMetadata {
 
     $argMeta = [System.IO.Path]::GetTempFileName()
     try {
-        [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
+        [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet`n-o`n$metaBackup`n$SrcPath`n")
         [System.IO.File]::ReadAllText($argMeta) | exiftool -@ - | Out-Null
         # A failed dump can still leave a PARTIAL container behind; remove it so nothing
         # downstream mistakes it for a complete backup.
@@ -1806,6 +1893,213 @@ function Test-ThumbOutputMatchesSource {
     return ($val -eq 0)
 }
 
+function Get-TiffSampleLayout {
+    <#
+    .SYNOPSIS
+        Audit round 28. The sample layout of every page of a TIFF, read with exiftool:
+        @{ Ok = [bool]; Pages = [string[]] }, one "<class>/<spp>/<bits>/<alpha>" per IFD in
+        page order. class: gray (Photometric 0/1), rgb (2, and 6 = YCbCr, which decodes to
+        RGB), else "p<n>". alpha: the ExtraSamples values that are alpha (1 associated,
+        2 unassociated); 0 = unspecified (a scanner's IR channel) and an absent tag both count
+        as no alpha.
+
+    .DESCRIPTION
+        ImageMagick's TIFF writer picks the output layout from the PIXELS, not from the source
+        tags: an RGB file whose every pixel has R=G=B (black-and-white film scanned in RGB)
+        was written as a ONE-channel grayscale TIFF with the RGB ICC profile still embedded,
+        and a VueScan RGB+IR file in the same case came out with 2 samples and half of every
+        row lost. The pixel gates decode both files through magick, where gray and neutral RGB
+        are equal, so every one of them said OK. Get-MagickKeepTypeArgs stops the rewrite;
+        Test-TiffSampleLayoutKept is the gate that sees it when it happens anyway.
+        FAIL-CLOSED: any read or parse failure returns Ok = $false.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Get-TiffSampleLayout} = $using:SampleLayoutFnDef
+    #>
+    param([string]$Path)
+
+    $fail = @{ Ok = $false; Pages = @() }
+    $argRead = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SamplesPerPixel`n-PhotometricInterpretation`n-ExtraSamples`n-BitsPerSample`n$Path`n")
+        $readOut = @([System.IO.File]::ReadAllText($argRead) | exiftool -@ - 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $fail }
+    } catch {
+        return $fail
+    } finally {
+        Remove-Item $argRead -Force -ErrorAction SilentlyContinue
+    }
+
+    $ifds = @{}
+    foreach ($line in $readOut) {
+        if ("$line" -match '^\[IFD(\d+)\]\s+(SamplesPerPixel|PhotometricInterpretation|ExtraSamples|BitsPerSample):\s*(.*?)\s*$') {
+            $i = [int]$Matches[1]
+            if (-not $ifds.ContainsKey($i)) { $ifds[$i] = @{} }
+            $ifds[$i][$Matches[2]] = $Matches[3]
+        }
+    }
+    $pages = @()
+    for ($i = 0; $ifds.ContainsKey($i); $i++) {
+        $t = $ifds[$i]
+        if (-not $t.ContainsKey('PhotometricInterpretation')) { return $fail }
+        $ph = "$($t['PhotometricInterpretation'])".Trim()
+        $class = "p$ph"
+        if ($ph -eq '0' -or $ph -eq '1') { $class = 'gray' }
+        elseif ($ph -eq '2' -or $ph -eq '6') { $class = 'rgb' }
+        $spp = '1'
+        if ($t.ContainsKey('SamplesPerPixel')) { $spp = "$($t['SamplesPerPixel'])".Trim() }
+        $bits = '1'
+        if ($t.ContainsKey('BitsPerSample')) { $bits = ("$($t['BitsPerSample'])".Trim() -split '\s+') -join ',' }
+        $alpha = @()
+        if ($t.ContainsKey('ExtraSamples')) {
+            foreach ($v in ("$($t['ExtraSamples'])".Trim() -split '\s+')) {
+                if ($v -eq '1' -or $v -eq '2') { $alpha += $v }
+            }
+        }
+        $pages += "$class/$spp/$bits/$($alpha -join ',')"
+    }
+    # A gap in the IFD numbering (or no IFD0 at all) is not a layout this can vouch for
+    if ($pages.Count -eq 0 -or $pages.Count -ne $ifds.Count) { return $fail }
+    return @{ Ok = $true; Pages = $pages }
+}
+
+function Get-MagickKeepTypeArgs {
+    <#
+    .SYNOPSIS
+        Audit round 28. The magick write options that keep the source's channel layout, from
+        Get-TiffSampleLayout pages: "-type TrueColor" when every page is RGB without alpha (a
+        scanner IR channel included: it comes back as ExtraSamples=0, samples unchanged),
+        "-type TrueColorAlpha" when every page is RGB with alpha, plus
+        "-define tiff:alpha=associated" when all that alpha is associated (magick writes it
+        back as unassociated otherwise). Anything else -- a gray page, a mixed file -- returns
+        no options: -type applies to every page of the write, so a gray IR page next to a
+        neutral RGB page cannot be kept both ways, and Test-TiffSampleLayoutKept refuses the
+        result instead. Callers wrap the call in @().
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Get-MagickKeepTypeArgs} = $using:KeepTypeFnDef
+    #>
+    param([string[]]$Pages)
+
+    if (-not $Pages -or $Pages.Count -eq 0) { return @() }
+    $withAlpha = 0
+    $associatedOnly = $true
+    foreach ($p in $Pages) {
+        $parts = "$p" -split '/'
+        if ($parts[0] -ne 'rgb') { return @() }
+        $alpha = ''
+        if ($parts.Count -ge 4) { $alpha = $parts[3] }
+        if ($alpha) {
+            $withAlpha++
+            foreach ($a in ($alpha -split ',')) { if ($a -ne '1') { $associatedOnly = $false } }
+        }
+    }
+    if ($withAlpha -eq 0) { return @('-type', 'TrueColor') }
+    if ($withAlpha -ne $Pages.Count) { return @() }
+    $typeArgs = @('-type', 'TrueColorAlpha')
+    if ($associatedOnly) { $typeArgs += @('-define', 'tiff:alpha=associated') }
+    return $typeArgs
+}
+
+function Test-AssociatedAlphaRewritable {
+    <#
+    .SYNOPSIS
+        Audit round 28. $false when a page of the source carries ASSOCIATED alpha and the image
+        is not fully opaque: ImageMagick un-premultiplies on read and re-premultiplies on write,
+        and the alpha samples come back changed (1791 of a real VueScan scan's), even with
+        -define tiff:alpha=associated. Neither the layout gate nor a pixel compare through magick
+        sees it, so such a file is refused. Opaque associated alpha comes back identical.
+        Unreadable fails CLOSED.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Test-AssociatedAlphaRewritable} = $using:AssocAlphaFnDef
+        (Invoke-MagickWithTimeout must be injected too.)
+    #>
+    param([string]$Path, [string[]]$Pages, [int]$TimeoutSec = 30)
+
+    $assoc = $false
+    foreach ($p in $Pages) {
+        $parts = "$p" -split '/'
+        if ($parts.Count -ge 4 -and (($parts[3] -split ',') -contains '1')) { $assoc = $true }
+    }
+    if (-not $assoc) { return $true }
+    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[opaque]`n", $Path) -TimeoutSec $TimeoutSec
+    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
+    $lines = @($r.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+    if ($lines.Count -eq 0) { return $false }
+    foreach ($l in $lines) { if ("$l".Trim() -ne 'True') { return $false } }
+    return $true
+}
+
+function Test-TiffSampleLayoutKept {
+    <#
+    .SYNOPSIS
+        Audit round 28. $true only when $DstPath has the sample layout $SrcPages describe:
+        the same number of pages, and per page the same color class, samples per pixel, bits
+        per sample and alpha kind. -MainPageOnly compares page 0 alone (the -GenerateThumbnail
+        path builds a new page layout on purpose). Also the page-count gate of modes 0/9 and
+        legacy, which used to have none. Anything unreadable fails CLOSED.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Test-TiffSampleLayoutKept} = $using:LayoutKeptFnDef
+        (Get-TiffSampleLayout must be injected too.)
+    #>
+    param([string[]]$SrcPages, [string]$DstPath, [switch]$MainPageOnly)
+
+    if (-not $SrcPages -or $SrcPages.Count -eq 0) { return $false }
+    $dst = Get-TiffSampleLayout -Path $DstPath
+    if (-not $dst.Ok) { return $false }
+    if ($MainPageOnly) { return ("$($dst.Pages[0])" -ceq "$($SrcPages[0])") }
+    if ($dst.Pages.Count -ne $SrcPages.Count) { return $false }
+    for ($i = 0; $i -lt $SrcPages.Count; $i++) {
+        if ("$($dst.Pages[$i])" -cne "$($SrcPages[$i])") { return $false }
+    }
+    return $true
+}
+
+function Move-FileReplacing {
+    <#
+    .SYNOPSIS
+        Audit round 28. Renames $From onto $To, replacing $To in one step: there is never a
+        moment with nothing at $To. Throws on failure. Both paths must be on one volume.
+
+    .DESCRIPTION
+        Move-Item -Force over an existing file DELETES the destination and then renames, on
+        PowerShell 5.1 and 7 alike: a swap loop saw the destination missing 4792 times in
+        60764 looks. A kill or a power cut between the two left the place of a photo empty,
+        with its verified replacement under a leftover name every later run ignores.
+        MoveFileEx(REPLACE_EXISTING) is one rename: [System.IO.File]::Move(a, b, $true) on
+        PowerShell 7, and Microsoft.VisualBasic's FileSystem.MoveFile(a, b, $true) -- which
+        calls MoveFileEx with that flag, and handles paths over 260 characters -- on 5.1,
+        where File.Move has no overwrite overload. 0 misses in 39766 looks.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Move-FileReplacing} = $using:MoveReplaceFnDef
+    #>
+    param([string]$From, [string]$To)
+
+    # [System.IO.File] resolves a relative path against the PROCESS directory, not $PWD
+    $From = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($From)
+    $To = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($To)
+    $move3 = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
+    if ($move3) {
+        [System.IO.File]::Move($From, $To, $true)
+        return
+    }
+    if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) { Add-Type -AssemblyName Microsoft.VisualBasic }
+    [Microsoft.VisualBasic.FileIO.FileSystem]::MoveFile($From, $To, $true)
+}
+
 # Capture function definitions once so they can be re-injected into -Parallel runspaces
 $script:MagickTimeoutFnDef = ${function:Invoke-MagickWithTimeout}.ToString()
 $script:MagickPathFnDef    = ${function:ConvertTo-MagickPathSpec}.ToString()
@@ -1819,6 +2113,11 @@ $script:RestoreSubfileFnDef = ${function:Restore-TiffSubfileTypes}.ToString()
 $script:ThumbMarkerFnDef   = ${function:Set-TiffThumbMarkers}.ToString()
 $script:ThumbSafeFnDef     = ${function:Test-ThumbnailSafeSource}.ToString()
 $script:HistoryFnDef       = ${function:Add-TiffHistoryEntry}.ToString()
+$script:SampleLayoutFnDef  = ${function:Get-TiffSampleLayout}.ToString()
+$script:KeepTypeFnDef      = ${function:Get-MagickKeepTypeArgs}.ToString()
+$script:LayoutKeptFnDef    = ${function:Test-TiffSampleLayoutKept}.ToString()
+$script:AssocAlphaFnDef    = ${function:Test-AssociatedAlphaRewritable}.ToString()
+$script:MoveReplaceFnDef   = ${function:Move-FileReplacing}.ToString()
 # xmpMM:History SoftwareAgent of every file this run rewrites (Add-TiffHistoryEntry). A plain
 # script-scope variable so the -Parallel blocks can read it with $using:historyAgent.
 $historyAgent = "tiff-workflow $script:ToolkitVersion ($script:ToolkitUrl)"
@@ -1928,6 +2227,19 @@ function Process-TiffJob {
         return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
     }
 
+    # Audit round 28: magick turned a neutral RGB file into a 1-channel gray one (and a
+    # neutral RGB+IR scan into a 2-sample one) and every gate said OK. The source layout
+    # picks the -type that keeps it and is the reference for the gate after the write.
+    $srcLayout = Get-TiffSampleLayout -Path $srcPath
+    if (-not $srcLayout.Ok) {
+        return @{ Result = "ERROR (sample layout unreadable) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+    }
+    $layoutPages = if ($generateThumb) { @($srcLayout.Pages[0]) } else { @($srcLayout.Pages) }
+    $typeArgs = @(Get-MagickKeepTypeArgs -Pages $layoutPages)
+    if (-not (Test-AssociatedAlphaRewritable -Path $srcPath -Pages $layoutPages -TimeoutSec $script:MagickTimeout)) {
+        return @{ Result = "ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+    }
+
     # When the output overwrites the input (in-place: no -StagingDir and no separate output
     # folder), the original is already gone by the time the EXIF restore below runs, so
     # `-tagsfromfile $srcPath` would read the freshly compressed file and silently return
@@ -1985,7 +2297,7 @@ function Process-TiffJob {
 
         try {
             # First: compress main image
-            $out = magick -quiet $mainPage -compress zip (ConvertTo-MagickPathSpec $tempTiff) 2>&1
+            $out = magick -quiet $mainPage -compress zip @typeArgs (ConvertTo-MagickPathSpec $tempTiff) 2>&1
             if ($LASTEXITCODE -ne 0) {
                 if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                 return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
@@ -2011,7 +2323,7 @@ function Process-TiffJob {
                 # a thumbnail-first file is read as multi-page by every classifier here.
                 # The two INPUTS stay literal on purpose -- a plain input is opened verbatim,
                 # and an escaped one would not be found.
-                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDstSpec 2>&1
+                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip @typeArgs $writeDstSpec 2>&1
                 if ($LASTEXITCODE -ne 0) {
                     # Fallback: just use compressed main
                     Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
@@ -2043,7 +2355,7 @@ function Process-TiffJob {
         # Normal compression (all pages or page 0).
         # The input stays literal (magick opens a plain path verbatim); the OUTPUT is escaped,
         # or a '%' in the name silently redirects it -- see ConvertTo-MagickPathSpec.
-        $out = magick -quiet $srcPath -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
+        $out = magick -quiet $srcPath -compress zip @typeArgs (ConvertTo-MagickPathSpec $writeDst) 2>&1
         if ($LASTEXITCODE -ne 0) {
             if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
             # Audit round 16: also drop the partial when writeDst IS finalDst (no staging) --
@@ -2059,20 +2371,35 @@ function Process-TiffJob {
         }
     }
 
+    # Audit round 28: the written file must have the source's sample layout, page for page
+    # (page 0 on the thumbnail path). The output is always this run's own file here.
+    if (-not (Test-TiffSampleLayoutKept -SrcPages $layoutPages -DstPath $writeDst -MainPageOnly:$generateThumb)) {
+        if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
+        Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+        return @{ Result = "ERROR (sample layout changed: $($layoutPages -join ' ') - output dropped, original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+    }
+
     $stagingName = [System.IO.Path]::GetFileName($writeDst)
     # Always restore metadata from the source (or the MIE backup for in-place writes).
     # The old EXIF:Make precheck skipped this whenever magick happened to keep Make --
     # while XMP/IPTC/GPS/ICC were silently dropped by the same rewrite.
     $argCopy = [System.IO.Path]::GetTempFileName()
     $copyOut = ""
-    $copyExit = 0
+    # Audit round 28: starts as a failure. The -Parallel twins had 0 here, and an exception
+    # in that block (no trap in a runspace) left it at 0: OK [SOURCE DELETED] with no EXIF.
+    $copyExit = 1
     try {
         $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
         # ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
         # exiftool gives when the tagsfromfile source could not be opened -- it still exits 0.
-        [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
+        # IPTC:CodedCharacterSet is not part of -all:all: without it UTF-8 IPTC text was
+        # written back as Latin, every Japanese character a '?' (audit round 28).
+        [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet`n-unsafe`n$writeDst`n")
         $copyOut = "$([System.IO.File]::ReadAllText($argCopy) | exiftool -@ - 2>&1)"
         $copyExit = $LASTEXITCODE
+    } catch {
+        $copyExit = 1
+        $copyOut = "$($_.Exception.Message)"
     } finally {
         Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
     }
@@ -2112,13 +2439,21 @@ function Process-TiffJob {
         }
     }
 
-    if ($inPlaceFinalDst) {
-        # Only a fully decoded, pixel-verified ZIP may replace the original; on any failure the
-        # temp sibling is dropped and the source stays untouched.
+    # Audit round 28: this output REPLACES the original when it is written in place (temp
+    # sibling) -- and also when it is staged (-StagingDir) for a destination that is the
+    # source itself (legacy, mode 2 with -OutputDir on the input root, mode 5 inside ZIP/).
+    # The gate used to key on the temp sibling alone, so with -StagingDir nothing was checked
+    # and the staging loop moved an unverified file over the only copy. Modes 0/9 keep the
+    # original in OLD_TIFFs/ and mode 8 has its own gate below.
+    $replacesSource = [bool]$inPlaceFinalDst -or ((($mode -lt 0) -or ($mode -ge 1 -and $mode -le 7)) -and ($finalDst -eq $srcPath))
+    if ($replacesSource) {
+        # Only a fully decoded, pixel-verified ZIP whose metadata was restored may replace the
+        # original; on any failure the new file is dropped and the source stays untouched.
         # Decode alone is not enough -- exactly the mode 8 reasoning: a page-short or truncated
-        # file still decodes cleanly, and in-place destroys the ONLY copy. Skipped when the
-        # thumbnail path ran, which legitimately rewrites page 0 and replaces the thumbnail.
-        $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $script:MagickTimeout
+        # file still decodes cleanly, and this destroys the ONLY copy. A failed metadata
+        # restore used to be a WARN here while the file without EXIF replaced the original.
+        $inPlaceOk = -not $exifWarn
+        if ($inPlaceOk) { $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $script:MagickTimeout }
         if ($inPlaceOk) {
             if ($generateThumb) {
                 # Used to be decode-only here, because whole-file identity cannot hold for a
@@ -2130,28 +2465,35 @@ function Process-TiffJob {
                 $inPlaceOk = Test-PixelIdentical -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $script:MagickTimeout
             }
         }
-        if ($inPlaceOk) {
+        if (-not $inPlaceOk) {
+            Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+            $why = if ($exifWarn) { "metadata restore failed" } else { "in-place verification failed" }
+            return @{ Result = "ERROR ($why - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+        }
+        if ($inPlaceFinalDst) {
             try {
-                Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst -Force -ErrorAction Stop
+                Move-FileReplacing -From $writeDst -To $inPlaceFinalDst
             } catch {
                 Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
                 return @{ Result = "ERROR (in-place replace failed) | $name | $($_.Exception.Message)"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
             }
-        } else {
-            Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
-            return @{ Result = "ERROR (in-place verification failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
         }
     }
 
     $canDeleteSource = $false
     $integrityFailed = $false
+    $integrityReason = ""
     if ($mode -eq 8) {
-        # Always verify in mode 8 -- including the [no thumb] and exiftool-WARN paths:
-        # the staged file overwrites the original, so an unverified ZIP must never move.
+        # Always verify in mode 8 -- including the [no thumb] path: the staged file
+        # overwrites the original, so an unverified ZIP must never move.
         # Decode-check alone is not enough (a truncated page still decodes): the staged
         # file must also be pixel-identical to the source it replaces.
+        # Audit round 28: and its metadata must have been restored -- a failed restore used to
+        # be a WARN while the file without EXIF replaced (or deleted) the original.
         $verifyTarget = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
-        $mode8Ok = (Test-ZipIntegrity -Path $verifyTarget -TimeoutSec $script:MagickTimeout) -and
+        if ($exifWarn) { $integrityReason = "metadata restore failed" }
+        $mode8Ok = (-not $exifWarn) -and
+                   (Test-ZipIntegrity -Path $verifyTarget -TimeoutSec $script:MagickTimeout) -and
                    (Test-Path -LiteralPath $srcPath)
         if ($mode8Ok) {
             if ($generateThumb) {
@@ -2195,6 +2537,7 @@ function Process-TiffJob {
         FinalDst = $finalDst
         CanDeleteSource = $canDeleteSource
         IntegrityFailed = $integrityFailed
+        IntegrityReason = $integrityReason
     }
 }
 
@@ -2296,6 +2639,11 @@ if ($Mode -lt 0) {
                     ${function:Set-TiffThumbMarkers}       = $using:ThumbMarkerFnDef
                     ${function:Add-TiffHistoryEntry}       = $using:HistoryFnDef
                     ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
+                    ${function:Get-TiffSampleLayout}        = $using:SampleLayoutFnDef
+                    ${function:Get-MagickKeepTypeArgs}      = $using:KeepTypeFnDef
+                    ${function:Test-TiffSampleLayoutKept}   = $using:LayoutKeptFnDef
+                    ${function:Test-AssociatedAlphaRewritable} = $using:AssocAlphaFnDef
+                    ${function:Move-FileReplacing}          = $using:MoveReplaceFnDef
                     $writeDirL = $using:writeDir
                     $finalDirL = $using:finalDir
                     $dryL      = $using:DryRun
@@ -2395,6 +2743,18 @@ if ($Mode -lt 0) {
 
                     if ($dryL) { return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src; FinalDst = $finalDst } }
 
+                    # Audit round 28: the source layout picks the -type that keeps it and is
+                    # the reference for the gate after the write (see the Process-TiffJob twin).
+                    $srcLayout = Get-TiffSampleLayout -Path $src
+                    if (-not $srcLayout.Ok) {
+                        return @{ Result = "ERROR (sample layout unreadable) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
+                    }
+                    $layoutPages = if ($genThumbL) { @($srcLayout.Pages[0]) } else { @($srcLayout.Pages) }
+                    $typeArgs = @(Get-MagickKeepTypeArgs -Pages $layoutPages)
+                    if (-not (Test-AssociatedAlphaRewritable -Path $src -Pages $layoutPages -TimeoutSec $magickTimeoutSec)) {
+                        return @{ Result = "ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
+                    }
+
                     # $noThumbNote accumulates the degraded outcome instead of returning early:
                     # returning here used to skip the EXIF restore block below, so a failed
                     # thumbnail produced a TIFF with no metadata on PS7 while the PS5 path
@@ -2436,7 +2796,7 @@ if ($Mode -lt 0) {
                         $thumbTemp = $thumbTempBase -replace '\.tmp$', ".$thumbExt"
                         $writeDstSpec = ConvertTo-MagickPathSpec $writeDst
                         try {
-                            $out = magick -quiet $mainPage -compress zip (ConvertTo-MagickPathSpec $tempTiff) 2>&1
+                            $out = magick -quiet $mainPage -compress zip @typeArgs (ConvertTo-MagickPathSpec $tempTiff) 2>&1
                             if ($LASTEXITCODE -ne 0) {
                                 if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                                 return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src }
@@ -2457,7 +2817,7 @@ if ($Mode -lt 0) {
                                 # Main image first, thumbnail after it (-ThumbPage 0 is refused at
                                 # startup). Both INPUTS stay literal: a plain input is opened
                                 # verbatim and an escaped one would not be found.
-                                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDstSpec 2>&1
+                                $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip @typeArgs $writeDstSpec 2>&1
                                 if ($LASTEXITCODE -ne 0) {
                                     Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
                                     $noThumbNote = " [no thumb]"
@@ -2484,9 +2844,16 @@ if ($Mode -lt 0) {
                         }
                     } else {
                         # Input literal, OUTPUT escaped -- see ConvertTo-MagickPathSpec.
-                        $out = magick -quiet $src -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
+                        $out = magick -quiet $src -compress zip @typeArgs (ConvertTo-MagickPathSpec $writeDst) 2>&1
                         if ($LASTEXITCODE -ne 0) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; if ($inPlaceFinalDst -or ($writeDst -eq $finalDst)) { Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
                         if (-not (Test-Path -LiteralPath $writeDst)) { if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }; return @{ Result = "ERROR (magick reported success but wrote no file) | $name | expected: $writeDst"; StagingName = $null; OriginalName = $name; SrcPath = $src } }
+                    }
+
+                    # Audit round 28: sample layout gate -- see the Process-TiffJob twin.
+                    if (-not (Test-TiffSampleLayoutKept -SrcPages $layoutPages -DstPath $writeDst -MainPageOnly:$genThumbL)) {
+                        if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
+                        Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                        return @{ Result = "ERROR (sample layout changed: $($layoutPages -join ' ') - output dropped, original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
                     }
 
                     # Always restore metadata from the source (or the MIE backup for in-place
@@ -2494,14 +2861,21 @@ if ($Mode -lt 0) {
                     # Make -- while XMP/IPTC/GPS/ICC were silently dropped by the rewrite.
                     $argCopy = [System.IO.Path]::GetTempFileName()
                     $copyOut = ""
-                    $copyExit = 0
+                    # Audit round 28: starts as a failure, and the catch keeps it one. With 0
+                    # here an exception (a runspace has no trap) left the file without EXIF
+                    # and the run said OK.
+                    $copyExit = 1
                     try {
                         $tagSource = if ($metaBackup) { $metaBackup } else { $src }
                         # ONE -q: the second suppresses the warning that is the only signal
                         # exiftool gives for an unreadable tagsfromfile source (it exits 0).
-                        [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
+                        # IPTC:CodedCharacterSet: see the Process-TiffJob twin.
+                        [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet`n-unsafe`n$writeDst`n")
                         $copyOut = "$([System.IO.File]::ReadAllText($argCopy) | exiftool -@ - 2>&1)"
                         $copyExit = $LASTEXITCODE
+                    } catch {
+                        $copyExit = 1
+                        $copyOut = "$($_.Exception.Message)"
                     } finally {
                         Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
                     }
@@ -2524,13 +2898,17 @@ if ($Mode -lt 0) {
                         $historyFailed = $true
                     }
 
-                    if ($inPlaceFinalDst) {
-                        # Only a fully decoded, pixel-verified ZIP may replace the original; on
-                        # any failure the temp sibling is dropped and the source stays untouched.
-                        # Decode alone is not enough -- same reasoning as mode 8: a page-short or
-                        # truncated file still decodes, and in-place destroys the ONLY copy.
-                        # Skipped for the thumbnail path, which legitimately rewrites the pages.
-                        $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeoutSec -LoadFactor $using:effectiveWorkersLegacy
+                    # Audit round 28: staged (-StagingDir) for the source's own place is a
+                    # replace too -- see the Process-TiffJob twin. Legacy writes no copies
+                    # beside the source unless -OutputDir sends them elsewhere.
+                    if ($inPlaceFinalDst -or ($finalDst -eq $src)) {
+                        # Only a fully decoded, pixel-verified ZIP whose metadata was restored
+                        # may replace the original; on any failure the new file is dropped and
+                        # the source stays untouched. Decode alone is not enough -- same
+                        # reasoning as mode 8: a page-short or truncated file still decodes, and
+                        # this destroys the ONLY copy.
+                        $inPlaceOk = -not $exifWarn
+                        if ($inPlaceOk) { $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeoutSec -LoadFactor $using:effectiveWorkersLegacy }
                         if ($inPlaceOk) {
                             if ($genThumbL) {
                                 # Used to be decode-only here: whole-file identity cannot hold for
@@ -2542,16 +2920,18 @@ if ($Mode -lt 0) {
                                 $inPlaceOk = Test-PixelIdentical -SrcPath $src -DstPath $writeDst -TimeoutSec $magickTimeoutSec -LoadFactor $using:effectiveWorkersLegacy
                             }
                         }
-                        if ($inPlaceOk) {
+                        if (-not $inPlaceOk) {
+                            Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                            $why = if ($exifWarn) { "metadata restore failed" } else { "in-place verification failed" }
+                            return @{ Result = "ERROR ($why - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
+                        }
+                        if ($inPlaceFinalDst) {
                             try {
-                                Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst -Force -ErrorAction Stop
+                                Move-FileReplacing -From $writeDst -To $inPlaceFinalDst
                             } catch {
                                 Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
                                 return @{ Result = "ERROR (in-place replace failed) | $name | $($_.Exception.Message)"; StagingName = $null; OriginalName = $name; SrcPath = $src }
                             }
-                        } else {
-                            Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
-                            return @{ Result = "ERROR (in-place verification failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $src }
                         }
                     }
 
@@ -2935,6 +3315,21 @@ foreach ($f in $files) {
         continue
     }
 
+    # Audit round 28: modes 1-7 write a COPY elsewhere. A folder name can still make the
+    # output resolve onto the source -- ExportZipSubfolder "TIFF" in mode 7, ZipSuffix
+    # "_TIFF" in mode 4, ZipSubfolderName "" -- and the original was replaced with no
+    # OLD_TIFFs, no -Overwrite and no question. Modes 1/3/4/6/7 never mean that; modes 2
+    # (-OutputDir on the input root) and 5 (a file already inside ZIP\) do when the user
+    # asked for it on the command line, but not when the settings overlay set the name.
+    if ($Mode -ge 1 -and $Mode -le 7 -and $finalDst -eq $f.FullName) {
+        $overlayNames = @($script:OverlayApplied | Where-Object { $_ -in @('ZipSuffix', 'ZipSubfolderName', 'ExportMarker', 'ExportZipSubfolder', 'ExportTiffSubfolder') })
+        if (($Mode -ne 2 -and $Mode -ne 5) -or $overlayNames.Count -gt 0) {
+            $why = if ($overlayNames.Count -gt 0) { "settings overlay: $($overlayNames -join ', ')" } else { "check -ZipSuffix / -ZipSubfolderName / -ExportZipSubfolder / -ExportTiffSubfolder" }
+            Process-Results @("ERROR (mode $Mode would write over its own source - refused; $why) | $($f.Name)")
+            continue
+        }
+    }
+
     # Windows refuses paths longer than 259 characters and magick.exe is not long-path
     # aware, so an over-long output path used to fail deep inside the worker with a bare
     # "No such file or directory" naming neither the cause nor the limit -- and in modes 0/9
@@ -3022,6 +3417,15 @@ foreach ($f in $files) {
     # Without this, two workers race on the same output file and one image is lost.
     if ($Mode -ne 2) {
         $dstKey = $finalDst.ToLowerInvariant()
+        # Audit round 28: when the earlier claimant IS the destination file (photo.tif, the
+        # output of an earlier run, next to the photo.tiff it came from), this output already
+        # exists: SKIP (exists), as the worker says when there is no collision. Renaming made
+        # mode 8 without -DeleteSource write photo_v2.tif, photo_v3.tif, ... on every run.
+        if (-not $Overwrite -and $claimedDst.ContainsKey($dstKey) -and
+            $claimedDst[$dstKey] -ne $f.FullName -and $claimedDst[$dstKey] -ieq $finalDst) {
+            Process-Results @("SKIP (exists) | $($f.Name)")
+            continue
+        }
         if ($claimedDst.ContainsKey($dstKey) -and $claimedDst[$dstKey] -ne $f.FullName) {
             $dstDir  = [System.IO.Path]::GetDirectoryName($finalDst)
             $dstStem = [System.IO.Path]::GetFileNameWithoutExtension($finalDst)
@@ -3291,6 +3695,11 @@ foreach ($group in $groupedTasks) {
             ${function:Set-TiffThumbMarkers}       = $using:ThumbMarkerFnDef
             ${function:Add-TiffHistoryEntry}       = $using:HistoryFnDef
             ${function:Test-ThumbnailSafeSource}    = $using:ThumbSafeFnDef
+            ${function:Get-TiffSampleLayout}        = $using:SampleLayoutFnDef
+            ${function:Get-MagickKeepTypeArgs}      = $using:KeepTypeFnDef
+            ${function:Test-TiffSampleLayoutKept}   = $using:LayoutKeptFnDef
+            ${function:Test-AssociatedAlphaRewritable} = $using:AssocAlphaFnDef
+            ${function:Move-FileReplacing}          = $using:MoveReplaceFnDef
             $srcPath = $t.Src
             $writeDst = $t.WriteDst
             $finalDst = $t.FinalDst
@@ -3391,6 +3800,18 @@ foreach ($group in $groupedTasks) {
                 return @{ Result = "DRY ($comp -> ZIP)$thumbNote | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
             }
 
+            # Audit round 28: the source layout picks the -type that keeps it and is the
+            # reference for the gate after the write (see the Process-TiffJob twin).
+            $srcLayout = Get-TiffSampleLayout -Path $srcPath
+            if (-not $srcLayout.Ok) {
+                return @{ Result = "ERROR (sample layout unreadable) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+            }
+            $layoutPages = if ($generateThumb) { @($srcLayout.Pages[0]) } else { @($srcLayout.Pages) }
+            $typeArgs = @(Get-MagickKeepTypeArgs -Pages $layoutPages)
+            if (-not (Test-AssociatedAlphaRewritable -Path $srcPath -Pages $layoutPages -TimeoutSec $magickTimeout)) {
+                return @{ Result = "ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+            }
+
             # In-place output destroys the original before the EXIF restore runs; park the
             # metadata in a temp MIE container first (see Backup-TiffMetadata).
             $metaBackupInfo = Backup-TiffMetadata -SrcPath $srcPath -WriteDst $writeDst
@@ -3432,7 +3853,7 @@ foreach ($group in $groupedTasks) {
                 $thumbTemp = $thumbTempBase -replace '\.tmp$', ".$thumbExt"
                 $writeDstSpec = ConvertTo-MagickPathSpec $writeDst
                 try {
-                    $out = magick -quiet $mainPage -compress zip (ConvertTo-MagickPathSpec $tempTiff) 2>&1
+                    $out = magick -quiet $mainPage -compress zip @typeArgs (ConvertTo-MagickPathSpec $tempTiff) 2>&1
                     if ($LASTEXITCODE -ne 0) {
                         if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                         return @{ Result = "ERROR (magick compress) | $name | $out"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
@@ -3453,7 +3874,7 @@ foreach ($group in $groupedTasks) {
                         # Main image first, thumbnail after it (-ThumbPage 0 is refused at
                         # startup). Both INPUTS stay literal: a plain input is opened verbatim
                         # and an escaped one would not be found.
-                        $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip $writeDstSpec 2>&1
+                        $out = magick -quiet $tempTiff "$thumbExt`:$thumbTemp" -compress zip @typeArgs $writeDstSpec 2>&1
                         if ($LASTEXITCODE -ne 0) {
                             Copy-Item -LiteralPath $tempTiff -Destination $writeDst -Force
                             $noThumbNote = " [no thumb]"
@@ -3481,7 +3902,7 @@ foreach ($group in $groupedTasks) {
             } else {
                 # Normal compression (all pages or page 0).
                 # Input literal, OUTPUT escaped -- see ConvertTo-MagickPathSpec.
-                $out = magick -quiet $srcPath -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
+                $out = magick -quiet $srcPath -compress zip @typeArgs (ConvertTo-MagickPathSpec $writeDst) 2>&1
                 if ($LASTEXITCODE -ne 0) {
                     if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
                     # Audit round 16: also drop the partial when writeDst IS finalDst (no
@@ -3496,20 +3917,35 @@ foreach ($group in $groupedTasks) {
                     return @{ Result = "ERROR (magick reported success but wrote no file) | $name | expected: $writeDst"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
                 }
             }
+
+            # Audit round 28: sample layout gate -- see the Process-TiffJob twin.
+            if (-not (Test-TiffSampleLayoutKept -SrcPages $layoutPages -DstPath $writeDst -MainPageOnly:$generateThumb)) {
+                if ($metaBackup) { Remove-Item -LiteralPath $metaBackup -Force -ErrorAction SilentlyContinue }
+                Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                return @{ Result = "ERROR (sample layout changed: $($layoutPages -join ' ') - output dropped, original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath; FinalDst = $finalDst }
+            }
+
             $stagingName = [System.IO.Path]::GetFileName($writeDst)
             # Always restore metadata from the source (or the MIE backup for in-place
             # writes). The old EXIF:Make precheck skipped this whenever magick kept
             # Make -- while XMP/IPTC/GPS/ICC were silently dropped by the rewrite.
             $argCopy = [System.IO.Path]::GetTempFileName()
             $copyOut = ""
-            $copyExit = 0
+            # Audit round 28: starts as a failure, and the catch keeps it one. With 0 here an
+            # exception (a runspace has no trap) left the file without EXIF, and mode 8 said
+            # OK [SOURCE DELETED] on PS7 where PS 5.1 stopped with FATAL.
+            $copyExit = 1
             try {
                 $tagSource = if ($metaBackup) { $metaBackup } else { $srcPath }
                 # ONE -q: the second suppresses the warning that is the only signal exiftool
                 # gives for an unreadable tagsfromfile source (it exits 0).
-                [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-unsafe`n$writeDst`n")
+                # IPTC:CodedCharacterSet: see the Process-TiffJob twin.
+                [System.IO.File]::WriteAllText($argCopy, "-charset`nfilename=utf8`n-q`n-overwrite_original`n-tagsfromfile`n$tagSource`n-all:all`n-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet`n-unsafe`n$writeDst`n")
                 $copyOut = "$([System.IO.File]::ReadAllText($argCopy) | exiftool -@ - 2>&1)"
                 $copyExit = $LASTEXITCODE
+            } catch {
+                $copyExit = 1
+                $copyOut = "$($_.Exception.Message)"
             } finally {
                 Remove-Item $argCopy -Force -ErrorAction SilentlyContinue
             }
@@ -3544,13 +3980,18 @@ foreach ($group in $groupedTasks) {
                 }
             }
 
-            if ($inPlaceFinalDst) {
-                # Only a fully decoded, verified ZIP may replace the original; on any failure the
-                # temp sibling is dropped and the source stays untouched. Decode alone is not
-                # enough -- a page-short or truncated file still decodes, and in-place destroys
-                # the ONLY copy. The thumbnail path legitimately rewrites the page layout, so it
-                # is verified against page 0 instead (see Test-ThumbOutputMatchesSource).
-                $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers
+            # Audit round 28: in place (temp sibling) OR staged for the source's own place --
+            # see the Process-TiffJob twin. Modes 0/9 keep the original, mode 8 gates below.
+            $replacesSource = [bool]$inPlaceFinalDst -or (($mode -ge 1 -and $mode -le 7) -and ($finalDst -eq $srcPath))
+            if ($replacesSource) {
+                # Only a fully decoded, verified ZIP whose metadata was restored may replace the
+                # original; on any failure the new file is dropped and the source stays
+                # untouched. Decode alone is not enough -- a page-short or truncated file still
+                # decodes, and this destroys the ONLY copy. The thumbnail path legitimately
+                # rewrites the page layout, so it is verified against page 0 instead (see
+                # Test-ThumbOutputMatchesSource).
+                $inPlaceOk = -not $exifWarn
+                if ($inPlaceOk) { $inPlaceOk = Test-ZipIntegrity -Path $writeDst -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers }
                 if ($inPlaceOk) {
                     if ($generateThumb) {
                         $expectedPages = if ($noThumbNote) { 1 } else { 2 }
@@ -3559,28 +4000,34 @@ foreach ($group in $groupedTasks) {
                         $inPlaceOk = Test-PixelIdentical -SrcPath $srcPath -DstPath $writeDst -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers
                     }
                 }
-                if ($inPlaceOk) {
+                if (-not $inPlaceOk) {
+                    Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                    $why = if ($exifWarn) { "metadata restore failed" } else { "in-place verification failed" }
+                    return @{ Result = "ERROR ($why - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
+                }
+                if ($inPlaceFinalDst) {
                     try {
-                        Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst -Force -ErrorAction Stop
+                        Move-FileReplacing -From $writeDst -To $inPlaceFinalDst
                     } catch {
                         Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
                         return @{ Result = "ERROR (in-place replace failed) | $name | $($_.Exception.Message)"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                     }
-                } else {
-                    Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
-                    return @{ Result = "ERROR (in-place verification failed - original untouched) | $name"; StagingName = $null; OriginalName = $name; SrcPath = $srcPath }
                 }
             }
 
             $canDeleteSource = $false
             $integrityFailed = $false
+            $integrityReason = ""
             if ($mode -eq 8) {
-                # Always verify in mode 8 -- including the [no thumb] and exiftool-WARN paths:
-                # the staged file overwrites the original, so an unverified ZIP must never move.
+                # Always verify in mode 8 -- including the [no thumb] path: the staged file
+                # overwrites the original, so an unverified ZIP must never move.
                 # Decode-check alone is not enough (a truncated page still decodes): the staged
-                # file must also be pixel-identical to the source it replaces.
+                # file must also be pixel-identical to the source it replaces -- and its
+                # metadata restored (audit round 28; see the Process-TiffJob twin).
                 $verifyPath = if ($writeDst -ne $srcPath) { $writeDst } else { $srcPath }
-                $mode8Ok = (Test-ZipIntegrity -Path $verifyPath -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers) -and
+                if ($exifWarn) { $integrityReason = "metadata restore failed" }
+                $mode8Ok = (-not $exifWarn) -and
+                           (Test-ZipIntegrity -Path $verifyPath -TimeoutSec $magickTimeout -LoadFactor $using:effectiveWorkers) -and
                            (Test-Path -LiteralPath $srcPath)
                 if ($mode8Ok) {
                     if ($generateThumb) {
@@ -3622,6 +4069,7 @@ foreach ($group in $groupedTasks) {
                 FinalDst = $finalDst
                 CanDeleteSource = $canDeleteSource
                 IntegrityFailed = $integrityFailed
+                IntegrityReason = $integrityReason
             }
         } -ThrottleLimit $effectiveWorkers
 
@@ -3637,7 +4085,7 @@ foreach ($group in $groupedTasks) {
             $resultText = $r.Result
             if ($r.IntegrityFailed) {
                 if ($r.FinalDst) { $integrityFailedDst.Add($r.FinalDst.ToLowerInvariant()) | Out-Null }
-                $resultText = "ERROR (ZIP integrity check failed - source preserved) | $($r.OriginalName)"
+                $resultText = "ERROR ($(if ($r.IntegrityReason) { $r.IntegrityReason } else { 'ZIP integrity check failed' }) - source preserved) | $($r.OriginalName)"
             }
             if ($r.FinalDst -and $collisionNotes.ContainsKey($r.FinalDst.ToLowerInvariant())) { $resultText += $collisionNotes[$r.FinalDst.ToLowerInvariant()] }
             Process-Results @($resultText)
@@ -3774,7 +4222,7 @@ foreach ($group in $groupedTasks) {
             $resultText = $result.Result
             if ($result.IntegrityFailed) {
                 $integrityFailedDst.Add($t.FinalDst.ToLowerInvariant()) | Out-Null
-                $resultText = "ERROR (ZIP integrity check failed - source preserved) | $($result.OriginalName)"
+                $resultText = "ERROR ($(if ($result.IntegrityReason) { $result.IntegrityReason } else { 'ZIP integrity check failed' }) - source preserved) | $($result.OriginalName)"
             }
             if ($result.FinalDst -and $collisionNotes.ContainsKey($result.FinalDst.ToLowerInvariant())) { $resultText += $collisionNotes[$result.FinalDst.ToLowerInvariant()] }
             Process-Results @($resultText)

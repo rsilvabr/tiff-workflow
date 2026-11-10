@@ -62,7 +62,72 @@ function Get-SettingsOverlay {
         }
         $result.Path = $path
         if (-not [System.IO.File]::Exists($path)) { return $result }
-        $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false))
+        # Audit round 28: the three readers (the wizard and PowerShell 5.1/7) must agree on what
+        # a bad file is, or the wizard plans with one value and the backend runs another.
+        # ConvertFrom-Json takes comments, trailing commas, single quotes, bare keys, 0x10 and
+        # 010 (7 reads it as octal), and ReadAllText took UTF-16 and turned ANSI bytes into
+        # U+FFFD; Python's json refuses all of them. So: strict UTF-8 (a UTF-8 BOM is allowed),
+        # then the JSON grammar Python's json.loads accepts, then ConvertFrom-Json.
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        if ($text.Length -gt 0 -and [int]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
+        function Skip-JsonSpace($st) {
+            while ($st.P -lt $st.T.Length) {
+                $c = [int]$st.T[$st.P]
+                if ($c -ne 32 -and $c -ne 9 -and $c -ne 10 -and $c -ne 13) { break }
+                $st.P++
+            }
+        }
+        function Read-JsonString($st) {
+            $m = $st.Str.Match($st.T, $st.P)
+            if (-not $m.Success) { throw "not valid JSON (a string at character $($st.P))" }
+            $st.P += $m.Length
+        }
+        function Read-JsonValue($st, [int]$depth) {
+            if ($depth -gt 64) { throw 'not valid JSON (nested too deeply)' }
+            Skip-JsonSpace $st
+            if ($st.P -ge $st.T.Length) { throw 'not valid JSON (it ends too early)' }
+            $c = [int]$st.T[$st.P]
+            if ($c -eq 123 -or $c -eq 91) {
+                $close = 93
+                if ($c -eq 123) { $close = 125 }
+                $st.P++
+                Skip-JsonSpace $st
+                if ($st.P -lt $st.T.Length -and [int]$st.T[$st.P] -eq $close) { $st.P++; return }
+                while ($true) {
+                    if ($c -eq 123) {
+                        Skip-JsonSpace $st
+                        Read-JsonString $st
+                        Skip-JsonSpace $st
+                        if ($st.P -ge $st.T.Length -or [int]$st.T[$st.P] -ne 58) { throw "not valid JSON (':' expected at character $($st.P))" }
+                        $st.P++
+                    }
+                    Read-JsonValue $st ($depth + 1)
+                    Skip-JsonSpace $st
+                    if ($st.P -ge $st.T.Length) { throw 'not valid JSON (it ends too early)' }
+                    $d = [int]$st.T[$st.P]
+                    $st.P++
+                    if ($d -eq $close) { return }
+                    if ($d -ne 44) { throw "not valid JSON (character $($st.P - 1))" }
+                }
+            }
+            if ($c -eq 34) { Read-JsonString $st; return }
+            foreach ($word in @('true', 'false', 'null', 'NaN', 'Infinity', '-Infinity')) {
+                if ([string]::CompareOrdinal($st.T, $st.P, $word, 0, $word.Length) -eq 0) { $st.P += $word.Length; return }
+            }
+            $m = $st.Num.Match($st.T, $st.P)
+            if (-not $m.Success) { throw "not valid JSON (character $($st.P))" }
+            $st.P += $m.Length
+        }
+        $st = @{
+            T = $text
+            P = 0
+            Str = [regex]::new('\G"(?:[^"\\\x00-\x1F]|\\["\\/bfnrt]|\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])*"')
+            Num = [regex]::new('\G-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?')
+        }
+        Read-JsonValue $st 0
+        Skip-JsonSpace $st
+        if ($st.P -lt $st.T.Length) { throw "not valid JSON (text after the end, character $($st.P))" }
         # PS 5.1 unrolls a root array into its elements: look at the text, not at the object
         $first = $text.TrimStart([char[]]@(0xFEFF, 32, 9, 13, 10))
         if ($first.Length -eq 0 -or $first[0] -ne [char]123) { throw 'not a JSON object' }
@@ -237,6 +302,13 @@ function Resolve-SrgbProfile {
 }
 
 $script:SrgbProfilePath = Resolve-SrgbProfile -Explicit $SrgbProfile
+# Audit round 28: an overlay path that does not exist must not stop the run (see
+# compress_tiff_zip.ps1): warn and auto-detect. A -SrgbProfile typed on the command line still fails.
+if ($SrgbProfile -and -not $script:SrgbProfilePath -and ($script:OverlayApplied -contains 'SrgbProfile')) {
+    Write-Log "WARN: settings overlay: SrgbProfile not found: $SrgbProfile; using the auto-detected profile" "WARN"
+    $SrgbProfile = ""
+    $script:SrgbProfilePath = Resolve-SrgbProfile -Explicit ""
+}
 if ($SrgbProfile -and -not $script:SrgbProfilePath) {
     Write-Log "ERROR: -SrgbProfile not found: $SrgbProfile" "ERROR"
     exit 1
@@ -525,6 +597,21 @@ if ($Remove) {
             $script:skipTotal++
             Write-Log "[$($script:counterTotal)/$($script:total)] DRY-RUN (would remove) | $($thumb.Name)"
             continue
+        }
+        # Audit round 28: a .tif named like a thumbnail can be a real photo (a 1200x800 16-bit
+        # "hitchhiker_thumb.tif" was deleted). This script never writes a thumbnail larger
+        # than -Size, so a bigger or unreadable TIFF is kept and reported -- fail closed.
+        if ($thumb.Extension -match '^(?i)\.tiff?$') {
+            $dims = @(& magick identify -ping -format "%w %h`n" "$(ConvertTo-MagickPathSpec $thumb.FullName)[0]" 2>$null)
+            $w = 0; $h = 0
+            $parts = "$(@($dims)[0])".Trim() -split '\s+'
+            $readOk = ($LASTEXITCODE -eq 0) -and ($parts.Count -ge 2) -and [int]::TryParse($parts[0], [ref]$w) -and [int]::TryParse($parts[1], [ref]$h)
+            if (-not $readOk -or [Math]::Max($w, $h) -gt $Size) {
+                $script:skipTotal++
+                $why = if ($readOk) { "${w}x${h} is larger than -Size $Size" } else { "size unreadable" }
+                Write-Log "[$($script:counterTotal)/$($script:total)] SKIP (not a thumbnail this script wrote: $why - kept) | $($thumb.Name)" "WARN"
+                continue
+            }
         }
         try {
             Remove-Item -LiteralPath $thumb.FullName -Force

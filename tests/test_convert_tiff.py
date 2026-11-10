@@ -16,6 +16,25 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import convert_tiff
+# audit round 28: the padded conversion and the purge gate also read the per-page sample
+# layout (exiftool -SamplesPerPixel ...) and the XMP/IPTC values (exiftool -j). Test doubles
+# that answer every exiftool call with "" have to answer those two as well.
+_FAKE_LAYOUT = ("[IFD0]  SamplesPerPixel: 3\n[IFD0]  PhotometricInterpretation: 2\n"
+                "[IFD0]  BitsPerSample: 16 16 16\n")
+
+
+def _fake_exiftool_round28(kwargs):
+    """The answer of a round-28 exiftool read, or None for any other call."""
+    data = kwargs.get("input") or b""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    if b"-SamplesPerPixel" in data:
+        return SimpleNamespace(returncode=0, stdout=_FAKE_LAYOUT, stderr="")
+    if b"\n-j\n" in data:
+        return SimpleNamespace(returncode=0, stdout='[{"SourceFile": "x"}]', stderr="")
+    return None
+
+
 from convert_tiff import (
     _format_size,
     truncate_path,
@@ -385,7 +404,7 @@ class TestCompressPaddedFiles:
             Path(cmd[-1]).write_bytes(b"z" * 100)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if cmd[0] == "exiftool":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return _fake_exiftool_round28(kwargs) or SimpleNamespace(returncode=0, stdout="", stderr="")
         if "null:" in cmd:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         if "identify" in cmd:
@@ -561,6 +580,8 @@ class TestComparePageCount:
 
     def test_matching_page_counts_pass(self, tmp_path, monkeypatch):
         def fake_run(cmd, **kwargs):
+            if cmd[0] == "exiftool" and _fake_exiftool_round28(kwargs):
+                return _fake_exiftool_round28(kwargs)
             fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
             if fmt == "%w %h":
                 return SimpleNamespace(returncode=0, stdout="100 100", stderr="")
@@ -729,7 +750,7 @@ class TestRestoreSubfileTypesHonored:
             return SimpleNamespace(returncode=0, stdout="", stderr="0 (0)")
         cmd = [str(c) for c in cmd]
         if cmd[0] == "exiftool":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return _fake_exiftool_round28(kwargs) or SimpleNamespace(returncode=0, stdout="", stderr="")
         if cmd[0] == "magick" and "-depth" in cmd:
             Path(cmd[-1]).write_bytes(b"z" * 100)
             return SimpleNamespace(returncode=0, stdout="", stderr="")

@@ -12,6 +12,117 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## Unreleased - Audit Round 28
+
+The bug sweep of 2026-11-11 (22 findings, `AI_tools/261111_Fable_review_bug-sweep.md`).
+
+### HIGH - A neutral RGB file came out as a 1-channel grayscale TIFF, and every gate said OK
+**Issue:** ImageMagick's TIFF writer picks the channel layout from the pixels. An RGB file whose
+every pixel has R=G=B (black-and-white film scanned in RGB, a B&W conversion exported as RGB)
+was written with ONE sample per pixel and the RGB ICC profile still embedded -- an invalid pair
+colour-managed programs reject or ignore. A VueScan RGB+IR scan in the same case came out with
+2 samples and half of every row lost (modes 0-7 and 9 said OK; 8 refused it). Every gate
+decodes through magick, where gray and neutral RGB are equal: in mode 8 the original was
+deleted, and the Delete OLD_TIFFs gate answered IDENTICAL. Every `magick -compress zip` of the
+toolkit had it: compress (all modes), copy_exif `-CompressZip`, the padded conversion.
+- **Fix:** the source layout (per page: colour class, samples, bits, alpha kind; exiftool) picks
+  the write options (`Get-MagickKeepTypeArgs`: `-type TrueColor`, `TrueColorAlpha`, and
+  `-define tiff:alpha=associated`, which also stops associated alpha turning unassociated), and
+  `Test-TiffSampleLayoutKept` checks the written file page for page before anything else -- a
+  neutral RGB page next to a gray IR page cannot be kept both ways and is refused, original
+  untouched. The same gate is the page-count check modes 0/9 and legacy never had (#12).
+  `-define colorspace:auto-grayscale=false` does not work on IM 7.1.2.
+- **Files:** `compress_tiff_zip.ps1` (3 workers), both copy_exif, `convert_tiff.py`,
+  `tests/test_round28_ps_backends.py` (both real neutral scans included)
+
+### HIGH - IPTC text outside Latin became `???` through the MIE container
+**Issue:** `-tagsfromfile ... -all:all` does not copy `IPTC:CodedCharacterSet`, so the MIE dump
+(a `%` anywhere in the path, or any in-place write) stored UTF-8 IPTC as Latin: `伊豆沼` became
+`???`, written over the good IPTC magick had kept. OK, exit 0; permanent in mode 8 and in place.
+- **Fix:** `-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet` after `-all:all` in the dump and in
+  every restore. Verified: UTF-8 kept, Latin IPTC without the tag kept, no IPTC created.
+- **Files:** `Backup-TiffMetadata` (3 copies), the restore of the 3 compress workers and both
+  copy_exif, `convert_tiff.py`
+
+### HIGH - copy_exif `-CompressZip -StagingDir` on another drive emptied the photo's place
+**Issue:** the move loop used `Move-Item -Force` from the staging folder onto the TIFF: it
+deletes the destination, then copies across drives into its name. A kill mid-copy left the
+place empty and the only copy in the staging folder under a run name; the log said `OK+ZIP`.
+- **Fix:** `Move-FileIntoPlace` (copy next to the destination, size check, one rename), ported
+  from compress; copy_exif discovery skips the temp names a killed run leaves.
+- **Files:** both copy_exif
+
+### MEDIUM - `Move-Item -Force` is not a swap even on one volume
+**Issue:** onto an existing file it deletes and then renames (PowerShell 5.1 and 7): a swap loop
+saw the destination missing 4792 times in 60764 looks. A kill in between left the place of a
+photo empty, the verified replacement under a leftover name every later run ignores.
+- **Fix:** `Move-FileReplacing`: MoveFileEx(REPLACE_EXISTING) -- `File.Move(a, b, $true)` on 7,
+  `Microsoft.VisualBasic.FileIO.FileSystem.MoveFile` on 5.1 (paths over 260 too). 0 misses.
+  Used by every in-place swap, `Move-FileIntoPlace` and `Complete-KeepOriginal`.
+
+### MEDIUM - A failed metadata restore let the file without EXIF replace the original
+**Issue:** in mode 8 and in place a failed restore was `WARN (exiftool failed, ZIP ok)` and the
+file without EXIF replaced (or deleted) the original, exit 0. On PS7 an exception in the
+`-Parallel` worker (no trap in a runspace) left `$copyExit` at its initial 0: `OK [SOURCE
+DELETED]` with no EXIF, where PS 5.1 stopped with FATAL.
+- **Fix:** `$copyExit` starts at 1 and a `catch` keeps it there; a failed restore blocks the
+  replace (`ERROR (metadata restore failed - original untouched)`) and mode 8
+  (`... - source preserved`). Modes 0/9 keep the original in OLD_TIFFs and stay a WARN.
+
+### MEDIUM - With `-StagingDir` the in-place gate was skipped
+**Issue:** the gate keyed on the temp sibling (`writeDst -eq srcPath`); with `-StagingDir` the
+write goes to staging, so legacy, mode 2 with `-OutputDir` on the root and mode 5 inside `ZIP\`
+moved an unchecked file over the original.
+- **Fix:** the gate keys on the destination: it runs whenever the output replaces the source.
+
+### MEDIUM - An overlay folder name turned a copy mode into an in-place replace
+**Issue:** `{"ExportZipSubfolder": "TIFF"}` made mode 7 write over `_EXPORT\TIFF\*.tif`,
+`{"ZipSuffix": "_TIFF"}` did it in mode 4: no OLD_TIFFs, no `-Overwrite`, no question.
+- **Fix:** modes 1/3/4/6/7 refuse an output that resolves onto its source; modes 2 and 5 keep
+  their verified in-place case only when the name did not come from the overlay.
+
+### LOW-MEDIUM - The PowerShell overlay readers accepted files the wizard refuses
+**Issue:** comments, trailing commas, single quotes, bare keys, `0x10`, `010` (octal on 7),
+UTF-16 and ANSI bytes: the wizard said "not read" and planned with the script value, the backend
+applied the file.
+- **Fix:** `Get-SettingsOverlay` (4 identical copies) decodes strict UTF-8 and checks the JSON
+  grammar Python's `json.loads` takes before `ConvertFrom-Json`; the wizard refuses the keys only
+  PowerShell refused (case-variant duplicates, `""`).
+
+### MEDIUM - The padded 16->8 conversion moved the original out before its replacement landed
+**Issue:** the original went to `OLD_PADDED/` first and the 8-bit file was then moved in from
+`%TEMP%` -- across drives a copy into the photo's name. A kill left the place empty, or holding
+a truncated file that still identified as 8-bit, and no tool reported it.
+- **Fix:** `_land_padded_conversion`: the converted file is brought next to the photo under a
+  leftover name (size-checked copy from another volume), the original gets a hard link in
+  `OLD_PADDED/`, and one `os.replace` swaps it in. No hard link on the drive: two renames.
+  Never `shutil.move` (on a locked file it copied the whole original into `OLD_PADDED/`).
+
+### MEDIUM - The Delete OLD_TIFFs gate did not see XMP or IPTC, nor a gray collapse
+- **Fix:** `_compare_tiff_metadata` compares every XMP and IPTC value (only `xmpMM:History`, and
+  the `XMPToolkit` exiftool adds to a file that had no XMP, are left out) and the sample layout.
+
+### LOW - Smaller ones
+- `tools/move_old_backups.py --folder OLD_TIFFs` moved a `name_v2.tif` whose place was empty:
+  `_vN` is a rename only in `OLD_PADDED`, the date stamp only in `OLD_TIFFs`.
+- AutoFind accepted a folder with `;` in its name, which the backend split into two other folders;
+  it is skipped with a warning. A relative folder was stored in a preset as typed (Task
+  Scheduler starts in System32); presets now store absolute paths.
+- `--run-preset` refused only the exact word `-DeleteSource`: any case, an abbreviation,
+  `-DeleteSource:$true` and mode 8 without the switch are refused unattended now.
+- Diagnose preset: `"convert_padded": "false"` converted; a failed conversion exited 0. Advanced
+  `-SrgbProfile` "auto for this run" was shown and not passed; the manifest collision check
+  repeated `_ZIP`/`ZIP` as literals; Diagnose took a path containing "padded" for a verdict.
+- A backup named `<stem>_yyyyMMdd_HHmmss.tif` is a collision copy only when `<stem>` itself is in
+  OLD_TIFFs; otherwise it is the photo's own name and is restored under it (was `Scan.tif`).
+- Mode 8 without `-DeleteSource`, `.tiff` source: the second run made `photo_v2.tif`, the third
+  `_v3`, ...; a claimant that is the destination file itself is now `SKIP (exists)`.
+- `generate_thumbnails.ps1 -Remove` deleted any TIFF named `*_thumb`; a TIFF larger than `-Size`
+  (or unreadable) is now kept and reported.
+- An overlay `SrgbProfile` that does not exist stopped every run; it now warns and auto-detects.
+- copy_exif `-AutoFind` matched its tool-output folders on the absolute path (round 14's shape):
+  nothing was found under a root below a `ZIP` or `_EXPORT` folder.
+
 ## v2.8.0 - Audit Round 27
 
 ### HIGH - Every exiftool call failed when `%TEMP%` held a character outside the ANSI code page

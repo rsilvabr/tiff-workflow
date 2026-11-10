@@ -64,7 +64,72 @@ function Get-SettingsOverlay {
         }
         $result.Path = $path
         if (-not [System.IO.File]::Exists($path)) { return $result }
-        $text = [System.IO.File]::ReadAllText($path, [System.Text.UTF8Encoding]::new($false))
+        # Audit round 28: the three readers (the wizard and PowerShell 5.1/7) must agree on what
+        # a bad file is, or the wizard plans with one value and the backend runs another.
+        # ConvertFrom-Json takes comments, trailing commas, single quotes, bare keys, 0x10 and
+        # 010 (7 reads it as octal), and ReadAllText took UTF-16 and turned ANSI bytes into
+        # U+FFFD; Python's json refuses all of them. So: strict UTF-8 (a UTF-8 BOM is allowed),
+        # then the JSON grammar Python's json.loads accepts, then ConvertFrom-Json.
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        $text = [System.Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+        if ($text.Length -gt 0 -and [int]$text[0] -eq 0xFEFF) { $text = $text.Substring(1) }
+        function Skip-JsonSpace($st) {
+            while ($st.P -lt $st.T.Length) {
+                $c = [int]$st.T[$st.P]
+                if ($c -ne 32 -and $c -ne 9 -and $c -ne 10 -and $c -ne 13) { break }
+                $st.P++
+            }
+        }
+        function Read-JsonString($st) {
+            $m = $st.Str.Match($st.T, $st.P)
+            if (-not $m.Success) { throw "not valid JSON (a string at character $($st.P))" }
+            $st.P += $m.Length
+        }
+        function Read-JsonValue($st, [int]$depth) {
+            if ($depth -gt 64) { throw 'not valid JSON (nested too deeply)' }
+            Skip-JsonSpace $st
+            if ($st.P -ge $st.T.Length) { throw 'not valid JSON (it ends too early)' }
+            $c = [int]$st.T[$st.P]
+            if ($c -eq 123 -or $c -eq 91) {
+                $close = 93
+                if ($c -eq 123) { $close = 125 }
+                $st.P++
+                Skip-JsonSpace $st
+                if ($st.P -lt $st.T.Length -and [int]$st.T[$st.P] -eq $close) { $st.P++; return }
+                while ($true) {
+                    if ($c -eq 123) {
+                        Skip-JsonSpace $st
+                        Read-JsonString $st
+                        Skip-JsonSpace $st
+                        if ($st.P -ge $st.T.Length -or [int]$st.T[$st.P] -ne 58) { throw "not valid JSON (':' expected at character $($st.P))" }
+                        $st.P++
+                    }
+                    Read-JsonValue $st ($depth + 1)
+                    Skip-JsonSpace $st
+                    if ($st.P -ge $st.T.Length) { throw 'not valid JSON (it ends too early)' }
+                    $d = [int]$st.T[$st.P]
+                    $st.P++
+                    if ($d -eq $close) { return }
+                    if ($d -ne 44) { throw "not valid JSON (character $($st.P - 1))" }
+                }
+            }
+            if ($c -eq 34) { Read-JsonString $st; return }
+            foreach ($word in @('true', 'false', 'null', 'NaN', 'Infinity', '-Infinity')) {
+                if ([string]::CompareOrdinal($st.T, $st.P, $word, 0, $word.Length) -eq 0) { $st.P += $word.Length; return }
+            }
+            $m = $st.Num.Match($st.T, $st.P)
+            if (-not $m.Success) { throw "not valid JSON (character $($st.P))" }
+            $st.P += $m.Length
+        }
+        $st = @{
+            T = $text
+            P = 0
+            Str = [regex]::new('\G"(?:[^"\\\x00-\x1F]|\\["\\/bfnrt]|\\u[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])*"')
+            Num = [regex]::new('\G-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?')
+        }
+        Read-JsonValue $st 0
+        Skip-JsonSpace $st
+        if ($st.P -lt $st.T.Length) { throw "not valid JSON (text after the end, character $($st.P))" }
         # PS 5.1 unrolls a root array into its elements: look at the text, not at the object
         $first = $text.TrimStart([char[]]@(0xFEFF, 32, 9, 13, 10))
         if ($first.Length -eq 0 -or $first[0] -ne [char]123) { throw 'not a JSON object' }
@@ -541,7 +606,7 @@ function Backup-TiffMetadata {
 
     $argMeta = [System.IO.Path]::GetTempFileName()
     try {
-        [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-o`n$metaBackup`n$SrcPath`n")
+        [System.IO.File]::WriteAllText($argMeta, "-charset`nfilename=utf8`n-q`n-q`n-all:all`n-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet`n-o`n$metaBackup`n$SrcPath`n")
         [System.IO.File]::ReadAllText($argMeta) | exiftool -@ - | Out-Null
         # A failed dump can still leave a PARTIAL container behind; remove it so nothing
         # downstream mistakes it for a complete backup.
@@ -620,6 +685,266 @@ function Test-TiffHasOnlySubfilePages {
         }
         $isReducedSize = ($mainW -gt 0 -and $mainH -gt 0 -and $w -gt 0 -and $h -gt 0 -and $w -lt $mainW -and $h -lt $mainH)
         if (-not $isReducedSize) { return $false }
+    }
+    return $true
+}
+
+function New-TempSiblingPath {
+    <#
+    .SYNOPSIS
+        A temporary name next to $Path (same folder, so same volume): <Path>.<run id>_<12 hex>.tif.
+        $script:leftoverNamePattern matches it, so a copy an interrupted run leaves behind is
+        never taken for a photo (nor for a stranded original).
+    #>
+    param([string]$Path)
+    return "$Path.$($script:runStagingId)_$([guid]::NewGuid().ToString('N').Substring(0, 12)).tif"
+}
+
+function Move-FileIntoPlace {
+    <#
+    .SYNOPSIS
+        Puts $From at $To so that $To is never a half-written file. Returns $null or an error.
+
+    .DESCRIPTION
+        Audit round 26. A move between two volumes is a copy then a delete, and Move-Item
+        -Force over an existing $To wrote the copy straight into it: a run killed mid-copy (a
+        cross-drive -StagingDir: mode 8 replacing an original, mode 9's staged output) left a
+        truncated file where the only copy of the image had been. jxl-photo's rule: the
+        irreversible step comes last, as an atomic rename on the destination volume. So a
+        file from another volume is first copied to a temp sibling of $To (size checked), and
+        only that sibling is renamed over $To. The source is removed after the rename.
+    #>
+    param([string]$From, [string]$To)
+    $fromRoot = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($From))
+    $toRoot   = [System.IO.Path]::GetPathRoot([System.IO.Path]::GetFullPath($To))
+    # Audit round 28: Move-FileReplacing, never Move-Item -Force -- that deletes $To first and
+    # renames after, so a kill in between left the place of the photo empty.
+    if ($fromRoot -ieq $toRoot) {
+        try {
+            Move-FileReplacing -From $From -To $To
+            return $null
+        } catch { return "move failed: $($_.Exception.Message)" }
+    }
+    $tmp = New-TempSiblingPath -Path $To
+    try {
+        $size = (Get-Item -LiteralPath $From).Length
+        Copy-Item -LiteralPath $From -Destination $tmp -ErrorAction Stop
+        if ((Get-Item -LiteralPath $tmp).Length -ne $size) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            return "size mismatch after copy"
+        }
+        Move-FileReplacing -From $tmp -To $To
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        return "copy failed: $($_.Exception.Message)"
+    }
+    Remove-Item -LiteralPath $From -Force -ErrorAction SilentlyContinue
+    return $null
+}
+
+function Move-FileReplacing {
+    <#
+    .SYNOPSIS
+        Audit round 28. Renames $From onto $To, replacing $To in one step: there is never a
+        moment with nothing at $To. Throws on failure. Both paths must be on one volume.
+
+    .DESCRIPTION
+        Move-Item -Force over an existing file DELETES the destination and then renames, on
+        PowerShell 5.1 and 7 alike: a swap loop saw the destination missing 4792 times in
+        60764 looks. A kill or a power cut between the two left the place of a photo empty,
+        with its verified replacement under a leftover name every later run ignores.
+        MoveFileEx(REPLACE_EXISTING) is one rename: [System.IO.File]::Move(a, b, $true) on
+        PowerShell 7, and Microsoft.VisualBasic's FileSystem.MoveFile(a, b, $true) -- which
+        calls MoveFileEx with that flag, and handles paths over 260 characters -- on 5.1,
+        where File.Move has no overwrite overload. 0 misses in 39766 looks.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Move-FileReplacing} = $using:MoveReplaceFnDef
+    #>
+    param([string]$From, [string]$To)
+
+    # [System.IO.File] resolves a relative path against the PROCESS directory, not $PWD
+    $From = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($From)
+    $To = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($To)
+    $move3 = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
+    if ($move3) {
+        [System.IO.File]::Move($From, $To, $true)
+        return
+    }
+    if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) { Add-Type -AssemblyName Microsoft.VisualBasic }
+    [Microsoft.VisualBasic.FileIO.FileSystem]::MoveFile($From, $To, $true)
+}
+
+function Get-TiffSampleLayout {
+    <#
+    .SYNOPSIS
+        Audit round 28. The sample layout of every page of a TIFF, read with exiftool:
+        @{ Ok = [bool]; Pages = [string[]] }, one "<class>/<spp>/<bits>/<alpha>" per IFD in
+        page order. class: gray (Photometric 0/1), rgb (2, and 6 = YCbCr, which decodes to
+        RGB), else "p<n>". alpha: the ExtraSamples values that are alpha (1 associated,
+        2 unassociated); 0 = unspecified (a scanner's IR channel) and an absent tag both count
+        as no alpha.
+
+    .DESCRIPTION
+        ImageMagick's TIFF writer picks the output layout from the PIXELS, not from the source
+        tags: an RGB file whose every pixel has R=G=B (black-and-white film scanned in RGB)
+        was written as a ONE-channel grayscale TIFF with the RGB ICC profile still embedded,
+        and a VueScan RGB+IR file in the same case came out with 2 samples and half of every
+        row lost. The pixel gates decode both files through magick, where gray and neutral RGB
+        are equal, so every one of them said OK. Get-MagickKeepTypeArgs stops the rewrite;
+        Test-TiffSampleLayoutKept is the gate that sees it when it happens anyway.
+        FAIL-CLOSED: any read or parse failure returns Ok = $false.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Get-TiffSampleLayout} = $using:SampleLayoutFnDef
+    #>
+    param([string]$Path)
+
+    $fail = @{ Ok = $false; Pages = @() }
+    $argRead = [System.IO.Path]::GetTempFileName()
+    try {
+        [System.IO.File]::WriteAllText($argRead, "-charset`nfilename=utf8`n-a`n-G1`n-s`n-s`n-n`n-SamplesPerPixel`n-PhotometricInterpretation`n-ExtraSamples`n-BitsPerSample`n$Path`n")
+        $readOut = @([System.IO.File]::ReadAllText($argRead) | exiftool -@ - 2>$null)
+        if ($LASTEXITCODE -ne 0) { return $fail }
+    } catch {
+        return $fail
+    } finally {
+        Remove-Item $argRead -Force -ErrorAction SilentlyContinue
+    }
+
+    $ifds = @{}
+    foreach ($line in $readOut) {
+        if ("$line" -match '^\[IFD(\d+)\]\s+(SamplesPerPixel|PhotometricInterpretation|ExtraSamples|BitsPerSample):\s*(.*?)\s*$') {
+            $i = [int]$Matches[1]
+            if (-not $ifds.ContainsKey($i)) { $ifds[$i] = @{} }
+            $ifds[$i][$Matches[2]] = $Matches[3]
+        }
+    }
+    $pages = @()
+    for ($i = 0; $ifds.ContainsKey($i); $i++) {
+        $t = $ifds[$i]
+        if (-not $t.ContainsKey('PhotometricInterpretation')) { return $fail }
+        $ph = "$($t['PhotometricInterpretation'])".Trim()
+        $class = "p$ph"
+        if ($ph -eq '0' -or $ph -eq '1') { $class = 'gray' }
+        elseif ($ph -eq '2' -or $ph -eq '6') { $class = 'rgb' }
+        $spp = '1'
+        if ($t.ContainsKey('SamplesPerPixel')) { $spp = "$($t['SamplesPerPixel'])".Trim() }
+        $bits = '1'
+        if ($t.ContainsKey('BitsPerSample')) { $bits = ("$($t['BitsPerSample'])".Trim() -split '\s+') -join ',' }
+        $alpha = @()
+        if ($t.ContainsKey('ExtraSamples')) {
+            foreach ($v in ("$($t['ExtraSamples'])".Trim() -split '\s+')) {
+                if ($v -eq '1' -or $v -eq '2') { $alpha += $v }
+            }
+        }
+        $pages += "$class/$spp/$bits/$($alpha -join ',')"
+    }
+    # A gap in the IFD numbering (or no IFD0 at all) is not a layout this can vouch for
+    if ($pages.Count -eq 0 -or $pages.Count -ne $ifds.Count) { return $fail }
+    return @{ Ok = $true; Pages = $pages }
+}
+
+function Get-MagickKeepTypeArgs {
+    <#
+    .SYNOPSIS
+        Audit round 28. The magick write options that keep the source's channel layout, from
+        Get-TiffSampleLayout pages: "-type TrueColor" when every page is RGB without alpha (a
+        scanner IR channel included: it comes back as ExtraSamples=0, samples unchanged),
+        "-type TrueColorAlpha" when every page is RGB with alpha, plus
+        "-define tiff:alpha=associated" when all that alpha is associated (magick writes it
+        back as unassociated otherwise). Anything else -- a gray page, a mixed file -- returns
+        no options: -type applies to every page of the write, so a gray IR page next to a
+        neutral RGB page cannot be kept both ways, and Test-TiffSampleLayoutKept refuses the
+        result instead. Callers wrap the call in @().
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Get-MagickKeepTypeArgs} = $using:KeepTypeFnDef
+    #>
+    param([string[]]$Pages)
+
+    if (-not $Pages -or $Pages.Count -eq 0) { return @() }
+    $withAlpha = 0
+    $associatedOnly = $true
+    foreach ($p in $Pages) {
+        $parts = "$p" -split '/'
+        if ($parts[0] -ne 'rgb') { return @() }
+        $alpha = ''
+        if ($parts.Count -ge 4) { $alpha = $parts[3] }
+        if ($alpha) {
+            $withAlpha++
+            foreach ($a in ($alpha -split ',')) { if ($a -ne '1') { $associatedOnly = $false } }
+        }
+    }
+    if ($withAlpha -eq 0) { return @('-type', 'TrueColor') }
+    if ($withAlpha -ne $Pages.Count) { return @() }
+    $typeArgs = @('-type', 'TrueColorAlpha')
+    if ($associatedOnly) { $typeArgs += @('-define', 'tiff:alpha=associated') }
+    return $typeArgs
+}
+
+function Test-AssociatedAlphaRewritable {
+    <#
+    .SYNOPSIS
+        Audit round 28. $false when a page of the source carries ASSOCIATED alpha and the image
+        is not fully opaque: ImageMagick un-premultiplies on read and re-premultiplies on write,
+        and the alpha samples come back changed (1791 of a real VueScan scan's), even with
+        -define tiff:alpha=associated. Neither the layout gate nor a pixel compare through magick
+        sees it, so such a file is refused. Opaque associated alpha comes back identical.
+        Unreadable fails CLOSED.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Test-AssociatedAlphaRewritable} = $using:AssocAlphaFnDef
+        (Invoke-MagickWithTimeout must be injected too.)
+    #>
+    param([string]$Path, [string[]]$Pages, [int]$TimeoutSec = 30)
+
+    $assoc = $false
+    foreach ($p in $Pages) {
+        $parts = "$p" -split '/'
+        if ($parts.Count -ge 4 -and (($parts[3] -split ',') -contains '1')) { $assoc = $true }
+    }
+    if (-not $assoc) { return $true }
+    $r = Invoke-MagickWithTimeout -Arguments @("identify", "-format", "%[opaque]`n", $Path) -TimeoutSec $TimeoutSec
+    if ($r.TimedOut -or $r.ExitCode -ne 0) { return $false }
+    $lines = @($r.Output | Where-Object { -not [string]::IsNullOrWhiteSpace("$_") })
+    if ($lines.Count -eq 0) { return $false }
+    foreach ($l in $lines) { if ("$l".Trim() -ne 'True') { return $false } }
+    return $true
+}
+
+function Test-TiffSampleLayoutKept {
+    <#
+    .SYNOPSIS
+        Audit round 28. $true only when $DstPath has the sample layout $SrcPages describe:
+        the same number of pages, and per page the same color class, samples per pixel, bits
+        per sample and alpha kind. -MainPageOnly compares page 0 alone (the -GenerateThumbnail
+        path builds a new page layout on purpose). Also the page-count gate of modes 0/9 and
+        legacy, which used to have none. Anything unreadable fails CLOSED.
+
+    .NOTES
+        Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
+        Re-inject into -Parallel runspaces with:
+            ${function:Test-TiffSampleLayoutKept} = $using:LayoutKeptFnDef
+        (Get-TiffSampleLayout must be injected too.)
+    #>
+    param([string[]]$SrcPages, [string]$DstPath, [switch]$MainPageOnly)
+
+    if (-not $SrcPages -or $SrcPages.Count -eq 0) { return $false }
+    $dst = Get-TiffSampleLayout -Path $DstPath
+    if (-not $dst.Ok) { return $false }
+    if ($MainPageOnly) { return ("$($dst.Pages[0])" -ceq "$($SrcPages[0])") }
+    if ($dst.Pages.Count -ne $SrcPages.Count) { return $false }
+    for ($i = 0; $i -lt $SrcPages.Count; $i++) {
+        if ("$($dst.Pages[$i])" -cne "$($SrcPages[$i])") { return $false }
     }
     return $true
 }
@@ -747,7 +1072,9 @@ function Invoke-S5ProFolder {
     $allFiles  = Get-ChildItem -LiteralPath $RootPath -File -Recurse:$IsRecurse
     # JPEG index is always built recursively so JPEG/JPG subfolders can be found by Find-JpegPair
     $jpgFiles  = Get-ChildItem -LiteralPath $RootPath -File -Recurse | Where-Object { $_.Extension -match '^\.(jpg|jpeg)$' }
-    $tiffFiles = @($allFiles | Where-Object { $_.Extension -match '^\.(tif|tiff)$' })
+    # Audit round 28: a temp sibling (<name>.<8 hex>_<12 hex>.tif) or a staged file a killed run
+    # left behind is not a photo -- the same names compress_tiff_zip.ps1 ignores.
+    $tiffFiles = @($allFiles | Where-Object { $_.Extension -match '^\.(tif|tiff)$' -and $_.Name -notmatch '(?i)^[0-9a-f]{8}_[0-9a-f]{12}_.+\.tiff?$|(?i)\.[0-9a-f]{8}_[0-9a-f]{12}\.tiff?$' })
 
     if ($script:excludeNames.Count -gt 0) {
         $beforeExclude = $tiffFiles.Count
@@ -1085,9 +1412,24 @@ function Invoke-S5ProFolder {
                 "OK+SKIP-ZIP (exists) | $($p.TifName)$rawSuffix"; continue
             }
 
+            # Audit round 28: magick turned a neutral RGB TIFF into a 1-channel gray one with
+            # the RGB profile still in it, and the pixel gate below cannot see that (it decodes
+            # both through magick). The source layout picks the -type that keeps it and is the
+            # reference for the layout gate after the write.
+            $srcLayout = Get-TiffSampleLayout -Path $tiffTarget
+            if (-not $srcLayout.Ok) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "ERROR (sample layout unreadable) | $($p.TifName)"; continue
+            }
+            $typeArgs = @(Get-MagickKeepTypeArgs -Pages $srcLayout.Pages)
+            if (-not (Test-AssociatedAlphaRewritable -Path $tiffTarget -Pages $srcLayout.Pages -TimeoutSec $magickTimeoutSec)) {
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | $($p.TifName)"; continue
+            }
+
             # Input literal, OUTPUT escaped: a '%' in the name sends the output somewhere
             # else while magick still exits 0 (see ConvertTo-MagickPathSpec).
-            $magickErr = magick -quiet $tiffTarget -compress zip (ConvertTo-MagickPathSpec $writeDst) 2>&1
+            $magickErr = magick -quiet $tiffTarget -compress zip @typeArgs (ConvertTo-MagickPathSpec $writeDst) 2>&1
             $zipFailed = ($LASTEXITCODE -ne 0)
             if (-not $zipFailed -and -not (Test-Path -LiteralPath $writeDst)) {
                 # Exit 0 with no file: the staged ZIP never landed, so there is nothing to move
@@ -1106,6 +1448,11 @@ function Invoke-S5ProFolder {
             # pixel-identical first. A zero exit from magick is not proof: a page-short or
             # truncated file still exits 0 and still decodes. Same fail-closed gate that
             # compress_tiff_zip.ps1 requires before a mode 8 delete.
+            if (-not (Test-TiffSampleLayoutKept -SrcPages $srcLayout.Pages -DstPath $writeDst)) {
+                Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
+                if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
+                "ERROR (sample layout changed: $($srcLayout.Pages -join ' ') - original untouched) | $($p.TifName)"; continue
+            }
             if (-not (Test-PixelIdentical -SrcPath $tiffTarget -DstPath $writeDst -TimeoutSec $magickTimeoutSec)) {
                 Remove-Item -LiteralPath $writeDst -Force -ErrorAction SilentlyContinue
                 if ($tiffCopied) { Remove-Item -LiteralPath $destTiff -Force -ErrorAction SilentlyContinue }
@@ -1121,7 +1468,9 @@ function Invoke-S5ProFolder {
             $restoreExit = 1
             if (-not ($tiffMeta.Needed -and -not $tiffMeta.Path)) {
                 # ONE -q: the second hides the unreadable-source warning (exiftool exits 0 anyway).
-                $restoreRes = Invoke-ExifTool -Arguments @('-q','-overwrite_original','-tagsfromfile',$tiffTagSource,'-all:all','-unsafe',$writeDst) -MergeStderr
+                # IPTC:CodedCharacterSet is not part of -all:all: without it UTF-8 IPTC text came
+                # back as '?' (audit round 28).
+                $restoreRes = Invoke-ExifTool -Arguments @('-q','-overwrite_original','-tagsfromfile',$tiffTagSource,'-all:all','-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet','-unsafe',$writeDst) -MergeStderr
                 $restoreOut = "$($restoreRes.Output)"
                 $restoreExit = $restoreRes.ExitCode
                 if ($restoreOut -match 'Error opening file') { $restoreExit = 1 }
@@ -1174,7 +1523,12 @@ function Invoke-S5ProFolder {
                         $origMtime = $null
                         try { $origMtime = (Get-Item -LiteralPath $tif.FullName).LastWriteTime } catch { }
                         $stageSize = (Get-Item -LiteralPath $stagePath).Length
-                        Move-Item -Force -LiteralPath $stagePath -Destination $destPath -ErrorAction Stop
+                        # Audit round 28: Move-Item -Force deletes the destination first, and
+                        # from another drive (-StagingDir) it then COPIES into the photo's name:
+                        # a kill mid-copy left the place empty, the only copy in the staging
+                        # folder. Move-FileIntoPlace copies next to it and swaps with one rename.
+                        $mvErr = Move-FileIntoPlace -From $stagePath -To $destPath
+                        if ($mvErr) { throw $mvErr }
                         if ((Test-Path -LiteralPath $destPath) -and ((Get-Item -LiteralPath $destPath).Length -eq $stageSize)) {
                             # The staged ZIP is a new file with "now" as mtime; the plain
                             # EXIF-only path preserves the source date via exiftool -P, so
@@ -1270,8 +1624,11 @@ foreach ($root in $inputDirs) {
         # Escape the pattern: -like is a WILDCARD match, so a '[' in a folder name would be
         # parsed as a character class and never match the literal folder.
         $folderPatternEsc = [System.Management.Automation.WildcardPattern]::Escape($FolderPattern)
+        # Audit round 28: the tool-output folders are matched as segments BELOW the root (round
+        # 14's rule, Test-PathExcluded). The absolute-path -notlike found nothing at all under a
+        # root that itself sat below a ZIP or _EXPORT folder.
         $matchingFolders = Get-ChildItem -LiteralPath $root -Directory -Recurse |
-                           Where-Object { $_.Name -like "*$folderPatternEsc*" -and $_.FullName -notlike "*\Logs\*" -and $_.FullName -notlike "*\OLD_TIFFs\*" -and $_.FullName -notlike "*\ZIP\*" -and $_.FullName -notlike "*\_EXPORT\*" -and $_.FullName -notlike "*\converted_zip\*" }
+                           Where-Object { $_.Name -like "*$folderPatternEsc*" -and -not (Test-PathExcluded -Directory $_.FullName -Root $root -Names @('Logs', 'OLD_TIFFs', 'ZIP', '_EXPORT', 'converted_zip')) }
 
         if ($matchingFolders.Count -eq 0) {
             Write-Log "No folders matching '$FolderPattern' found in: $root" "WARN"

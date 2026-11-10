@@ -20,8 +20,16 @@ OLD_TIFFs before writing its compressed copy; a run killed in between left 365 o
 there with nothing in their place, and on 2026-10-17 this script moved them to H:\ as if
 they were leftovers. "Its place" is the parent folder of OLD_*: the same name, the other
 TIFF extension (.tif/.tiff), and the base name of a renamed backup (name_v2.tif from the
-padded conversion, name_20260803_081300.tif from compress). Run
-`compress_tiff_zip.ps1 -RestoreStranded` on such a folder first.
+padded conversion, name_20260803_081300.tif from compress). Put an OLD_TIFFs one back with
+`compress_tiff_zip.ps1 -RestoreStranded` (or the wizard's Restore OLD_TIFFs); an OLD_PADDED
+one by hand -- move it back into the folder above OLD_PADDED (neither knows OLD_PADDED).
+
+Audit round 28: a name counts as RENAMED only in the folder whose writer makes that rename
+(_vN in OLD_PADDED, the date stamp in OLD_TIFFs) and only when the backup it collided with,
+<base>.tif/.tiff, is in the same folder -- the only case in which either writer renames.
+Otherwise the suffix is part of the photo's own name: OLD_TIFFs\portrait_v2.tif, or
+IMG_20190815_143000.tif from a phone, with nothing in its place but an unrelated
+portrait.tif / IMG.tif next to it, was moved off the disk as a spare copy.
 """
 import argparse
 import hashlib
@@ -39,8 +47,25 @@ DEFAULT_DESTS = {
     "OLD_TIFFs": "H:\\OLD_TIFFS_BCK",
 }
 TIFF_EXTS = (".tif", ".tiff")
-# Renamed backups: name_v2 (padded conversion), name_20260803_081300[_1] (compress modes 0/9)
-_RENAMED = re.compile(r"^(?P<base>.+?)(?:_v\d+|_\d{8}_\d{6}(?:_\d+)?)$")
+# Renamed backups, per folder: name_v2 (padded conversion, OLD_PADDED), name_20260803_081300[_1]
+# (compress modes 0/9, OLD_TIFFs). Keys are upper-case folder names.
+_RENAMED = {
+    "OLD_PADDED": re.compile(r"^(?P<base>.+)_v\d+$"),
+    "OLD_TIFFS": re.compile(r"^(?P<base>.+)_\d{8}_\d{6}(?:_\d+)?$"),
+}
+
+
+def _renamed_base(backup: Path):
+    """The base name a renamed backup was made from, or None (see the module docstring:
+    the folder's own rename, and only next to the backup it collided with)."""
+    rx = _RENAMED.get(backup.parent.name.upper())
+    m = rx.match(backup.stem) if rx else None
+    if not m:
+        return None
+    base = m["base"]
+    if any(os.path.exists(_long(backup.parent / f"{base}{e}")) for e in TIFF_EXTS):
+        return base
+    return None
 
 
 def _long(p: Path) -> str:
@@ -68,9 +93,9 @@ def counterparts(backup: Path):
     if ext not in TIFF_EXTS:
         return [parent / backup.name]
     stems = [backup.stem]
-    m = _RENAMED.match(backup.stem)
-    if m:
-        stems.append(m["base"])
+    base = _renamed_base(backup)
+    if base:
+        stems.append(base)
     return [parent / f"{s}{e}" for s in stems for e in TIFF_EXTS]
 
 
@@ -120,7 +145,10 @@ def main(argv=None) -> int:
     found = find(source, roots, folder)
     only_copies = [j for j in found if place_is_empty(j)]
     kept = set(only_copies)
-    jobs = [j for j in found if j not in kept]
+    # Renamed copies first: each is re-checked right before its move, and its base backup
+    # (moved in the same run) is what makes it a renamed copy.
+    jobs = sorted((j for j in found if j not in kept),
+                  key=lambda j: (_renamed_base(j) is None, str(j)))
     total_bytes = sum(os.path.getsize(_long(j)) for j in jobs)
     print(f"Found {len(found)} file(s) in {len({j.parent for j in found})} {folder} folder(s); "
           f"{len(jobs)} to move, {total_bytes / 2**30:.1f} GB", flush=True)
@@ -131,7 +159,12 @@ def main(argv=None) -> int:
             print(f"  {j}")
         if len(only_copies) > 40:
             print(f"  ... and {len(only_copies) - 40} more")
-        print("Put them back first (compress_tiff_zip.ps1 -RestoreStranded, or by hand).\n")
+        if folder.upper() == "OLD_PADDED":
+            # -RestoreStranded and the wizard's Restore only know OLD_TIFFs (audit round 28).
+            print("Put them back first: move each one by hand into the folder above OLD_PADDED.\n")
+        else:
+            print("Put them back first (compress_tiff_zip.ps1 -RestoreStranded, the wizard's "
+                  "Restore OLD_TIFFs, or by hand).\n")
     if not a.go:
         for j in jobs[:15]:
             print(f"  {j}  ->  {dest / j.relative_to(source)}")

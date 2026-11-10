@@ -60,6 +60,8 @@ gitignored). If one exists:
   on the same volume, and the swap is a rename: modes 0/9 land through
   `Complete-KeepOriginal` (never move originals while planning again), every staging loop
   through `Move-FileIntoPlace` (never `Move-Item -Force` from another drive onto a file).
+  The rename itself is `Move-FileReplacing` (MoveFileEx REPLACE_EXISTING): `Move-Item -Force`
+  onto an existing file DELETES it first and renames after, even on one volume (round 28).
   Every run reports originals left in `OLD_TIFFs/` with nothing in their place
   (`Find-StrandedOriginals`); never delete or move an `OLD_TIFFs` backup whose place is
   empty (`tools/move_old_backups.py`, the wizard's Delete OLD_TIFFs).
@@ -105,6 +107,14 @@ gitignored). If one exists:
   (`zipzip`); read `exiftool -IFD0:Compression` instead. `%[tiff:subfiletype]`
   is empty both when absent and when 0 -- use `exiftool -a -G1 -s -s -n
   -SubfileType` when the difference matters.
+- **magick picks the output channel layout from the PIXELS** (round 28): an RGB file whose
+  every pixel is R=G=B comes out as 1-channel gray (RGB+IR as 2 samples), with the RGB ICC
+  still in it, and every pixel compare says identical. Every rewrite passes
+  `Get-MagickKeepTypeArgs` (`-type TrueColor`/`TrueColorAlpha`) and is checked by
+  `Test-TiffSampleLayoutKept`; `-define colorspace:auto-grayscale=false` does NOT help.
+- **`-tagsfromfile ... -all:all` does not copy `IPTC:CodedCharacterSet`** (round 28): into a
+  file (or the MIE container) without it, UTF-8 IPTC text is written as Latin, Japanese as
+  `?`. Add `-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet` after `-all:all`.
 - **PS5 cannot bind `-Switch:$false` through `-File`**: the switch arrives as a
   string and stays ON. Route PS5 through `_wrap_ps5_command` (tests:
   `run_ps_switched`).

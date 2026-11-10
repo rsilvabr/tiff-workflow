@@ -29,14 +29,21 @@ def library(tmp_path):
         "healthy": put(old / "a.tif", b"orig-a"),             # a.tif in place
         "only": put(old / "b.tif", b"orig-b"),                # nothing in place
         "tiffext": put(old / "c.tiff", b"orig-c"),            # c.tif in place
+        # round 28: a stamp is a rename only next to the backup it collided with
+        "stamped_first": put(old / "d.tif", b"orig-d"),        # d.tif in place
         "stamped": put(old / "d_20260803_081300.tif", b"d"),  # d.tif in place
         "stamped_only": put(old / "e_20260803_081300.tif", b"e"),
+        # round 28: its OWN name has the stamp; an unrelated f.tif sits in the parent
+        "stamped_own_name": put(old / "f_20260803_081300.tif", b"f"),
+        # round 28: _v2 is not a rename compress makes; an unrelated g.tif in the parent
+        "v2_in_old_tiffs": put(old / "g_v2.tif", b"g"),
         "sidecar": put(old / "a.xmp", b"<x/>"),               # a.xmp in place
         "sidecar_only": put(old / "z.xmp", b"<z/>"),
     }
-    for n in ("a.tif", "c.tif", "d.tif", "a.xmp"):
+    for n in ("a.tif", "c.tif", "d.tif", "f.tif", "g.tif", "a.xmp"):
         put(cam / n, b"zip-" + n.encode())
     padded = cam / "OLD_PADDED"
+    put(padded / "p.tif", b"p1")                                # the backup p_v2 collided with
     f["v2"] = put(padded / "p_v2.tif", b"p2")                  # p.tif in place
     put(cam / "p.tif", b"p8")
     return src, cam, f
@@ -52,6 +59,8 @@ def test_place_is_empty_rules(library):
     assert not mop.place_is_empty(f["sidecar"])
     assert mop.place_is_empty(f["sidecar_only"])
     assert not mop.place_is_empty(f["v2"])
+    assert mop.place_is_empty(f["stamped_own_name"])
+    assert mop.place_is_empty(f["v2_in_old_tiffs"])
 
 
 def test_folder_is_required_and_picks_its_own_destination(library, monkeypatch, capsys):
@@ -74,7 +83,7 @@ def test_dry_run_lists_the_only_copies_and_moves_nothing(library, tmp_path, caps
                    "--dest", str(tmp_path / "H")])
     out = capsys.readouterr().out
     assert rc == 1                      # something needs the owner's attention
-    assert "KEPT: 3 backup(s) have NOTHING in their original place" in out
+    assert "KEPT: 5 backup(s) have NOTHING in their original place" in out
     assert all(p.exists() for p in f.values())
     assert not (tmp_path / "H").exists()
 
@@ -86,13 +95,13 @@ def test_go_moves_only_backups_whose_original_is_in_place(library, tmp_path, cap
                    "--dest", str(dest), "--go"])
     out = capsys.readouterr().out
     assert rc == 1
-    for k in ("only", "stamped_only", "sidecar_only"):
+    for k in ("only", "stamped_only", "sidecar_only", "stamped_own_name", "v2_in_old_tiffs"):
         assert f[k].exists(), k                       # the only copies stay on the disk
         assert not (dest / f[k].relative_to(src)).exists()
-    for k in ("healthy", "tiffext", "stamped", "sidecar"):
+    for k in ("healthy", "tiffext", "stamped_first", "stamped", "sidecar"):
         assert not f[k].exists(), k
-        assert (dest / f[k].relative_to(src)).read_bytes() in (b"orig-a", b"orig-c", b"d", b"<x/>")
-    assert "3 kept (only copy)" in out
+        assert (dest / f[k].relative_to(src)).read_bytes() in (b"orig-a", b"orig-c", b"orig-d", b"d", b"<x/>")
+    assert "5 kept (only copy)" in out
     assert f["v2"].exists()                           # another folder name: not touched
 
 

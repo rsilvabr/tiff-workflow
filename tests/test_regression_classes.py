@@ -33,6 +33,25 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+
+# audit round 28: the padded conversion and the purge gate also read the per-page sample
+# layout (exiftool -SamplesPerPixel ...) and the XMP/IPTC values (exiftool -j). Test doubles
+# that answer every exiftool call with "" answer those two here: one RGB page, no XMP/IPTC.
+def _fake_round28_exiftool(cmd, kwargs):
+    if not cmd or str(cmd[0]) != "exiftool":
+        return None
+    data = kwargs.get("input") or b""
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    if b"-SamplesPerPixel" in data:
+        return SimpleNamespace(returncode=0, stderr="", stdout=(
+            "[IFD0]  SamplesPerPixel: 3\n[IFD0]  PhotometricInterpretation: 2\n"
+            "[IFD0]  BitsPerSample: 16 16 16\n"))
+    if b"\n-j\n" in data:
+        return SimpleNamespace(returncode=0, stdout='[{"SourceFile": "x"}]', stderr="")
+    return None
+
+
 import convert_tiff
 from convert_tiff import (
     ToolConfig,
@@ -755,6 +774,9 @@ class TestFailClosedGates:
                       pages_old=PAGES_OK, pages_new=PAGES_OK, calls=None):
         """Old and new are told apart by filename, so each side can be made unreadable."""
         def fake_run(cmd, **kwargs):
+            r28 = _fake_round28_exiftool(cmd, kwargs)
+            if r28:
+                return r28
             cmd = [str(c) for c in cmd]
             if calls is not None:
                 calls.append(cmd)
@@ -818,7 +840,7 @@ class TestFailClosedGates:
         def fake_run(cmd, **kwargs):
             cmd = [str(c) for c in cmd]
             if cmd[0] == "exiftool":
-                return SimpleNamespace(returncode=0, stdout="", stderr="")
+                return _fake_round28_exiftool(cmd, kwargs) or SimpleNamespace(returncode=0, stdout="", stderr="")
             if "compare" in cmd:
                 return compare
             if "-depth" in cmd:
@@ -988,7 +1010,9 @@ class TestPs5Ps7Parity:
         # 3, not 2, for the same reason the count above is 3: the mode >= 0 -Parallel worker
         # is an in-place worker too now. These two assertions were left behind when the first
         # one was raised.
-        assert source.count("Move-Item -LiteralPath $writeDst -Destination $inPlaceFinalDst") == 3
+        # audit round 28: one MoveFileEx(REPLACE_EXISTING) rename, not Move-Item -Force (which
+        # deletes the original first and renames after)
+        assert source.count("Move-FileReplacing -From $writeDst -To $inPlaceFinalDst") == 3
         # Decode alone is not enough before replacing the ONLY copy: a page-short file still
         # decodes cleanly (that is how -GenerateThumbnail silently dropped a scanner IR page
         # in place). Every in-place worker must pixel-compare too, like mode 8 does.
@@ -2008,6 +2032,9 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         (folder / "img.tif").write_bytes(b"tiffdata")
 
         def fake_run(cmd, **kwargs):
+            r28 = _fake_round28_exiftool(cmd, kwargs)
+            if r28:
+                return r28
             cmd = [str(a) for a in cmd]
             if "compare" in cmd:
                 return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
@@ -3100,6 +3127,9 @@ class TestAuditRound16PurgeMetadataGate:
     @staticmethod
     def _fake_run(subfile_by_name):
         def fake_run(cmd, **kwargs):
+            r28 = _fake_round28_exiftool(cmd, kwargs)
+            if r28:
+                return r28
             cmd = [str(a) for a in cmd]
             if cmd[0] == "exiftool" and "-@" in cmd:
                 # _run_exiftool sends everything as a UTF-8 argfile on stdin (`-@ -`); read it back

@@ -57,7 +57,8 @@ def tree(tmp_path):
     a.tif  -- STRANDED: only OLD_TIFFs/a.tif exists
     b.tif  -- healthy: compressed b.tif in place + its backup
     c      -- two backups claim c.tif (c.tif + a timestamped namesake), none in place
-    d      -- timestamped backup whose base d.tif is in place: healthy
+    d      -- timestamped backup whose base d.tif is in place: healthy (round 28: the stamp is
+              a collision rename only next to OLD_TIFFs/d.tif, the backup it collided with)
     e      -- .tiff backup whose output was written as e.tif: healthy
     OLD_TIFFs/OLD_TIFFs/z.tif -- a backup of a backup: never reported
     """
@@ -70,6 +71,7 @@ def tree(tmp_path):
     tiff(old / "c.tif", seed=3)
     tiff(old / "c_20260803_081300.tif", seed=4)
     tiff(cam / "d.tif", compressed=True, seed=5)
+    tiff(old / "d.tif", seed=5)
     tiff(old / "d_20260803_081300.tif", seed=5)
     tiff(cam / "e.tif", compressed=True, seed=6)
     tiff(old / "e.tiff", seed=6)
@@ -110,7 +112,7 @@ def test_restore_puts_them_back_and_this_run_compresses_them(tree, tmp_path, she
     assert not (cam / "c.tif").exists()
     assert "more than one backup claims" in out
     # the healthy backups and the nested one are untouched
-    for n in ("b.tif", "d_20260803_081300.tif", "e.tiff"):
+    for n in ("b.tif", "d.tif", "d_20260803_081300.tif", "e.tiff"):
         assert (old / n).exists()
     assert (old / "OLD_TIFFs" / "z.tif").exists()
     assert "1 restored" in out
