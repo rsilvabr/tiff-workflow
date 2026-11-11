@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -55,6 +56,11 @@ class FakeTools:
         self.meta = "auto"            # "auto" = what backup_tiff_metadata would decide
         self.magick_rc = 0
         self.magick_writes = True
+        # one entry per magick call, in order, for a test that needs the calls to differ:
+        # "ok", "fail" (exit 1, nothing written), "nofile" (exit 0, nothing written) or an
+        # exception to raise. When it runs out, magick_rc / magick_writes answer.
+        self.magick_plan = []
+        self.thumb_markers = True
         self.exif_result = (0, "")
         self.subfile_restore = True
         self.history = True
@@ -75,7 +81,7 @@ class FakeTools:
         m.setattr(tw, "magick_run", self._magick_run)
         m.setattr(tw, "exiftool", self._exiftool)
         m.setattr(tw, "restore_tiff_subfile_types", self._subfile)
-        m.setattr(tw, "set_tiff_thumb_markers", lambda s, d: True)
+        m.setattr(tw, "set_tiff_thumb_markers", lambda s, d: self.thumb_markers)
         m.setattr(tw, "add_tiff_history_entry", self._history)
         m.setattr(tw, "zip_integrity", self._integrity)
         m.setattr(tw, "pixel_identical", self._pixels)
@@ -105,13 +111,23 @@ class FakeTools:
     def _magick_run(self, args):
         self.events.append("magick")
         self.magick_calls.append([str(a) for a in args])
-        if self.magick_rc == 0 and self.magick_writes:
+        if self.magick_plan:
+            step = self.magick_plan.pop(0)
+            if isinstance(step, BaseException):
+                raise step
+            rc, writes = {"ok": (0, True), "fail": (1, False), "nofile": (0, False)}[step]
+        else:
+            rc, writes = self.magick_rc, self.magick_writes
+        return self._magick_write(args, rc, writes)
+
+    def _magick_write(self, args, rc, writes):
+        if rc == 0 and writes:
             out = str(args[-1]).replace("%%", "%")
             if ":" in out[:8] and not out[1:3] == ":\\":
                 out = out.split(":", 1)[1]
             with open(out, "wb") as fh:
                 fh.write(b"COMPRESSED")
-        return self.magick_rc, "magick: boom" if self.magick_rc else ""
+        return rc, "magick: boom" if rc else ""
 
     def _exiftool(self, args, merge_stderr=False):
         self.events.append("exif")
@@ -409,6 +425,103 @@ class TestGatesPerMode:
         assert tools.history_params == "compress_tiff_zip mode 9: ZIP (Deflate)"
         job(compress_run(*IN_PLACE), photo)
         assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate)"
+
+
+class TestThumbnailWrite:
+    """-GenerateThumbnail is three magick calls -- the main image, the thumbnail, the two
+    together -- in _write_with_thumbnail, which hands process_job a ThumbWrite. What
+    process_job does with each of its fields: the [no thumb] fallback and the page count the
+    gate then expects, the marker warning, and what a failure leaves behind (nothing: not
+    the partial output, not the metadata container, not the two temp files)."""
+
+    @pytest.fixture
+    def tmp(self, tmp_path, monkeypatch):
+        """The folder of _write_with_thumbnail's two temp files."""
+        folder = tmp_path / "tmp 一時 [x]"
+        folder.mkdir()
+        counter = iter(range(100))
+        monkeypatch.setattr(tw, "temp_file_path",
+                            lambda suffix: str(folder / f"tw_{next(counter):016x}{suffix}"))
+        return folder
+
+    def in_place(self, tools, photo, *plan):
+        """An in-place run (the output replaces the photo); the metadata container that
+        FakeTools names exists, so a test can see whether it was removed."""
+        tools.magick_plan = list(plan)
+        self.container = Path(str(photo) + ".meta")
+        self.container.write_bytes(b"MIE")
+        return job(compress_run(*IN_PLACE, "-GenerateThumbnail"), photo)
+
+    def nothing_left(self, photo, tmp):
+        return (leftovers(photo.parent) == [] and not self.container.exists()
+                and os.listdir(tmp) == [])
+
+    def test_the_thumbnail_is_written_and_two_pages_are_expected(self, tools, photo, tmp):
+        r = self.in_place(tools, photo)
+        assert r.result == f"OK (Uncompressed -> ZIP) | {photo.name}"
+        assert len(tools.magick_calls) == 3 and tools.thumb_expected == 2
+        assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate) + thumbnail page"
+        assert photo.read_bytes() == b"COMPRESSED" and self.nothing_left(photo, tmp)
+
+    @pytest.mark.parametrize("plan", [("ok", "fail"), ("ok", "nofile"), ("ok", "ok", "fail")],
+                             ids=["thumbnail-fails", "thumbnail-not-written", "joining-fails"])
+    def test_a_failed_thumbnail_falls_back_to_the_main_image_alone(self, tools, photo, tmp, plan):
+        """The fallback writes ONE page: the gate must expect one, or it refuses a good file
+        (and with two expected it would accept a file that lost its thumbnail)."""
+        r = self.in_place(tools, photo, *plan)
+        assert r.result == f"OK (Uncompressed -> ZIP) [no thumb] | {photo.name}"
+        assert tools.thumb_expected == 1
+        assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate)", \
+            "the history must not claim a thumbnail page"
+        assert photo.read_bytes() == b"COMPRESSED" and self.nothing_left(photo, tmp)
+
+    def test_a_failed_page_marker_is_a_warning_on_the_result_line(self, tools, photo, tmp):
+        tools.thumb_markers = False
+        r = self.in_place(tools, photo)
+        assert r.result == f"WARN (exiftool failed, ZIP ok) [thumb marker failed] | {photo.name}"
+        assert photo.read_bytes() == b"COMPRESSED" and self.nothing_left(photo, tmp)
+
+    def test_a_failed_main_image_leaves_nothing(self, tools, photo, tmp):
+        r = self.in_place(tools, photo, "fail")
+        assert r.result == f"ERROR (magick compress) | {photo.name} | magick: boom"
+        assert r.final_dst is None
+        assert photo.read_bytes() == b"ORIGINAL" and self.nothing_left(photo, tmp)
+        assert "replace" not in tools.events and "exif" not in tools.events
+
+    def test_an_os_error_drops_the_partial_output(self, tools, photo, tmp, monkeypatch):
+        """A full disk during the fallback copy: the half-written temp sibling must go, or
+        the next run finds a leftover -- and in a copy mode a file that says "exists"."""
+        def full_disk(src, dst):
+            with open(dst, "wb") as fh:
+                fh.write(b"HALF")
+            raise OSError("no space left on device")
+        monkeypatch.setattr(cz.shutil, "copyfile", full_disk)
+        r = self.in_place(tools, photo, "ok", "fail")
+        assert r.result == f"ERROR (magick compress) | {photo.name} | no space left on device"
+        assert r.final_dst is None
+        assert photo.read_bytes() == b"ORIGINAL" and self.nothing_left(photo, tmp)
+
+    def test_an_os_error_drops_the_partial_output_of_a_copy_mode(self, tools, photo, tmp, tmp_path,
+                                                                 monkeypatch):
+        def full_disk(src, dst):
+            with open(dst, "wb") as fh:
+                fh.write(b"HALF")
+            raise OSError("no space left on device")
+        monkeypatch.setattr(cz.shutil, "copyfile", full_disk)
+        tools.magick_plan = ["ok", "fail"]
+        out = tmp_path / "out [x]" / photo.name
+        out.parent.mkdir()
+        r = job(compress_run("-Mode", "1", "-GenerateThumbnail"), photo, write_dst=out, final_dst=out)
+        assert r.result.startswith("ERROR (magick compress)")
+        assert not out.exists(), "the half-written output would be a SKIP (exists) on the next run"
+        assert os.listdir(tmp) == []
+
+    def test_success_without_a_file_is_an_error_that_names_the_destination(self, tools, photo, tmp):
+        r = self.in_place(tools, photo, "ok", "ok", "nofile")
+        assert r.result.startswith(f"ERROR (magick reported success but wrote no file) | {photo.name} | expected: ")
+        assert r.final_dst == str(photo)
+        assert photo.read_bytes() == b"ORIGINAL" and self.nothing_left(photo, tmp)
+        assert "replace" not in tools.events
 
 
 class TestKeepOriginal:
@@ -750,6 +863,87 @@ def failing_move(kind):
     return move
 
 
+class TestCopyExifOutputNames:
+    """copy_exif -OutputDir: every session writes into ONE folder, and the cameras restart
+    their numbering (two sessions hold DSCF0001.tif). The second claimant of a name gets
+    _v2: it is never skipped as "exists in OutputDir", and with -Overwrite it never lands on
+    the first one's output (_dest_name)."""
+
+    NAME = "DSCF0001 50%.tif"
+
+    def sessions(self, tmp_path, count=2):
+        made = []
+        for i in range(1, count + 1):
+            s = tmp_path / f"0{i} S5pro 伊豆沼 [{i}]"
+            s.mkdir()
+            (s / self.NAME).write_bytes(f"TIFF {i}".encode())
+            (s / self.NAME).with_suffix(".jpg").write_bytes(b"JPEG")
+            made.append(s)
+        return made
+
+    def run_all(self, tmp_path, folders, *argv):
+        out = tmp_path / "out 伊豆沼 [x] 100%"
+        run = exif_run("-OutputDir", str(out), "-Workers", "1", *argv)
+        for f in folders:
+            cx.process_folder(run, str(f))
+        return run, out
+
+    def renames(self, run):
+        return [m for level, m in run.log.lines if "RENAME" in m]
+
+    @pytest.mark.parametrize("extra", [[], ["-Overwrite"]], ids=["plain", "overwrite"])
+    def test_the_second_session_gets_v2(self, tools, tmp_path, extra):
+        run, out = self.run_all(tmp_path, self.sessions(tmp_path), *extra)
+        assert sorted(os.listdir(out)) == ["DSCF0001 50%.tif", "DSCF0001 50%_v2.tif"]
+        assert (out / "DSCF0001 50%.tif").read_bytes() == b"TIFF 1"
+        assert (out / "DSCF0001 50%_v2.tif").read_bytes() == b"TIFF 2"
+        assert self.renames(run) == [
+            "  RENAME (name already taken in OutputDir) | DSCF0001 50%.tif -> DSCF0001 50%_v2.tif"]
+        assert ("WARN", self.renames(run)[0]) in run.log.lines
+        assert (run.ok, run.err, run.skip) == (2, 0, 0), run.log.lines
+
+    def test_a_third_session_gets_v3_and_a_name_on_disk_is_never_taken(self, tools, tmp_path):
+        folders = self.sessions(tmp_path, 3)
+        out = tmp_path / "out 伊豆沼 [x] 100%"
+        out.mkdir()
+        (out / "DSCF0001 50%_v3.tif").write_bytes(b"SOMEONE ELSE'S")
+        run, out = self.run_all(tmp_path, folders)
+        assert sorted(os.listdir(out)) == ["DSCF0001 50%.tif", "DSCF0001 50%_v2.tif",
+                                           "DSCF0001 50%_v3.tif", "DSCF0001 50%_v4.tif"]
+        assert (out / "DSCF0001 50%_v3.tif").read_bytes() == b"SOMEONE ELSE'S"
+        assert (out / "DSCF0001 50%_v4.tif").read_bytes() == b"TIFF 3"
+        assert [r.split(" -> ")[1] for r in self.renames(run)] == ["DSCF0001 50%_v2.tif", "DSCF0001 50%_v4.tif"]
+
+    def test_a_dry_run_gives_each_session_its_own_name(self, tools, tmp_path):
+        """Nothing is written in a dry run, so only the claims of this run keep the third
+        session off the name the second one was given."""
+        run, out = self.run_all(tmp_path, self.sessions(tmp_path, 3), "-DryRun")
+        assert [r.split(" -> ")[1] for r in self.renames(run)] == ["DSCF0001 50%_v2.tif", "DSCF0001 50%_v3.tif"]
+        assert not out.exists()
+        assert len([m for _lv, m in run.log.lines if "] DRY (" in m]) == 3, run.log.lines
+
+    def test_the_same_session_twice_keeps_its_own_name(self, tools, tmp_path):
+        """The claim is by source path: a folder listed twice is not its own rival."""
+        s1 = self.sessions(tmp_path, 1)[0]
+        run, out = self.run_all(tmp_path, [s1, s1])
+        assert os.listdir(out) == ["DSCF0001 50%.tif"] and self.renames(run) == []
+        assert [m for _lv, m in run.log.lines if "SKIP (exists in OutputDir)" in m]
+
+    def test_without_outputdir_nothing_is_renamed(self, tools, tmp_path):
+        folders = self.sessions(tmp_path)
+        run = exif_run("-Workers", "1")
+        for f in folders:
+            cx.process_folder(run, str(f))
+        assert self.renames(run) == [] and run.claimed_dest == {}
+        assert all(sorted(os.listdir(f)) == ["DSCF0001 50%.jpg", "DSCF0001 50%.tif"] for f in folders)
+
+    def test_the_zip_path_lands_under_the_new_name_too(self, tools, tmp_path):
+        run, out = self.run_all(tmp_path, self.sessions(tmp_path), "-CompressZip")
+        assert sorted(os.listdir(out)) == ["DSCF0001 50%.tif", "DSCF0001 50%_v2.tif"]
+        assert (run.ok, run.err) == (2, 0), run.log.lines
+        assert len(self.renames(run)) == 1
+
+
 def error_lines(run):
     return [msg for level, msg in run.log.lines if level == "ERROR"]
 
@@ -813,6 +1007,220 @@ class TestStagedMoveFailures:
         assert os.stat(photo).st_mtime_ns == old
         assert ("INFO", f"  -> Moved 1 file(s) -> {photo.parent}") in run.log.lines
         assert (run.err, run.ok) == (0, 1)
+
+
+def modes(*argv):
+    """run_modes on the command line `argv` (one file at a time): (run, exit code)."""
+    opt, bound = tw.parse_args(list(argv) + ["-ForceSequential"], cz.PARAMS)
+    run = cz.Run(opt, NoLog(), [])
+    return run, cz.run_modes(run, bound)
+
+
+def said(run, text):
+    return [m for _lv, m in run.log.lines if text in m]
+
+
+class TestPlan:
+    """What run_modes decides before any worker starts (_plan_jobs): which file gets which
+    destination, which one is refused or skipped -- and that a refused file is never queued."""
+
+    @pytest.fixture
+    def flat(self, tmp_path):
+        """Two source folders that hold the same file name, and a flat output folder."""
+        root = tmp_path / "伊豆沼 [FINAL] x"
+        for sub in ("a", "b"):
+            (root / sub).mkdir(parents=True)
+            (root / sub / "x 50%.tif").write_bytes(sub.upper().encode())
+        return root, tmp_path / "out [x]"
+
+    def test_mode2_numbered_gives_the_second_claimant_v2(self, tools, flat):
+        root, out = flat
+        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(out))
+        assert rc == 0 and sorted(os.listdir(out)) == ["x 50%.tif", "x 50%_v2.tif"]
+        assert len(tools.magick_calls) == 2 and (run.ok, run.counter, run.total) == (2, 2, 2)
+
+    def test_mode2_overwrite_takes_the_earlier_claimant_out_of_the_plan(self, tools, flat):
+        """Last claimant wins and the dropped one is still reported. The plan is REBOUND
+        there: whoever reads the job list afterwards must read the new one, or both files
+        are written to the same name."""
+        root, out = flat
+        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(out),
+                        "-DuplicateAction", "Overwrite")
+        assert rc == 0 and os.listdir(out) == ["x 50%.tif"]
+        assert [c[1] for c in tools.magick_calls] == [str(root / "b" / "x 50%.tif")], \
+            "only the last claimant is compressed"
+        assert len(said(run, "SKIP (superseded by a later duplicate in flat output) | x 50%.tif")) == 1
+        assert len(said(run, "OVERWRITE (duplicate filename in flat output) | x 50%.tif")) == 1
+        assert (run.ok, run.skip, run.counter, run.total) == (1, 1, 2, 2)
+
+    def test_mode2_skip_leaves_the_later_claimant_out(self, tools, flat):
+        root, out = flat
+        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(out),
+                        "-DuplicateAction", "Skip")
+        assert rc == 0 and os.listdir(out) == ["x 50%.tif"]
+        assert [c[1] for c in tools.magick_calls] == [str(root / "a" / "x 50%.tif")]
+        assert len(said(run, "SKIP (duplicate filename in flat output) | x 50%.tif")) == 1
+        assert (run.ok, run.skip, run.counter, run.total) == (1, 1, 2, 2)
+
+    @pytest.mark.parametrize("mode", ["0", "9"])
+    def test_modes_0_and_9_refuse_a_multi_page_file_while_planning(self, tools, photo, mode):
+        """SafeMode: the file is reported and NOT queued -- queued, the worker would
+        compress it and the original would go to OLD_TIFFs."""
+        tools.pages, tools.only_subfile = 2, False
+        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent))
+        assert said(run, f"MULTI (2 pages - skipped, original untouched) | {photo.name}")
+        assert tools.magick_calls == [] and run.multi_paths == [str(photo)] and run.multi == 1
+        assert os.listdir(photo.parent) == [photo.name] and photo.read_bytes() == b"ORIGINAL"
+
+    @pytest.mark.parametrize("mode", ["0", "9"])
+    def test_modes_0_and_9_write_a_temp_sibling_never_the_file_itself(self, tools, photo, mode):
+        """The worker's output path for a .tif source would BE the original."""
+        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent))
+        assert rc == 0, run.log.lines
+        written = tools.magick_calls[0][-1].replace("%%", "%")
+        assert written != str(photo) and os.path.dirname(written) == str(photo.parent)
+        assert tw.LEFTOVER_NAME_RE.search(os.path.basename(written)), written
+        assert photo.read_bytes() == b"COMPRESSED"
+        assert (photo.parent / "OLD_TIFFs" / photo.name).read_bytes() == b"ORIGINAL"
+        assert leftovers(photo.parent) == [] and run.temp_files
+
+    def test_mode9_with_staging_writes_there_and_leaves_it_empty(self, tools, photo, tmp_path):
+        stg = tmp_path / "stg [x]"
+        run, rc = modes("-Mode", "9", "-InputDir", str(photo.parent), "-StagingDir", str(stg))
+        assert rc == 0, run.log.lines
+        assert os.path.dirname(tools.magick_calls[0][-1].replace("%%", "%")) == str(stg)
+        assert os.listdir(stg) == [] and photo.read_bytes() == b"COMPRESSED"
+        assert (photo.parent / "OLD_TIFFs" / photo.name).read_bytes() == b"ORIGINAL"
+
+    @pytest.mark.parametrize("mode", ["1", "8", "9"])
+    def test_a_dry_run_plans_without_the_staging_folder(self, tools, photo, tmp_path, mode):
+        stg = tmp_path / "stg [x]"
+        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-StagingDir", str(stg), "-DryRun")
+        assert rc == 0 and run.dry == 1 and said(run, f"DRY (Uncompressed -> ZIP) | {photo.name}")
+        assert not stg.exists(), "a dry run created the staging folder"
+        assert os.listdir(photo.parent) == [photo.name] and tools.magick_calls == []
+        assert not run.temp_files
+
+    @pytest.mark.parametrize("mode", ["0", "9"])
+    def test_a_dry_run_of_modes_0_and_9_has_nothing_to_clean_or_archive(self, tools, photo, mode):
+        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-DryRun")
+        assert rc == 0 and run.dry == 1 and not run.temp_files and not run.moved_originals
+        assert os.listdir(photo.parent) == [photo.name] and photo.read_bytes() == b"ORIGINAL"
+
+    def test_a_failed_archive_is_a_counted_error(self, tools, photo, monkeypatch):
+        """Modes 0/9: complete_keep_original said no -- the run must end with exit code 1."""
+        monkeypatch.setattr(cz, "complete_keep_original", lambda *a, **k: "boom")
+        run, rc = modes("-Mode", "9", "-InputDir", str(photo.parent))
+        assert rc == 1 and run.err == 1
+        assert error_lines(run) == [f"ERROR (keep original) | {photo.name} | boom"]
+
+    def test_an_output_over_its_own_source_is_refused_in_the_copy_modes(self, tools, tmp_path):
+        """Modes 1/3/4/6/7 never mean "in place": a folder name that makes the output resolve
+        onto the source (-ZipSuffix _TIFF in mode 4) is an error, not a silent replace."""
+        d = tmp_path / "伊豆沼 [x]" / "shots_TIFF"
+        d.mkdir(parents=True)
+        (d / "p.tif").write_bytes(b"ORIGINAL")
+        run, rc = modes("-Mode", "4", "-InputDir", str(d.parent), "-ZipSuffix", "_TIFF")
+        assert rc == 1 and tools.magick_calls == [] and (d / "p.tif").read_bytes() == b"ORIGINAL"
+        assert said(run, "ERROR (mode 4 would write over its own source - refused;")
+
+    def test_mode5_never_climbs_above_the_input_root(self, tmp_path):
+        """A TIFF directly in the root has its grandparent OUTSIDE the chosen tree."""
+        root = str(tmp_path / "data")
+        opt, _b = tw.parse_args(["-Mode", "5"], cz.PARAMS)
+
+        def out(directory):
+            f = SimpleNamespace(dir=directory, stem="p", name="p.tif", path=directory + "\\p.tif")
+            return cz.resolve_output(f, 5, root, opt)
+        assert out(root) == root + "\\ZIP\\p.tif"
+        assert out(root + "\\job") == root + "\\ZIP\\p.tif"
+        assert out(root + "\\job\\TIFF") == root + "\\job\\ZIP\\p.tif"
+        # a prefix is not a parent: C:\data also prefixes C:\database
+        assert out(root + "base\\x") == root + "\\ZIP\\p.tif"
+
+
+class TestMode8DefaultStaging:
+    """Mode 8 without -StagingDir stages in a folder of its own (_cs8_<id>): inside the input
+    folder when there is one, in the temp folder when there are several. On an interactive
+    console it asks first; an unattended run (the wizard, a preset, a pipe) is never asked."""
+
+    @pytest.fixture
+    def console(self, monkeypatch):
+        """An interactive console whose answers are the list this returns."""
+        answers = []
+        asked = []
+
+        def fake_input(prompt=""):
+            asked.append(prompt)
+            if not answers:
+                raise EOFError
+            return answers.pop(0)
+        monkeypatch.setattr(cz, "_is_interactive", lambda: True)
+        monkeypatch.setattr("builtins.input", fake_input)
+        monkeypatch.setattr(tw, "say", lambda *a, **k: None)
+        return SimpleNamespace(answers=answers, asked=asked)
+
+    def staging_folders(self, folder):
+        return [n for n in os.listdir(folder) if n.startswith("_cs8_")]
+
+    def test_unattended_it_is_never_asked(self, tools, photo, monkeypatch):
+        def no_input(prompt=""):
+            raise AssertionError("an unattended run was asked a question")
+        monkeypatch.setattr(cz, "_is_interactive", lambda: False)
+        monkeypatch.setattr("builtins.input", no_input)
+        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        assert rc == 0, run.log.lines
+        staged = tools.magick_calls[0][-1].replace("%%", "%")
+        assert os.path.dirname(os.path.dirname(staged)) == str(photo.parent)
+        assert os.path.basename(os.path.dirname(staged)).startswith("_cs8_")
+        assert photo.read_bytes() == b"COMPRESSED"
+        assert os.listdir(photo.parent) == [photo.name], "the staging folder of the run stayed"
+        assert said(run, "Default temporary staging will be used: ")
+
+    @pytest.mark.parametrize("answer", ["", "y", "Y", "yes", "s", " "])
+    def test_yes_or_enter_uses_the_default_folder(self, tools, photo, console, answer):
+        console.answers.append(answer)
+        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        assert rc == 0 and console.asked == ["Use default temporary staging? [Y/n]: "]
+        assert photo.read_bytes() == b"COMPRESSED" and os.listdir(photo.parent) == [photo.name]
+
+    @pytest.mark.parametrize("answer", ["n", "N", "no", " nao", "Não"])
+    def test_no_stops_the_run_before_anything_is_made(self, tools, photo, console, answer):
+        console.answers.append(answer)
+        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        assert rc == 1
+        assert error_lines(run) == ["Mode 8 aborted: no staging directory selected."]
+        assert tools.magick_calls == [] and photo.read_bytes() == b"ORIGINAL"
+        assert os.listdir(photo.parent) == [photo.name], "a refused run created its staging folder"
+        assert not run.cleanup_dirs and not run.created_default_staging
+
+    def test_end_of_input_counts_as_enter(self, tools, photo, console):
+        """As it is today: Ctrl+Z at the question goes on with the default folder."""
+        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        assert rc == 0 and len(console.asked) == 1 and photo.read_bytes() == b"COMPRESSED"
+
+    def test_with_staging_given_or_in_a_dry_run_there_is_no_question(self, tools, photo, console, tmp_path):
+        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent), "-StagingDir", str(tmp_path / "stg"))
+        assert rc == 0 and console.asked == []
+        photo.write_bytes(b"ORIGINAL")
+        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent), "-DryRun")
+        assert rc == 0 and console.asked == [] and os.listdir(photo.parent) == [photo.name]
+        assert not said(run, "Default temporary staging")
+
+    def test_several_roots_stage_in_the_temp_folder(self, tools, photo, tmp_path, monkeypatch):
+        other = tmp_path / "second [x] 一時"
+        other.mkdir()
+        (other / "q.tif").write_bytes(b"ORIGINAL")
+        temp = tmp_path / "temp 50%"
+        temp.mkdir()
+        monkeypatch.setattr(cz.tempfile, "gettempdir", lambda: str(temp))
+        monkeypatch.setattr(cz, "_is_interactive", lambda: False)
+        run, rc = modes("-Mode", "8", "-InputDir", f"{photo.parent};{other}")
+        assert rc == 0, run.log.lines
+        for call in tools.magick_calls:
+            assert os.path.dirname(os.path.dirname(call[-1].replace("%%", "%"))) == str(temp)
+        assert os.listdir(temp) == [] and self.staging_folders(photo.parent) == []
+        assert photo.read_bytes() == b"COMPRESSED" and (other / "q.tif").read_bytes() == b"COMPRESSED"
 
 
 class TestGroupSteps:
