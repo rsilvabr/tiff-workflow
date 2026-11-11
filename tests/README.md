@@ -44,7 +44,7 @@ pytest tests --cov=..
 - **Every end-to-end test runs once per lane.** This replaces "both shells" (Windows PowerShell 5.1 = sequential, PowerShell 7 = parallel) of the PowerShell edition. The per-file work is one implementation now; what is left of that axis is whether it runs on the caller's thread or on a thread pool
 
 ### `test_backend_invariants.py` covers
-- 242 tests that run the Python backends with ImageMagick and exiftool replaced by fakes (`FakeTools` answers every tool call and records the order of the steps). No tools needed. Each test names the audit round its rule comes from
+- 239 tests that run the Python backends with ImageMagick and exiftool replaced by fakes (`FakeTools` answers every tool call and records the order of the steps). No tools needed. Each test names the audit round its rule comes from
 - What a failed step leaves behind, on the paths a real run cannot reach: copy_exif with `-OutputDir` leaves neither the copy nor a staged file (12 failure points), and on success only the staged ZIP; the tag list of the JPEG copy (`_jpeg_copy_args`)
 - The staging loops (modes 1-8, copy_exif `-CompressZip`): the six error lines of a staged file that did not land (destination missing, wrong size, the move's own error), each counted once; `tw.land_staged_file` on its own (same volume, another volume, the folder made only when asked)
 - The steps of a group in `run_modes`, each called on its own (`_run_group`, `_move_staged`, `_archive_originals`, `_delete_sources`): mode 8 checks the file where it landed before it deletes the source; a staged file that failed its gate is dropped, never moved; modes 0/9 never archive an original whose copy failed or whose worker raised
