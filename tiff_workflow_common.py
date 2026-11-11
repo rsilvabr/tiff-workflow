@@ -34,6 +34,7 @@ import tempfile
 import threading
 import uuid
 from datetime import datetime
+from typing import NamedTuple
 
 # The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
 # requires the same value in convert_tiff.py's TOOLKIT_VERSION.
@@ -678,13 +679,10 @@ def one_line(text):
     return " ".join(part.strip() for part in str(text).splitlines() if part.strip())
 
 
-class MagickResult:
-    __slots__ = ("timed_out", "exit_code", "lines")
-
-    def __init__(self, timed_out, exit_code, lines):
-        self.timed_out = timed_out
-        self.exit_code = exit_code
-        self.lines = lines
+class MagickResult(NamedTuple):
+    timed_out: bool
+    exit_code: int
+    lines: list
 
 
 def magick_probe(args, timeout=30):
@@ -792,13 +790,10 @@ def _size_scaled_timeout(timeout, paths, load_factor=1.0):
     return max(timeout, int(math.ceil(max_mb * 0.25 * max(1.0, load_factor))))
 
 
-class PageCount:
-    __slots__ = ("ok", "count", "error")
-
-    def __init__(self, ok, count, error):
-        self.ok = ok
-        self.count = count
-        self.error = error
+class PageCount(NamedTuple):
+    ok: bool
+    count: int
+    error: str
 
 
 def tiff_page_count(path, timeout=30):
@@ -1052,13 +1047,10 @@ def add_tiff_history_entry(path, agent, parameters):
         return False
 
 
-class ThumbSafe:
-    __slots__ = ("ok", "page_count", "reason")
-
-    def __init__(self, ok, page_count, reason):
-        self.ok = ok
-        self.page_count = page_count
-        self.reason = reason
+class ThumbSafe(NamedTuple):
+    ok: bool
+    page_count: int
+    reason: str
 
 
 def thumbnail_safe_source(path, timeout=30):
