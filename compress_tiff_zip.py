@@ -1408,11 +1408,7 @@ def run_modes(run, bound):
                     log(f"ERROR (final ZIP failed integrity - source preserved) | {src_name}", "ERROR")
                     continue
                 try:
-                    try:
-                        os.remove(t["src"])
-                    except PermissionError:
-                        os.chmod(t["src"], 0o666)     # a read-only source is deleted too
-                        os.remove(t["src"])
+                    tw.remove_file(t["src"])     # a read-only source is deleted too
                     deleted += 1
                 except OSError:
                     run.err += 1

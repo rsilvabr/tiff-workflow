@@ -401,11 +401,7 @@ def remove_thumbnails(opt, log, c, input_roots, recurse, size):
                 log(f"{tag} SKIP (not a thumbnail this script wrote: {why} - kept) | {t.name}", "WARN")
                 continue
         try:
-            try:
-                os.remove(t.path)
-            except PermissionError:
-                os.chmod(t.path, 0o666)     # a read-only thumbnail is removed too
-                os.remove(t.path)
+            tw.remove_file(t.path)     # a read-only thumbnail is removed too
             c.ok += 1
             log(f"{tag} REMOVED | {t.name}")
         except OSError as e:

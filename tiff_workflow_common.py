@@ -784,6 +784,15 @@ def remove_quietly(path):
             pass
 
 
+def remove_file(path):
+    """Delete a file, a read-only one too. Raises OSError (remove_quietly never does)."""
+    try:
+        os.remove(path)
+    except PermissionError:
+        os.chmod(path, 0o666)
+        os.remove(path)
+
+
 def file_size(path):
     return os.stat(path).st_size
 
