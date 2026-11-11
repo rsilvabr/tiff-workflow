@@ -247,6 +247,22 @@ Heavy changes run in three steps, each leaving a document in `AI_tools/`
 (gitignored, local only): `YYMMDD_<Tool>_<plan|report|review>_<topic>.md`,
 same `<topic>` across the three.
 
+**Ask first who codes** (owner's rule, 2026-11-12). Before planning a heavy
+change, ask the owner: will the coder be a cheap model (DeepSeek, Kimi, GLM,
+...) or a strong one (Claude Opus or Fable) that plans and codes itself?
+- **Cheap coder:** the three steps below, as written. The literal plan and the
+  full review are what make its work safe.
+- **Strong model doing both:** a one-page plan (what changes for the user, the
+  decisions taken and the ones that are the owner's, the callers and test
+  doubles when a signature or return shape changes, the tests to write, what
+  can go wrong), the code, and a short closing report (the proofs with their
+  REAL output, what is left for later, what was NOT verified). No line-by-line
+  "current -> required" tables, and the independent review (step 3) runs when
+  the owner asks for it, not by default.
+- **Either way, unchanged:** one step per commit, every new test proved to fail
+  against the pre-fix code, hostile paths, the suite and the battery as
+  "Verification" says.
+
 1. **Plan (Claude/Opus)** -- literal and complete, no design decision left to
    the coder: file + function, current -> required behaviour and why, every
    decision already taken, the caller list when a signature or return shape
