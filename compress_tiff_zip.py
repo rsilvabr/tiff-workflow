@@ -1002,41 +1002,10 @@ def _input_roots(run, bound):
     return input_roots, missing_roots
 
 
-def run_modes(run, bound):
-    opt = run.opt
+def _collect_files(run, mode, input_roots):
+    """The TIFFs of every input folder that `mode` works on, each with the root it was
+    found under, sorted by path. Logs what was left out and why."""
     log = run.log
-    mode = opt["Mode"]
-    dry = opt["DryRun"]
-    overwrite = opt["Overwrite"]
-
-    resolved = _input_roots(run, bound)
-    if resolved is None:
-        return 1
-    input_roots, missing_roots = resolved
-
-    # A RELATIVE -OutputDir is resolved ONCE, against the current folder: re-based on each
-    # input root it scattered one flat output across A\out and B\out.
-    if opt["OutputDir"] and not os.path.isabs(opt["OutputDir"]):
-        opt["OutputDir"] = tw.full_path(opt["OutputDir"])
-    staging = opt["StagingDir"]
-
-    # a bad path in a ';' list still yields exit code 1
-    run.err += len(missing_roots)
-
-    log(f"Log: {log.path}")
-    # Mode 8 resolves final_dst == src for a .tif source, so the compressed file is moved ON
-    # TOP of the original whether or not -DeleteSource was passed.
-    if mode == 8 and not opt["DeleteSource"]:
-        log("NOTE: mode 8 replaces each original in place (verified pixel-identical first). "
-            "-DeleteSource additionally removes a .tiff source whose output is written as .tif.", "WARN")
-    log(f"Mode: {mode} | Workers: {opt['Workers']} | "
-        f"OutputDir: {opt['OutputDir'] or '(in-place/flat)'} | Staging: {staging or 'disabled'} | "
-        f"DryRun: {dry} | SafeMode: {opt['SafeMode']} | SkipLzw: {opt['SkipLzwAsCompressed']} | "
-        f"Overwrite: {overwrite} | DeleteSource: {'ON' if opt['DeleteSource'] else 'OFF'}")
-
-    report_stranded(run, input_roots)
-
-    # Collect the files of every input folder
     all_files = []
     seen_files = set()
     excluded = backups = leftovers = 0
@@ -1072,8 +1041,45 @@ def run_modes(run, bound):
     if leftovers > 0:
         log(f"Skipped {leftovers} staged/temp file(s) left by an interrupted run", "WARN")
 
-    # Sorted by full path: the _v2 renames below must not depend on the listing order.
-    files = sorted(all_files, key=lambda f: f.path.lower())
+    # Sorted by full path: the _v2 renames of the plan must not depend on the listing order.
+    return sorted(all_files, key=lambda f: f.path.lower())
+
+
+def run_modes(run, bound):
+    opt = run.opt
+    log = run.log
+    mode = opt["Mode"]
+    dry = opt["DryRun"]
+    overwrite = opt["Overwrite"]
+
+    resolved = _input_roots(run, bound)
+    if resolved is None:
+        return 1
+    input_roots, missing_roots = resolved
+
+    # A RELATIVE -OutputDir is resolved ONCE, against the current folder: re-based on each
+    # input root it scattered one flat output across A\out and B\out.
+    if opt["OutputDir"] and not os.path.isabs(opt["OutputDir"]):
+        opt["OutputDir"] = tw.full_path(opt["OutputDir"])
+    staging = opt["StagingDir"]
+
+    # a bad path in a ';' list still yields exit code 1
+    run.err += len(missing_roots)
+
+    log(f"Log: {log.path}")
+    # Mode 8 resolves final_dst == src for a .tif source, so the compressed file is moved ON
+    # TOP of the original whether or not -DeleteSource was passed.
+    if mode == 8 and not opt["DeleteSource"]:
+        log("NOTE: mode 8 replaces each original in place (verified pixel-identical first). "
+            "-DeleteSource additionally removes a .tiff source whose output is written as .tif.", "WARN")
+    log(f"Mode: {mode} | Workers: {opt['Workers']} | "
+        f"OutputDir: {opt['OutputDir'] or '(in-place/flat)'} | Staging: {staging or 'disabled'} | "
+        f"DryRun: {dry} | SafeMode: {opt['SafeMode']} | SkipLzw: {opt['SkipLzwAsCompressed']} | "
+        f"Overwrite: {overwrite} | DeleteSource: {'ON' if opt['DeleteSource'] else 'OFF'}")
+
+    report_stranded(run, input_roots)
+
+    files = _collect_files(run, mode, input_roots)
     run.total = len(files)
 
     if run.total == 0:
