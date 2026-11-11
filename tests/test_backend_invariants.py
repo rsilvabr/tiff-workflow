@@ -1045,6 +1045,97 @@ class TestCommandLine:
 
 
 # ---------------------------------------------------------------------------
+# generate_thumbnails
+# ---------------------------------------------------------------------------
+
+class TestThumbnails:
+    def test_remove_keeps_a_tiff_larger_than_size(self, monkeypatch):
+        """Round 28: -Remove finds thumbnails by NAME, and a 1200x800 hitchhiker_thumb.tif
+        was a photo. This script never writes a thumbnail larger than -Size."""
+        seen = []
+
+        def says(*lines):
+            def fake(args, timeout=30):
+                seen.append([str(a) for a in args])
+                return tw.MagickResult(False, 0, list(lines))
+            monkeypatch.setattr(tw, "magick_probe", fake)
+        path = "E:\\伊豆沼 [FINAL] 50%\\hitchhiker_thumb.tif"
+        says("1200 800")
+        assert gt._own_thumbnail(path, 256) == (False, "1200x800 is larger than -Size 256")
+        assert seen[-1][0] == "identify", "a probe (with a timeout), never a conversion"
+        assert seen[-1][-1] == path.replace("%", "%%") + "[0]", "a '[n]' spec needs '%' escaped"
+        says("256 171")
+        assert gt._own_thumbnail(path, 256) == (True, "")
+        says("171 257")
+        assert gt._own_thumbnail(path, 256) == (False, "171x257 is larger than -Size 256"), \
+            "the longer side decides"
+
+    @pytest.mark.parametrize("result", [
+        tw.MagickResult(True, -1, []), tw.MagickResult(False, 1, ["64 64"]),
+        tw.MagickResult(False, -1, []), tw.MagickResult(False, 0, []),
+        tw.MagickResult(False, 0, ["64"]), tw.MagickResult(False, 0, ["64 x"]),
+    ])
+    def test_remove_keeps_a_tiff_it_cannot_measure(self, monkeypatch, result):
+        """Fail closed: a timeout, a non-zero exit or output that is not two numbers."""
+        monkeypatch.setattr(tw, "magick_probe", lambda args, timeout=30: result)
+        assert gt._own_thumbnail("a_thumb.TIFF", 4096) == (False, "size unreadable")
+
+    def test_remove_does_not_probe_the_other_formats(self, monkeypatch):
+        def never(args, timeout=30):
+            raise AssertionError("only a .tif thumbnail can be mistaken for a photo")
+        monkeypatch.setattr(tw, "magick_probe", never)
+        for name in ("a_thumb.jpg", "a_thumb.PNG", "p [1]_thumb-0.jpeg"):
+            assert gt._own_thumbnail(name, 32) == (True, "")
+
+    def test_a_taken_thumbnail_name_is_numbered(self):
+        """Round 16: with -OutputDir + -Recursive the second p_thumb.jpg was reported
+        "SKIP (exists)" and never made."""
+        files = [tw.FoundFile(f"E:\\r\\{d}\\p.tif", "p.tif", f"E:\\r\\{d}", 1, 1) for d in "abc"]
+        log = NoLog()
+        pairs = gt._plan(log, files, "E:\\out [x]", "jpg")
+        assert pairs == [("E:\\r\\a\\p.tif", "E:\\out [x]\\p_thumb.jpg"),
+                         ("E:\\r\\b\\p.tif", "E:\\out [x]\\p_thumb_v2.jpg"),
+                         ("E:\\r\\c\\p.tif", "E:\\out [x]\\p_thumb_v3.jpg")]
+        assert log.lines == [("WARN", "RENAME (thumbnail name already taken) | p.tif -> p_thumb_v2.jpg"),
+                             ("WARN", "RENAME (thumbnail name already taken) | p.tif -> p_thumb_v3.jpg")]
+        beside = gt._plan(NoLog(), files, "", "png")
+        assert [d for _s, d in beside] == [f"E:\\r\\{d}\\p_thumb.png" for d in "abc"]
+        relative = gt._plan(NoLog(), files[:1], "thumbs", "tif")
+        assert relative == [("E:\\r\\a\\p.tif", "E:\\r\\a\\thumbs\\p_thumb.tif")]
+
+    def test_what_a_thumbnail_sends_to_magick(self, tmp_path, monkeypatch):
+        """Round 13: '%' is expanded in the output name and in an input with a '[n]' suffix;
+        a plain input (-Page all) is opened literally."""
+        calls = []
+
+        def magick_run(args):
+            calls.append([str(a) for a in args])
+            Path(str(args[-1]).replace("%%", "%")).write_bytes(b"T")
+            return 0, ""
+        monkeypatch.setattr(tw, "magick_run", magick_run)
+        src = str(tmp_path / "伊豆沼 [x] 50%off.tif")
+        dest = str(tmp_path / "out 100%" / "伊豆沼 [x] 50%off_thumb.jpg")
+        cfg = gt.ThumbSettings(64, "85", "jpg", "0", False, None)
+        assert gt.make_thumbnail(src, dest, cfg) == \
+            "OK | 伊豆沼 [x] 50%off.tif -> 伊豆沼 [x] 50%off_thumb.jpg (1 bytes)"
+        call = calls[0]
+        assert call[0] == src.replace("%", "%%") + "[0]"
+        assert call[-1] == dest.replace("%", "%%")
+        assert call[call.index("-quality") + 1] == "85" and "-interlace" in call
+        assert call[call.index("-thumbnail") + 1] == "64x64>"
+        assert gt.make_thumbnail(src, dest, cfg) == "SKIP (exists) | 伊豆沼 [x] 50%off.tif"
+        every_page = cfg._replace(page="all", format="tif")
+        tif_dest = dest[:-4] + ".tif"
+        gt.make_thumbnail(src, tif_dest, every_page)
+        assert calls[-1][0] == src, "a plain input must stay unescaped"
+        assert "-quality" not in calls[-1] and calls[-1][-3:-1] == ["-compress", "zip"]
+        assert len(calls) == 2
+        dry = gt.make_thumbnail(src, dest[:-4] + "_other.jpg", cfg._replace(dry_run=True))
+        assert dry == "DRY-RUN | 伊豆沼 [x] 50%off.tif -> 伊豆沼 [x] 50%off_thumb_other.jpg"
+        assert len(calls) == 2, "a dry run starts nothing"
+
+
+# ---------------------------------------------------------------------------
 # Static: what the source of the backends must never contain
 # ---------------------------------------------------------------------------
 

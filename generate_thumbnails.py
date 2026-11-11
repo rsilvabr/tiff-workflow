@@ -13,6 +13,7 @@ input folder does not exist, else 0. docs/README_generate_thumbnails.md has the 
 import os
 import re
 import sys
+from typing import NamedTuple, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -106,30 +107,38 @@ def thumb_exists(dest_path, frame_names):
     return len(frame_files(dest_path)) > 0
 
 
-def make_thumbnail(task):
+class ThumbSettings(NamedTuple):
+    """What every thumbnail of a run is made with."""
+    size: int
+    quality: str
+    format: str
+    page: str
+    dry_run: bool
+    srgb_profile: Optional[str]
+
+
+def make_thumbnail(src, dest, cfg):
     """One thumbnail; returns the result line."""
-    src = task["src"]
-    dest = task["dest"]
     name = os.path.basename(src)
-    if thumb_exists(dest, task["page"] == "all") and not task["dry_run"]:
+    if thumb_exists(dest, cfg.page == "all") and not cfg.dry_run:
         return f"SKIP (exists) | {name}"
-    if task["dry_run"]:
+    if cfg.dry_run:
         return f"DRY-RUN | {name} -> {os.path.basename(dest)}"
     try:
         dest_dir = os.path.dirname(dest)
         os.makedirs(dest_dir, exist_ok=True)
         # A '[n]' suffix turns the input into a filename SPEC, where '%' is expanded; a
         # plain input (-Page all) is opened literally and must stay unescaped.
-        if task["page"] == "all":
+        if cfg.page == "all":
             source = src
         else:
-            source = f"{tw.magick_path_spec(src)}[{task['page']}]"
-        args = [source] + tw.thumbnail_magick_args(task["srgb_profile"], task["size"])
+            source = f"{tw.magick_path_spec(src)}[{cfg.page}]"
+        args = [source] + tw.thumbnail_magick_args(cfg.srgb_profile, cfg.size)
         # -quality only where it means JPEG quality. ImageMagick reinterprets it for PNG as
         # zlib level + filter (85 -> level 8, filter 5); TIFF ignores it.
-        fmt = task["format"].lower()
+        fmt = cfg.format.lower()
         if fmt in ("jpg", "jpeg"):
-            args += ["-quality", task["quality"], "-interlace", "Plane"]
+            args += ["-quality", cfg.quality, "-interlace", "Plane"]
         elif fmt in ("tif", "tiff"):
             args += ["-compress", "zip"]
         # The output path is always escaped: a '%' in the name would send the thumbnail
@@ -148,6 +157,84 @@ def make_thumbnail(task):
         return f"ERROR (output not created) | {name}"
     except Exception as e:
         return f"ERROR | {name} | {e}"
+
+
+def _input_roots(opt):
+    """(the -InputDir entries that exist, the ones that do not). A ';' separated list like
+    the other backends; a bad path is an ERROR, not a WARN: a typo used to look identical
+    to "folder has no TIFFs" and exited 0."""
+    input_roots = []
+    missing_roots = []
+    for entry in opt["InputDir"].split(";"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        entry = tw.full_path(entry)
+        if not os.path.exists(entry):
+            missing_roots.append(entry)
+            continue
+        input_roots.append(entry)
+    return input_roots, missing_roots
+
+
+def _discover(log, input_roots, recurse, tool_output_names):
+    """The TIFFs to make thumbnails of, in path order.
+
+    Each file carries the root it was discovered under, so the exclusion is evaluated
+    relative to that root. A file passed directly as -InputDir is its own root: an
+    explicit path always wins."""
+    unreadable = []
+    by_path = {}
+    for root in input_roots:
+        if os.path.isfile(root):
+            if tw.is_tiff_name(root):
+                st = os.stat(root)
+                f = tw.FoundFile(root, os.path.basename(root), os.path.dirname(root),
+                                 st.st_size, st.st_mtime_ns)
+                f.input_root = f.dir
+                by_path.setdefault(root.lower(), f)
+            continue
+        for f in tw.list_files(root, recurse, unreadable):
+            if tw.is_tiff_name(f.name):
+                f.input_root = root
+                # Dedupe: a repeated -InputDir entry (A;A) or a root nested under a
+                # -Recursive root lists the same source twice.
+                by_path.setdefault(f.path.lower(), f)
+    for d in unreadable:
+        log(f"cannot read folder (skipped): {d}", "WARN")
+    # Ordered: which of two same-name sources claims photo_thumb.jpg must not vary by run.
+    all_files = [by_path[k] for k in sorted(by_path)]
+    files = [f for f in all_files
+             if not tw.path_excluded(f.dir, f.input_root, tool_output_names)
+             and not THUMB_NAME_RE.search(f.stem)]
+    excluded = len(all_files) - len(files)
+    if excluded > 0:
+        log(f"Excluded {excluded} file(s): existing thumbnails, or under {'; '.join(tool_output_names)}")
+    return files
+
+
+def _plan(log, files, output_dir, fmt):
+    """[(source, thumbnail path)] for `files`.
+
+    claimed: with -OutputDir + -Recursive, a\\photo.tif and b\\photo.tif both map to
+    photo_thumb.jpg. The second one used to report "SKIP (exists)" and never be generated,
+    so later claimants are numbered instead."""
+    claimed = {}
+    pairs = []
+    for f in files:
+        if output_dir:
+            out_dir = output_dir if os.path.isabs(output_dir) else tw.join_path(f.dir, output_dir)
+        else:
+            out_dir = f.dir
+        dest = tw.join_path(out_dir, f"{f.stem}_thumb.{fmt}")
+        if dest.lower() in claimed:
+            cand_name, cand = tw.numbered_name(out_dir, f"{f.stem}_thumb", f".{fmt}",
+                                               lambda name, path: path.lower() in claimed)
+            log(f"RENAME (thumbnail name already taken) | {f.name} -> {cand_name}", "WARN")
+            dest = cand
+        claimed[dest.lower()] = f.path
+        pairs.append((f.path, dest))
+    return pairs
 
 
 def run(argv):
@@ -209,19 +296,7 @@ def run(argv):
         log("WARN: no sRGB ICC profile found -- wide-gamut sources (ProPhoto, AdobeRGB) will "
             "produce thumbnails with shifted colours. Pass -SrgbProfile <path.icc> to fix.", "WARN")
 
-    # A ';' separated list like the other backends; a bad path is an ERROR, not a WARN: a
-    # typo used to look identical to "folder has no TIFFs" and exited 0.
-    input_roots = []
-    missing_roots = []
-    for entry in opt["InputDir"].split(";"):
-        entry = entry.strip()
-        if not entry:
-            continue
-        entry = tw.full_path(entry)
-        if not os.path.exists(entry):
-            missing_roots.append(entry)
-            continue
-        input_roots.append(entry)
+    input_roots, missing_roots = _input_roots(opt)
 
     try:
         tool_output_names = list(TOOL_OUTPUT_NAMES) + tw.parse_exclude_folders(opt["ExcludeFolders"])
@@ -229,36 +304,7 @@ def run(argv):
         tw.say(f"ERROR: {e}")
         return 1
 
-    # Each file carries the root it was discovered under, so the exclusion is evaluated
-    # relative to that root. A file passed directly as -InputDir is its own root: an
-    # explicit path always wins.
-    unreadable = []
-    by_path = {}
-    for root in input_roots:
-        if os.path.isfile(root):
-            if tw.is_tiff_name(root):
-                st = os.stat(root)
-                f = tw.FoundFile(root, os.path.basename(root), os.path.dirname(root),
-                                 st.st_size, st.st_mtime_ns)
-                f.input_root = f.dir
-                by_path.setdefault(root.lower(), f)
-            continue
-        for f in tw.list_files(root, recurse, unreadable):
-            if tw.is_tiff_name(f.name):
-                f.input_root = root
-                # Dedupe: a repeated -InputDir entry (A;A) or a root nested under a
-                # -Recursive root lists the same source twice.
-                by_path.setdefault(f.path.lower(), f)
-    for d in unreadable:
-        log(f"cannot read folder (skipped): {d}", "WARN")
-    # Ordered: which of two same-name sources claims photo_thumb.jpg must not vary by run.
-    all_files = [by_path[k] for k in sorted(by_path)]
-    files = [f for f in all_files
-             if not tw.path_excluded(f.dir, f.input_root, tool_output_names)
-             and not THUMB_NAME_RE.search(f.stem)]
-    excluded = len(all_files) - len(files)
-    if excluded > 0:
-        log(f"Excluded {excluded} file(s): existing thumbnails, or under {'; '.join(tool_output_names)}")
+    files = _discover(log, input_roots, recurse, tool_output_names)
 
     c = Counters()
     c.total = len(files)
@@ -283,29 +329,12 @@ def run(argv):
     log(f"Size: {size}px | Format: {fmt} | Quality: {quality} | Page: {page}")
     log("Mode: GENERATE thumbnails")
 
-    # claimed: with -OutputDir + -Recursive, a\photo.tif and b\photo.tif both map to
-    # photo_thumb.jpg. The second one used to report "SKIP (exists)" and never be generated,
-    # so later claimants are numbered instead.
-    claimed = {}
-    tasks = []
-    for f in files:
-        if output_dir:
-            out_dir = output_dir if os.path.isabs(output_dir) else tw.join_path(f.dir, output_dir)
-        else:
-            out_dir = f.dir
-        dest = tw.join_path(out_dir, f"{f.stem}_thumb.{fmt}")
-        if dest.lower() in claimed:
-            cand_name, cand = tw.numbered_name(out_dir, f"{f.stem}_thumb", f".{fmt}",
-                                               lambda name, path: path.lower() in claimed)
-            log(f"RENAME (thumbnail name already taken) | {f.name} -> {cand_name}", "WARN")
-            dest = cand
-        claimed[dest.lower()] = f.path
-        tasks.append({"src": f.path, "dest": dest, "size": size, "quality": quality,
-                      "format": fmt, "page": page, "dry_run": dry_run, "srgb_profile": srgb})
+    pairs = _plan(log, files, output_dir, fmt)
+    cfg = ThumbSettings(size, quality, fmt, page, dry_run, srgb)
 
     workers = min(opt["Workers"], 16)
-    for _task, result in tw.run_tasks(tasks, make_thumbnail, workers):
-        line = result if isinstance(result, str) else f"ERROR | {os.path.basename(_task['src'])} | {result}"
+    for pair, result in tw.run_tasks(pairs, lambda p: make_thumbnail(p[0], p[1], cfg), workers):
+        line = result if isinstance(result, str) else f"ERROR | {os.path.basename(pair[0])} | {result}"
         c.counter += 1
         level = "INFO"
         if line.startswith("OK"):
@@ -323,10 +352,8 @@ def run(argv):
     return 1 if c.err > 0 else 0
 
 
-def remove_thumbnails(opt, log, c, input_roots, recurse, size):
-    """-Remove: delete the thumbnails themselves (found by name), not the ones derived from
-    the TIFFs present: a thumbnail whose TIFF was deleted or moved could never be cleaned
-    up otherwise."""
+def _search_roots(opt, input_roots, recurse):
+    """The folders -Remove looks for thumbnails in, each once."""
     output_dir = opt["OutputDir"]
     if output_dir:
         if os.path.isabs(output_dir):
@@ -353,6 +380,35 @@ def remove_thumbnails(opt, log, c, input_roots, recurse, size):
         if r.lower() not in seen_roots:
             seen_roots.add(r.lower())
             unique_roots.append(r)
+    return unique_roots
+
+
+def _own_thumbnail(path, size):
+    """(True, "") when -Remove may delete `path`, else (False, why it is kept).
+
+    A .tif named like a thumbnail can be a real photo (a 1200x800 16-bit
+    "hitchhiker_thumb.tif" was deleted: audit round 28). This script never writes a
+    thumbnail larger than -Size, so a bigger or unreadable TIFF is kept and reported."""
+    if not tw.TIFF_EXT_RE.match(os.path.splitext(path)[1]):
+        return True, ""
+    r = tw.magick_probe(["identify", "-ping", "-format", "%w %h\n",
+                         f"{tw.magick_path_spec(path)}[0]"], 120)
+    w = h = 0
+    parts = (r.lines[0] if r.lines else "").split()
+    read_ok = (not r.timed_out and r.exit_code == 0 and len(parts) >= 2
+               and parts[0].isdigit() and parts[1].isdigit())
+    if read_ok:
+        w, h = int(parts[0]), int(parts[1])
+    if not read_ok or max(w, h) > size:
+        return False, f"{w}x{h} is larger than -Size {size}" if read_ok else "size unreadable"
+    return True, ""
+
+
+def remove_thumbnails(opt, log, c, input_roots, recurse, size):
+    """-Remove: delete the thumbnails themselves (found by name), not the ones derived from
+    the TIFFs present: a thumbnail whose TIFF was deleted or moved could never be cleaned
+    up otherwise."""
+    unique_roots = _search_roots(opt, input_roots, recurse)
 
     # Search roots can nest (root\thumbs and root\sub\thumbs), so the same file can be
     # listed twice -- deleting it twice would count a phantom error.
@@ -383,23 +439,11 @@ def remove_thumbnails(opt, log, c, input_roots, recurse, size):
             c.skip += 1
             log(f"{tag} DRY-RUN (would remove) | {t.name}")
             continue
-        # A .tif named like a thumbnail can be a real photo (a 1200x800 16-bit
-        # "hitchhiker_thumb.tif" was deleted: audit round 28). This script never writes a
-        # thumbnail larger than -Size, so a bigger or unreadable TIFF is kept and reported.
-        if tw.TIFF_EXT_RE.match(t.ext):
-            r = tw.magick_probe(["identify", "-ping", "-format", "%w %h\n",
-                                 f"{tw.magick_path_spec(t.path)}[0]"], 120)
-            w = h = 0
-            parts = (r.lines[0] if r.lines else "").split()
-            read_ok = (not r.timed_out and r.exit_code == 0 and len(parts) >= 2
-                       and parts[0].isdigit() and parts[1].isdigit())
-            if read_ok:
-                w, h = int(parts[0]), int(parts[1])
-            if not read_ok or max(w, h) > size:
-                c.skip += 1
-                why = f"{w}x{h} is larger than -Size {size}" if read_ok else "size unreadable"
-                log(f"{tag} SKIP (not a thumbnail this script wrote: {why} - kept) | {t.name}", "WARN")
-                continue
+        own, why = _own_thumbnail(t.path, size)
+        if not own:
+            c.skip += 1
+            log(f"{tag} SKIP (not a thumbnail this script wrote: {why} - kept) | {t.name}", "WARN")
+            continue
         try:
             tw.remove_file(t.path)     # a read-only thumbnail is removed too
             c.ok += 1
