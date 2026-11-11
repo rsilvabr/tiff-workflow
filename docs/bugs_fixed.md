@@ -12,6 +12,63 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.0.0 - The port to Python
+
+Not an audit round: the three PowerShell backends were rewritten in Python (one file each plus
+`tiff_workflow_common.py`). The sections below this one describe the PowerShell scripts; their
+function names map to the Python ones (`Test-PixelIdentical` -> `pixel_identical`,
+`Move-FileReplacing` -> `move_file_replacing`, `Complete-KeepOriginal` ->
+`complete_keep_original`, ...), and `tests/test_round28_ps_backends.py` is now
+`tests/test_round28_backends.py`. Every fix of rounds 1-28 was carried over; the tests that
+pinned them on the shape of the PowerShell source now run the Python code with the tools
+replaced (`tests/test_backend_invariants.py`).
+
+Found in the PowerShell scripts while porting, confirmed by running v2.9.1 (both shells), fixed
+in the port. None of them damaged a file.
+
+### LOW - `-InputDir .` with an exclusion equal to the folder's own name excluded the whole run
+**Issue:** `generate_thumbnails.ps1` and both copy_exif scripts joined a relative root to the
+current folder without normalising it (`E:\session\.`), so the exclusion matcher did not find
+the file's folder under the root and fell back to matching the WHOLE path: `-ExcludeFolders
+session` run from inside `session` excluded every file, exit 0. `compress_tiff_zip.ps1` had
+been fixed in round 16; these copies were left behind.
+- **Fix:** every root goes through `full_path` before anything else, in all three backends.
+- **Files:** `generate_thumbnails.py`, `copy_exif_to_tiff.py`, `tests/test_v3_fixes.py`
+
+### LOW - A Copy EXIF dry run created the `-OutputDir` folder
+**Issue:** `-DryRun -CompressZip -OutputDir X` created `X` (the folder was made before the
+dry-run check, for every group).
+- **Fix:** a dry run creates no folder.
+- **Files:** `copy_exif_to_tiff.py`, `tests/test_v3_fixes.py`,
+  `tests/test_dry_run_creates_nothing.py` (new row)
+
+### LOW - Legacy mode: a file where a folder was expected logged an ERROR and exited 0
+**Issue:** with `-StagingDir` (or the output path) naming an existing file, every folder
+logged `ERROR: StagingDir exists as a file` and was skipped, but the error was never counted:
+nothing compressed, exit 0.
+- **Fix:** counted as an error (exit 1).
+- **Files:** `compress_tiff_zip.py` (`run_legacy`), `tests/test_v3_fixes.py`
+
+### LOW - `-Mode 10` and above exited 0
+**Issue:** an unknown mode discovered no files: "No TIFF files found for mode 19", exit 0. A
+typo in a `.bat` read as "nothing to do".
+- **Fix:** refused before anything is created, exit 1.
+- **Files:** `compress_tiff_zip.py` (`run_main`), `tests/test_v3_fixes.py`
+
+### LOW - A probe that timed out left its `magick.exe` running
+**Issue:** `Invoke-MagickWithTimeout` could not stop the native process (its own comment said
+so): after a timeout the identify/compare kept running until the script ended.
+- **Fix:** `magick_probe` runs the process under `subprocess`'s timeout, which kills it.
+- **Files:** `tiff_workflow_common.py`
+
+### LOW - Ctrl+C in modes 0/9 left the temp copies next to the photos
+**Issue:** the interrupt handler removed this run's files from the staging folder only. Without
+`-StagingDir` the copies in flight (`<name>.<8 hex>_<12 hex>.tif`) stayed in the photo folders;
+later runs skip them (and say so) but never remove them.
+- **Fix:** the run keeps the list of temp siblings it writes and removes them on an interrupt
+  or an unhandled error; an empty default staging folder (mode 8) is removed too.
+- **Files:** `compress_tiff_zip.py` (`cleanup_after_stop`), `tests/test_backend_invariants.py`
+
 ## v2.9.1 - Audit Round 28
 
 The bug sweep of 2026-11-11 (22 findings, `AI_tools/261111_Fable_review_bug-sweep.md`).

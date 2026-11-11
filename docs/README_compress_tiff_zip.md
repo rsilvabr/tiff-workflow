@@ -1,8 +1,10 @@
-# compress_tiff_zip.ps1 -- ZIP Compression Backend
+# compress_tiff_zip.py -- ZIP Compression Backend
 
-PowerShell compression backend with modes 0-9 CLI flags. Called by `convert_tiff.py` wizard or used directly.
+Python compression backend with modes 0-9 CLI flags. Called by `convert_tiff.py` wizard or used directly.
 
-**Requires:** PowerShell 5.1 or 7, ImageMagick 7, exiftool. No Python required for direct usage.
+**Requires:** Python 3.9+ (standard library only), ImageMagick 7, exiftool. `tiff_workflow_common.py`, the module the three backends share, must sit next to the script.
+
+Until v2.9.1 this backend was `compress_tiff_zip.ps1`; that edition is described in [powershell_edition.md](powershell_edition.md). The command line is the same -- only the way to start it changed.
 
 ---
 
@@ -10,36 +12,46 @@ PowerShell compression backend with modes 0-9 CLI flags. Called by `convert_tiff
 
 ```powershell
 # In-place, non-recursive (mode 0)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 0 -InputDir .
+python compress_tiff_zip.py -Mode 0 -InputDir .
 
 # Recursive, in-place with delete (mode 8)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 8 -InputDir F:\Photos -DeleteSource
+python compress_tiff_zip.py -Mode 8 -InputDir F:\Photos -DeleteSource
 
 # Subfolder per folder (mode 1)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 1 -InputDir F:\Photos -ZipSubfolderName "ZIP"
+python compress_tiff_zip.py -Mode 1 -InputDir F:\Photos -ZipSubfolderName "ZIP"
 
 # Flat to output folder (mode 2)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 2 -InputDir F:\Photos -OutputDir E:\all_zips
+python compress_tiff_zip.py -Mode 2 -InputDir F:\Photos -OutputDir E:\all_zips
 
 # Folder rename (mode 4)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 4 -InputDir F:\Photos -ZipSuffix "_ZIP"
+python compress_tiff_zip.py -Mode 4 -InputDir F:\Photos -ZipSuffix "_ZIP"
 
 # With staging and workers
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -StagingDir E:\staging -Workers 12
+python compress_tiff_zip.py -Mode 3 -InputDir F:\Photos -StagingDir E:\staging -Workers 12
 
 # Dry-run
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -DryRun
+python compress_tiff_zip.py -Mode 3 -InputDir F:\Photos -DryRun
 ```
+
+The parameters keep the form they had in the `.ps1`: `-Name value`, `-Switch`,
+`-SafeMode:$false`. Names are matched without case, and an unambiguous prefix of a name works
+(`-Dry` for `-DryRun`). A `bool` takes `$true`/`$false`, `true`/`false` or `1`/`0`. Typed in a
+PowerShell terminal, a `$false` inside an argument must be quoted (`'-SafeMode:$false'`) -- or
+simply write `-SafeMode:false`. A command line that cannot be read (an unknown name, a value out
+of range, a value without its `-Parameter`) ends the run with exit code 1 before anything is
+touched.
 
 ---
 
 ## Parameters
 
+The defaults below are the `PARAMS` table at the top of `compress_tiff_zip.py`.
+
 ### Core
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-Mode` | int | `-1` | **-1 = legacy mode** (no CLI params = original behavior). **0-9** = new mode behavior |
+| `-Mode` | int | `-1` | **-1 = legacy mode** (no CLI params = original behavior). **0-9** = new mode behavior. A value above 9 is refused (exit code 1) |
 | `-InputDir` | string | `.` | Input folder. Can be relative or absolute |
 | `-InputDirFile` | string | `""` | UTF-8 text file with one input folder per line, used instead of `-InputDir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. compress: modes 0-9 only. |
 
@@ -57,7 +69,7 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-Workers` | int | `8` | Parallel jobs (PS7) / throttle limit |
+| `-Workers` | int | `8` | Files processed at once (1-64) |
 | `-CapWorkers` | int | `0` | Clamp parallel workers to this value (0 = no cap). Independent of SafeMode |
 | `-WorkerMemoryFraction` | double | `0.8` | Cap parallel workers so their ImageMagick processes fit in this share of the memory still free (0 = no cap) |
 | `-DryRun` | switch | off | Show what would be compressed, don't write anything |
@@ -65,8 +77,8 @@ powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -D
 | `-SkipLzwAsCompressed` | bool | `$false` | Treat LZW as already compressed (skip re-compression) |
 | `-Overwrite` | switch | off | Overwrite existing ZIP files |
 | `-DeleteSource` | switch | off | Delete source TIFF after successful compression (mode 8 only) |
-| `-ForceParallel` | switch | off | Force parallelism ON (use if PS5 detected but pwsh is available) |
-| `-ForceSequential` | switch | off | Force parallelism OFF (use if PS7 detected but want sequential) |
+| `-ForceParallel` | switch | off | Does nothing: parallel is the default. Still accepted, for old command lines and presets |
+| `-ForceSequential` | switch | off | One file at a time |
 | `-StagingDir` | string | `""` | SSD staging folder for faster I/O. Files moved to final destination after each group |
 | `-DuplicateAction` | string | `"Numbered"` | Mode 2 collision handling: `Skip`, `Numbered` (v2, v3...), or `Overwrite` |
 | `-RestoreStranded` | switch | off | Move originals stranded in `OLD_TIFFs/` (nothing left in their place, see [Stranded originals](#stranded-originals)) back where they came from, before this run's discovery -- so this run compresses them. Never over an existing file; a dry run only says what it would restore |
@@ -91,7 +103,8 @@ pixel -- measured at **5.35 GiB on an 84 MP scan**, while a plain recompress/dec
 ~12.7 B/px. ImageMagick's own limit is 32 GiB per process, so it does not protect the machine.
 Before the first worker starts, the run reads the largest image of the batch and logs
 `Memory: ~N GB per worker | N GB available | workers N`; if that needs fewer workers than you
-asked for, it logs `Workers reduced from N to M` and runs at M. `-CapWorkers` still applies --
+asked for, it logs `Workers reduced from N to M` and runs at M. `-CapWorkers` still applies
+(logged once per run as `Workers capped to N (CapWorkers limit)`) --
 the effective count is the **smaller** of `-Workers`, `-CapWorkers` and the memory cap. A file
 whose size cannot be read is counted as 150 MP, so an unreadable file can only make the cap
 stricter; if the available memory cannot be read at all, the count is left alone.
@@ -99,7 +112,7 @@ stricter; if the available memory cannot be read at all, the count is left alone
 **Example:**
 ```powershell
 # Compress with embedded 512px thumbnail
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -ThumbSize 512 -InputDir F:\Photos
+python compress_tiff_zip.py -Mode 9 -GenerateThumbnail -ThumbSize 512 -InputDir F:\Photos
 ```
 
 **Thumbnail format:**
@@ -118,7 +131,7 @@ so it replaces an existing embedded preview but **refuses** any file whose extra
 (scanner IR, Photoshop layers) instead of discarding them.
 
 **`-ThumbPage 0` is refused.** Every page classifier in this toolkit -- SafeMode, the
-thumbnail-safety gate, both Copy EXIF backends and the Python mirror -- treats page 0 as the
+thumbnail-safety gate, the Copy EXIF backend and the wizard's own classifier -- treats page 0 as the
 main image and measures the other pages against it. A thumbnail-first file therefore has a
 *full-size* page 1, which reads as a real extra page: the file came back `MULTI` and was
 skipped by every later run, `-GenerateThumbnail` included. The flag now exits 1 with an
@@ -187,7 +200,7 @@ A TIFF with extra pages is treated as "single-page with thumbnail(s)" when every
 
 If any extra page is full-size without a whitelisted tag (scanner IR, Photoshop layer, real second photo), SafeMode marks the file as multi-page and skips it. This is **fail-closed** behavior: when in doubt, the file is not touched.
 
-> **Note:** `copy_exif_to_TIFF_ps*.ps1` uses a broader tag whitelist (`REDUCEDIMAGE`/`REDUCED`/`MASK`/`PAGE`) because those scripts preserve all existing pages while copying metadata. `compress_tiff_zip.ps1` only trusts `REDUCEDIMAGE`/`REDUCED` (plus the size rule) because `-GenerateThumbnail` discards extra pages and replaces them with a generated thumbnail.
+> **Note:** `copy_exif_to_tiff.py` applies the same rule under its own `-SafeMode`: only `REDUCEDIMAGE`/`REDUCED` (plus the size rule) make an extra page a thumbnail. A `MASK` or `PAGE` page is a real page there too (scanner RGB+IR files).
 
 ```
 SKIP Multi-page TIFFs: SafeMode=$true
@@ -196,7 +209,7 @@ COMPRESS all TIFFs: SafeMode=$false
 
 To force compression of all TIFFs (including multi-page):
 ```powershell
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 0 -InputDir . -SafeMode:$false
+python compress_tiff_zip.py -Mode 0 -InputDir . -SafeMode:false
 ```
 
 ---
@@ -224,6 +237,9 @@ destination, and only then is the original moved into `OLD_TIFFs/` and the copy 
 its place. The original is also checked to be unchanged since the run read it (size and
 date); an edit saved meanwhile wins -- the copy is dropped and nothing is archived. A copy that
 fails to decode, or any error, never moves the original.
+
+On Ctrl+C the run also removes the temporary copies (`<name>.<8 hex>_<12 hex>.tif`) it had
+written next to the photos.
 
 Before round 26 these modes moved **every** original of the run to `OLD_TIFFs/` while planning,
 before compressing a single file, so for the whole run their places were empty.
@@ -303,18 +319,22 @@ If any check fails, the source is preserved.
 
 ---
 
-## PowerShell Version Handling
+## Parallel and Sequential Runs
 
-- **PS7+**: Uses `ForEach-Object -Parallel` with `-ThrottleLimit $Workers` (synchronous parallel — no background jobs)
-- **PS5.1**: Falls back to sequential `foreach` loop (no parallel execution)
+Every run works on several files at once (`-Workers`), on any machine. The per-file work is the
+same code either way; only how many files are in flight changes.
 
-Detected automatically via `$PSVersionTable.PSVersion.Major -ge 7`.
+- `-ForceSequential`: one file at a time.
+- `-ForceParallel`: does nothing (parallel is the default). It is still accepted, so old command
+  lines and presets keep working.
 
-`magick` calls that need a timeout (page count, ZIP integrity) run in an in-process runspace
-(`Invoke-MagickWithTimeout`) rather than `Start-Job`, which used to spawn a whole PowerShell
-process per file. Same timeout semantics, ~36% faster end-to-end on small files.
+A mode 0-9 run prints which one it is at start-up: `Python 3.13.1 (PARALLEL)`, or
+`Python 3.13.1 (SEQUENTIAL) [FORCED via -ForceSequential]`.
 
-`-Workers` accepts 1-64. Values outside that range are rejected at parameter binding.
+`magick` calls that need a timeout (page count, ZIP integrity, pixel compare) are killed when the
+timeout passes, and a timeout is a failed check, never a pass.
+
+`-Workers` accepts 1-64. A value outside that range is refused before the run starts (exit code 1).
 
 ---
 
@@ -326,7 +346,7 @@ format of the wizard's padded 16 -> 8-bit conversion and of jxl-photo:
 ```
 Action=converted
 When=2026-11-10T22:04:16+09:00
-SoftwareAgent=tiff-workflow 2.9.0 (https://github.com/rsilvabr/tiff-workflow)
+SoftwareAgent=tiff-workflow 3.0.0 (https://github.com/rsilvabr/tiff-workflow)
 Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (legacy mode: "legacy"; with a
                                                              thumbnail: "... + thumbnail page")
 ```
@@ -345,18 +365,18 @@ Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (legacy mode: "legac
 
 ## Logging
 
-Logs written to `Logs/compress_tiff_zip/<timestamp>.log` in the current working directory. Each run appends to a new timestamped file. The first line of every backend log names the release, the script and the PowerShell version: `tiff-workflow 2.9.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9`.
+Logs written to `Logs/compress_tiff_zip/<timestamp>.log` in the current working directory. Each run appends to a new timestamped file. The first line of every backend log names the release, the script and the Python version: `tiff-workflow 3.0.0 | compress_tiff_zip.py | Python 3.13.1`.
 
 Sample output:
 ```
-10:23:45 | INFO | tiff-workflow 2.9.0 | compress_tiff_zip.ps1 | PowerShell 7.6.9
+10:23:45 | INFO | tiff-workflow 3.0.0 | compress_tiff_zip.py | Python 3.13.1
 10:23:45 | INFO | Log: Logs/compress_tiff_zip/20240415_102345.log
 10:23:45 | INFO | Mode: 3 | Workers: 8 | OutputDir: (in-place/flat) | Staging: disabled | DryRun: False | SafeMode: True | SkipLzw: False | Overwrite: False | DeleteSource: OFF
 10:23:45 | INFO | Found: 150 TIFF(s)
 10:23:45 | INFO | -- Group: E:\photos\session1 (25 file(s))
-10:23:46 | INFO | [1/150] OK (Uncompressed → ZIP) | DSC_0001.tif
+10:23:46 | INFO | [1/150] OK (Uncompressed -> ZIP) | DSC_0001.tif
 ...
-10:24:12 | INFO | Done: 142 OK | 5 skipped | 3 multi-page (not touched) | 0 errors | 150/150 processed
+10:24:12 | INFO | Done: 142 OK | 5 skipped | 3 multi-page (not touched) | 0 warnings | 0 errors | 150/150 processed
 ```
 
 ---
@@ -377,14 +397,15 @@ When SafeMode skips multi-page TIFFs, they are listed at the end:
 ```
 ImageMagick 7    https://imagemagick.org/script/download.php
 exiftool         https://exiftool.org
-PowerShell 5.1+  (PS7 recommended for parallel processing)
+Python 3.9+      https://www.python.org
 ```
 
-Both `magick.exe` and `exiftool.exe` must be on your PATH.
+Both `magick.exe` and `exiftool.exe` must be on your PATH. The script uses only Python's
+standard library; `tiff_workflow_common.py` must be in the same folder.
 
 ### Verify
 ```powershell
 magick --version    # ImageMagick 7.x.x
 exiftool -ver       # 13.xx
-$PSVersionTable.PSVersion.Major  # PowerShell version
+python --version    # Python 3.9+
 ```

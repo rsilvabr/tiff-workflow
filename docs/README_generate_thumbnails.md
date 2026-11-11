@@ -1,8 +1,10 @@
-# generate_thumbnails.ps1 -- Thumbnail Generator
+# generate_thumbnails.py -- Thumbnail Generator
 
 Standalone thumbnail generator for TIFF files. Converts TIFF pages to smaller JPEG/PNG/TIFF thumbnails.
 
-**Requires:** PowerShell 5.1 or 7, ImageMagick 7. No Python or exiftool required.
+**Requires:** Python 3.9+ (standard library only), ImageMagick 7. No exiftool required. `tiff_workflow_common.py`, the module the three backends share, must sit next to the script.
+
+Until v2.9.1 this backend was `generate_thumbnails.ps1`; that edition is described in [powershell_edition.md](powershell_edition.md). The command line is the same -- only the way to start it changed.
 
 ---
 
@@ -10,24 +12,30 @@ Standalone thumbnail generator for TIFF files. Converts TIFF pages to smaller JP
 
 ```powershell
 # Basic usage: generate 256px JPEG thumbnails in current directory
-powershell -NoProfile -File generate_thumbnails.ps1
+python generate_thumbnails.py
 
 # Custom size and output directory
-powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -Size 512 -OutputDir "C:\Thumbs"
+python generate_thumbnails.py -InputDir . -Size 512 -OutputDir "C:\Thumbs"
 
 # Recursive processing with parallel workers
-powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -Recursive -Workers 8
+python generate_thumbnails.py -InputDir . -Recursive -Workers 8
 
 # TIFF output with ZIP compression
-powershell -NoProfile -File generate_thumbnails.ps1 -Format tif -Quality 95
+python generate_thumbnails.py -Format tif -Quality 95
 
 # Dry-run to preview what would be generated
-powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
+python generate_thumbnails.py -InputDir . -DryRun
 ```
+
+The parameters keep the form they had in the `.ps1`: `-Name value`, `-Switch`. Names are
+matched without case, and an unambiguous prefix of a name works. A command line that cannot be
+read ends the run with exit code 1 before anything is touched.
 
 ---
 
 ## Parameters
+
+The defaults below are the `PARAMS` table at the top of `generate_thumbnails.py`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -37,7 +45,7 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -DryRun
 | `-Remove` | switch | off | Remove generated thumbnails instead of creating them |
 | `-DryRun` | switch | off | Show what would be generated, don't create files |
 | `-Recursive` | switch | off | Process subdirectories recursively |
-| `-Workers` | int | `4` | Number of parallel worker threads (PS7). Range 1-64, capped at 16 |
+| `-Workers` | int | `4` | Thumbnails made at once. Range 1-64, capped at 16. `1` = one at a time |
 | `-Page` | string | `"0"` | Page number to extract (`0`=first, `all`=all pages) |
 | `-Quality` | string | `"85"` | JPEG quality (1-100). Ignored for `png` and `tif` -- ImageMagick reinterprets `-quality` for PNG as a zlib level + filter, so it is deliberately not passed there (TIFF output uses `-compress zip`) |
 | `-Format` | string | `"jpg"` | Output format: `jpg`, `jpeg`, `png`, `tif`, `tiff` |
@@ -94,7 +102,7 @@ side (round 28): a photo that happens to be called `something_thumb.tif` is kept
 TIFF thumbnails were made with a larger `-Size`, pass the same `-Size` to `-Remove`.
 
 ```powershell
-powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -Recursive -Remove -DryRun
+python generate_thumbnails.py -InputDir . -Recursive -Remove -DryRun
 ```
 
 ---
@@ -109,5 +117,5 @@ powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -Recursive -Remo
 - **ICC stripping**: Removes ICC profiles to reduce file size
 - **Configurable quality**: JPEG quality adjustable (default 85)
 - **Multi-format**: Supports JPEG, PNG, and TIFF output
-- **Parallel processing**: Uses PS7 `ForEach-Object -Parallel` for speed
+- **Parallel processing**: several thumbnails at once (`-Workers`), on any machine; `-Workers 1` runs one at a time
 - **Page selection**: Can extract specific page or all pages from multi-page TIFFs

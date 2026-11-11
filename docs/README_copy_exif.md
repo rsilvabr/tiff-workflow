@@ -1,18 +1,21 @@
-# Copy EXIF Scripts -- TIFF Metadata Restoration
+# copy_exif_to_tiff.py -- TIFF Metadata Restoration
 
 Copy EXIF metadata from JPEG to TIFF. Used in Fuji S3/S5 Pro workflows where Hyper Utility exports TIFFs without camera metadata.
 
-**Status:** Scripts implemented. The `convert_tiff.py` wizard integrates with `copy_exif_to_TIFF_ps7.ps1` (PowerShell 7, parallel) and `copy_exif_to_TIFF_ps5.ps1` (PowerShell 5.1, sequential).
+**Status:** Implemented. The `convert_tiff.py` wizard runs `copy_exif_to_tiff.py`.
 
 ---
 
-## Scripts
+## Script
 
-Two versions are provided:
-- **`copy_exif_to_TIFF_ps7.ps1`** -- PowerShell 7, parallel processing with `ForEach-Object -Parallel`
-- **`copy_exif_to_TIFF_ps5.ps1`** -- PowerShell 5.1, sequential processing (no `-Parallel` support)
+One script, **`copy_exif_to_tiff.py`**, callable directly or via the `convert_tiff.py` wizard.
+It works on several TIFFs at once by default (`-Workers`), on any machine; `-Workers 1` runs
+one at a time.
 
-Both will be callable directly or via the `convert_tiff.py` wizard.
+Until v2.9.1 there were two PowerShell scripts, `copy_exif_to_TIFF_ps5.ps1` (sequential) and
+`copy_exif_to_TIFF_ps7.ps1` (parallel); that edition is described in
+[powershell_edition.md](powershell_edition.md). The command line is the same -- only the way to
+start it changed.
 
 ---
 
@@ -39,48 +42,57 @@ Fuji S3 Pro / S5 Pro workflow with Hyper Utility:
 ## CLI Parameters
 
 ```powershell
-# Basic usage (PowerShell 7, parallel)
-powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir .
+# Basic usage
+python copy_exif_to_tiff.py -InputDir .
 
 # With worker count
-powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -Workers 12
+python copy_exif_to_tiff.py -InputDir . -Workers 12
+
+# One TIFF at a time
+python copy_exif_to_tiff.py -InputDir . -Workers 1
 
 # Dry-run
-powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -DryRun
+python copy_exif_to_tiff.py -InputDir . -DryRun
 
 # Skip TIFFs that already carry camera EXIF (default: overwrite existing EXIF)
-powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -SkipIfTiffHasExif
+python copy_exif_to_tiff.py -InputDir . -SkipIfTiffHasExif
 
 # Compress TIFF to ZIP after copying EXIF
-powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -CompressZip
+python copy_exif_to_tiff.py -InputDir . -CompressZip
 
 # Overwrite existing output
-powershell -NoProfile -File copy_exif_to_TIFF_ps7.ps1 -InputDir . -Overwrite
+python copy_exif_to_tiff.py -InputDir . -Overwrite
 ```
+
+The parameters keep the form they had in the `.ps1` scripts: `-Name value`, `-Switch`. Names
+are matched without case, and an unambiguous prefix of a name works. A command line that cannot
+be read ends the run with exit code 1 before anything is touched.
 
 ---
 
 ## Parameters
 
+The defaults below are the `PARAMS` table at the top of `copy_exif_to_tiff.py`.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-InputDir` | string | `.` | Folder containing JPEG and TIFF pairs |
+| `-InputDir` | string | `""` | Folder containing JPEG and TIFF pairs. Empty = the current folder |
 | `-InputDirFile` | string | `""` | UTF-8 text file with one input folder per line, used instead of `-InputDir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. |
 | `-OutputDir` | string | `""` | Output folder for processed TIFFs. **If set and different from source folder, the original TIFF is preserved** — a copy is created in OutputDir and EXIF is applied to the copy |
-| `-Workers` | int | `8` | Parallel jobs (PS7 only) |
-| `-WorkerMemoryFraction` | double | `0.8` | Cap parallel workers so their ImageMagick compares fit in this share of the memory still free (0 = no cap; PS5 is sequential and ignores it) |
-| `-DryRun` | switch | off | Show what would be copied, don't modify anything |
+| `-Workers` | int | `16` | TIFFs processed at once (1-64). `1` = one at a time |
+| `-WorkerMemoryFraction` | double | `0.8` | Cap parallel workers so their ImageMagick compares fit in this share of the memory still free (0 = no cap; with `-Workers 1` there is nothing to cap) |
+| `-DryRun` | switch | off | Show what would be copied, don't modify anything. No folder is created either, `-OutputDir` included |
 | `-SkipIfTiffHasExif` | switch | off | Skip TIFFs that already carry camera EXIF (an Exif IFD: exposure, aperture, dates). The basic tags every TIFF has -- size, resolution, orientation, and the Make/Model some converters write -- do not count. Before v2.7.1 they did, and the option skipped every TIFF |
 | `-CompressZip` | switch | off | Compress TIFF to ZIP after copying EXIF |
 | `-Overwrite` | switch | off | Overwrite existing TIFFs |
 
-**Memory and `-Workers` (PS7).** The `-CompressZip` flow proves the staged ZIP is
+**Memory and `-Workers`.** The `-CompressZip` flow proves the staged ZIP is
 pixel-identical to the TIFF it replaces with a `magick compare`, which holds ~68 bytes per
 pixel -- measured at **5.35 GiB on an 84 MP scan** -- and up to `-Workers` of those ran at
-once with no memory limit. Before the parallel block starts, the run reads the largest TIFF
-of the group and logs `Memory: ~N GB per worker | N GB available | workers N`; if fewer
-workers than requested fit in `-WorkerMemoryFraction` of the free memory, it logs
-`Workers reduced from N to M` and runs at M. A size that cannot be read counts as 150 MP
+once with no memory limit. Before the workers of a group start, the run reads the largest TIFF
+of the group; if fewer workers than requested fit in `-WorkerMemoryFraction` of the free
+memory, it logs `Memory: ~N GB per worker | N GB available | workers N` and
+`Workers reduced from N to M`, and runs at M. A size that cannot be read counts as 150 MP
 (never shrinks the estimate); if the available memory cannot be read, the count is left
 alone. `-DryRun` skips the cap entirely (nothing runs).
 
@@ -93,12 +105,15 @@ alone. `-DryRun` skips the cap entirely (nothing runs).
 3. Extract EXIF from the source using exiftool
 4. **If `-OutputDir` is specified and different from source folder:** copy TIFF to OutputDir first, then write EXIF to the copy (original is preserved)
 5. **Otherwise:** write EXIF directly to the original TIFF
-6. If `-CompressZip` is set, compress the TIFF (with EXIF) to ZIP format
-7. Verify EXIF was written
+6. If `-CompressZip` is set, compress the TIFF (with EXIF) to ZIP format; the ZIP replaces the
+   TIFF only after it is proven pixel-identical to it
+7. A file whose EXIF copy failed is reported as `ERROR`, and the run ends with exit code 1
 
 Each run writes its log to `Logs\Copy-S5Pro-Exif\<timestamp>.log` under the **current
-folder** (the one you start it from), like the other backends -- the wizard runs from the
-scripts' folder. Calling the script from somewhere else puts its `Logs\` there.
+folder** (the one you start it from), like the other backends -- through the wizard, that is
+the folder the wizard was started from. Calling the script from somewhere else puts its
+`Logs\` there. The first log line names the release, the script and the Python version:
+`tiff-workflow 3.0.0 | copy_exif_to_tiff.py | Python 3.13.1`.
 
 ### Pairing
 
@@ -139,9 +154,9 @@ The wizard's AutoFind feature scans recursively for folders matching `S5pro` or 
 -InputDir "E:\photos\S5pro\session1;E:\photos\S5pro\session2;E:\photos\S3pro\session3"
 ```
 
-**Note on `-ExcludeFolders`:** both Copy EXIF backends accept the flag for consistency with the
-other backends, but they read each `-InputDir` folder **non-recursively** -- there is nothing below
-their roots to exclude, so the flag only really bites in the recursive compression modes.
+**Note on `-ExcludeFolders`:** the Copy EXIF backend accepts the flag for consistency with the
+other backends, but it reads each `-InputDir` folder **non-recursively** -- there is nothing below
+its roots to exclude, so the flag only really bites in the recursive compression modes.
 
 Each session folder is processed independently.
 
@@ -152,13 +167,15 @@ Each session folder is processed independently.
 ```
 ImageMagick 7    https://imagemagick.org/script/download.php
 exiftool         https://exiftool.org
-PowerShell 5.1+  (PS7 recommended for parallel processing)
+Python 3.9+      https://www.python.org
 ```
 
-Both `magick.exe` and `exiftool.exe` must be on your PATH.
+Both `magick.exe` and `exiftool.exe` must be on your PATH. The script uses only Python's
+standard library; `tiff_workflow_common.py` must be in the same folder.
 
 ### Verify
 ```powershell
 magick --version    # ImageMagick 7.x.x
 exiftool -ver       # 13.xx
+python --version    # Python 3.9+
 ```

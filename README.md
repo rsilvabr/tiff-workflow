@@ -9,7 +9,9 @@ Unified TIFF processing toolkit with four complementary workflows:
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
-**Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; PowerShell 7, ExifTool and ImageMagick included.
+**Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; ExifTool and ImageMagick included.
+
+**v3.0.0: everything is Python now.** Until v2.9.1 the three backends were PowerShell scripts. They take the same command line and do the same to your files; presets saved by v2.x keep working. If you call the scripts from your own `.bat` files, or want the old scripts, see [The PowerShell edition](docs/powershell_edition.md).
 
 ---
  
@@ -63,23 +65,25 @@ The wizard supports **AutoFind** — automatically locates folders matching patt
 
 **New-release notice:** the main menu looks once a day for a newer release (one anonymous request to GitHub, nothing else sent; never for `--run-preset`). Turn it off with `"check_for_updates": false` in `~/.convert_tiff_config.json` or the environment variable `TIFFWORKFLOW_NO_UPDATE_CHECK` — see [the notice](docs/README_convert_tiff_py.md#new-release-notice).
 
-**Script settings without editing a script:** folder names (`ZIP`, `_EXPORT`, ...), timeouts, thumbnail defaults and a few more live in one JSON file, `.tiff_workflow_settings.json` — next to the scripts, in your user profile, or wherever the environment variable `TIFFWORKFLOW_SETTINGS` points (set to an empty value it switches the file off). The wizard's main menu **[6]** edits it, and the four `.ps1` read it too, in PowerShell 5.1 and 7. It can **never** change anything that deletes, overwrites or skips a safety check (`SafeMode`, `Overwrite`, `DeleteSource`, `Mode`, the folders, `Workers`, ...); a bad file or value changes nothing and is reported, and a `-Param` on the command line always wins — see [Script settings](docs/README_convert_tiff_py.md#script-settings-main-menu-6).
+**Script settings without editing a script:** folder names (`ZIP`, `_EXPORT`, ...), timeouts, thumbnail defaults and a few more live in one JSON file, `.tiff_workflow_settings.json` — next to the scripts, in your user profile, or wherever the environment variable `TIFFWORKFLOW_SETTINGS` points (set to an empty value it switches the file off). The wizard's main menu **[6]** edits it, and the three backends read it too. It can **never** change anything that deletes, overwrites or skips a safety check (`SafeMode`, `Overwrite`, `DeleteSource`, `Mode`, the folders, `Workers`, ...); a bad file or value changes nothing and is reported, and a `-Param` on the command line always wins — see [Script settings](docs/README_convert_tiff_py.md#script-settings-main-menu-6).
 
-### Direct PowerShell (no Python required)
+### The scripts directly (no wizard)
 
 ```powershell
 # Compress TIFFs, mode 0 (in-place)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 0 -InputDir .
+python compress_tiff_zip.py -Mode 0 -InputDir .
 
 # Compress TIFFs, mode 8 (recursive, delete source after)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 8 -InputDir F:\Photos -DeleteSource
+python compress_tiff_zip.py -Mode 8 -InputDir F:\Photos -DeleteSource
 
 # Compress with embedded thumbnail (creates multi-page TIFF: main image + thumbnail)
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 9 -GenerateThumbnail -ThumbSize 512 -InputDir F:\Photos
+python compress_tiff_zip.py -Mode 9 -GenerateThumbnail -ThumbSize 512 -InputDir F:\Photos
 
 # Generate standalone thumbnails (sRGB, stripped ICC)
-powershell -NoProfile -File generate_thumbnails.ps1 -InputDir F:\Photos -Size 256
+python generate_thumbnails.py -InputDir F:\Photos -Size 256
 ```
+
+The parameters are the ones the PowerShell scripts had (`-Name value`, `-Switch`, names without case). To turn a yes/no setting off, write `-SafeMode:false`.
 
 ---
 
@@ -93,25 +97,27 @@ tiff-workflow/
 |-- convert_tiff.py               <- Wizard (Python + Rich UI)
 |                                   [Use this for guided workflows]
 |
-|-- compress_tiff_zip.ps1         <- Compression backend
-|                                   [PowerShell 5.1 or 7, direct usage]
+|-- compress_tiff_zip.py          <- Compression backend
+|                                   [direct usage, modes 0-9]
 |                                   Supports embedded thumbnail generation
 |
-|-- generate_thumbnails.ps1        <- Thumbnail generator (standalone)
+|-- generate_thumbnails.py         <- Thumbnail generator (standalone)
 |                                   [sRGB, stripped ICC, configurable size/quality]
 |
-|-- copy_exif_to_TIFF_ps7.ps1      <- EXIF copy (PowerShell 7, parallel)
-|-- copy_exif_to_TIFF_ps5.ps1      <- EXIF copy (PowerShell 5.1, sequential)
+|-- copy_exif_to_tiff.py           <- EXIF copy (Fuji S3/S5 Pro JPEG or RAF -> TIFF)
+|
+|-- tiff_workflow_common.py        <- Shared by the three backends: keep it next to them
 |
 |-- docs/
 |   |-- README_convert_tiff_py.md      <- Wizard detailed docs
-|   |-- README_compress_tiff_zip.md <- compress_tiff_zip.ps1 detailed docs
-|   |-- README_copy_exif.md           <- Copy EXIF scripts detailed docs
+|   |-- README_compress_tiff_zip.md <- compress_tiff_zip.py detailed docs
+|   |-- README_copy_exif.md           <- Copy EXIF detailed docs
 |   |-- README_generate_thumbnails.md  <- Thumbnail generator docs
+|   |-- powershell_edition.md          <- The scripts up to v2.9.1 (PowerShell)
 |   |-- CHANGELOG.md                   <- Release history
 |   |-- bugs_fixed.md                  <- Bug fixes history
 |
-|-- tests/                         <- Pytest + Pester tests
+|-- tests/                         <- Pytest suite
 ```
 
 ---
@@ -139,9 +145,9 @@ tiff-workflow/
 
 **Folder exclusion** (`-ExcludeFolders "_EXPORT;temp"`): skips whole folder trees by name during discovery, in every mode. Segment match only (`_EXPORT` never touches `My_EXPORT_photos`), and every run logs what was excluded. The wizard offers your last list as the default (stored in your local config) — a fresh install defaults to nothing excluded.
 
-Matching is **relative to the folder you point at**: only folders *below* it count, so a name that happens to appear higher up the path (`Temp`, `Users`, your drive, the selected folder's own name) never excludes anything. Pointing the tool directly at a folder named `_EXPORT` to process it still works. Note that the Copy EXIF backends read each folder non-recursively, so there is nothing below their roots to exclude — the flag only really bites in the recursive compression modes.
+Matching is **relative to the folder you point at**: only folders *below* it count, so a name that happens to appear higher up the path (`Temp`, `Users`, your drive, the selected folder's own name) never excludes anything. Pointing the tool directly at a folder named `_EXPORT` to process it still works. Note that the Copy EXIF backend reads each folder non-recursively, so there is nothing below its roots to exclude — the flag only really bites in the recursive compression modes.
 
-`generate_thumbnails.ps1` takes the same flag. On top of it, all four backends always skip **`OLD_TIFFs/`** (and `converted_zip/` in the thumbnail generator): those hold the pristine originals modes 0/9 archived, and processing them produces a second copy of every photo under a `_v2` name. Same relative rule — pointing `-InputDir` straight at an `OLD_TIFFs` folder still processes it. Staged and temporary files left behind by an interrupted run are skipped too, and both counts are logged.
+`generate_thumbnails.py` takes the same flag. On top of it, all three backends always skip **`OLD_TIFFs/`** (and `converted_zip/` in the thumbnail generator): those hold the pristine originals modes 0/9 archived, and processing them produces a second copy of every photo under a `_v2` name. Same relative rule — pointing `-InputDir` straight at an `OLD_TIFFs` folder still processes it. Staged and temporary files left behind by an interrupted run are skipped too, and both counts are logged.
 
 **`OLD_TIFFs/` is never an input.** Every mode excludes it, so running mode 2/3/5 over a tree you already compressed with mode 0/9 re-reads only the real files.
 
@@ -207,7 +213,7 @@ Rename-Item "C:\tools\exiftool\exiftool(-k).exe" "exiftool.exe"
 Copy-Item "C:\tools\exiftool\exiftool(-k).exe" "C:\tools\exiftool\exiftool.exe"
 ```
 
-### 2. Add to PATH (PowerShell)
+### 2. Add to PATH (in a PowerShell terminal)
 
 **Replace the example paths below with YOUR actual installation paths:**
 
@@ -227,26 +233,29 @@ $p = [Environment]::GetEnvironmentVariable("PATH", "User")
 
 > **Important:** Both `magick.exe` and `exiftool.exe` must be on your PATH for the scripts and the wizard to find them. They only search the system PATH — they do not look in other directories.
 
-### 3. Python + Rich (wizard only — optional)
+### 3. Python (+ Rich for the wizard)
 
-Python 3.9+ with the `rich` package is needed **only** for the guided wizard (`convert_tiff.py`). The direct PowerShell scripts need nothing but the two tools above.
+Python 3.9 or newer runs everything. The three backends use only what Python ships with; the guided wizard (`convert_tiff.py`) also wants the `rich` package for its menus (without it, it falls back to plain text).
 
 ```powershell
 pip install rich
 ```
 
+PowerShell itself is no longer needed: any terminal that starts `python` will do.
+
 > Install `rich` in the same Python version you'll use to run the wizard: `python -m pip install rich`.
 
 ### 4. Verify Installation
 
-**Restart PowerShell**, then run:
+**Restart the terminal**, then run:
 
 ```powershell
 # Each should return a version number
+python --version    # Python 3.9 or newer
 magick --version    # ImageMagick 7.x.x
 exiftool -ver       # 13.xx
 
-# Test full environment (wizard only)
+# Test full environment
 cd "C:\Users\YourName\Documents\GitHub\tiff-workflow"  # adjust path
 python convert_tiff.py
 ```
@@ -255,13 +264,13 @@ python convert_tiff.py
 
 ## Workflows
 
-### Compress TIFFs (wizard option 1 or direct PowerShell)
+### Compress TIFFs (wizard option 1 or the script directly)
 
 Suitable for any TIFF collection. Choose a mode (0-9), pick a folder, and compress.
 
 ```powershell
-# Direct PowerShell example
-powershell -NoProfile -File compress_tiff_zip.ps1 -Mode 3 -InputDir F:\Photos -StagingDir E:\staging -Workers 12
+# The script directly
+python compress_tiff_zip.py -Mode 3 -InputDir F:\Photos -StagingDir E:\staging -Workers 12
 ```
 
 See [docs/README_compress_tiff_zip.md](docs/README_compress_tiff_zip.md) for full CLI reference.
@@ -311,7 +320,8 @@ On fast storage (SSD), processing cost >> I/O cost, so uncompressed is fastest. 
 | `magick` not recognized | ImageMagick folder not on PATH | Add its folder to PATH and reopen the terminal |
 | `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download the `.zip` with `_64` suffix |
 | `ModuleNotFoundError: No module named 'rich'` | `rich` installed in a different Python version | Run `python -m pip install rich` |
-| PATH still not working | Terminal not restarted | Close and reopen PowerShell completely |
+| PATH still not working | Terminal not restarted | Close and reopen the terminal completely |
+| `No module named 'tiff_workflow_common'` | A backend was copied somewhere on its own | Keep `tiff_workflow_common.py` in the same folder as the three backends |
 | "ERROR (exiftool check) — cannot detect compression" | exiftool can't read the file | `exiftool -s -s -s -Compression photo.tif` — should output: Deflate, LZW, or nothing (uncompressed) |
 | "ERROR (magick) — compression failed" | magick can't read the file | `magick identify -verbose photo.tif` — should display image info without errors |
 
@@ -319,7 +329,7 @@ On fast storage (SSD), processing cost >> I/O cost, so uncompressed is fastest. 
 
 ## Related project: tiff-workflow as a Windows program
 
-[tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe) packages this toolkit as `tiff-workflow.exe`: no Python to install, and PowerShell 7, ExifTool and ImageMagick come in the same folder. Unzip and double-click for the wizard, or run the same scripts from a terminal (`tiff-workflow.exe compress -Mode 1 -InputDir ...`). The wizard and the four scripts inside are byte-for-byte those of a tiff-workflow release, and it passes the same real-photo battery. Presets are shared: both versions read the same settings file.
+[tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe) packages this toolkit as `tiff-workflow.exe`: no Python to install, and ExifTool and ImageMagick come in the same folder. Unzip and double-click for the wizard, or run the same scripts from a terminal (`tiff-workflow.exe compress -Mode 1 -InputDir ...`). The wizard and the scripts inside are byte-for-byte those of a tiff-workflow release, and it passes the same real-photo battery. Presets are shared: both versions read the same settings file.
 
 This Python version, the one the author runs on their own archive, remains by far the more tested. Use the program if you would rather not install Python and the tools; otherwise use the scripts here.
 
@@ -353,7 +363,7 @@ Getting there required finding and fixing several bugs. The full history and tec
 
 ## Changelog
 
-**Latest release: v2.9.1** — fixes only: a black-and-white photo stored as RGB stays RGB when compressed (it came out as one gray channel with the RGB profile still in it), Japanese IPTC text survives, and no swap can leave a photo's place empty. v2.9.0: every setting of the scripts within the wizard's reach: an *Advanced options* screen per run, and a settings file (`.tiff_workflow_settings.json`, main menu **[6]**) instead of editing the `.py`/`.ps1` files. v2.8.0: exiftool works when the Windows temp folder has characters outside the system's code page; every TIFF compress rewrites records it in the photo's `xmpMM:History`; the release is in every script and log (`--version`); the menu tells you when a newer release is out. v2.7.4: modes 0/9 keep each original in place until its compressed copy is ready, and a staging folder on another drive never writes over an original; the wizard offers to restore originals an interrupted run left behind. v2.7.3: compress lists originals that an interrupted mode 0/9 run left in `OLD_TIFFs` with nothing in their place, and `-RestoreStranded` puts them back; the script that moves backup folders to another drive never moves such a file. v2.7.2: a preset runs the backends next to the wizard, so it keeps working after the toolkit moves to another folder. v2.7.1: Copy EXIF's `-SkipIfTiffHasExif` no longer skips every TIFF. v2.7: the padded 16 -> 8-bit conversion records itself in the photo's `xmpMM:History`. v2.6.2: files in folders with `[ ]` in the name no longer leave full temporary copies in `%TEMP%`; the Diagnose progress line shows the folder. v2.6 made Diagnose TIFFs a preset (report only) with a folder-path scope and file-name skips.
+**Latest release: v3.0.0** — the backends are Python now (they were PowerShell scripts): same command line, same result on your files, no PowerShell needed, presets saved by v2.x keep working, and Copy EXIF is one script instead of two. See [The PowerShell edition](docs/powershell_edition.md) for what changes if you call the scripts yourself. v2.9.1 — fixes only: a black-and-white photo stored as RGB stays RGB when compressed (it came out as one gray channel with the RGB profile still in it), Japanese IPTC text survives, and no swap can leave a photo's place empty. v2.9.0: every setting of the scripts within the wizard's reach: an *Advanced options* screen per run, and a settings file (`.tiff_workflow_settings.json`, main menu **[6]**) instead of editing the scripts. v2.8.0: exiftool works when the Windows temp folder has characters outside the system's code page; every TIFF compress rewrites records it in the photo's `xmpMM:History`; the release is in every script and log (`--version`); the menu tells you when a newer release is out. v2.7.4: modes 0/9 keep each original in place until its compressed copy is ready, and a staging folder on another drive never writes over an original; the wizard offers to restore originals an interrupted run left behind. v2.7.3: compress lists originals that an interrupted mode 0/9 run left in `OLD_TIFFs` with nothing in their place, and `-RestoreStranded` puts them back; the script that moves backup folders to another drive never moves such a file. v2.7.2: a preset runs the backends next to the wizard, so it keeps working after the toolkit moves to another folder. v2.7.1: Copy EXIF's `-SkipIfTiffHasExif` no longer skips every TIFF. v2.7: the padded 16 -> 8-bit conversion records itself in the photo's `xmpMM:History`. v2.6.2: files in folders with `[ ]` in the name no longer leave full temporary copies in `%TEMP%`; the Diagnose progress line shows the folder. v2.6 made Diagnose TIFFs a preset (report only) with a folder-path scope and file-name skips.
 
 - Full release history: [`docs/CHANGELOG.md`](docs/CHANGELOG.md)
 - Per-bug technical detail: [`docs/bugs_fixed.md`](docs/bugs_fixed.md)

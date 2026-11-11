@@ -10,6 +10,51 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v3.0.0
+
+**The backends are Python now.** Until v2.9.1 the wizard was Python and the backends were
+PowerShell scripts (four files: Copy EXIF had one per PowerShell version). They were rewritten
+in Python, one file each. What a run does to your files is the same: before the PowerShell
+scripts were removed, each was run next to its replacement on copies of the same files with the
+same arguments -- 63 scenarios, synthetic and real photos, every mode -- and the resulting
+files, pixels, metadata, exit codes and result lines were the same.
+[The PowerShell edition](powershell_edition.md) says what to change if you call the scripts
+yourself, and what was found wrong in the old scripts on the way.
+
+- **No PowerShell needed.** Python 3.9+, ImageMagick and exiftool run everything. The backends
+  use only what Python ships with (`rich` is still only the wizard's)
+- **The same command line.** `python compress_tiff_zip.py -Mode 9 -InputDir F:\Photos` takes
+  the parameters `compress_tiff_zip.ps1` took, written the same way (`-Name value`, `-Switch`,
+  `-SafeMode:$false` or `-SafeMode:false`, names without case)
+- **Presets, *Repeat last* and manifests saved by v2.x keep working.** A saved PowerShell
+  command line is read and run with the Python script and the same arguments
+- **Several files at once on every machine.** That used to need PowerShell 7; Windows
+  PowerShell 5.1 worked one file at a time. `-ForceSequential` (compress) or `-Workers 1` turn
+  it off; `-ForceParallel` is still accepted and does nothing
+- **Copy EXIF is one script**, `copy_exif_to_tiff.py`, in place of `copy_exif_to_TIFF_ps5.ps1`
+  and `copy_exif_to_TIFF_ps7.ps1`
+- **`tiff_workflow_common.py`** holds what the three backends share (it must stay next to
+  them). The PowerShell scripts carried up to four copies of each helper, and a fix made in
+  one copy and not in the others was this project's most frequent bug
+- **Settings:** the defaults a user may edit are the `PARAMS` table at the top of each script.
+  The settings file (`.tiff_workflow_settings.json`, main menu **[6]**) is unchanged
+- **Fixed on the way** (present in v2.9.1, none damages a file): with `-InputDir .`, an
+  `-ExcludeFolders` entry equal to the folder's own name excluded the whole run in
+  `generate_thumbnails` and Copy EXIF; a Copy EXIF dry run created the `-OutputDir` folder;
+  legacy mode with a file where a folder was expected, and `-Mode 10` or higher, ended with
+  exit code 0; a check that timed out left its `magick.exe` running; Ctrl+C in modes 0/9 left
+  the temporary copies it was writing next to the photos
+- **Output:** the first log line names the Python script; a multi-page file skipped by Safe
+  mode always reads `MULTI (N pages - skipped)`; `-- Group:` shows the folder as spelled on
+  disk; `Workers capped to N (CapWorkers limit)` is printed once, not once per folder
+- **Windows program:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe) no
+  longer carries PowerShell 7
+- **Tests:** the suite drives the Python backends end to end in two lanes, parallel and
+  sequential (what the two shells were). The rules that used to be checked on the shape of the
+  PowerShell source are now checked by running the code with the tools replaced
+  (`tests/test_backend_invariants.py`). Pester is gone. 944 tests and the real-photo battery
+  (394 checks, in both lanes) pass
+
 ## v2.9.1
 
 Fixes only (audit round 28: a bug sweep of v2.9.0, 22 findings, and its review).

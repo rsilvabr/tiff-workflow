@@ -1,8 +1,8 @@
 # convert_tiff.py -- TIFF Workflow Manager (Wizard)
 
-Unified Python/Rich wizard for TIFF processing. Use this for guided workflows with AutoFind, persistent config, and streaming PowerShell output.
+Unified Python/Rich wizard for TIFF processing. Use this for guided workflows with AutoFind, persistent config, and streaming output from the backends.
 
-**Requires:** Python 3.9+, Rich (`pip install rich`), PowerShell 5.1+ or 7, ImageMagick 7, exiftool.
+**Requires:** Python 3.9+, ImageMagick 7, exiftool. Rich (`pip install rich`) is optional: without it the wizard falls back to a plain-text UI. No PowerShell is needed: the backends (`compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and the module they share, `tiff_workflow_common.py`) are Python scripts next to the wizard, started with the same Python that runs it. The PowerShell backends of v2.9.1 and earlier are described in [powershell_edition.md](powershell_edition.md).
 
 ---
 
@@ -44,7 +44,7 @@ Step 6: Summary + confirm
 `Skip`, `Overwrite`). Choosing the input folder itself means recompressing in place without
 a backup, so it requires an explicit confirmation.
 
-**Workers** are clamped to 1-64, the range the PowerShell backends accept.
+**Workers** are clamped to 1-64, the range the backends accept.
 
 **Advanced options.** Right after the basic questions (Workers, staging, dry-run, safe mode,
 ...) every compress and Copy EXIF workflow asks `Advanced options? [y/N]`. The default is
@@ -198,7 +198,7 @@ Create sRGB thumbnails from TIFFs. Can be used standalone or as part of the comp
 - Dry-run mode
 
 Size, quality and format are validated before the backend is launched — an out-of-range
-value falls back to the default instead of aborting at PowerShell parameter binding.
+value falls back to the default instead of the backend refusing the run.
 
 **Output:** `filename_thumb.jpg` next to each TIFF (or in specified output folder)
 
@@ -294,6 +294,9 @@ compression) can coexist instead of overwriting each other:
 - A preset runs the backends next to the wizard that starts it, not the ones of the
   folder it was saved from: it keeps working after the toolkit is moved or updated
   into another folder.
+- A preset or "Repeat last workflow" saved by v2.x holds a PowerShell command line
+  (`pwsh -File ...ps1 args`, or the `-Command` form of Windows PowerShell 5.1). It keeps
+  working: the wizard reads it and runs the Python backend with the same arguments.
 
 ### Running a preset unattended (Task Scheduler)
 
@@ -303,17 +306,16 @@ python convert_tiff.py --run-preset nightly-zip          # runs it, no menu, no 
 python convert_tiff.py --run-preset nightly-zip --dry-run
 ```
 
-`--run-preset` runs once and exits. It never waits on stdin (`-NonInteractive` and a
-closed stdin are passed to the backends), so a prompt left on the path is a refusal, not
-a hang.
+`--run-preset` runs once and exits. It never waits on stdin (the backends are started with
+a closed stdin), so a prompt left on the path is a refusal, not a hang.
 
 | | |
 |---|---|
 | **Dry-run** | off unless you pass `--dry-run`. It is **never** inherited from the stored run |
 | **Exit code** | `0` ran (or nothing to do), `1` failed or refused, `2` no such preset (available names are printed) |
 
-- A preset that deletes or replaces sources (`-DeleteSource` in any spelling PowerShell
-  binds -- any case, an abbreviation such as `-DeleteS`, `-DeleteSource:$true` -- compress
+- A preset that deletes or replaces sources (`-DeleteSource` in any spelling the backends
+  bind -- any case, an abbreviation such as `-DeleteS`, `-DeleteSource:$true` -- compress
   mode 8, or a manifest with a mode-8 row) is **refused** unattended (exit 1) unless you
   pass `--dry-run`: the confirmation cannot be given without a console. Run those from the
   menu.
@@ -337,7 +339,7 @@ schtasks /Create /TN "tiff-workflow nightly" /SC DAILY /ST 03:00 /RL LIMITED /TR
 
 `cmd /k` keeps the window open when the run ends, so a failure is in front of you the
 next morning instead of buried in a log. The `cd /d` matters: the backends write their
-logs to `Logs\` of the **current directory** (`$PWD`), so the run must start in the
+logs to `Logs\` of the **current directory**, so the run must start in the
 folder where the scripts live. Or use the task editor (*Create Task -> Actions -> New ->
 Start a program*):
 
@@ -420,8 +422,8 @@ Config saved to `~/.convert_tiff_config.json`:
   answered; written by the check itself, nothing to edit
 
 The wizard's defaults for Safe mode, LZW, thumbnails and duplicate names are read from the
-backends' own `param()` defaults — edit them there, or change them without editing a file in
-the [settings file](#script-settings-main-menu-6) below.
+backends' own defaults (the `PARAMS` table at the top of each backend) — edit them there, or
+change them without editing a file in the [settings file](#script-settings-main-menu-6) below.
 
 The wizard's own workflows that run ImageMagick in parallel (Diagnose, the padded-8-bit
 compress, Delete OLD_TIFFs) are capped by memory instead of by the worker count alone. Two
@@ -452,8 +454,9 @@ says the budget and what the typical and the largest file need.
 ## Script settings (main menu 6)
 
 The settings at the top of the scripts -- folder names, timeouts, thumbnail defaults -- can be
-changed **without editing a `.ps1`/`.py`**: they live in one JSON file, read by this wizard
-and by all four PowerShell backends (Windows PowerShell 5.1 and 7), and menu **[6]** edits it.
+changed **without editing a `.py`**: they live in one JSON file, read by this wizard
+and by the three backends, and menu **[6]** edits it. In a backend, the settings are the
+defaults of the `PARAMS = (P("Name", "kind", default, ...), ...)` table at the top of the file.
 
 ```json
 {
@@ -467,11 +470,13 @@ and by all four PowerShell backends (Windows PowerShell 5.1 and 7), and menu **[
 **Where the file is** (first that applies): the path in the environment variable
 `TIFFWORKFLOW_SETTINGS` (**set but empty = no overlay at all**), else
 `.tiff_workflow_settings.json` next to the scripts if it is there, else the same name in the
-user profile (`%USERPROFILE%`). Menu 6 shows which one it is using. `copy_exif` is one section
-for both `copy_exif_to_TIFF_ps5.ps1` and `_ps7.ps1`.
+user profile (`%USERPROFILE%`). Menu 6 shows which one it is using. `copy_exif` is the section
+of `copy_exif_to_tiff.py`. The file, its sections and its rules are the ones of v2.9: a
+settings file written for the PowerShell backends keeps working.
 
-**What it can change** -- only the names in each script's `OVERLAY-SPECS` block (an
-`# OVERLAY-SPECS-BEGIN` ... `END` table at the top of the `.ps1`), each with a type and range:
+**What it can change** -- only the names in each script's `OVERLAY_SPECS` table (the
+`OVERLAY_SPECS = {...}` table right below `PARAMS` at the top of each backend), each with a
+type and range:
 
 | Section | Names |
 |---|---|
@@ -519,7 +524,7 @@ python convert_tiff.py --help             # Show help
 python convert_tiff.py --list-presets     # List saved presets and exit
 python convert_tiff.py --run-preset NAME  # Run a preset unattended and exit
 python convert_tiff.py --run-preset NAME --dry-run
-python convert_tiff.py --version          # Print the release (tiff-workflow 2.9.0) and exit
+python convert_tiff.py --version          # Print the release (tiff-workflow 3.0.0) and exit
 ```
 
 No CLI flags are required -- the wizard is fully interactive. `--run-preset` and
@@ -538,7 +543,7 @@ When the main menu opens, the wizard looks once a day for a newer release of the
 GitHub and, if there is one, adds a line and a **[U]** entry that opens the release page:
 
 ```
-A new release is out: v2.10.0 (this copy is 2.9.0) -- [U] in the menu opens its page.
+A new release is out: v3.1.0 (this copy is 3.0.0) -- [U] in the menu opens its page.
 ```
 
 - It is **one anonymous request** to `api.github.com` (`releases/latest`; a generic
@@ -558,7 +563,7 @@ A new release is out: v2.10.0 (this copy is 2.9.0) -- [U] in the menu opens its 
 
 ## Output
 
-The wizard calls `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps7.ps1`, or `generate_thumbnails.ps1` as a subprocess and streams their output with color coding:
+The wizard calls `compress_tiff_zip.py`, `copy_exif_to_tiff.py`, or `generate_thumbnails.py` as a subprocess (started with the same Python that runs the wizard) and streams their output with color coding:
 - `[OK]` lines -- green
 - `[ERROR]` lines -- red
 - `[WARNING]` / `[WARN]` lines -- yellow
@@ -581,10 +586,11 @@ The wizard calls `compress_tiff_zip.ps1`, `copy_exif_to_TIFF_ps7.ps1`, or `gener
 ImageMagick 7    https://imagemagick.org/script/download.php
 exiftool         https://exiftool.org
 Python 3.9+      https://www.python.org
-Rich             pip install rich
+Rich (optional)  pip install rich
 ```
 
-Both `magick.exe` and `exiftool.exe` must be on your PATH.
+Both `magick.exe` and `exiftool.exe` must be on your PATH. Without Rich the wizard uses a
+plain-text UI; the backends themselves use only Python's standard library.
 
 ### Verify
 ```powershell

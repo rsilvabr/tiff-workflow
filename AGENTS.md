@@ -13,8 +13,12 @@ gitignored). If one exists:
   the file), then continue with what the user asked.
 
 ## Active scripts
-- `convert_tiff.py` -- the interactive wizard (Python). Builds and runs the
-  PowerShell backends, owns the manifest, the AutoFind search and the
+Everything is Python since v3.0.0. Until v2.9.1 the three backends were
+PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
+
+- `convert_tiff.py` -- the interactive wizard. Builds the backends' command
+  lines and runs them as subprocesses (`_backend_command`: this Python, the
+  script next to the wizard), owns the manifest, the AutoFind search and the
   multi-step workflows (it gates step 2 on step 1's exit code). Presets
   (menu 5, `--run-preset`, `--list-presets`) are named journal snapshots run
   by `_run_journal`, the same runner as Repeat last. A Diagnose journal
@@ -22,99 +26,119 @@ gitignored). If one exists:
   settings carry `convert_padded: true` (an explicit workflow-7 answer, default no);
   then `_run_diagnose_journal` calls `_compress_padded_files`, whose pixel gate
   (`_padded_pixels_status`) and OLD_PADDED backup are what make that safe unattended.
-- `compress_tiff_zip.ps1` -- TIFF -> ZIP/Deflate, modes 0-9, in-place backups
-  in `OLD_TIFFs/`, thumbnails, `-ExcludeFolders`.
-  compress and both copy_exif backends also take `-InputDirFile` (one folder per
-  line); the wizard's `run_subprocess` switches to it when the command line would
-  pass `_CMDLINE_SPILL_CHARS`.
-- `copy_exif_to_TIFF_ps5.ps1` / `copy_exif_to_TIFF_ps7.ps1` -- EXIF from the
-  Fuji S3/S5 Pro JPEG into the TIFF. Two copies of one behaviour: PS5
-  (sequential) and PS7 (`-Parallel`).
-- `generate_thumbnails.ps1` -- sRGB thumbnails, standalone or embedded.
+- `compress_tiff_zip.py` -- TIFF -> ZIP/Deflate, modes 0-9 and legacy (no
+  `-Mode`: the current folder, in place), backups in `OLD_TIFFs/`, thumbnails,
+  `-ExcludeFolders`. ONE per-file worker, `process_job`, for every mode.
+- `copy_exif_to_tiff.py` -- EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into
+  the TIFF, optionally compressing it (`-CompressZip`). Worker: `process_pair`.
+- `generate_thumbnails.py` -- sRGB thumbnails, standalone.
+- `tiff_workflow_common.py` -- what the three backends share: the command
+  line (`P`, `parse_args`), the settings overlay, the log, every call to
+  ImageMagick and exiftool, the gates, the moves, the directory listing, the
+  thread pool (`run_tasks`). It must sit next to the backends.
+  compress and copy_exif also take `-InputDirFile` (one folder per line); the
+  wizard's `run_subprocess` switches to it when the command line would pass
+  `_CMDLINE_SPILL_CHARS`.
 
-## Hard constraints of the .ps1 files
-- **Pure ASCII, no BOM.** PowerShell 5.1 reads a BOM-less file as cp1252, and
-  `"` (U+201D) is a string delimiter there: one em-dash broke parsing of a
-  whole script (v2.4). Write `--`, `->`, plain `-`. Check after every edit:
-  `grep -P '[^\x00-\x7F]' *.ps1`. Python's `encoding="utf-8-sig"` silently
-  adds a BOM.
-- **Every script parses under BOTH PowerShell 5.1 and 7**, and the PS5
-  (sequential) and PS7 (`-Parallel`) paths stay behaviourally identical --
-  divergence between them is this project's most recurring bug class.
-  `compress_tiff_zip.ps1` carries near-duplicate worker paths (the
-  sequential `Process-TiffJob` and the `ForEach-Object -Parallel` blocks of
-  the legacy and the mode paths): **a fix in one is a fix in ALL of them**,
-  and in both copy_exif copies.
-- **Functions are invisible inside `ForEach-Object -Parallel`.** They are
-  re-injected with `${function:Name} = $using:NameFnDef`, captured once near
-  the top. A new helper used in a parallel block needs a `...FnDef` capture
-  AND an injection line in EVERY runspace.
-- **Functions duplicated across the .ps1 files are pinned by
-  `tests/test_ps_helper_parity.py` -- fix every copy.** The test extracts each
-  duplicated function body and requires the copies to be identical (doc and
-  line comments stripped); `_KNOWN_DIVERGENT` lists the annotated exceptions.
-- **Never `return` at script scope.** It exits 0 and discards the
-  `$errTotal -gt 0 -> exit 1` contract that `convert_tiff.py` relies on.
+## Hard constraints of the backends
+- **The command line is a contract.** Presets and journals saved by users hold
+  the arguments -- some of them written by the PowerShell edition. Never rename
+  or remove a parameter of a `PARAMS` table or change what a value means;
+  `parse_args` binds the way PowerShell did (`-Name value`, `-Name:value`,
+  `-Switch`, `-Switch:$false`, names without case, unambiguous prefixes) and
+  refuses everything else with exit 1. `tests/test_wizard_registry.py` replays
+  the golden PowerShell command lines; `tests/test_powershell_journals.py` the
+  journal forms.
+- **One copy of everything.** A helper two backends need goes in
+  `tiff_workflow_common.py`, never into both. The only deliberate duplicate is
+  the overlay reader (`_overlay_object_pairs`, `_overlay_bound`,
+  `_overlay_value`), which `convert_tiff.py` carries too so that the wizard does
+  not import the backends: `tests/test_backend_invariants.py` requires the
+  copies to be identical. The wizard's own TIFF helpers (`_tiff_sample_layout`,
+  `_restore_subfile_types`, `_magick_spec`, ...) serve the padded conversion and
+  the purge gate and are a separate pipeline.
+- **A worker never logs, counts or lands a file.** `process_job` and
+  `process_pair` run on pool threads: they run the tools, apply the gates to
+  the file they wrote and RETURN a result. The caller's thread logs it, counts
+  it and does the moves (`run_tasks` yields each result there). The one write a
+  worker makes onto a photo is the verified in-place swap of its own file.
+- **The exit code is `main()`'s return value.** `sys.exit` appears once per
+  backend, at the entry point; a run function never falls off its end or
+  returns nothing (`tests/test_backend_invariants.py`). `convert_tiff.py`
+  relies on "any error -> exit 1".
+- **Paths are compared with `same_path` / `.lower()`, never `==`.** Windows
+  names files without case, and the PowerShell scripts compared that way.
+- **The backends use the standard library only**, and run on Python 3.9.
 - **The irreversible step comes last** (jxl-photo's rule; rounds 25-26). An original
   leaves its place only after its replacement is written, checked and sitting next to it
   on the same volume, and the swap is a rename: modes 0/9 land through
-  `Complete-KeepOriginal` (never move originals while planning again), every staging loop
-  through `Move-FileIntoPlace` (never `Move-Item -Force` from another drive onto a file).
-  The rename itself is `Move-FileReplacing` (MoveFileEx REPLACE_EXISTING): `Move-Item -Force`
-  onto an existing file DELETES it first and renames after, even on one volume (round 28).
-  MoveFileEx (and Python's `os.replace`) refuses a READ-ONLY destination, which `-Force`
-  replaced: clear the attribute for the swap and restore it when the swap fails; a hard link
-  shares the attribute with the original (`_land_padded_conversion`).
+  `complete_keep_original` (never move originals while planning again), every staging loop
+  through `move_file_into_place` (never a copy from another drive onto a file).
+  The rename itself is `move_file_replacing` (`os.replace`, MoveFileEx REPLACE_EXISTING),
+  the only place `os.replace` appears; `shutil.move` appears nowhere (round 28: a delete
+  followed by a rename left a photo's place empty).
+  The rename refuses a READ-ONLY destination: the attribute is cleared for the swap and
+  restored when the swap fails; a hard link shares the attribute with the original
+  (`_land_padded_conversion` in the wizard).
   Every run reports originals left in `OLD_TIFFs/` with nothing in their place
-  (`Find-StrandedOriginals`); never delete or move an `OLD_TIFFs` backup whose place is
+  (`find_stranded_originals`); never delete or move an `OLD_TIFFs` backup whose place is
   empty (`tools/move_old_backups.py`, the wizard's Delete OLD_TIFFs).
 - **Gates that authorise destroying data fail CLOSED**: a timeout, a non-zero
-  exit or unparseable output is a failure, never a pass (`Test-ZipIntegrity`,
-  `Get-TiffPageCount`, `_compare_tiff_metadata`, `_process_single_padded`).
-  Ask what a gate can actually OBSERVE: a decode check cannot see a missing
-  page (round 12).
+  exit or unparseable output is a failure, never a pass (`zip_integrity`,
+  `tiff_page_count`, `pixel_identical`, `tiff_sample_layout`,
+  `backup_tiff_metadata`; in the wizard `_compare_tiff_metadata`,
+  `_process_single_padded`). Ask what a gate can actually OBSERVE: a decode
+  check cannot see a missing page (round 12).
+- **Every tool call goes through the common module**: `run_captured` is the
+  only place that starts a process, `exiftool()` the only way to exiftool,
+  `magick_probe` (timeout, killed when it passes) for identify/compare/decode
+  checks, `magick_run` (no timeout) for conversions only.
 
 ## Settings are never hardcoded
-- The user-editable settings live at the top of each script. Code READS them
-  -- never repeat a default as a literal. A literal equal to the default
-  passes every test and silently discards the user's edit.
+- The user-editable settings are the defaults in the `PARAMS` table at the top
+  of each backend (and the constants at the top of `convert_tiff.py`). Code
+  READS them -- never repeat a default as a literal. A literal equal to the
+  default passes every test and silently discards the user's edit.
 - When `convert_tiff.py` passes a setting to a backend, pass it explicitly,
   even when it equals the default: omitting it "because it is the default"
   lets a backend whose own setting was edited run with a different value
   than the wizard planned with.
-- The wizard reads a backend default with `_backend_default(script, param)`;
-  its `_BACKEND_PARAM_FALLBACKS` is used only when the `.ps1` cannot be read,
-  and `tests/test_settings_literals.py` pins it to the scripts.
+- The wizard reads a backend default with `_backend_default(script, param)`,
+  from the script's `PARAMS` table parsed with `ast` (`_backend_tables`: the
+  table is written with literals only, and a backend is never imported by the
+  wizard); its `_BACKEND_PARAM_FALLBACKS` is used only when the script cannot
+  be read, and `tests/test_settings_literals.py` pins it to the scripts.
 - **The settings overlay** `.tiff_workflow_settings.json` (env
   `TIFFWORKFLOW_SETTINGS`, blank = off; else next to the scripts; else the
   user profile) changes those settings without editing a file. It is read by
-  `convert_tiff.py` (`_OVERLAY_SETTINGS`) and by every `.ps1`
-  (`Get-SettingsOverlay`, identical in the four scripts, no literal braces in
-  its strings). Only the names in a script's `OVERLAY-SPECS` block are taken:
-  **never add a safety or per-run parameter to one** (tests/test_settings_overlay.py
-  T6 pins the forbidden list). A `-Param` on the command line wins; a bad file
-  or value changes nothing and warns. Tests and the battery switch it off.
+  `convert_tiff.py` (`_OVERLAY_SETTINGS`) and by every backend
+  (`apply_settings_overlay`). Only the names in a script's `OVERLAY_SPECS`
+  table are taken: **never add a safety or per-run parameter to one**
+  (tests/test_settings_overlay.py T6 pins the forbidden list). A `-Param` on
+  the command line wins; a bad file or value changes nothing and warns. Tests
+  and the battery switch it off.
 - **Every backend parameter is in `REGISTRY` or in `NOT_OFFERED`** (with the
   reason) in `convert_tiff.py`; the argv comes from `_emit_all`, in REGISTRY
   order. `tests/test_wizard_registry.py` fails on a new parameter nobody
   decided about, and its golden file `tests/data/wizard_registry_golden.json`
-  is never regenerated.
+  is never regenerated (it holds the PowerShell edition's command lines: the
+  arguments must stay byte for byte).
 
 ## Tool traps (verified, all silent)
 - **exiftool `-tagsfromfile SRCFILE` expands printf codes** in SRCFILE: `%o`
   in `50%off.tif` is eaten, it warns and STILL exits 0. Doubling does not
-  escape it; use a `%`-free container name (`Backup-TiffMetadata`). One `-q`
+  escape it; use a `%`-free container name (`backup_tiff_metadata`). One `-q`
   only (`-q -q` hides the warning); fail on `Error opening file` regardless of
   the exit code -- but NOT on `No writable tags set`.
 - **`magick identify -format "%[compression]"` prints once per page**
-  (`zipzip`); read `exiftool -IFD0:Compression` instead. `%[tiff:subfiletype]`
-  is empty both when absent and when 0 -- use `exiftool -a -G1 -s -s -n
-  -SubfileType` when the difference matters.
+  (`zipzip`); read `exiftool -IFD0:Compression` instead (`ifd0_compression`).
+  `%[tiff:subfiletype]` is empty both when absent and when 0 -- use
+  `exiftool -a -G1 -s -s -n -SubfileType` when the difference matters.
 - **magick picks the output channel layout from the PIXELS** (round 28): an RGB file whose
   every pixel is R=G=B comes out as 1-channel gray (RGB+IR as 2 samples), with the RGB ICC
   still in it, and every pixel compare says identical. Every rewrite passes
-  `Get-MagickKeepTypeArgs` (`-type TrueColor`/`TrueColorAlpha`) and is checked by
-  `Test-TiffSampleLayoutKept`; `-define colorspace:auto-grayscale=false` does NOT help.
+  `magick_keep_type_args` (`-type TrueColor`/`TrueColorAlpha`) and is checked by
+  `tiff_sample_layout_kept`; `-define colorspace:auto-grayscale=false` does NOT help.
 - **`-tagsfromfile ... -all:all` does not copy `IPTC:CodedCharacterSet`** (round 28): into a
   file (or the MIE container) without it, UTF-8 IPTC text is written as Latin, Japanese as
   `?`. Add `-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet` after `-all:all`. `-IPTC:All` has
@@ -122,20 +146,30 @@ gitignored). If one exists:
   own, so its IPTC is copied onto itself first (`-tagsfromfile @ -IPTC:All`) and exiftool
   rewrites the whole block in the new charset -- without that a Latin caption is left
   mislabelled as UTF-8.
-- **PS5 cannot bind `-Switch:$false` through `-File`**: the switch arrives as a
-  string and stays ON. Route PS5 through `_wrap_ps5_command` (tests:
-  `run_ps_switched`).
 - **exiftool reads its command line in the ANSI code page -- an argfile PATH
-  too** (round 27): `-@ <argfile>` failed on every call when `%TEMP%` held a
-  character outside it. Every call sends the argfile's CONTENT on stdin,
-  `exiftool -@ -` (`ReadAllText($f) | exiftool -@ -`; `input=` in Python).
-  **PS 5.1 pipes to a native program with `$OutputEncoding` = us-ascii**: it is
-  set to `UTF8Encoding($false)` at script scope and as the first statement of
-  every `-Parallel` block. A test that reads tags must not put a Japanese path
+  too** (round 27). Every call sends the argfile's CONTENT on stdin,
+  `exiftool -@ -` (`tw.exiftool`, `_run_exiftool` in the wizard), with
+  `-charset filename=utf8`. A test that reads tags must not put a Japanese path
   on exiftool's command line either (`exif_stdin` in
-  `tests/test_exiftool_stdin.py`).
+  `tests/test_exiftool_stdin.py`), and a fixture built by exiftool or magick is
+  made under a plain name and renamed.
+- **magick expands `%` in every output name and in an input with a `[n]`
+  suffix** (`magick_path_spec`: `%%`); a plain input must stay unescaped.
+- **magick globs `[ ]` in a spec that carries a `[n]` selector**, and a glob
+  match wins over the literal file (`foo[1].tif[0]` reads `foo1.tif` when both
+  exist; no escape works on Windows). The wizard routes such paths through a
+  bracket-free hard-link alias (`_magick_spec`, released per file: across
+  drives the alias is a full COPY). The backends do not: their compares would
+  copy every scan of a library that lives in a `[FINAL]` folder on another
+  drive. There the literal file wins unless a file matching the glob really
+  exists, and then the gate compares the wrong file and refuses unless its
+  pixels happen to be equal.
+- **A wait on a lock cannot be interrupted on Windows**: `run_tasks` polls
+  with a timeout so Ctrl+C is seen while files are in flight.
+- **`shutil.which` returns `magick.EXE`**, and ImageMagick prints the name it
+  was started under in every message (`find_tool` lower-cases the extension).
 - Windows' 260-character path limit: staged names in mode 8 blew past it
-  (round 13). Keep generated names short.
+  (round 13). Keep generated names short; `magick.exe` is not long-path aware.
 
 ## Shared semantics with jxl-photo
 `jxl-photo` (sibling repo) is the **reference implementation** of the features
@@ -152,43 +186,36 @@ inventing a new one.
   `[ ]` brackets, spaces, `%`, parentheses, long paths, files on another drive
   than `%TEMP%`. Every change that touches a path (discovery, magick, exiftool,
   staging, moves, reports) gets a REAL test whose fixture path has Japanese
-  characters AND `[ ]` AND a space -- not only an ASCII `tmp_path`. Known traps:
-  exiftool reads its command line in the ANSI code page (Japanese arrives
-  mangled -> pass paths through a UTF-8 argfile, `-charset filename=utf8`:
-  `_run_exiftool`, the backends' argfiles); magick globs `[ ]` (bracket-free
-  alias, `_magick_spec`) and expands `%` (escape `%%`); a hard link cannot
-  cross drives (an alias becomes a full COPY -- release it per file); Windows'
-  260-character limit. Round 2026-10-17 shipped three such bugs (alias copies
-  filling C:, every conversion refused under `伊豆沼`, Delete OLD_TIFFs refused).
+  characters AND `[ ]` AND a space -- not only an ASCII `tmp_path`. Round
+  2026-10-17 shipped three such bugs (alias copies filling C:, every conversion
+  refused under `伊豆沼`, Delete OLD_TIFFs refused).
 On the owner's machine `py` is a Python 3.13 without pytest -- use `python` for
 the suite and the battery.
-- **Two suites, different jobs.** `pytest tests` is the real one: it drives
-  the PowerShell backends end to end through both `powershell` and `pwsh`
-  with real TIFFs. Pester is static pattern-matching over the sources, and
-  only runs under `pwsh` (Pester lives in the PS7 module path):
-  `Invoke-Pester -Path (Get-ChildItem tests/test_*.ps1).FullName`
-  (Pester 5+ auto-discovers only `*.Tests.ps1`).
+- **One suite: `python -m pytest tests`.** It drives the backends end to end
+  as subprocesses with real TIFFs, once per LANE (`tests/backends.py`:
+  `parallel` and `sequential` -- what the two PowerShell shells were).
+  `tests/test_backend_invariants.py` runs the backends' code with the tools
+  replaced (`FakeTools`): which gate runs before which irreversible step, what
+  a failed gate leaves on disk, what is sent to the tools. Add a rule there by
+  RUNNING the code; match the text of the source only for what cannot be run
+  (the AST rules at its end).
 - **Real-photo battery** -- `python tools/real_photo_battery.py
   --fixtures <folder>` (or `TW_FIXTURES`) runs the backends unattended on COPIES
-  of real photos under both shells and checks the files on disk. Run it before
+  of real photos in both lanes and checks the files on disk. Run it before
   every release and after any change to what magick/exiftool read or write, to a
   delete or in-place path, or to discovery. Paste its summary into the report.
 - **Prove every regression test FAILS against the pre-fix code** (mutation
   check): extract the old file and run the test against it, then compare the
   restored file's hash with the original bytes.
   ```
-  git show HEAD:compress_tiff_zip.ps1 > <tmpdir>/compress_tiff_zip.ps1
+  git show HEAD:compress_tiff_zip.py > <tmpdir>/compress_tiff_zip.py
   ```
   Never `git stash` for this.
-- **Pester assertions pin code SHAPES**: a refactor can break them with no
-  bug present, and a test can also be the wrong side (round 15 found three
-  failing against correct code). Decide which side is wrong before touching
-  either; rewrite a moved invariant, never just delete it.
 - **Changing a function's signature OR its return shape** (a new parameter, a
-  tuple/array gaining a member, a hashtable losing a key): first list every
-  caller, every splatted call and every test double -- in every worker path
-  and both copy_exif copies. jxl-photo's round 43 shipped a crash because one
-  loop unpacked a result tuple at a fixed arity.
+  result dict gaining or losing a key): first list every caller and every test
+  double (`FakeTools`, the monkeypatches in the wizard's tests). jxl-photo's
+  round 43 shipped a crash because one loop unpacked a result tuple at a fixed
+  arity.
 - **Run the tool twice and feed it its own output** when auditing or testing a
   destructive path: two of round 13's three serious findings only appear on a
   second run over files the toolkit wrote itself.
@@ -199,17 +226,19 @@ the suite and the battery.
 - Fixtures with `%` in the name are built under a safe name and renamed
   (`make_tiff_named`), or `magick` writes `500ff.tif`.
 - **Every subprocess call in `convert_tiff.py` goes through `_run_captured`**
-  except the version probes (`detect_powershell_version`, `_probe_version`) and
-  the streaming `run_subprocess`; `tests/test_memory_subprocess.py` enforces
-  it. `capture_output=True` starts reader threads that can hang `Thread.start()`
-  under memory exhaustion, before the timeout is armed.
+  except the version probe (`_probe_version`) and the streaming
+  `run_subprocess`; `tests/test_memory_subprocess.py` enforces it.
+  `capture_output=True` starts reader threads that can hang `Thread.start()`
+  under memory exhaustion, before the timeout is armed. The backends have the
+  same rule (`tw.run_captured`).
 
 ## Editing source safely
 - **Bash heredocs eat backslashes** even with a quoted delimiter
   (`python - <<'PY'`): `'[\\\\/]'` landed as `'[\/]'`, a path guard that
   silently stopped matching `\`. Use the Edit tool for exact edits. When a bulk
-  edit needs Python, `assert s.count(old) == N` before replacing, then verify
-  the bytes on disk (`grep ... | cat -A`) against a sibling construct.
+  edit needs Python, write the script to a file first (not a heredoc),
+  `assert s.count(old) == N` before replacing, then verify the bytes on disk
+  (`grep ... | cat -A`) against a sibling construct.
 - **Stage files by name, never `git add -A`**: it once swept the owner's
   untracked bug report into a commit.
 
@@ -223,16 +252,16 @@ same `<topic>` across the three.
    decision already taken, the caller list when a signature or return shape
    changes, the tests to write (real files where it matters) and the command
    that proves each one fails against the pre-fix code, and the rules above
-   most often broken (ASCII, PS5/PS7 parity, every worker path, fail-closed,
-   no hardcoded settings).
+   most often broken (the command-line contract, one copy of everything,
+   fail-closed, no hardcoded settings, hostile paths).
 2. **Code (DeepSeek or another coder)** -- follow the plan literally; when it
    is wrong or ambiguous take the most conservative option (fail closed,
    change less) and record it. Never commit. Report: each plan item done /
    partly / not done; every decision and deviation, with why; the commands run
-   with their REAL output (pytest and Pester summaries, the pre-fix failure
-   proof); what was NOT verified. Tell the user the report's path.
+   with their REAL output (the pytest summary, the pre-fix failure proof); what
+   was NOT verified. Tell the user the report's path.
 3. **Review (Claude/Opus)** -- read plan, report and the full diff; re-run the
-   suites and the pre-fix proofs instead of trusting the report; must-fix /
+   suite and the pre-fix proofs instead of trusting the report; must-fix /
    should-fix list and a commit verdict.
 
 ## Docs map
@@ -240,15 +269,26 @@ same `<topic>` across the three.
 - `docs/README_compress_tiff_zip.md`, `docs/README_convert_tiff_py.md`,
   `docs/README_copy_exif.md`, `docs/README_generate_thumbnails.md` -- per-script
   reference.
+- `docs/powershell_edition.md` -- the PowerShell scripts of v2.9.1: where they
+  are, what changes for someone moving to v3, and the problems found in them
+  while porting. **Written once, with v3.0.0, and frozen** (owner's decision,
+  2026-11-11): never spend time finding out whether a bug fixed later also
+  existed in the `.ps1`, and never add to its list -- the page itself says to
+  assume it did.
 - `docs/bugs_fixed.md` -- one section per audit round, newest first (severity
   emoji, `**Issue:** / - **Fix:** / - **Files:**`). Its old version headings
   are not the real numbering: find the next round with
-  `git log --grep audit-round`.
+  `git log --grep audit-round`. Rounds 1-28 describe the PowerShell scripts;
+  the function names in them map to Python ones (`Test-PixelIdentical` ->
+  `pixel_identical`, ...).
 - `docs/CHANGELOG.md` -- per release. `tests/README.md` -- what each suite pins.
 - `RELEASE_vX.Y.md` (root, gitignored) -- notes pasted into the GitHub release
   with `gh release create --notes-file`. Their FIRST line points to the Windows
   program (owner's rule, 2026-11-08):
-  `> **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — the same scripts with PowerShell 7, ExifTool and ImageMagick included.`
+  `> **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — the same scripts with ExifTool and ImageMagick included.`
+  Every release has a TITLE, as jxl-photo's do (owner's rule, 2026-11-11):
+  `--title "vX.Y.Z — What Changed, In Title Case"`, never the bare number. The
+  exe's is `vX.Y.Z-exe1 — tiff-workflow vX.Y.Z`.
 
 ## Commits and releases
 - Commits carry the repo owner's authorship only -- **no `Co-Authored-By`,
@@ -256,10 +296,10 @@ same `<topic>` across the three.
   README's Acknowledgments.
 - An audit round is one `fix(audit-round-N): ...` commit plus its
   `docs/bugs_fixed.md` section.
-- The release number lives in five places: `TOOLKIT_VERSION` in
-  `convert_tiff.py` and `$script:ToolkitVersion` in the four `.ps1`
-  (`tests/test_version_parity.py`), and it must match the newest
-  `docs/CHANGELOG.md` section (`tests/test_diagnose_preset.py`).
+- The release number lives in two places: `TOOLKIT_VERSION` in
+  `convert_tiff.py` (the Windows program's build reads it there) and in
+  `tiff_workflow_common.py` (`tests/test_version_parity.py`), and it must match
+  the newest `docs/CHANGELOG.md` section (`tests/test_diagnose_preset.py`).
 - Commit or push only when the owner asks.
 - **Every tiff-workflow release updates tiff-workflow-exe too** (owner's rule,
   2026-10-25), in the sibling repo `../tiff-workflow-exe`: `TIFFWORKFLOW_TAG`
@@ -269,9 +309,10 @@ same `<topic>` across the three.
   creates a DRAFT release; `gh attestation verify` on the zip, then
   `python tests/battery_on_exe.py --app <that zip, extracted>` (runs the
   program from a hostile, internet-marked folder; must pass) before it is
-  published as a regular release. A bundled tool update (PowerShell,
-  ExifTool, ImageMagick: URL + SHA-256 in its `TOOLS`) goes the same way
-  with the next `PACKAGE_REVISION`.
+  published as a regular release. A bundled tool update (ExifTool,
+  ImageMagick: URL + SHA-256 in its `TOOLS`) goes the same way with the next
+  `PACKAGE_REVISION`. A new file the backends need (as
+  `tiff_workflow_common.py` was) must be added to its `SCRIPT_NAMES`.
 
 ## Pending list
 The owner keeps one list of everything still pending, across all repos, in
