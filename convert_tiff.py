@@ -75,6 +75,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -4477,6 +4478,30 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
         sibling.unlink(missing_ok=True)
         return f"could not bring the converted file next to the original ({e}) — original preserved", None
 
+    # audit round 28 (review): Windows refuses to rename over -- or to unlink -- a READ-ONLY
+    # file, and a hard link shares the attribute with the original. A read-only original (a
+    # scan copied from a CD) therefore failed at step 3 where the old move-out / move-in had
+    # converted it, and the cleanup could not remove the link: a "backup" of a conversion that
+    # never happened stayed in OLD_PADDED/. Clear the attribute for the swap; the original
+    # gets it back under whichever name it ends with.
+    ro_mode = None
+    if os.name == "nt":
+        try:
+            mode = os.stat(str(final_dst)).st_mode
+            if not mode & stat.S_IWRITE:
+                os.chmod(str(final_dst), mode | stat.S_IWRITE)
+                ro_mode = mode
+        except OSError as e:
+            sibling.unlink(missing_ok=True)
+            return f"the original is read-only and that cannot be changed ({e}) — original preserved", None
+
+    def _read_only_again(p):
+        if ro_mode is not None:
+            try:
+                os.chmod(str(p), ro_mode)
+            except OSError:
+                pass
+
     linked = False
     try:
         os.link(str(final_dst), str(backup_path))
@@ -4492,13 +4517,16 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
             except OSError:
                 pass
             sibling.unlink(missing_ok=True)
+            _read_only_again(final_dst)
             return f"could not move the converted file into place ({e}) — original preserved", None
+        _read_only_again(backup_path)
         return None, None
 
     try:
         os.replace(str(final_dst), str(backup_path))
     except OSError as e:
         sibling.unlink(missing_ok=True)
+        _read_only_again(final_dst)
         return f"backup to OLD_PADDED failed ({e}) — original preserved", None
     try:
         os.replace(str(sibling), str(final_dst))
@@ -4506,10 +4534,13 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
         try:
             os.replace(str(backup_path), str(final_dst))
             restored = " — original restored"
+            _read_only_again(final_dst)
         except OSError:
             restored = f" — ORIGINAL LEFT IN OLD_PADDED/{backup_path.name}"
+            _read_only_again(backup_path)
         sibling.unlink(missing_ok=True)
         return f"could not move the converted file into place ({e}){restored}", None
+    _read_only_again(backup_path)
     return None, "(no hard link on this drive: the original was renamed into OLD_PADDED/)"
 
 

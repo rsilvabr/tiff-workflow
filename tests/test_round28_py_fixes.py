@@ -271,6 +271,63 @@ def test_padded_swap_on_a_locked_original_leaves_no_copy_in_old_padded(tmp_path,
     assert not [p for p in photo.parent.iterdir() if p.is_file() and p != photo]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="the read-only attribute blocks a rename on Windows only")
+def test_padded_swap_replaces_a_read_only_original(tmp_path, monkeypatch):
+    """Review of round 28: os.replace refuses a READ-ONLY destination, and the hard link in
+    OLD_PADDED/ shares the attribute, so it could not be unlinked either -- the conversion
+    failed (v2.9.0 converted the file) and left a "backup" of a swap that never happened."""
+    import stat
+    photo = tmp_path / HOSTILE / "0014_14 (2).tif"
+    photo.parent.mkdir(parents=True)
+    photo.write_bytes(b"x" * 2000)
+    os.chmod(photo, stat.S_IREAD)
+    monkeypatch.setattr(ct, "_process_single_padded", _fake_padded_result(None))
+    monkeypatch.setattr(ct, "_memory_budget", lambda *a, **k: (None, {}))
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    cfg = SimpleNamespace(config=ct.ToolConfig())
+    backup = photo.parent / "OLD_PADDED" / photo.name
+    try:
+        done = ct._compress_padded_files([photo], tmp_path / "temp", workers=1, cfg=cfg)
+        assert done["converted"] == 1 and done.get("failed", []) == [], done
+        assert photo.read_bytes() == b"z" * 100
+        assert os.access(photo, os.W_OK), "the converted file must not be read-only"
+        assert backup.read_bytes() == b"x" * 2000
+        assert not os.access(backup, os.W_OK), "the original keeps its read-only mark"
+        assert [p.name for p in photo.parent.iterdir() if p.is_file()] == [photo.name]
+    finally:
+        for p in (photo, backup):
+            if p.exists():
+                os.chmod(p, stat.S_IWRITE)
+
+
+def test_padded_swap_that_fails_on_a_read_only_original_leaves_it_as_it_was(tmp_path, monkeypatch):
+    """The swap still fails when the file is open elsewhere: no link stays in OLD_PADDED/ and
+    the original is read-only again."""
+    import stat
+    photo = tmp_path / HOSTILE / "0014_14 (2).tif"
+    photo.parent.mkdir(parents=True)
+    photo.write_bytes(b"x" * 2000)
+    os.chmod(photo, stat.S_IREAD)
+    monkeypatch.setattr(ct, "_process_single_padded", _fake_padded_result(None))
+    monkeypatch.setattr(ct, "_memory_budget", lambda *a, **k: (None, {}))
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    cfg = SimpleNamespace(config=ct.ToolConfig())
+    try:
+        with open(photo, "rb"):                 # open without delete sharing (Windows)
+            done = ct._compress_padded_files([photo], tmp_path / "temp", workers=1, cfg=cfg)
+        assert photo.read_bytes() == b"x" * 2000
+        if sys.platform == "win32":
+            assert done["converted"] == 0 and len(done["failed"]) == 1, done
+            assert not os.access(photo, os.W_OK), "the original lost its read-only mark"
+            old = photo.parent / "OLD_PADDED"
+            assert not old.exists() or list(old.glob("*")) == []
+        assert [p.name for p in photo.parent.iterdir() if p.is_file()] == [photo.name]
+    finally:
+        for p in photo.parent.rglob("*"):
+            if p.is_file():
+                os.chmod(p, stat.S_IWRITE)
+
+
 # --- #10 / #16: renamed-backup rules -------------------------------------------------
 
 

@@ -20,7 +20,9 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -245,6 +247,53 @@ class TestIptcSurvivesTheMieContainer:
         assert exif(src, "-s3", "-EXIF:Make") == "FUJIFILM"
 
 
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("folder", [HOSTILE, f"{HOSTILE} 50%"], ids=["plain", "percent"])
+@need_tools[0]
+@need_tools[1]
+def test_copy_exif_keeps_utf8_iptc_of_the_jpeg(tmp_path, shell, folder):
+    """Review of round 28: the JPEG -> TIFF copy is '-IPTC:All' too, so the JPEG's UTF-8 IPTC
+    reached the TIFF as '???' (with or without the MIE container), the run saying OK. The
+    TIFF's own Latin IPTC must survive the change of charset as well."""
+    script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+    cam = tmp_path / folder / "S5pro"
+    tif = color_rgb(cam / "_DSF4796 (2).tif")
+    exif(tif, "-q", "-overwrite_original", "-IPTC:Credit=São Paulo")
+    assert exif(tif, "-s3", "-IPTC:CodedCharacterSet") == ""      # Latin, as old software wrote it
+    jpg = cam / "_DSF4796 (2).jpg"
+    subprocess.run(["magick", "-size", "64x48", "gradient:", "-depth", "8", str(tmp_path / "j.jpg")],
+                   check=True, capture_output=True)
+    shutil.move(str(tmp_path / "j.jpg"), str(jpg))
+    exif(jpg, "-q", "-overwrite_original", "-Make=FUJIFILM", "-Model=FinePix S5Pro",
+         "-IPTC:CodedCharacterSet=UTF8", "-IPTC:Keywords=伊豆沼", "-IPTC:Caption-Abstract=伊豆沼の夏")
+    assert exif(jpg, "-s3", "-IPTC:Keywords") == "伊豆沼"
+    r, out = run(shell, REPO / script, ["-InputDir", cam, "-Workers", 2], tmp_path)
+    assert r.returncode == 0, out[-3000:]
+    assert exif(tif, "-s3", "-EXIF:Model") == "FinePix S5Pro", out[-2000:]
+    assert exif(tif, "-s3", "-IPTC:Keywords") == "伊豆沼", out[-2000:]
+    assert exif(tif, "-s3", "-IPTC:Caption-Abstract") == "伊豆沼の夏"
+    assert exif(tif, "-s3", "-IPTC:Credit") == "São Paulo"
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@need_tools[0]
+@need_tools[1]
+def test_copy_exif_creates_no_iptc_when_neither_file_has_one(tmp_path, shell):
+    script = "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
+    cam = tmp_path / HOSTILE / "S5pro"
+    tif = color_rgb(cam / "_DSF4796 (2).tif")
+    jpg = cam / "_DSF4796 (2).jpg"
+    subprocess.run(["magick", "-size", "64x48", "gradient:", "-depth", "8", str(tmp_path / "j.jpg")],
+                   check=True, capture_output=True)
+    shutil.move(str(tmp_path / "j.jpg"), str(jpg))
+    exif(jpg, "-q", "-overwrite_original", "-Make=FUJIFILM", "-Model=FinePix S5Pro")
+    r, out = run(shell, REPO / script, ["-InputDir", cam, "-Workers", 2], tmp_path)
+    assert r.returncode == 0, out[-3000:]
+    assert "] OK |" in out and "WARN" not in out, out[-3000:]
+    assert exif(tif, "-s3", "-EXIF:Model") == "FinePix S5Pro"
+    assert exif(tif, "-a", "-G1", "-s", "-IPTC:all") == ""
+
+
 # ---------------------------------------------------------------------------------------------
 # #8: legacy with -StagingDir is still verified (and still works)
 # ---------------------------------------------------------------------------------------------
@@ -271,6 +320,64 @@ def test_the_replace_gate_keys_on_the_destination_not_on_the_temp_sibling():
     # a failed metadata restore blocks the replace in all three, and mode 8 in both
     assert s.count("$inPlaceOk = -not $exifWarn") == 3
     assert s.count('if ($exifWarn) { $integrityReason = "metadata restore failed" }') == 2
+
+
+# ---------------------------------------------------------------------------------------------
+# #7: a failed metadata restore blocks the replace -- a real run with the failure injected
+# (review of round 28: the fix shipped with static checks only)
+# ---------------------------------------------------------------------------------------------
+
+_EXIFTOOL_SHIM = r'''import os, subprocess, sys
+data = sys.stdin.buffer.read() if "-" in sys.argv[1:] else None
+if data and b"-tagsfromfile" in data and b"-all:all" in data and b"-overwrite_original" in data:
+    sys.stderr.write("Error: injected failure\n")      # what a full staging disk does
+    sys.exit(1)
+r = subprocess.run([os.environ["TW_REAL_EXIFTOOL"]] + sys.argv[1:], input=data, capture_output=True)
+sys.stdout.buffer.write(r.stdout)
+sys.stderr.buffer.write(r.stderr)
+sys.exit(r.returncode)
+'''
+
+
+def _failing_restore_env(tmp_path):
+    """PATH with an `exiftool` in front that fails the metadata restore (-tagsfromfile ...
+    -all:all) and passes every other call to the real one."""
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "shim_exiftool.py").write_text(_EXIFTOOL_SHIM, encoding="utf-8")
+    (shim / "exiftool.cmd").write_text(
+        '@echo off\r\n"' + sys.executable + '" "%~dp0shim_exiftool.py" %*\r\nexit /b %ERRORLEVEL%\r\n',
+        encoding="ascii", newline="")
+    env = env_off(TW_REAL_EXIFTOOL=shutil.which("exiftool"))
+    env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+    return env
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the injected exiftool is a .cmd")
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("key", ["legacy", "mode8", "mode9"])
+@need_tools[0]
+@need_tools[1]
+def test_a_failed_metadata_restore_never_replaces_the_original(tmp_path, shell, key):
+    cam = tmp_path / HOSTILE / "NORITSU"
+    src = color_rgb(cam / "0014_14 (2).tif")
+    exif(src, "-q", "-overwrite_original", "-EXIF:Make=FUJIFILM")
+    orig = src.read_bytes()
+    env = _failing_restore_env(tmp_path)
+    if key == "legacy":
+        r, out = run(shell, COMPRESS, ["-Workers", 2], cam, env=env)
+    else:
+        r, out = run(shell, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
+                     tmp_path, env=env)
+    if key == "mode9":
+        # the original is kept in OLD_TIFFs, so this stays a warning (and exit 0)
+        assert r.returncode == 0 and "WARN (exiftool failed, ZIP ok)" in out, out[-3000:]
+        assert (cam / "OLD_TIFFs" / src.name).read_bytes() == orig
+        return
+    assert r.returncode == 1, out[-3000:]
+    assert "metadata restore failed" in out, out[-3000:]
+    assert src.read_bytes() == orig, "a file without its metadata replaced the original"
+    assert exif(src, "-s3", "-EXIF:Make") == "FUJIFILM"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -361,6 +468,91 @@ for ($i = 0; $i -lt 400; $i++) {
     assert seen["n"] > 100
     assert seen["missing"] == 0, seen
     assert sorted(p.name for p in d.iterdir()) == ["0014_14 (2).tif", "done"]
+
+
+# ---------------------------------------------------------------------------------------------
+# Review of round 28: MoveFileEx refuses a READ-ONLY destination, which Move-Item -Force
+# replaced -- mode 8 and every in-place swap failed on a scan that kept the attribute
+# ---------------------------------------------------------------------------------------------
+
+def _writable_again(root: Path):
+    for p in root.rglob("*"):
+        if p.is_file():
+            os.chmod(p, stat.S_IWRITE)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("script", PS_SCRIPTS)
+def test_move_file_replacing_replaces_a_read_only_destination(tmp_path, shell, script):
+    """...and a swap that still fails (the destination is held open) leaves the original
+    read-only, exactly as it was."""
+    d = tmp_path / f"{HOSTILE} 50%"
+    d.mkdir()
+    fn = _function((REPO / script).read_text(encoding="ascii"), "Move-FileReplacing")
+    harness = tmp_path / "h.ps1"
+    harness.write_text("param([string]$Dir)\n" + fn + r"""
+$to = Join-Path $Dir "0014_14 (2).tif"
+$from = "$to.0a1b2c3d_0123456789ab.tif"
+[System.IO.File]::WriteAllBytes($to, [byte[]](1, 1, 1))
+[System.IO.File]::WriteAllBytes($from, [byte[]](2, 2, 2, 2))
+(Get-Item -LiteralPath $to).IsReadOnly = $true
+$r = @{}
+try { Move-FileReplacing -From $from -To $to; $r.swap = "ok" } catch { $r.swap = "threw: $($_.Exception.Message)" }
+$r.len = (Get-Item -LiteralPath $to).Length
+$r.readonly = (Get-Item -LiteralPath $to).IsReadOnly
+$r.fromLeft = [System.IO.File]::Exists($from)
+
+$held = Join-Path $Dir "held.tif"
+$from2 = "$held.0a1b2c3d_0123456789ab.tif"
+[System.IO.File]::WriteAllBytes($held, [byte[]](3, 3, 3))
+[System.IO.File]::WriteAllBytes($from2, [byte[]](4, 4, 4, 4))
+(Get-Item -LiteralPath $held).IsReadOnly = $true
+$lock = [System.IO.File]::Open($held, 'Open', 'Read', 'Read')
+try { Move-FileReplacing -From $from2 -To $held; $r.heldSwap = "ok" } catch { $r.heldSwap = "threw" }
+$lock.Dispose()
+$r.heldLen = (Get-Item -LiteralPath $held).Length
+$r.heldReadonly = (Get-Item -LiteralPath $held).IsReadOnly
+$r.from2Left = [System.IO.File]::Exists($from2)
+[System.IO.File]::WriteAllText((Join-Path $Dir "result.json"), ($r | ConvertTo-Json))
+""", encoding="utf-8-sig")
+    r = subprocess.run([shell, "-NoProfile", "-File", str(harness), "-Dir", str(d)],
+                       capture_output=True, text=True, timeout=300)
+    try:
+        assert r.returncode == 0 and (d / "result.json").exists(), r.stdout + r.stderr
+        got = json.loads((d / "result.json").read_text(encoding="utf-8-sig"))
+        assert got["swap"] == "ok", got
+        assert (got["len"], got["readonly"], got["fromLeft"]) == (4, False, False), got
+        assert got["heldSwap"] == "threw", got
+        assert (got["heldLen"], got["heldReadonly"], got["from2Left"]) == (3, True, True), got
+    finally:
+        _writable_again(tmp_path)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("key", ["legacy", "mode8"])
+@need_tools[0]
+@need_tools[1]
+def test_a_read_only_original_is_still_replaced(tmp_path, shell, key):
+    """v2.9.0 compressed a read-only TIFF in place and in mode 8; with the first
+    Move-FileReplacing both said "move failed" / "in-place replace failed"."""
+    cam = tmp_path / HOSTILE / "NORITSU"
+    src = color_rgb(cam / "0014_14 (2).tif")
+    ref = tifffile.imread(str(src))
+    os.chmod(src, stat.S_IREAD)
+    try:
+        if key == "legacy":
+            r, out = run(shell, COMPRESS, [], cam)
+        else:
+            r, out = run(shell, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
+                         tmp_path)
+        assert r.returncode == 0, out[-3000:]
+        assert exif(src, "-s3", "-IFD0:Compression") in ("Adobe Deflate", "Deflate"), out[-2000:]
+        assert np.array_equal(tifffile.imread(str(src)), ref)
+        # no staged copy or temp sibling left behind (legacy keeps its log under Logs\)
+        tiffs = [p.name for p in cam.rglob("*") if p.suffix.lower() in (".tif", ".tiff")]
+        assert tiffs == ["0014_14 (2).tif"], out[-2000:]
+    finally:
+        _writable_again(tmp_path)
 
 
 # ---------------------------------------------------------------------------------------------

@@ -2080,6 +2080,8 @@ function Move-FileReplacing {
         PowerShell 7, and Microsoft.VisualBasic's FileSystem.MoveFile(a, b, $true) -- which
         calls MoveFileEx with that flag, and handles paths over 260 characters -- on 5.1,
         where File.Move has no overwrite overload. 0 misses in 39766 looks.
+        A read-only $To is replaced too, as Move-Item -Force did (the attribute is cleared
+        for the rename and restored if it fails); the new file is not read-only.
 
     .NOTES
         Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
@@ -2091,13 +2093,32 @@ function Move-FileReplacing {
     # [System.IO.File] resolves a relative path against the PROCESS directory, not $PWD
     $From = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($From)
     $To = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($To)
-    $move3 = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
-    if ($move3) {
-        [System.IO.File]::Move($From, $To, $true)
-        return
+    # MoveFileEx refuses a READ-ONLY destination (access denied) where Move-Item -Force
+    # replaced it: a scan copied from a CD keeps that attribute, and mode 8 and every in-place
+    # swap failed on it. Clear it first -- the file is about to be replaced -- and put it back
+    # when the rename fails, so a refused swap leaves the original exactly as it was.
+    $readOnlyAttr = $null
+    if ([System.IO.File]::Exists($To)) {
+        $toAttr = [System.IO.File]::GetAttributes($To)
+        if (([int]$toAttr -band [int][System.IO.FileAttributes]::ReadOnly) -ne 0) {
+            [System.IO.File]::SetAttributes($To, [System.IO.FileAttributes]([int]$toAttr -band (-bnot [int][System.IO.FileAttributes]::ReadOnly)))
+            $readOnlyAttr = $toAttr
+        }
     }
-    if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) { Add-Type -AssemblyName Microsoft.VisualBasic }
-    [Microsoft.VisualBasic.FileIO.FileSystem]::MoveFile($From, $To, $true)
+    try {
+        $move3 = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
+        if ($move3) {
+            [System.IO.File]::Move($From, $To, $true)
+        } else {
+            if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) { Add-Type -AssemblyName Microsoft.VisualBasic }
+            [Microsoft.VisualBasic.FileIO.FileSystem]::MoveFile($From, $To, $true)
+        }
+    } catch {
+        if ($null -ne $readOnlyAttr) {
+            try { [System.IO.File]::SetAttributes($To, $readOnlyAttr) } catch { }
+        }
+        throw
+    }
 }
 
 # Capture function definitions once so they can be re-injected into -Parallel runspaces

@@ -88,6 +88,11 @@ Logs are written to `Logs/generate_thumbnails/`.
 Because it does not derive names from source TIFFs, thumbnails whose original was moved or
 deleted are also cleaned up. Combine with `-DryRun` to preview.
 
+A `.tif`/`.tiff` with such a name is only removed when it is no larger than `-Size` on its long
+side (round 28): a photo that happens to be called `something_thumb.tif` is kept and reported as
+`SKIP (not a thumbnail this script wrote ...)`, and so is a TIFF that cannot be read. If your
+TIFF thumbnails were made with a larger `-Size`, pass the same `-Size` to `-Remove`.
+
 ```powershell
 powershell -NoProfile -File generate_thumbnails.ps1 -InputDir . -Recursive -Remove -DryRun
 ```

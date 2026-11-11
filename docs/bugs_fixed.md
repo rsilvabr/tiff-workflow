@@ -60,6 +60,27 @@ photo empty, the verified replacement under a leftover name every later run igno
   `Microsoft.VisualBasic.FileIO.FileSystem.MoveFile` on 5.1 (paths over 260 too). 0 misses.
   Used by every in-place swap, `Move-FileIntoPlace` and `Complete-KeepOriginal`.
 
+### MEDIUM - The new swap refused a read-only original (found by the review of this round)
+**Issue:** MoveFileEx does not replace a read-only file, which `Move-Item -Force` did. With the
+first `Move-FileReplacing`, a TIFF that kept the read-only attribute (a scan copied from a CD)
+failed in mode 8 (`move failed`, the staged copy left behind) and in every in-place swap, where
+v2.9.0 compressed it. In the padded conversion the hard link in `OLD_PADDED/` shares the
+attribute, so the cleanup could not remove it either: the run said "original preserved" and left
+a backup of a swap that never happened. No data was at risk; both failed closed.
+- **Fix:** `Move-FileReplacing` (3 copies) and `_land_padded_conversion` clear the attribute for
+  the swap and put it back when the swap fails; the original keeps it in `OLD_PADDED/`.
+- **Files:** `compress_tiff_zip.ps1`, both copy_exif, `convert_tiff.py`
+
+### MEDIUM - copy_exif wrote a JPEG's UTF-8 IPTC into the TIFF as `???` (found by the review)
+**Issue:** the JPEG -> TIFF copy is `-IPTC:All` as well, so it had the same hole as the MIE
+container, with or without a `%` in the path: Japanese keywords and captions of the JPEG reached
+the TIFF as `?`, and the run said OK. XMP was not affected.
+- **Fix:** `-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet` in that copy, after the TIFF's own
+  IPTC is copied onto itself (`-tagsfromfile @ -IPTC:All`), so exiftool rewrites the whole block
+  in the new charset and a Latin caption the TIFF already had is not left mislabelled as UTF-8.
+  Checked on six pairs (no IPTC / Latin / UTF-8 on either side); no IPTC block is created.
+- **Files:** both copy_exif
+
 ### MEDIUM - A failed metadata restore let the file without EXIF replace the original
 **Issue:** in mode 8 and in place a failed restore was `WARN (exiftool failed, ZIP ok)` and the
 file without EXIF replaced (or deleted) the original, exit 0. On PS7 an exception in the

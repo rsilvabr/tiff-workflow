@@ -804,8 +804,8 @@ function New-TempSiblingPath {
     <#
     .SYNOPSIS
         A temporary name next to $Path (same folder, so same volume): <Path>.<run id>_<12 hex>.tif.
-        $script:leftoverNamePattern matches it, so a copy an interrupted run leaves behind is
-        never taken for a photo (nor for a stranded original).
+        The discovery filter of Invoke-S5ProFolder skips that name, so a copy an interrupted
+        run leaves behind is never taken for a photo.
     #>
     param([string]$Path)
     return "$Path.$($script:runStagingId)_$([guid]::NewGuid().ToString('N').Substring(0, 12)).tif"
@@ -868,6 +868,8 @@ function Move-FileReplacing {
         PowerShell 7, and Microsoft.VisualBasic's FileSystem.MoveFile(a, b, $true) -- which
         calls MoveFileEx with that flag, and handles paths over 260 characters -- on 5.1,
         where File.Move has no overwrite overload. 0 misses in 39766 looks.
+        A read-only $To is replaced too, as Move-Item -Force did (the attribute is cleared
+        for the rename and restored if it fails); the new file is not read-only.
 
     .NOTES
         Duplicated in compress_tiff_zip.ps1 and both copy_exif scripts; keep them identical.
@@ -879,13 +881,32 @@ function Move-FileReplacing {
     # [System.IO.File] resolves a relative path against the PROCESS directory, not $PWD
     $From = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($From)
     $To = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($To)
-    $move3 = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
-    if ($move3) {
-        [System.IO.File]::Move($From, $To, $true)
-        return
+    # MoveFileEx refuses a READ-ONLY destination (access denied) where Move-Item -Force
+    # replaced it: a scan copied from a CD keeps that attribute, and mode 8 and every in-place
+    # swap failed on it. Clear it first -- the file is about to be replaced -- and put it back
+    # when the rename fails, so a refused swap leaves the original exactly as it was.
+    $readOnlyAttr = $null
+    if ([System.IO.File]::Exists($To)) {
+        $toAttr = [System.IO.File]::GetAttributes($To)
+        if (([int]$toAttr -band [int][System.IO.FileAttributes]::ReadOnly) -ne 0) {
+            [System.IO.File]::SetAttributes($To, [System.IO.FileAttributes]([int]$toAttr -band (-bnot [int][System.IO.FileAttributes]::ReadOnly)))
+            $readOnlyAttr = $toAttr
+        }
     }
-    if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) { Add-Type -AssemblyName Microsoft.VisualBasic }
-    [Microsoft.VisualBasic.FileIO.FileSystem]::MoveFile($From, $To, $true)
+    try {
+        $move3 = [System.IO.File].GetMethod('Move', [type[]]@([string], [string], [bool]))
+        if ($move3) {
+            [System.IO.File]::Move($From, $To, $true)
+        } else {
+            if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) { Add-Type -AssemblyName Microsoft.VisualBasic }
+            [Microsoft.VisualBasic.FileIO.FileSystem]::MoveFile($From, $To, $true)
+        }
+    } catch {
+        if ($null -ne $readOnlyAttr) {
+            try { [System.IO.File]::SetAttributes($To, $readOnlyAttr) } catch { }
+        }
+        throw
+    }
 }
 
 function Get-TiffSampleLayout {
@@ -1517,7 +1538,17 @@ function Invoke-S5ProFolder {
             # -unsafe-only tags (embedded thumbnail/preview images) do not belong on the TIFF
             # either. Verified live on a synthetic pair: EXIF DateTime/MakerNotes copy,
             # geometry does not.
-            $tagsArgs = @('-tagsfromfile', $jpegTagSource, '-EXIF:All', '-XMP:All', '-IPTC:All',
+            #
+            # Audit round 28 (review): -IPTC:All does not copy IPTC:CodedCharacterSet (see
+            # Backup-TiffMetadata), so a JPEG whose IPTC is UTF-8 landed on the TIFF as Latin:
+            # every Japanese keyword a '?', and the run said OK. The charset is copied by name
+            # (only when the JPEG has one), and the TIFF's OWN IPTC is copied onto itself first
+            # ('-tagsfromfile @'): exiftool then writes the whole block in the new charset, so
+            # a Latin caption the TIFF already had is not left mislabelled as UTF-8. Verified
+            # on six pairs (no IPTC / Latin / UTF-8 on either side); no IPTC is created.
+            $tagsArgs = @('-tagsfromfile', '@', '-IPTC:All',
+                          '-tagsfromfile', $jpegTagSource, '-EXIF:All', '-XMP:All', '-IPTC:All',
+                          '-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet',
                           '--ImageWidth', '--ImageHeight', '--ImageLength',
                           '--ExifImageWidth', '--ExifImageHeight', '--PixelXDimension', '--PixelYDimension',
                           '--Orientation', '--ThumbnailImage', '--PreviewImage', '--JpgFromRaw')

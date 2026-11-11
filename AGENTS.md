@@ -62,6 +62,9 @@ gitignored). If one exists:
   through `Move-FileIntoPlace` (never `Move-Item -Force` from another drive onto a file).
   The rename itself is `Move-FileReplacing` (MoveFileEx REPLACE_EXISTING): `Move-Item -Force`
   onto an existing file DELETES it first and renames after, even on one volume (round 28).
+  MoveFileEx (and Python's `os.replace`) refuses a READ-ONLY destination, which `-Force`
+  replaced: clear the attribute for the swap and restore it when the swap fails; a hard link
+  shares the attribute with the original (`_land_padded_conversion`).
   Every run reports originals left in `OLD_TIFFs/` with nothing in their place
   (`Find-StrandedOriginals`); never delete or move an `OLD_TIFFs` backup whose place is
   empty (`tools/move_old_backups.py`, the wizard's Delete OLD_TIFFs).
@@ -114,7 +117,11 @@ gitignored). If one exists:
   `Test-TiffSampleLayoutKept`; `-define colorspace:auto-grayscale=false` does NOT help.
 - **`-tagsfromfile ... -all:all` does not copy `IPTC:CodedCharacterSet`** (round 28): into a
   file (or the MIE container) without it, UTF-8 IPTC text is written as Latin, Japanese as
-  `?`. Add `-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet` after `-all:all`.
+  `?`. Add `-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet` after `-all:all`. `-IPTC:All` has
+  the same hole (copy_exif's JPEG -> TIFF copy); there the destination can hold IPTC of its
+  own, so its IPTC is copied onto itself first (`-tagsfromfile @ -IPTC:All`) and exiftool
+  rewrites the whole block in the new charset -- without that a Latin caption is left
+  mislabelled as UTF-8.
 - **PS5 cannot bind `-Switch:$false` through `-File`**: the switch arrives as a
   string and stays ON. Route PS5 through `_wrap_ps5_command` (tests:
   `run_ps_switched`).
