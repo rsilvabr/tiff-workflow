@@ -510,7 +510,7 @@ def pair(tiff, jpeg, **extra):
          "dest_name": Path(tiff).name, "jpeg": str(jpeg) if jpeg else None,
          "used_base": Path(tiff).stem, "kind": "exact", "source": "JPEG"}
     p.update(extra)
-    return p
+    return cx.Pair(**p)
 
 
 class TestCopyExif:
@@ -519,7 +519,7 @@ class TestCopyExif:
         Round 28: the TIFF's own IPTC is rewritten first, the charset copied by name."""
         jpg = photo.with_suffix(".jpg")
         r = cx.process_pair(exif_run(), pair(photo, jpg), str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"] == f"OK | {photo.name} <= {jpg.name}"
+        assert r.line == f"OK | {photo.name} <= {jpg.name}"
         call = tools.exif_calls[0]
         assert "-unsafe" not in call
         for tag in ("--ImageWidth", "--ImageHeight", "--Orientation", "--ThumbnailImage"):
@@ -532,7 +532,7 @@ class TestCopyExif:
         raf = photo.with_suffix(".RAF")
         r = cx.process_pair(exif_run("-IccPolicy", "always"), pair(photo, raf, source="RAF"),
                             str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"].endswith("[EXIF from RAW]")
+        assert r.line.endswith("[EXIF from RAW]")
         call = next(c for c in tools.exif_calls if "-EXIF:All" in c)
         assert "--FocalPlaneXResolution" in call and "-ICC_Profile" not in call
 
@@ -560,7 +560,7 @@ class TestCopyExif:
         tools.exif_result = (1, "")
         r = cx.process_pair(exif_run("-SkipIfTiffHasExif"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"].startswith("ERROR (exiftool EXIF check)")
+        assert r.line.startswith("ERROR (exiftool EXIF check)")
         assert len(tools.exif_calls) == 1
 
     def test_safe_mode_passes_the_restricted_list(self, tools, photo):
@@ -568,7 +568,7 @@ class TestCopyExif:
         tools.only_subfile = False
         r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"].startswith("MULTI (3 IFDs") and r["multi"] == str(photo)
+        assert r.line.startswith("MULTI (3 IFDs") and r.multi == str(photo)
         assert tools.allowed_seen == [("REDUCEDIMAGE", "REDUCED")]
         assert tools.exif_calls == [], "a multi-page TIFF must not be written to at all"
 
@@ -583,8 +583,8 @@ class TestCopyExif:
         setattr(tools, failing, False)
         r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"].startswith(text), r["line"]
-        assert r["staged"] is None
+        assert r.line.startswith(text), r.line
+        assert r.staged is None
         assert sorted(os.listdir(photo.parent)) == [photo.name], "the staged file stayed behind"
 
     def test_a_failed_metadata_restore_never_registers_the_staged_file(self, tools, photo, monkeypatch):
@@ -598,16 +598,16 @@ class TestCopyExif:
         monkeypatch.setattr(tw, "exiftool", exiftool)
         r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"].startswith("ERROR (exiftool metadata restore failed - original untouched)")
-        assert r["staged"] is None
+        assert r.line.startswith("ERROR (exiftool metadata restore failed - original untouched)")
+        assert r.staged is None
         assert sorted(os.listdir(photo.parent)) == [photo.name]
 
     def test_success_registers_the_staged_file_under_this_runs_id(self, tools, photo):
         run = exif_run("-CompressZip")
         r = cx.process_pair(run, pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"].startswith("OK+ZIP |"), r["line"]
-        assert r["staged"].startswith(run.run_id + "_") and tw.LEFTOVER_NAME_RE.search(r["staged"])
+        assert r.line.startswith("OK+ZIP |"), r.line
+        assert r.staged.startswith(run.run_id + "_") and tw.LEFTOVER_NAME_RE.search(r.staged)
         assert photo.read_bytes() == b"ORIGINAL", "the worker stages; the move comes after"
         ev = tools.events
         assert ev.index("layout") < ev.index("pixels") < ev.index("subfile")
@@ -656,10 +656,10 @@ class TestCopyExif:
         else:
             setattr(tools, failing, False)
         out, r = self._to_outputdir(photo, tmp_path, "-CompressZip")
-        assert r["line"].startswith(text), r["line"]
+        assert r.line.startswith(text), r.line
         if failing == "magick_writes":
-            assert "magick reported success but wrote no file" in r["line"]
-        assert r["staged"] is None
+            assert "magick reported success but wrote no file" in r.line
+        assert r.staged is None
         assert os.listdir(out) == [], "the copy or the staged file stayed in -OutputDir"
         assert photo.read_bytes() == b"ORIGINAL"
         assert sorted(os.listdir(photo.parent)) == [photo.name]
@@ -668,19 +668,19 @@ class TestCopyExif:
         """The copy has served (EXIF written to it, the ZIP made from it): the staged ZIP
         takes its name in the move that follows."""
         out, r = self._to_outputdir(photo, tmp_path, "-CompressZip")
-        assert r["line"].startswith("OK+ZIP |"), r["line"]
-        assert os.listdir(out) == [r["staged"]]
+        assert r.line.startswith("OK+ZIP |"), r.line
+        assert os.listdir(out) == [r.staged]
         assert photo.read_bytes() == b"ORIGINAL"
         ev = tools.events
         assert ev.index("magick") < ev.index("layout") < ev.index("pixels") < ev.index("subfile")
         restore = next(c for c in tools.exif_calls if "-all:all" in c)
         assert ev.index("pixels") < [i for i, e in enumerate(ev) if e == "exif"][-1] < ev.index("subfile"), \
             "the metadata restore runs between the pixel gate and the subfiletype restore"
-        assert restore[-1] == str(out / r["staged"])
+        assert restore[-1] == str(out / r.staged)
 
     def test_with_outputdir_and_no_zip_the_copy_carries_the_exif(self, tools, photo, tmp_path):
         out, r = self._to_outputdir(photo, tmp_path)
-        assert r["line"] == f"OK | {photo.name} <= {photo.with_suffix('.jpg').name} -> {out}"
+        assert r.line == f"OK | {photo.name} <= {photo.with_suffix('.jpg').name} -> {out}"
         assert os.listdir(out) == [photo.name]
         assert tools.exif_calls[0][-1] == str(out / photo.name), "never written to the original"
 
@@ -693,14 +693,14 @@ class TestCopyExif:
         monkeypatch.setattr(cx.shutil, "copy2", broken_copy)
         r = cx.process_pair(exif_run("-OutputDir", str(out)), pair(photo, photo.with_suffix(".jpg")),
                             str(out), str(out), 1.0)
-        assert r["line"].startswith("ERROR (copy to OutputDir failed)")
+        assert r.line.startswith("ERROR (copy to OutputDir failed)")
         assert not (out / photo.name).exists()
 
     def test_heuristic_match_is_a_warning(self, tools, photo):
         r = cx.process_pair(exif_run(), pair(photo, photo.parent / "photo.jpg", used_base="photo",
                                              kind="heuristic"),
                             str(photo.parent), str(photo.parent), 1.0)
-        assert r["line"].startswith("WARN (heuristic JPEG match) |")
+        assert r.line.startswith("WARN (heuristic JPEG match) |")
 
     def test_find_jpeg_pair_order(self, tmp_path):
         """Round 20: JPEG exact -> JPEG variant -> RAF exact -> RAF variant -> heuristic."""
@@ -719,7 +719,7 @@ class TestCopyExif:
 
         def found(name):
             p = cx.find_jpeg_pair(run, files[name], index)
-            return (os.path.basename(p["path"]), p["kind"], p["source"]) if p else None
+            return (os.path.basename(p.path), p.kind, p.source) if p else None
         assert found("DSC_0001.tif") == ("DSC_0001.RAF", "exact", "RAF")
         assert found("A_1.tif") == ("A.JPG", "variant", "JPEG")
         assert found("B_2.tif") == ("B.raf", "variant", "RAF")

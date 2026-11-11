@@ -16,6 +16,8 @@ import os
 import re
 import shutil
 import sys
+from dataclasses import dataclass
+from typing import NamedTuple, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -123,6 +125,36 @@ class Run:
         return self._dir_listing[key]
 
 
+class JpegMatch(NamedTuple):
+    """The file find_jpeg_pair chose for a TIFF."""
+    path: str
+    used_base: str      # the base name that matched (the TIFF's own, or with a suffix stripped)
+    kind: str           # "exact", "variant" or "heuristic"
+    source: str         # "JPEG" or "RAF"
+
+
+@dataclass(frozen=True)
+class Pair:
+    """One TIFF and the file its EXIF comes from: what process_pair works on. The last
+    four fields are None when no JPEG or RAF was found."""
+    tiff: str
+    tif_name: str
+    tif_base: str
+    dest_name: str
+    jpeg: Optional[str]
+    used_base: Optional[str]
+    kind: Optional[str]
+    source: Optional[str]
+
+
+class PairResult(NamedTuple):
+    """What process_pair returns: the result line, the path of a multi-page TIFF it
+    skipped, the name of the staged ZIP it registered for the move."""
+    line: str
+    multi: Optional[str] = None
+    staged: Optional[str] = None
+
+
 def find_jpeg_pair(run, tif, jpg_index):
     """The JPEG (or RAF) a TIFF takes its EXIF from, or None.
 
@@ -154,20 +186,19 @@ def find_jpeg_pair(run, tif, jpg_index):
             if src == "JPEG":
                 key = sd.lower() + "|" + b.lower()
                 if key in jpg_index:
-                    return {"path": jpg_index[key], "used_base": b, "kind": kind, "source": "JPEG"}
+                    return JpegMatch(jpg_index[key], b, kind, "JPEG")
                 # The index only covers the scanned root, so the parent folder (and its
                 # JPEG/JPG subfolders) is probed on disk.
                 for ext in (".jpg", ".jpeg"):
                     probe = tw.join_path(sd, b + ext)
                     if os.path.isfile(probe):
-                        return {"path": probe, "used_base": b, "kind": kind, "source": "JPEG"}
+                        return JpegMatch(probe, b, kind, "JPEG")
             else:
                 # From the folder listing, not a built path: the listing has the real
                 # name (.RAF), a built path the case it was given.
                 real = run.names_in(sd).get((b + ".raf").lower())
                 if real:
-                    return {"path": tw.join_path(sd, real), "used_base": b, "kind": kind,
-                            "source": "RAF"}
+                    return JpegMatch(tw.join_path(sd, real), b, kind, "RAF")
     return None
 
 
@@ -262,28 +293,25 @@ def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_co
 
 def process_pair(run, p, write_dir, final_dir, load_factor):
     """One TIFF: copy the EXIF from its JPEG/RAF and, with -CompressZip, stage a verified
-    ZIP copy. Returns {"line": result line, "multi": path or None, "staged": staged file
-    name or None}. Runs on a worker thread: it never logs or counts."""
+    ZIP copy. `p` is a Pair; returns a PairResult. Runs on a worker thread: it never logs
+    or counts."""
     opt = run.opt
-    name = p["tif_name"]
-    tiff = p["tiff"]
+    name = p.tif_name
+    tiff = p.tiff
 
-    def res(line, multi=None, staged=None):
-        return {"line": line, "multi": multi, "staged": staged}
-
-    if not p["jpeg"]:
-        return res(f"MISS | {name} | no matching JPEG or RAF (base: {p['tif_base']})")
+    if not p.jpeg:
+        return PairResult(f"MISS | {name} | no matching JPEG or RAF (base: {p.tif_base})")
 
     # Only the _\d{3,4}$ strip is heuristic: it can match an unrelated JPEG (foto_2024.tif
     # -> foto.jpg). The Capture One variant suffix (_DSF4817_1 -> _DSF4817) is the normal
     # name of the photo and reports OK. Without case: DSC_0001.tif + dsc_0001.jpg is an
     # EXACT stem match.
-    heur = bool(p["used_base"] and p["used_base"].lower() != p["tif_base"].lower()
-                and p["kind"] == "heuristic")
+    heur = bool(p.used_base and p.used_base.lower() != p.tif_base.lower()
+                and p.kind == "heuristic")
     ok_prefix = "WARN (heuristic JPEG match)" if heur else "OK"
-    heur_suffix = f" | TIFF base '{p['tif_base']}' matched JPEG base '{p['used_base']}'" if heur else ""
-    raw_suffix = " [EXIF from RAW]" if p["source"] == "RAF" else ""
-    jpeg_name = os.path.basename(p["jpeg"])
+    heur_suffix = f" | TIFF base '{p.tif_base}' matched JPEG base '{p.used_base}'" if heur else ""
+    raw_suffix = " [EXIF from RAW]" if p.source == "RAF" else ""
+    jpeg_name = os.path.basename(p.jpeg)
 
     if opt["SkipIfTiffHasExif"]:
         # Camera EXIF only (the Exif IFD): -EXIF:all includes IFD0 -- the size and
@@ -291,25 +319,25 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
         rc, out = tw.exiftool(["-q", "-q", "-G1", "-s", "-ExifIFD:all", tiff])
         # Fail-closed: an unreadable TIFF must not be overwritten by the copy below
         if rc != 0:
-            return res(f"ERROR (exiftool EXIF check) | {name} | cannot inspect TIFF, not overwriting")
+            return PairResult(f"ERROR (exiftool EXIF check) | {name} | cannot inspect TIFF, not overwriting")
         if any(ln.strip() for ln in out.split("\n")):
-            return res(f"SKIP (already has EXIF) | {name}")
+            return PairResult(f"SKIP (already has EXIF) | {name}")
 
     if opt["DryRun"]:
         zip_info = " + ZIP" if opt["CompressZip"] else ""
-        return res(f"DRY (EXIF{zip_info}) | {name} <= {jpeg_name}{raw_suffix}")
+        return PairResult(f"DRY (EXIF{zip_info}) | {name} <= {jpeg_name}{raw_suffix}")
 
     timeout = opt["MagickTimeout"] if opt["MagickTimeout"] > 0 else 30
 
     if opt["SafeMode"]:
         pc = tw.tiff_page_count(tiff, timeout)
         if not pc.ok:
-            return res(tw.page_count_error_line(pc, name, "output"))
+            return PairResult(tw.page_count_error_line(pc, name, "output"))
         if pc.count > 1:
             # REDUCEDIMAGE/REDUCED only, like compress_tiff_zip.py: MASK and PAGE are real
             # pages here (scanner RGB+IR files).
             if not tw.tiff_has_only_subfile_pages(tiff, pc.count, tw.THUMBNAIL_PAGE_TYPES, timeout):
-                return res(f"MULTI ({pc.count} IFDs -- skipped) | {name}", multi=tiff)
+                return PairResult(f"MULTI ({pc.count} IFDs -- skipped) | {name}", multi=tiff)
 
     icc_policy = opt["IccPolicy"].lower()
     tiff_has_icc = False
@@ -318,7 +346,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
         tiff_has_icc = bool(out.strip())
     copy_icc = icc_policy == "always" or (icc_policy == "preserve_tiff" and not tiff_has_icc)
     # A RAF does not describe the colour space of the exported TIFF.
-    icc_tag = "-ICC_Profile" if (copy_icc and p["source"] != "RAF") else ""
+    icc_tag = "-ICC_Profile" if (copy_icc and p.source != "RAF") else ""
 
     # With -OutputDir (another folder than the source's) the TIFF is copied there first:
     # the original is never written to.
@@ -327,7 +355,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
     dest_tiff = None
     src_dir = tw.full_path(os.path.dirname(tiff)).rstrip("\\/")
     if final_dir and final_dir.lower() != src_dir.lower():
-        dest_tiff = tw.join_path(final_dir, p["dest_name"])
+        dest_tiff = tw.join_path(final_dir, p.dest_name)
         if not os.path.exists(dest_tiff) or opt["Overwrite"]:
             try:
                 os.makedirs(final_dir, exist_ok=True)
@@ -340,9 +368,9 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
                 # A partial copy must not stay behind: a later run without -Overwrite would
                 # skip it as "exists in OutputDir" and the truncated TIFF persists
                 tw.remove_quietly(dest_tiff)
-                return res(f"ERROR (copy to OutputDir failed) | {name}: {e}")
+                return PairResult(f"ERROR (copy to OutputDir failed) | {name}: {e}")
         else:
-            return res(f"SKIP (exists in OutputDir) | {name}")
+            return PairResult(f"SKIP (exists in OutputDir) | {name}")
 
     def drop_copy():
         if tiff_copied:
@@ -351,13 +379,13 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
     # exiftool expands printf codes in the -tagsfromfile ARGUMENT: a JPEG named `50%off.jpg`
     # is read as `50ff.jpg`, exiftool warns and STILL EXITS 0. Park the tags in a container
     # with a safe name first; a name without '%' is passed through untouched.
-    needed, jpeg_meta = tw.backup_tiff_metadata(p["jpeg"], tiff_target)
+    needed, jpeg_meta = tw.backup_tiff_metadata(p.jpeg, tiff_target)
     if needed and not jpeg_meta:
         drop_copy()
-        return res(f"ERROR (metadata container failed - EXIF copy refused) | {name}")
-    jpeg_tag_source = jpeg_meta or p["jpeg"]
+        return PairResult(f"ERROR (metadata container failed - EXIF copy refused) | {name}")
+    jpeg_tag_source = jpeg_meta or p.jpeg
 
-    tags = _jpeg_copy_args(p["source"], jpeg_tag_source, icc_tag, tiff_target)
+    tags = _jpeg_copy_args(p.source, jpeg_tag_source, icc_tag, tiff_target)
 
     # ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
     # exiftool gives when the tagsfromfile source could not be opened -- it still exits 0.
@@ -367,39 +395,39 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
     # nothing writable reports differently and stays non-fatal.
     if rc != 0 or re.search("Error opening file", out, re.I):
         drop_copy()
-        return res(f"ERROR (exiftool EXIF) | {name}")
+        return PairResult(f"ERROR (exiftool EXIF) | {name}")
 
     if not opt["CompressZip"]:
         copy_note = f" -> {final_dir}" if tiff_copied else ""
-        return res(f"{ok_prefix} | {name} <= {jpeg_name}{copy_note}{heur_suffix}{raw_suffix}")
+        return PairResult(f"{ok_prefix} | {name} <= {jpeg_name}{copy_note}{heur_suffix}{raw_suffix}")
 
     ok, comp = tw.ifd0_compression(tiff_target)
     if not ok:
         drop_copy()
-        return res(f"ERROR (exiftool check) | {name} | cannot detect compression")
+        return PairResult(f"ERROR (exiftool check) | {name} | cannot detect compression")
     if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
         head = (f"WARN (heuristic JPEG match, already {comp} -- ZIP skipped)" if heur
                 else f"OK+SKIP-ZIP ({comp})")
-        return res(f"{head} | {name}{heur_suffix}{raw_suffix}")
+        return PairResult(f"{head} | {name}{heur_suffix}{raw_suffix}")
 
     # Run-scoped prefix: the interrupt cleanup only removes this run's staged files
-    staging_name = tw.staged_name(run.run_id, p["dest_name"])
+    staging_name = tw.staged_name(run.run_id, p.dest_name)
     write_dst = tw.join_path(write_dir, staging_name)
-    final_dst = tw.join_path(final_dir, p["dest_name"])
+    final_dst = tw.join_path(final_dir, p.dest_name)
 
     if os.path.exists(final_dst) and not opt["Overwrite"] and not tw.same_path(final_dst, tiff) \
             and not tiff_copied:
-        return res(f"OK+SKIP-ZIP (exists) | {name}{raw_suffix}")
+        return PairResult(f"OK+SKIP-ZIP (exists) | {name}{raw_suffix}")
 
     # The staged file is registered for the move ONLY after every gate has passed: a staged
     # ZIP whose metadata restore failed was once moved ON TOP of the EXIF-bearing original.
     error = _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy)
     if error:
-        return res(error)
+        return PairResult(error)
 
     drop_copy()
     head = "WARN (heuristic JPEG match)" if heur else "OK+ZIP"
-    return res(f"{head} | {name} <= {jpeg_name}{heur_suffix}{raw_suffix}", staged=staging_name)
+    return PairResult(f"{head} | {name} <= {jpeg_name}{heur_suffix}{raw_suffix}", staged=staging_name)
 
 
 def _dest_name(run, tif, final_dir):
@@ -528,21 +556,20 @@ def process_folder(run, root):
         dest_names = {}
         pairs = []
         for tif in group_files:
-            pair = find_jpeg_pair(run, tif, jpg_index)
+            match = find_jpeg_pair(run, tif, jpg_index)
             dest_name = _dest_name(run, tif, final_dir)
             dest_names[tif.path.lower()] = dest_name
-            pairs.append({
-                "tiff": tif.path, "tif_name": tif.name, "tif_base": tif.stem, "dest_name": dest_name,
-                "jpeg": pair["path"] if pair else None,
-                "used_base": pair["used_base"] if pair else None,
-                "kind": pair["kind"] if pair else None,
-                "source": pair["source"] if pair else None,
-            })
+            pairs.append(Pair(
+                tiff=tif.path, tif_name=tif.name, tif_base=tif.stem, dest_name=dest_name,
+                jpeg=match.path if match else None,
+                used_base=match.used_base if match else None,
+                kind=match.kind if match else None,
+                source=match.source if match else None))
 
         # The cap is about how many ImageMagick processes run at once; -DryRun starts none.
         workers = opt["Workers"]
         if not opt["DryRun"]:
-            workers = tw.memory_capped_workers(workers, [p["tiff"] for p in pairs],
+            workers = tw.memory_capped_workers(workers, [p.tiff for p in pairs],
                                                tw.COMPARE_BYTES_PER_PIXEL,
                                                opt["WorkerMemoryFraction"], log, quiet=True)
         load = float(max(1, min(workers, len(pairs))))   # workers running at once share the disk
@@ -552,13 +579,12 @@ def process_folder(run, root):
                                       lambda q: process_pair(run, q, write_dir, final_dir, load),
                                       workers):
             if isinstance(result, Exception):
-                result = {"line": f"ERROR | {p['tif_name']} | {type(result).__name__}: {result}",
-                          "multi": None, "staged": None}
-            if result["multi"]:
-                run.multi_paths.append(result["multi"])
-            if result["staged"]:
-                staging_map[p["tiff"].lower()] = result["staged"]
-            run.count(result["line"])
+                result = PairResult(f"ERROR | {p.tif_name} | {type(result).__name__}: {result}")
+            if result.multi:
+                run.multi_paths.append(result.multi)
+            if result.staged:
+                staging_map[p.tiff.lower()] = result.staged
+            run.count(result.line)
 
         _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir)
 
