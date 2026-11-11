@@ -108,6 +108,12 @@ class Run:
             level = "WARN"
         self.log(f"[{self.counter}/{self.total}] {line}", level)
 
+    def error(self, text):
+        """Count an error and log it, in one step: an error that is logged but not
+        counted ends in exit code 0, and the wizard reads that as success."""
+        self.err += 1
+        self.log(text, "ERROR")
+
     def names_in(self, directory):
         """{lower-case name: real name} of the files in a folder (cached)."""
         key = directory.lower()
@@ -517,11 +523,9 @@ def process_folder(run, root):
                                 pass
                         moved += 1
                     else:
-                        run.err += 1
-                        log(f"ERROR (move failed) | {tif.name}", "ERROR")
+                        run.error(f"ERROR (move failed) | {tif.name}")
                 except OSError as e:
-                    run.err += 1
-                    log(f"ERROR (move failed) | {tif.name}: {e}", "ERROR")
+                    run.error(f"ERROR (move failed) | {tif.name}: {e}")
             if moved > 0:
                 log(f"  -> Moved {moved} file(s) -> {final_dir}")
 

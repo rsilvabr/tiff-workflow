@@ -165,6 +165,12 @@ class Run:
             self.dry += 1
         self.log(f"[{self.counter}/{self.total}] {line}", level)
 
+    def error(self, text):
+        """Count an error and log it, in one step: an error that is logged but not
+        counted ends in exit code 0, and the wizard reads that as success."""
+        self.err += 1
+        self.log(text, "ERROR")
+
     def summary(self):
         """The end-of-run tally plus the multi-page list. Also printed by the early
         "nothing to do" exits: a folder where every file was correctly skipped must not end
@@ -308,8 +314,7 @@ def report_stranded(run, input_roots):
                 run.restored += 1
                 log(f"  RESTORED (stranded original) | {s['target']}", "WARN")
             except OSError as e:
-                run.err += 1
-                log(f"  RESTORE FAILED | {s['backup']}: {e}", "ERROR")
+                run.error(f"  RESTORE FAILED | {s['backup']}: {e}")
     if run.stranded > 0:
         if opt["RestoreStranded"] and not opt["DryRun"]:
             log(f"STRANDED: {run.stranded} original(s) found in OLD_TIFFs with nothing in their "
@@ -820,14 +825,12 @@ def run_legacy(run):
 
         if staging and not dry:
             if os.path.isfile(staging):
-                run.err += 1
-                log(f"ERROR: StagingDir exists as a file: {staging}", "ERROR")
+                run.error(f"ERROR: StagingDir exists as a file: {staging}")
                 continue
             os.makedirs(staging, exist_ok=True)
         if out_dir and not dry:
             if os.path.isfile(final_dir):
-                run.err += 1
-                log(f"ERROR: Output path exists as a file: {final_dir}", "ERROR")
+                run.error(f"ERROR: Output path exists as a file: {final_dir}")
                 continue
             os.makedirs(final_dir, exist_ok=True)
 
@@ -870,11 +873,9 @@ def run_legacy(run):
                     if os.path.exists(dest_path) and os.stat(dest_path).st_size == stage_size:
                         moved += 1
                     else:
-                        run.err += 1
-                        log(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}", "ERROR")
+                        run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}")
                 except OSError as e:
-                    run.err += 1
-                    log(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}: {e}", "ERROR")
+                    run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}: {e}")
             if moved > 0:
                 log(f"  -> Moved {moved} file(s) -> {final_dir}")
 
@@ -1318,19 +1319,16 @@ def run_modes(run, bound):
                     if mv_err:
                         raise OSError(mv_err)
                     if not os.path.exists(dest_path):
-                        run.err += 1
                         error_srcs.add(t["src"].lower())
-                        log(f"ERROR (move failed) | {dest_name}", "ERROR")
+                        run.error(f"ERROR (move failed) | {dest_name}")
                     elif os.stat(dest_path).st_size != stage_size:
-                        run.err += 1
                         error_srcs.add(t["src"].lower())
-                        log(f"ERROR (size mismatch after move) | {dest_name}", "ERROR")
+                        run.error(f"ERROR (size mismatch after move) | {dest_name}")
                     else:
                         moved += 1
                 except OSError as e:
-                    run.err += 1
                     error_srcs.add(t["src"].lower())
-                    log(f"ERROR (move exception) | {dest_name}: {e}", "ERROR")
+                    run.error(f"ERROR (move exception) | {dest_name}: {e}")
             if moved > 0:
                 log(f"  -> Moved {moved} file(s) -> {group_dir}")
 
@@ -1355,9 +1353,8 @@ def run_modes(run, bound):
                 k_err = complete_keep_original(run, written, t["src"], t["final_dst"], t["keep_dir"],
                                                t["src_length"], t["src_mtime_ns"])
                 if k_err:
-                    run.err += 1
                     tw.remove_quietly(written)
-                    log(f"ERROR (keep original) | {t['name']} | {k_err}", "ERROR")
+                    run.error(f"ERROR (keep original) | {t['name']} | {k_err}")
                 else:
                     kept += 1
             if kept > 0:
@@ -1374,21 +1371,18 @@ def run_modes(run, bound):
                     continue
                 src_name = os.path.basename(t["src"])
                 if not os.path.exists(t["final_dst"]):
-                    run.err += 1
-                    log(f"ERROR (final destination missing, source preserved) | {src_name}", "ERROR")
+                    run.error(f"ERROR (final destination missing, source preserved) | {src_name}")
                     continue
                 # The pixel gate ran on the STAGED file: the file that authorises the delete
                 # is checked again where it actually sits.
                 if not tw.zip_integrity(t["final_dst"], opt["MagickTimeout"]):
-                    run.err += 1
-                    log(f"ERROR (final ZIP failed integrity - source preserved) | {src_name}", "ERROR")
+                    run.error(f"ERROR (final ZIP failed integrity - source preserved) | {src_name}")
                     continue
                 try:
                     tw.remove_file(t["src"])     # a read-only source is deleted too
                     deleted += 1
                 except OSError:
-                    run.err += 1
-                    log(f"ERROR (failed to delete source after move) | {src_name}", "ERROR")
+                    run.error(f"ERROR (failed to delete source after move) | {src_name}")
             if deleted > 0:
                 log(f"  -> Deleted {deleted} source file(s) after successful move")
 
