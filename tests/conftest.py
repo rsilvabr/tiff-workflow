@@ -35,7 +35,7 @@ def _no_release_check(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_settings_overlay(monkeypatch):
     """The settings overlay (.tiff_workflow_settings.json) is read by convert_tiff and by every
-    PowerShell backend a test starts: set-but-empty turns it OFF, so the owner's real file
+    backend a test starts: set-but-empty turns it OFF, so the owner's real file
     never reaches a test. A test that wants an overlay sets TIFFWORKFLOW_SETTINGS itself."""
     monkeypatch.setenv("TIFFWORKFLOW_SETTINGS", "")
 

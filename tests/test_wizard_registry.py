@@ -1,14 +1,14 @@
 """v2.9.0: the wizard's option REGISTRY (convert_tiff.py, "Option Registry").
 
 T1  golden   -- the argv the command builders produced BEFORE the registry existed, for 13
-                workflow dicts under both shells (tests/data/wizard_registry_golden.json).
-                Generated once from the pre-registry builders; never regenerate it.
+                workflow dicts (tests/data/wizard_registry_golden.json). Generated once from
+                the pre-registry builders of the PowerShell edition; never regenerate it. Each
+                case holds the `pwsh -NoProfile -File <script>.ps1 args` line and the Windows
+                PowerShell 5.1 `-Command` line: the ARGUMENTS are what today's builders must
+                still produce, and both lines are what a preset saved by v2.x holds.
 T2  coverage -- every parameter of every backend is in REGISTRY or NOT_OFFERED, and vice versa.
 T3  advanced -- the per-run Advanced options screen.
 T4  a saved workflow that carries `advanced` rebuilds the same argv.
-
-Generate the golden file (refuses to overwrite one that exists):
-    python tests/test_wizard_registry.py --generate-golden
 """
 
 import json
@@ -68,55 +68,56 @@ CASES = [
     ("e_odd_values", "copy_exif",
      {"safe_mode": "yes", "skip_lzw": 0, "skip_exif": 0, "workers": "6"}, [HOSTILE], None),
 ]
-PS_NAMES = ("pwsh", "powershell")
+def _golden():
+    return json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 
-def _build(builder: str, workflow: dict, folders, extra, ps_name: str):
+def _golden_cmd(cid, shell):
+    return [a.replace(TOKEN, str(convert_tiff.SCRIPT_DIR)) for a in _golden()[cid][shell]]
+
+
+def _build(builder: str, workflow: dict, folders, extra):
     paths = [Path(f) for f in folders] if folders is not None else None
     if builder == "compress":
-        argv = convert_tiff.build_compress_command(dict(workflow), paths, ps_name=ps_name)
-    else:
-        argv = convert_tiff.build_copy_exif_command(dict(workflow), paths, extra, ps_name=ps_name)
-    return [str(a).replace(str(convert_tiff.SCRIPT_DIR), TOKEN) for a in argv]
-
-
-def _generate() -> None:
-    if GOLDEN.exists():
-        sys.exit(f"{GOLDEN} exists; the golden file is generated once, from the pre-registry "
-                 f"builders, and never regenerated.")
-    out = {}
-    for cid, builder, wf, folders, extra in CASES:
-        out[cid] = {ps: _build(builder, wf, folders, extra, ps) for ps in PS_NAMES}
-    GOLDEN.parent.mkdir(parents=True, exist_ok=True)
-    GOLDEN.write_text(json.dumps(out, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    print(f"wrote {GOLDEN} ({len(out)} cases x {len(PS_NAMES)} shells)")
+        return convert_tiff.build_compress_command(dict(workflow), paths)
+    return convert_tiff.build_copy_exif_command(dict(workflow), paths, extra)
 
 
 # --- T1 -----------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("ps_name", PS_NAMES)
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
-def test_T1_golden_argv_unchanged(case, ps_name):
+def test_T1_golden_argv_unchanged(case):
+    """The arguments are byte for byte the golden ones; only what runs them changed
+    (`pwsh -NoProfile -File <script>.ps1` -> this Python and <script>.py)."""
     cid, builder, wf, folders, extra = case
-    golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
-    assert cid in golden, f"{cid} missing from the golden file"
-    assert _build(builder, wf, folders, extra, ps_name) == golden[cid][ps_name]
+    golden = _golden_cmd(cid, "pwsh")
+    assert golden[:3] == ["pwsh", "-NoProfile", "-File"]
+    argv = _build(builder, wf, folders, extra)
+    assert argv[0] == sys.executable
+    assert argv[1] == str(convert_tiff._journaled_script_path([golden[3]]))
+    assert Path(argv[1]).name in convert_tiff.BACKEND_SCRIPTS
+    assert argv[2:] == golden[4:]
+
+
+@pytest.mark.parametrize("shell", ["pwsh", "powershell"])
+@pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
+def test_T1_a_golden_command_line_replays_as_todays(case, shell):
+    """What a preset saved by v2.x holds (either shell's form) rebuilds into exactly the
+    command today's builder produces for the same workflow."""
+    cid, builder, wf, folders, extra = case
+    parts = convert_tiff._journal_parts(_golden_cmd(cid, shell))
+    assert parts is not None, "a golden command line was not recognised"
+    assert convert_tiff._rebuild_journaled_command(parts) == _build(builder, wf, folders, extra)
 
 
 def test_T1_golden_file_covers_exactly_the_cases():
-    golden = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    golden = _golden()
     assert set(golden) == {c[0] for c in CASES}
     for cid in golden:
-        assert set(golden[cid]) == set(PS_NAMES)
+        assert set(golden[cid]) == {"pwsh", "powershell"}
 
 
 # --- T2 -----------------------------------------------------------------------------------
-
-def test_T2_both_copy_exif_scripts_have_the_same_parameters():
-    ps5 = convert_tiff._ps_param_names("copy_exif_to_TIFF_ps5.ps1")
-    ps7 = convert_tiff._ps_param_names("copy_exif_to_TIFF_ps7.ps1")
-    assert ps5 and sorted(ps5) == sorted(ps7)
-
 
 @pytest.mark.parametrize("backend", ["compress", "copy_exif", "thumbnails"])
 def test_T2_every_parameter_is_registered_or_declared_not_offered(backend):
@@ -124,7 +125,7 @@ def test_T2_every_parameter_is_registered_or_declared_not_offered(backend):
     declined = set(convert_tiff.NOT_OFFERED[backend])
     assert not (registered & declined), f"in both REGISTRY and NOT_OFFERED: {sorted(registered & declined)}"
     for script in convert_tiff.REGISTRY_SCRIPTS[backend]:
-        params = set(convert_tiff._ps_param_names(script))
+        params = set(convert_tiff._backend_param_names(script))
         assert params, f"no parameters read from {script}"
         for p in sorted(params):
             assert p in registered or p in declined, (
@@ -166,9 +167,9 @@ def REAL_ADVANCED(cfg, workflow):
     return _REAL_ADVANCED(cfg, workflow)
 
 
-def _cfg(ps_name="pwsh"):
+def _cfg():
     from types import SimpleNamespace
-    return SimpleNamespace(config=convert_tiff.ToolConfig(ps_name=ps_name, ps_major=7),
+    return SimpleNamespace(config=convert_tiff.ToolConfig(),
                            save_config=lambda: None)
 
 
@@ -218,7 +219,7 @@ def test_T3_answering_no_stores_nothing(monkeypatch, ui):
 @pytest.mark.parametrize("ui", UIS)
 def test_T3_an_edited_value_equal_to_the_default_is_still_emitted(monkeypatch, ui):
     # 1 = MagickTimeout of compress; the script's own default is 30
-    assert convert_tiff._ps_param_defaults("compress_tiff_zip.ps1")["MagickTimeout"] == 30
+    assert convert_tiff._backend_param_defaults("compress_tiff_zip.py")["MagickTimeout"] == 30
     wf = {"origin": "free_compress", "mode": 1}
     ui(monkeypatch, ["y", "1", "30", "0"])
     REAL_ADVANCED(_cfg(), wf)
@@ -324,20 +325,19 @@ def test_T3_a_hand_edited_value_that_fails_its_spec_is_dropped_not_passed():
         assert "-MagickTimeout" not in argv
 
 
-@pytest.mark.parametrize("ps_name", PS_NAMES)
-def test_T4_a_saved_workflow_with_advanced_rebuilds_the_same_argv(tmp_path, monkeypatch, ps_name):
+def test_T4_a_saved_workflow_with_advanced_rebuilds_the_same_argv(tmp_path, monkeypatch):
     wf = {"origin": "both", "mode": 9, "workers": 4, "dry_run": False, "safe_mode": True,
           "advanced": {"compress": {"MagickTimeout": 30, "WorkerMemoryFraction": 0.5},
                        "copy_exif": {"FailOnWarn": True, "MagickTimeout": 90}}}
     folders = [Path(HOSTILE)]
-    expect_c = convert_tiff.build_compress_command(wf, folders, ps_name=ps_name)
-    expect_e = convert_tiff.build_copy_exif_command(wf, folders, ps_name=ps_name)
+    expect_c = convert_tiff.build_compress_command(wf, folders)
+    expect_e = convert_tiff.build_copy_exif_command(wf, folders)
     # the JSON a preset / the journal stores
     stored = json.loads(json.dumps(wf, ensure_ascii=False))
-    assert convert_tiff.build_compress_command(stored, folders, ps_name=ps_name) == expect_c
-    assert convert_tiff.build_copy_exif_command(stored, folders, ps_name=ps_name) == expect_e
+    assert convert_tiff.build_compress_command(stored, folders) == expect_c
+    assert convert_tiff.build_copy_exif_command(stored, folders) == expect_e
     # the manifest's per-entry command carries it too
-    entry = convert_tiff.build_manifest_entry_cmd(HOSTILE, "", 1, wf, ps_name)
+    entry = convert_tiff.build_manifest_entry_cmd(HOSTILE, "", 1, wf)
     joined = " ".join(entry)
     assert "-MagickTimeout" in joined and "-WorkerMemoryFraction" in joined
     # and the config file's last_manifest_workflow, written and read back by a real manager
@@ -347,11 +347,8 @@ def test_T4_a_saved_workflow_with_advanced_rebuilds_the_same_argv(tmp_path, monk
     convert_tiff._save_last_run(cfg, "manifest", "x", None, manifest_workflow=wf)
     back = convert_tiff.ConfigManager().config.last_manifest_workflow
     assert back["advanced"] == wf["advanced"]
-    assert convert_tiff.build_compress_command(dict(back, mode=9), folders, ps_name=ps_name) == expect_c
+    assert convert_tiff.build_compress_command(dict(back, mode=9), folders) == expect_c
 
 
 if __name__ == "__main__":
-    if "--generate-golden" in sys.argv:
-        _generate()
-    else:
-        sys.exit(__doc__)
+    sys.exit(__doc__)

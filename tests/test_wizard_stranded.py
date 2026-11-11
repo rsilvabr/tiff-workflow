@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import convert_tiff as ct  # noqa: E402
 
 HOSTILE = "伊豆沼_夏 [FINAL] 5% off"
-COMPRESS = ["pwsh", "-NoProfile", "-File", "C:\\x\\compress_tiff_zip.ps1", "-Mode", "8",
+COMPRESS = [sys.executable, "C:\\x\\compress_tiff_zip.py", "-Mode", "8",
             "-InputDir", "G:\\2025"]
 
 
@@ -37,25 +37,22 @@ def test_run_subprocess_reads_the_count_from_real_output(monkeypatch):
                         lambda cmd, n, stdin: seen.append((n, stdin)) or None)
     code = ("print('12:00 | WARN | STRANDED: 4 original(s) still in OLD_TIFFs with "
             "nothing in their place -- see the STRANDED lines above')")
-    rc = ct.run_subprocess([sys.executable, "-c", code, "compress_tiff_zip.ps1"],
+    rc = ct.run_subprocess([sys.executable, "-c", code, "compress_tiff_zip.py"],
                            stdin=subprocess.DEVNULL)
     assert rc == 0
     assert seen == [(4, subprocess.DEVNULL)]
 
 
-def test_restore_flag_lands_inside_a_ps5_command_string():
-    wrapped = ct._wrap_ps5_command(["powershell", "-NoProfile", "-File", "C:\\a b\\c.ps1",
-                                    "-Mode", "8"])
-    out = ct._with_restore_stranded(wrapped)
-    assert out[-1].endswith(" -RestoreStranded") and len(out) == len(wrapped)
-    assert ct._with_restore_stranded(COMPRESS)[-1] == "-RestoreStranded"
+def test_restore_flag_is_one_more_argument():
+    out = ct._with_restore_stranded(COMPRESS)
+    assert out == COMPRESS + ["-RestoreStranded"] and out is not COMPRESS
 
 
 def test_no_offer_without_stranded_files_or_for_other_backends(monkeypatch):
     called = []
     monkeypatch.setattr(ct, "run_subprocess", lambda *a, **k: called.append(a) or 0)
     assert ct._offer_restore_stranded(COMPRESS, 0, None) is None
-    other = ["pwsh", "-File", "C:\\x\\copy_exif_to_TIFF_ps7.ps1"]
+    other = [sys.executable, "C:\\x\\copy_exif_to_tiff.py"]
     assert ct._offer_restore_stranded(other, 5, None) is None
     assert ct._offer_restore_stranded(COMPRESS + ["-RestoreStranded"], 5, None) is None
     assert called == []

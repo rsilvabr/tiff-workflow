@@ -4,7 +4,8 @@ copy has landed -- the irreversible step comes last (jxl-photo's rule).
 Until round 25 the planning loop moved EVERY original of the run to OLD_TIFFs/ before a
 single file was compressed, so for the whole run the original places were empty, and a run
 killed by anything but Ctrl+C stranded them all (365 on 2026-08-03). These tests drive the
-real backend under both shells in a hostile folder (Japanese, [ ], a space, %).
+real backend in both lanes (parallel and sequential: tests/backends.py) in a hostile folder
+(Japanese, [ ], a space, %).
 """
 
 import shutil
@@ -18,11 +19,10 @@ import pytest
 import tifffile
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "compress_tiff_zip.ps1"
-SHELLS = [s for s in ("powershell", "pwsh") if shutil.which(s)]
+SCRIPT = REPO / "compress_tiff_zip.py"
+from backends import LANES, backend_cmd, run_backend  # noqa: E402
 TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not None
 pytestmark = [
-    pytest.mark.skipif(not SHELLS, reason="PowerShell required"),
     pytest.mark.skipif(not TOOLS, reason="ImageMagick and exiftool required"),
 ]
 HOSTILE = "伊豆沼_夏 [FINAL] 5% off"
@@ -45,13 +45,13 @@ def pixels(path: Path):
     return tifffile.imread(str(path))
 
 
-def cmd(shell, root, *args):
-    return [shell, "-NoProfile", "-File", str(SCRIPT), "-InputDir", str(root),
-            *[str(a) for a in args]]
+def cmd(lane, root, *args):
+    return backend_cmd(lane, SCRIPT, ["-InputDir", str(root),
+            *[str(a) for a in args]])
 
 
-def run(shell, root, *args, cwd):
-    r = subprocess.run(cmd(shell, root, *args), cwd=str(cwd), capture_output=True,
+def run(lane, root, *args, cwd):
+    r = subprocess.run(cmd(lane, root, *args), cwd=str(cwd), capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=900)
     return r, r.stdout + r.stderr
 
@@ -62,17 +62,17 @@ def leftovers(folder: Path):
     return [p for p in folder.rglob("*") if pat.search(p.name)]
 
 
-@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize("staging", [False, True], ids=["in-place", "staging"])
-def test_mode9_lands_copies_and_keeps_originals(tmp_path, shell, staging):
+def test_mode9_lands_copies_and_keeps_originals(tmp_path, lane, staging):
     cam = tmp_path / "root" / HOSTILE / "01_D810"
     srcs = {n: tiff(cam / n, seed=i) for i, n in enumerate(["a.tif", "b (2).tif"])}
     srcs["c.tiff"] = tiff(cam / "c.tiff", seed=9)          # a .tiff source -> c.tif
     orig = {n: p.read_bytes() for n, p in srcs.items()}
-    args = ["-Mode", 9, "-ForceSequential"]
+    args = ["-Mode", 9]
     if staging:
         args += ["-StagingDir", tmp_path / "staging"]
-    r, out = run(shell, tmp_path / "root", *args, cwd=tmp_path)
+    r, out = run(lane, tmp_path / "root", *args, cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     old = cam / "OLD_TIFFs"
     for n in ("a.tif", "b (2).tif"):
@@ -85,16 +85,14 @@ def test_mode9_lands_copies_and_keeps_originals(tmp_path, shell, staging):
     assert "archived in OLD_TIFFs after their compressed copy landed" in out
     assert leftovers(tmp_path) == [], leftovers(tmp_path)
     # a second run over its own output: nothing to do, no new backup
-    r, out = run(shell, tmp_path / "root", *args, cwd=tmp_path)
+    r, out = run(lane, tmp_path / "root", *args, cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert sorted(p.name for p in old.iterdir()) == ["a.tif", "b (2).tif", "c.tiff"]
     assert "STRANDED" not in out
 
 
-@pytest.mark.parametrize("shell,parallel", [(s, False) for s in SHELLS] +
-                         ([("pwsh", True)] if "pwsh" in SHELLS else []),
-                         ids=lambda v: str(v))
-def test_a_killed_mode9_run_never_leaves_a_place_empty(tmp_path, shell, parallel):
+@pytest.mark.parametrize("lane", LANES)
+def test_a_killed_mode9_run_never_leaves_a_place_empty(tmp_path, lane):
     """Kill the backend (taskkill /T /F, like closing the window) after the first file is
     done. At no moment of the run, and not after the kill, may an original's place be
     empty. Against the round 25 file every place empties in the first second."""
@@ -104,9 +102,8 @@ def test_a_killed_mode9_run_never_leaves_a_place_empty(tmp_path, shell, parallel
     for i, n in enumerate(names):
         tiff(cam / n, h=1500, w=2000, seed=i, ext_bits=16)     # ~18 MB of noise each
     orig = {n: (cam / n).read_bytes() for n in names}
-    args = ["-Mode", 9, "-Workers", 2 if parallel else 1,
-            "-ForceParallel" if parallel else "-ForceSequential"]
-    p = subprocess.Popen(cmd(shell, root, *args), cwd=str(tmp_path),
+    args = ["-Mode", 9, "-Workers", 2]      # two at once in the parallel lane, one in the other
+    p = subprocess.Popen(cmd(lane, root, *args), cwd=str(tmp_path),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     empty_streak = {n: 0 for n in names}
     violations = []
@@ -153,7 +150,7 @@ def test_a_killed_mode9_run_never_leaves_a_place_empty(tmp_path, shell, parallel
         else:
             assert (cam / n).read_bytes() == orig[n]
     # the next run finishes the job and finds nothing stranded
-    r, out = run(shell, root, "-Mode", 9, "-ForceSequential", cwd=tmp_path)
+    r, out = run(lane, root, "-Mode", 9, cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert "STRANDED" not in out
     for n in names:
@@ -161,8 +158,8 @@ def test_a_killed_mode9_run_never_leaves_a_place_empty(tmp_path, shell, parallel
         assert (old / n).read_bytes() == orig[n]
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_an_original_edited_during_the_run_is_never_archived(tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_an_original_edited_during_the_run_is_never_archived(tmp_path, lane):
     """The landing re-checks the original (size + date) right before archiving it: an
     edit saved while the group was compressing must win -- the copy is dropped, the edited
     file stays in place, nothing goes to OLD_TIFFs/."""
@@ -170,7 +167,7 @@ def test_an_original_edited_during_the_run_is_never_archived(tmp_path, shell):
     cam = root / HOSTILE / "01_D810"
     a = tiff(cam / "a.tif", h=200, w=200, seed=1)
     tiff(cam / "b.tif", h=2500, w=3000, seed=2, ext_bits=16)  # keeps the group busy
-    p = subprocess.Popen(cmd(shell, root, "-Mode", 9, "-ForceSequential"), cwd=str(tmp_path),
+    p = subprocess.Popen(cmd(lane, root, "-Mode", 9), cwd=str(tmp_path),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     lines = []
     edited = False
@@ -192,20 +189,3 @@ def test_an_original_edited_during_the_run_is_never_archived(tmp_path, shell):
     assert (cam / "OLD_TIFFs" / "b.tif").exists()
     assert leftovers(tmp_path) == []
 
-
-def test_every_staging_move_goes_through_move_file_into_place():
-    """A cross-volume -StagingDir made each staged file a copy+delete straight over its
-    destination -- in mode 8 the ONLY copy of the image. All three staging loops (legacy,
-    PS7 parallel, PS5 sequential) now land through Move-FileIntoPlace, which copies to a
-    temp sibling on the destination volume and renames it into place."""
-    import re
-    s = SCRIPT.read_text(encoding="ascii")
-    assert s.count("$mvErr = Move-FileIntoPlace -From $stagePath -To $destPath") == 3
-    assert "Move-Item -Force -LiteralPath $stagePath -Destination $destPath" not in s
-    body = re.search(r"function Move-FileIntoPlace \{(.*?)\n\}\n", s, re.S).group(1)
-    i_copy = body.index("Copy-Item -LiteralPath $From -Destination $tmp")
-    # audit round 28: the rename is one MoveFileEx(REPLACE_EXISTING), never Move-Item -Force
-    # (which deletes $To first)
-    i_rename = body.index("Move-FileReplacing -From $tmp -To $To")
-    assert "Move-Item" not in re.sub(r"<#.*?#>", "", body, flags=re.S).replace("# Audit round 28: Move-FileReplacing, never Move-Item -Force", "")
-    assert i_copy < i_rename

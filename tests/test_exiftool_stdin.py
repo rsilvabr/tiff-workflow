@@ -4,7 +4,9 @@ exiftool reads its command line in the ANSI code page. Every exiftool call of th
 to pass `-@ <argfile>` with the argfile in %TEMP%; a %TEMP% with characters the code page
 lacks (a Windows user name in Japanese, Greek, Polish...) gave
 `Error opening arg file C:\\...\\?? O? ae [x] 100%\\probe.args` on EVERY call. The argfile's
-CONTENT now goes on stdin (`exiftool -@ -`). Same bug as jxl-photo #553.
+CONTENT now goes on stdin (`exiftool -@ -`). Same bug as jxl-photo #553. The Python backends
+make every call through tiff_workflow_common.exiftool (tests/test_backend_invariants.py pins
+that and what it sends); the real runs below are under a %TEMP% outside the code page.
 
 Helper rule (AGENTS.md): a test that reads tags must not put a Japanese path on exiftool's
 command line either -- `exif_stdin` below sends the path on stdin.
@@ -24,10 +26,9 @@ import pytest
 import tifffile
 
 REPO = Path(__file__).resolve().parent.parent
-COMPRESS = REPO / "compress_tiff_zip.ps1"
-COPY_EXIF = {"powershell": REPO / "copy_exif_to_TIFF_ps5.ps1",
-             "pwsh": REPO / "copy_exif_to_TIFF_ps7.ps1"}
-SHELLS = [s for s in ("powershell", "pwsh") if shutil.which(s)]
+COMPRESS = REPO / "compress_tiff_zip.py"
+COPY_EXIF = REPO / "copy_exif_to_tiff.py"
+from backends import LANES, backend_cmd  # noqa: E402
 TOOLS = (shutil.which("magick") is not None and shutil.which("exiftool") is not None)
 
 # No single Windows code page holds all of these.
@@ -44,7 +45,6 @@ def _acp_is_utf8():
 needs_ansi_cp = pytest.mark.skipif(
     sys.platform != "win32" or _acp_is_utf8(),
     reason="needs a non-UTF-8 ANSI code page (Windows): otherwise the bug cannot appear")
-needs_shell = pytest.mark.skipif(not SHELLS, reason="PowerShell required")
 needs_tools = pytest.mark.skipif(not TOOLS, reason="ImageMagick and exiftool required")
 
 
@@ -76,8 +76,8 @@ def _hostile_env(tmp_path: Path):
     return env
 
 
-def run_ps(shell, script, args, cwd, env):
-    cmd = [shell, "-NoProfile", "-File", str(script), *[str(a) for a in args]]
+def run_ps(lane, script, args, cwd, env):
+    cmd = backend_cmd(lane, script, [*[str(a) for a in args]])
     r = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, timeout=900)
     out = (r.stdout + r.stderr).decode("utf-8", "replace")
     return r.returncode, out
@@ -100,46 +100,17 @@ def make_jpeg(path: Path):
 
 # --- T1-1 static ------------------------------------------------------------------------
 
-_ENC = r"\$OutputEncoding = \[System\.Text\.UTF8Encoding\]::new\(\$false\)"
-_SCRIPTS_WITH_EXIFTOOL = ["compress_tiff_zip.ps1", "copy_exif_to_TIFF_ps5.ps1",
-                          "copy_exif_to_TIFF_ps7.ps1"]
-
-
-def test_no_ps1_passes_an_argfile_path_to_exiftool():
-    bad = []
-    for ps1 in sorted(REPO.glob("*.ps1")):
-        for n, line in enumerate(ps1.read_text(encoding="ascii").splitlines(), 1):
-            if re.search(r"exiftool -@ (?!-)", line):
-                bad.append(f"{ps1.name}:{n}: {line.strip()}")
-    assert not bad, "exiftool -@ <path> left (use `ReadAllText($f) | exiftool -@ -`):\n" + "\n".join(bad)
-
 
 def test_generate_thumbnails_never_calls_exiftool():
-    """It needs no $OutputEncoding line: pinned so that a future exiftool call there is noticed."""
-    src = (REPO / "generate_thumbnails.ps1").read_text(encoding="ascii")
+    """It runs on a machine with ImageMagick alone: a future exiftool call there is noticed."""
+    src = (REPO / "generate_thumbnails.py").read_text(encoding="utf-8")
     code = [l for l in src.splitlines() if not l.lstrip().startswith("#")]
     assert not [l for l in code if re.search(r"\bexiftool\b", l)]
 
 
-@pytest.mark.parametrize("name", _SCRIPTS_WITH_EXIFTOOL)
-def test_output_encoding_is_set_at_script_scope_and_in_every_parallel_block(name):
-    src = (REPO / name).read_text(encoding="ascii")
-    assert re.search(r"^" + _ENC + r"$", src, re.M), f"{name}: no script-scope $OutputEncoding"
-    lines = src.splitlines()
-    missing = []
-    for i, line in enumerate(lines):
-        if re.search(r"ForEach-Object\b.*-Parallel \{\s*$", line):
-            # first non-blank statement of the block
-            j = i + 1
-            while j < len(lines) and not lines[j].strip():
-                j += 1
-            if not re.fullmatch(r"\s*" + _ENC, lines[j]):
-                missing.append(f"{name}:{i + 1}")
-    assert not missing, ("-Parallel block without $OutputEncoding as its first statement: "
-                         + ", ".join(missing))
 
-
-@pytest.mark.parametrize("rel", ["convert_tiff.py", "tools/real_photo_battery.py"])
+@pytest.mark.parametrize("rel", ["convert_tiff.py", "tiff_workflow_common.py",
+                                 "tools/real_photo_battery.py"])
 def test_python_never_passes_an_argfile_path(rel):
     src = (REPO / rel).read_text(encoding="utf-8")
     args = re.findall(r'"-@"\s*,\s*([^\],)]+)', src)
@@ -158,45 +129,43 @@ def _fixture(tmp_path, names=("DSCF0001 (2)",)):
 
 
 @needs_ansi_cp
-@needs_shell
 @needs_tools
-@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("lane", LANES)
 class TestCompressUnderNonAnsiTemp:
-    def test_mode1_writes_a_deflate_copy(self, tmp_path, shell):
+    def test_mode1_writes_a_deflate_copy(self, tmp_path, lane):
         src, _ = _fixture(tmp_path)
-        rc, out = run_ps(shell, COMPRESS, ["-Mode", 1, "-InputDir", src], tmp_path,
+        rc, out = run_ps(lane, COMPRESS, ["-Mode", 1, "-InputDir", src], tmp_path,
                          _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         assert "exiftool check" not in out, out[-2000:]
         assert compression(src / "ZIP" / "DSCF0001 (2).tif") == "Adobe Deflate"
 
-    def test_mode8_delete_source_lands_in_place(self, tmp_path, shell):
+    def test_mode8_delete_source_lands_in_place(self, tmp_path, lane):
         src, arrays = _fixture(tmp_path)
-        rc, out = run_ps(shell, COMPRESS, ["-Mode", 8, "-InputDir", src, "-DeleteSource"],
+        rc, out = run_ps(lane, COMPRESS, ["-Mode", 8, "-InputDir", src, "-DeleteSource"],
                          tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         f = src / "DSCF0001 (2).tif"
         assert compression(f) == "Adobe Deflate"
         assert np.array_equal(tifffile.imread(str(f)), arrays["DSCF0001 (2)"])
 
-    def test_mode0_keeps_the_original_in_old_tiffs(self, tmp_path, shell):
+    def test_mode0_keeps_the_original_in_old_tiffs(self, tmp_path, lane):
         import hashlib
         src, _ = _fixture(tmp_path)
         before = hashlib.md5((src / "DSCF0001 (2).tif").read_bytes()).hexdigest()
-        rc, out = run_ps(shell, COMPRESS, ["-Mode", 0, "-InputDir", src], tmp_path,
+        rc, out = run_ps(lane, COMPRESS, ["-Mode", 0, "-InputDir", src], tmp_path,
                          _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         kept = src / "OLD_TIFFs" / "DSCF0001 (2).tif"
         assert hashlib.md5(kept.read_bytes()).hexdigest() == before
         assert compression(src / "DSCF0001 (2).tif") == "Adobe Deflate"
 
-    @pytest.mark.skipif("pwsh" not in SHELLS, reason="pwsh required")
-    def test_mode1_parallel_block(self, tmp_path, shell):
-        if shell != "pwsh":
-            pytest.skip("-ForceParallel needs PowerShell 7")
+    def test_mode1_parallel_block(self, tmp_path, lane):
+        if lane != "parallel":
+            pytest.skip("three workers at once: the parallel lane")
         names = ("DSCF0001 (2)", "DSCF0002 (3)", "DSCF0003 (4)")
         src, _ = _fixture(tmp_path, names)
-        rc, out = run_ps(shell, COMPRESS, ["-Mode", 1, "-InputDir", src, "-ForceParallel",
+        rc, out = run_ps(lane, COMPRESS, ["-Mode", 1, "-InputDir", src, "-ForceParallel",
                                            "-Workers", 3], tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         for n in names:
@@ -204,32 +173,31 @@ class TestCompressUnderNonAnsiTemp:
 
 
 @needs_ansi_cp
-@needs_shell
 @needs_tools
-@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("lane", LANES)
 class TestCopyExifUnderNonAnsiTemp:
     def _pair(self, src, name, seed):
         tiff(src / f"{name}.tif", seed=seed)
         make_jpeg(src / f"{name}.jpg")
 
-    def test_compress_zip_copies_exif_and_compresses(self, tmp_path, shell):
+    def test_compress_zip_copies_exif_and_compresses(self, tmp_path, lane):
         src = tmp_path / HOSTILE / "S5pro 01"
         self._pair(src, "DSCF0001 (2)", 1)
-        rc, out = run_ps(shell, COPY_EXIF[shell], ["-InputDir", src, "-CompressZip"],
+        rc, out = run_ps(lane, COPY_EXIF, ["-InputDir", src, "-CompressZip"],
                          tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         f = src / "DSCF0001 (2).tif"
         assert exif_stdin(f, "-s3", "-Make") == "FUJIFILM", out[-2000:]
         assert compression(f) == "Adobe Deflate"
 
-    def test_compress_zip_parallel_block(self, tmp_path, shell):
-        if shell != "pwsh":
-            pytest.skip("the parallel block exists only in the PowerShell 7 copy")
+    def test_compress_zip_parallel_block(self, tmp_path, lane):
+        if lane != "parallel":
+            pytest.skip("three workers at once: the parallel lane")
         names = ("DSCF0001 (2)", "DSCF0002 (3)", "DSCF0003 (4)")
         src = tmp_path / HOSTILE / "S5pro 01"
         for i, n in enumerate(names):
             self._pair(src, n, i + 1)
-        rc, out = run_ps(shell, COPY_EXIF[shell],
+        rc, out = run_ps(lane, COPY_EXIF,
                          ["-InputDir", src, "-CompressZip", "-Workers", 3],
                          tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]

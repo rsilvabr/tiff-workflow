@@ -15,7 +15,7 @@ Fixture layout -- the owner's real Capture One exports, a `<stem>_1.TIF` /
     250428_S3Pro          DSCF0092_1.TIF + DSCF0092.RAF (S3 Pro, no JPEG)
 
 The module skips itself when the env var is unset, the folder is missing, or any of
-pwsh / powershell / magick / exiftool is missing. The backends and the real files are
+magick / exiftool is missing. The backend and the real files are
 driven through the runners of tests/test_regression_classes.py, not copies of them.
 """
 
@@ -38,7 +38,7 @@ FIXTURE_ROOT = Path(FIXTURES)
 if not FIXTURE_ROOT.is_dir():
     pytest.skip(f"TW_FUJI_FIXTURES is not a folder: {FIXTURES}", allow_module_level=True)
 
-_MISSING = [tool for tool in ("pwsh", "powershell", "magick", "exiftool")
+_MISSING = [tool for tool in ("magick", "exiftool")
             if shutil.which(tool) is None]
 if _MISSING:
     pytest.skip("missing tools: " + ", ".join(_MISSING), allow_module_level=True)
@@ -48,8 +48,8 @@ S5_RAFONLY = "250309_S5Pro_rafonly"
 S3_RAFONLY = "250428_S3Pro"
 
 COPY_EXIF_TARGETS = [
-    ("pwsh", "copy_exif_to_TIFF_ps7.ps1"),
-    ("powershell", "copy_exif_to_TIFF_ps5.ps1"),
+    ("parallel", "copy_exif_to_tiff.py"),
+    ("sequential", "copy_exif_to_tiff.py"),
 ]
 
 
@@ -88,19 +88,19 @@ def ae_pages(path_a, path_b, page):
     return (result.stderr or result.stdout).strip()
 
 
-def backend_args(shell, folder):
+def backend_args(lane, folder):
     args = ["-InputDir", str(folder)]
-    if shell == "pwsh":
+    if lane == "parallel":
         args += ["-Workers", "4"]
     return args
 
 
-@pytest.mark.parametrize("shell,script", COPY_EXIF_TARGETS)
+@pytest.mark.parametrize("lane,script", COPY_EXIF_TARGETS)
 class TestCaptureOneVariants:
-    def test_t1_capture_one_variants_pair_with_the_jpeg(self, tmp_path, shell, script):
+    def test_t1_capture_one_variants_pair_with_the_jpeg(self, tmp_path, lane, script):
         work = copy_fixture(tmp_path, S5_VARIANTS)
 
-        result = run_ps(shell, script, backend_args(shell, work), tmp_path)
+        result = run_ps(lane, script, backend_args(lane, work), tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         for line in (
@@ -137,10 +137,10 @@ class TestCaptureOneVariants:
                     f"{tif_name}: page {page} pixels changed"
                 )
 
-    def test_t2_raf_is_the_source_when_there_is_no_jpeg(self, tmp_path, shell, script):
+    def test_t2_raf_is_the_source_when_there_is_no_jpeg(self, tmp_path, lane, script):
         work = copy_fixture(tmp_path, S5_RAFONLY)
 
-        result = run_ps(shell, script, backend_args(shell, work), tmp_path)
+        result = run_ps(lane, script, backend_args(lane, work), tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert ("OK | _DSF4796.TIF <= _DSF4796.RAF [EXIF from RAW]"
@@ -162,10 +162,10 @@ class TestCaptureOneVariants:
             assert ae_pages(out, FIXTURE_ROOT / S5_RAFONLY / "_DSF4796.TIF",
                             page).split()[0] == "0", f"page {page} pixels changed"
 
-    def test_t3_s3pro_raw_only_session(self, tmp_path, shell, script):
+    def test_t3_s3pro_raw_only_session(self, tmp_path, lane, script):
         work = copy_fixture(tmp_path, S3_RAFONLY)
 
-        result = run_ps(shell, script, backend_args(shell, work), tmp_path)
+        result = run_ps(lane, script, backend_args(lane, work), tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         for line in (
@@ -183,12 +183,12 @@ class TestCaptureOneVariants:
                 f"{tif_name}: DateTimeOriginal does not match its RAF"
             )
 
-    def test_t4_second_run_over_own_output(self, tmp_path, shell, script):
+    def test_t4_second_run_over_own_output(self, tmp_path, lane, script):
         work = copy_fixture(tmp_path, S5_VARIANTS)
-        first = run_ps(shell, script, backend_args(shell, work), tmp_path)
+        first = run_ps(lane, script, backend_args(lane, work), tmp_path)
         assert first.returncode == 0, f"{first.stdout}\n{first.stderr}"
 
-        again = run_ps(shell, script, backend_args(shell, work), tmp_path)
+        again = run_ps(lane, script, backend_args(lane, work), tmp_path)
 
         assert again.returncode == 0, f"{again.stdout}\n{again.stderr}"
         assert "MISS" not in again.stdout, again.stdout
@@ -210,12 +210,12 @@ class TestCaptureOneVariants:
                     f"{tif_name}: page {page} pixels changed on the second run"
                 )
 
-    def test_t5_percent_name_with_raf(self, tmp_path, shell, script):
+    def test_t5_percent_name_with_raf(self, tmp_path, lane, script):
         work = copy_fixture(tmp_path, S5_RAFONLY)
         (work / "_DSF4796.TIF").rename(work / "50%off_1.TIF")
         (work / "_DSF4796.RAF").rename(work / "50%off.RAF")
 
-        result = run_ps(shell, script, backend_args(shell, work), tmp_path)
+        result = run_ps(lane, script, backend_args(lane, work), tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert ("OK | 50%off_1.TIF <= 50%off.RAF [EXIF from RAW]"

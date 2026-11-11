@@ -1,9 +1,7 @@
 """v2.9.0: the settings overlay (.tiff_workflow_settings.json).
 
-T5  the Python and the PowerShell readers agree on ~70 (spec, JSON value) cases, in all four
-    scripts under both shells
-T6  no safety/per-run name is in any spec table; both copy_exif tables are equal; the function
-    is identical in the four scripts
+T5  the wizard's reader and the backends' reader agree on ~70 (spec, JSON value) cases
+T6  no safety/per-run name is in any spec table
 T7  real end to end under a hostile folder: a value from the file is what a run really does; a
     -Param on the command line beats it; a SafeMode entry is refused
 T8  a corrupt file, a root array, a wrong-case name, an unknown section, a BOM
@@ -30,12 +28,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import convert_tiff  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPTS = ["compress_tiff_zip.ps1", "copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1",
-           "generate_thumbnails.ps1"]
-SHELLS = [s for s in ("powershell", "pwsh") if shutil.which(s)]
+SCRIPTS = ["compress_tiff_zip.py", "copy_exif_to_tiff.py", "generate_thumbnails.py"]
+import tiff_workflow_common as twc  # noqa: E402
+from backends import LANES, backend_cmd  # noqa: E402
 HOSTILE = "写真 [FINAL] x"
 ENV = "TIFFWORKFLOW_SETTINGS"
-need_shell = pytest.mark.skipif(not SHELLS, reason="PowerShell required")
 need_tools = pytest.mark.skipif(shutil.which("magick") is None or shutil.which("exiftool") is None,
                                 reason="ImageMagick and exiftool required")
 
@@ -49,18 +46,6 @@ FORBIDDEN = ["Mode", "InputDir", "InputDirFile", "OutputDir", "StagingDir", "Wor
 
 
 # --- helpers ---------------------------------------------------------------------------------
-
-def _extract_function(text: str, name: str) -> str:
-    m = re.search(r"^function\s+" + re.escape(name) + r"\s*\{", text, re.M)
-    assert m, f"function {name} not found"
-    i, depth = m.end() - 1, 0
-    while i < len(text):
-        depth += (text[i] == "{") - (text[i] == "}")
-        if depth == 0:
-            break
-        i += 1
-    return text[m.start():i + 1]
-
 
 def _env(settings=None, **extra):
     """A child environment: TIFFWORKFLOW_SETTINGS = settings (None = removed), plus extras."""
@@ -78,8 +63,8 @@ def _write(path: Path, data, raw: bytes = None) -> Path:
     return path
 
 
-def _run(shell, script, args, cwd, env, script_dir=REPO):
-    cmd = [shell, "-NoProfile", "-File", str(script_dir / script), *[str(a) for a in args]]
+def _run(lane, script, args, cwd, env, script_dir=REPO):
+    cmd = backend_cmd(lane, script_dir / script, [*[str(a) for a in args]])
     r = subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, timeout=600)
     return r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace")
 
@@ -138,126 +123,77 @@ def test_T5_python_reader_verdicts_are_the_documented_ones():
         assert _py_verdict(spec, text).startswith("yes") == accepted, (spec, text)
 
 
-_HARNESS = r"""
-param([string]$FunctionFile, [string]$CasesFile, [string]$OutFile)
-. $FunctionFile
-$cases = [System.IO.File]::ReadAllText($CasesFile, [System.Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
-$out = New-Object System.Collections.Generic.List[string]
-$i = 0
-foreach ($c in $cases) {
-    $ov = Join-Path (Split-Path -Parent $CasesFile) ('ov_' + $i + '.json')
-    [System.IO.File]::WriteAllText($ov, '{"s": {"X": ' + $c.json + '}}', [System.Text.UTF8Encoding]::new($false))
-    $env:TIFFWORKFLOW_SETTINGS = $ov
-    $r = Get-SettingsOverlay -Section 's' -Specs @{ 'X' = [string]$c.spec } -ScriptRoot ''
-    if ($r.Values.ContainsKey('X')) {
-        $v = $r.Values['X']
-        $out.Add('yes:' + $v.GetType().Name + ':' + $v.ToString([System.Globalization.CultureInfo]::InvariantCulture))
-    } else { $out.Add('no') }
-    $i++
-}
-[System.IO.File]::WriteAllText($OutFile, ($out -join "`n"), [System.Text.UTF8Encoding]::new($false))
-"""
-
-_PS_TYPE = {"Int32": "int", "Double": "float", "String": "str", "Boolean": "bool"}
-
-
-def _same(py: str, ps: str) -> bool:
-    if py == ps:
-        return True
-    if not (py.startswith("yes:") and ps.startswith("yes:")):
-        return False
-    pt, pv = py.split(":", 2)[1:]
-    st, sv = ps.split(":", 2)[1:]
-    if _PS_TYPE.get(st) != pt:
-        return False
-    if pt == "float":
-        return float(pv) == float(sv)
-    if pt == "bool":
-        return pv.lower() == sv.lower()
-    return pv == sv
-
-
-@need_shell
-@pytest.mark.parametrize("shell", SHELLS)
-@pytest.mark.parametrize("script", SCRIPTS)
-def test_T5_powershell_reader_agrees_with_python(tmp_path, shell, script):
-    work = tmp_path / "t5"
-    work.mkdir()
-    func = _extract_function((REPO / script).read_text(encoding="utf-8"), "Get-SettingsOverlay")
-    (work / "func.ps1").write_text(func + "\n", encoding="utf-8")
-    (work / "harness.ps1").write_text(_HARNESS, encoding="utf-8")
-    (work / "cases.json").write_text(
-        json.dumps([{"spec": s, "json": t} for s, t, _ in CASES], ensure_ascii=False), encoding="utf-8")
-    r = subprocess.run([shell, "-NoProfile", "-File", str(work / "harness.ps1"), str(work / "func.ps1"),
-                        str(work / "cases.json"), str(work / "out.txt")],
-                       cwd=str(work), capture_output=True, timeout=600)
-    assert r.returncode == 0, (r.stdout + r.stderr).decode("utf-8", "replace")
-    got = (work / "out.txt").read_text(encoding="utf-8").split("\n")
-    assert len(got) == len(CASES)
-    bad = [f"{spec} {text}: python {_py_verdict(spec, text)!r}, {shell} {ps!r}"
-           for (spec, text, accepted), ps in zip(CASES, got) if not _same(_py_verdict(spec, text), ps)]
+def test_T5_the_backends_reader_agrees_with_the_wizard(tmp_path, monkeypatch):
+    """Same verdict, same value, same type: the wizard shows a value and the backend runs
+    with it."""
+    bad = []
+    for i, (spec, text, accepted) in enumerate(CASES):
+        ov = tmp_path / f"ov_{i}.json"
+        ov.write_text('{"s": {"X": ' + text + '}}', encoding="utf-8")
+        monkeypatch.setenv(ENV, str(ov))
+        got = twc.read_settings_overlay("s", {"X": spec}, "")
+        if "X" in got["values"]:
+            v = got["values"]["X"]
+            backend = f"yes:{type(v).__name__}:{v}"
+        else:
+            backend = "no"
+            assert got["warnings"], (spec, text)
+        if backend != _py_verdict(spec, text) or backend.startswith("yes") != accepted:
+            bad.append(f"{spec} {text}: wizard {_py_verdict(spec, text)!r}, backend {backend!r}")
     assert not bad, "\n".join(bad)
-    # and both are the documented verdict
-    for (spec, text, accepted), ps in zip(CASES, got):
-        assert ps.startswith("yes") == accepted, (spec, text, ps)
 
 
 # --- T6: what a spec table may contain ------------------------------------------------------------
 
 def _table(script):
-    return convert_tiff._ps_overlay_specs(script)
+    return convert_tiff._backend_overlay_specs(script)
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
 def test_T6_no_safety_or_per_run_name_is_in_a_spec_table(script):
     table = _table(script)
-    assert table, f"{script}: no OVERLAY-SPECS block"
+    assert table, f"{script}: no OVERLAY_SPECS table"
     leaked = sorted(set(table) & set(FORBIDDEN))
     assert not leaked, f"{script} lets the overlay change {leaked}"
     # every name is a real parameter of the script, and only those the plan lists
-    assert set(table) <= set(convert_tiff._ps_param_names(script))
+    assert set(table) <= set(convert_tiff._backend_param_names(script))
+    # ...and the table the wizard reads from the file is the one the script runs with
+    module = __import__(script[:-3])
+    assert table == module.OVERLAY_SPECS
 
 
 def test_T6_the_tables_are_exactly_the_planned_ones():
-    assert _table("compress_tiff_zip.ps1") == {
+    assert _table("compress_tiff_zip.py") == {
         "ZipSuffix": "name", "ZipSubfolderName": "name", "ExportMarker": "name",
         "ExportZipSubfolder": "name", "ExportTiffSubfolder": "name", "CapWorkers": "int:0:64",
         "MagickTimeout": "int:1:", "ThumbSize": "int:1:", "ThumbQuality": "intstr:1:100",
         "ThumbFormat": "name", "SrgbProfile": "path?", "WorkerMemoryFraction": "float:0:2"}
-    assert _table("generate_thumbnails.ps1") == {
+    assert _table("generate_thumbnails.py") == {
         "Size": "int:1:", "Quality": "intstr:1:100", "Format": "name", "SrgbProfile": "path?"}
-    for s in ("copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"):
-        assert _table(s) == {"MagickTimeout": "int:1:", "WorkerMemoryFraction": "float:0:2"}
-
-
-def test_T6_both_copy_exif_tables_are_equal_and_the_function_is_identical():
-    assert _table("copy_exif_to_TIFF_ps5.ps1") == _table("copy_exif_to_TIFF_ps7.ps1")
-    bodies = {s: re.sub(r"\s+", " ", _extract_function((REPO / s).read_text(encoding="utf-8"),
-                                                       "Get-SettingsOverlay")) for s in SCRIPTS}
-    assert len(set(bodies.values())) == 1, "Get-SettingsOverlay differs between the scripts"
+    assert _table("copy_exif_to_tiff.py") == {"MagickTimeout": "int:1:",
+                                              "WorkerMemoryFraction": "float:0:2"}
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
-def test_T6_the_overlay_is_applied_before_the_first_log_line_and_the_version_line_stays_first(script):
-    text = (REPO / script).read_text(encoding="utf-8")
-    assert text.count("Get-SettingsOverlay -Section") == 1
-    apply_at = text.index("Get-SettingsOverlay -Section")
-    version_at = text.index('Write-Log "tiff-workflow $script:ToolkitVersion')
-    assert apply_at < version_at < text.index("if ($script:OverlayInfo)")
-    first_log = re.search(r"^Write-Log\b", text, re.M)       # script scope: column 0
-    assert first_log.start() == version_at, "the version line must stay the first Write-Log"
-    # nothing reads a parameter between the top of the file and the overlay being applied
-    head = text[:apply_at]
-    assert "$script:Workers" not in head and "$script:MagickTimeout" not in head
-    assert text.count("$PSBoundParameters.ContainsKey($overlayName)") == 1
+def test_T6_the_overlay_is_applied_before_anything_reads_a_parameter(script):
+    """A parameter read before the overlay is applied keeps the script's own value while
+    the rest of the run uses the file's."""
+    import ast
+    tree = ast.parse((REPO / script).read_text(encoding="utf-8"))
+    entry = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("run", "run_main"))
+    src = ast.unparse(entry)
+    assert src.count("tw.apply_settings_overlay(") == 1
+    apply_at = src.index("tw.apply_settings_overlay(")
+    assert src.index("tw.parse_args(") < apply_at
+    assert src.index("opt[") > apply_at, f"{script}: a parameter is read before the overlay is applied"
+    assert apply_at < src.index("tiff-workflow {tw.TOOLKIT_VERSION}") < src.index("log(overlay['info'])")
 
 
 # --- T7 / T8: real runs ---------------------------------------------------------------------------
 
-@need_shell
 @need_tools
 class TestEndToEnd:
-    """compress_tiff_zip.ps1 mode 1 (output into a subfolder of each input folder) in a hostile
+    """compress_tiff_zip.py mode 1 (output into a subfolder of each input folder) in a hostile
     folder; the overlay file sits in the same folder and is named through TIFFWORKFLOW_SETTINGS."""
 
     @staticmethod
@@ -268,15 +204,15 @@ class TestEndToEnd:
         return root, src
 
     @staticmethod
-    def _mode1(shell, src, root, env, *extra):
-        return _run(shell, "compress_tiff_zip.ps1",
+    def _mode1(lane, src, root, env, *extra):
+        return _run(lane, "compress_tiff_zip.py",
                     ["-Mode", "1", "-InputDir", src, "-Workers", "1", *extra], root, env)
 
-    @pytest.mark.parametrize("shell", SHELLS)
-    def test_T7_a_value_from_the_file_is_what_the_run_does(self, tmp_path, shell):
+    @pytest.mark.parametrize("lane", LANES)
+    def test_T7_a_value_from_the_file_is_what_the_run_does(self, tmp_path, lane):
         root, src = self._layout(tmp_path)
         ov = _write(root / "settings.json", {"compress_tiff_zip": {"ZipSubfolderName": "FROM_FILE"}})
-        rc, out = self._mode1(shell, src, root, _env(ov))
+        rc, out = self._mode1(lane, src, root, _env(ov))
         assert rc == 0, out[-3000:]
         assert (src / "FROM_FILE" / "DSCF0001 (2).tif").is_file(), out[-3000:]
         assert not (src / "ZIP").exists()
@@ -287,26 +223,26 @@ class TestEndToEnd:
         assert text.index("tiff-workflow ") < text.index("Script settings overlay: ")
         assert "ZipSubfolderName" in text
 
-    @pytest.mark.parametrize("shell", SHELLS)
-    def test_T7_without_the_file_the_script_default_applies(self, tmp_path, shell):
+    @pytest.mark.parametrize("lane", LANES)
+    def test_T7_without_the_file_the_script_default_applies(self, tmp_path, lane):
         root, src = self._layout(tmp_path)
-        rc, out = self._mode1(shell, src, root, _env(tmp_path / "does not exist.json"))
+        rc, out = self._mode1(lane, src, root, _env(tmp_path / "does not exist.json"))
         assert rc == 0, out[-3000:]
         assert (src / "ZIP" / "DSCF0001 (2).tif").is_file()
         assert "settings overlay" not in out.lower()
 
-    @pytest.mark.parametrize("shell", SHELLS)
-    def test_T7_a_param_on_the_command_line_beats_the_file(self, tmp_path, shell):
+    @pytest.mark.parametrize("lane", LANES)
+    def test_T7_a_param_on_the_command_line_beats_the_file(self, tmp_path, lane):
         root, src = self._layout(tmp_path)
         ov = _write(root / "settings.json", {"compress_tiff_zip": {"ZipSubfolderName": "FROM_FILE"}})
-        rc, out = self._mode1(shell, src, root, _env(ov), "-ZipSubfolderName", "FROM_CMDLINE")
+        rc, out = self._mode1(lane, src, root, _env(ov), "-ZipSubfolderName", "FROM_CMDLINE")
         assert rc == 0, out[-3000:]
         assert (src / "FROM_CMDLINE" / "DSCF0001 (2).tif").is_file()
         assert not (src / "FROM_FILE").exists()
         assert "Script settings overlay:" not in out, "a bound param is not 'applied'"
 
-    @pytest.mark.parametrize("shell", SHELLS)
-    def test_T7_a_safemode_entry_is_refused_and_multipage_handling_is_unchanged(self, tmp_path, shell):
+    @pytest.mark.parametrize("lane", LANES)
+    def test_T7_a_safemode_entry_is_refused_and_multipage_handling_is_unchanged(self, tmp_path, lane):
         root, src = self._layout(tmp_path)
         _tiff(src / "multi.tif", pages=2)
         results = {}
@@ -318,7 +254,7 @@ class TestEndToEnd:
             work = tmp_path / label
             shutil.copytree(src, work / "scans 01")
             ov = _write(root / f"{label}.json", data) if data else tmp_path / "absent.json"
-            rc, out = self._mode1(shell, work / "scans 01", work, _env(ov))
+            rc, out = self._mode1(lane, work / "scans 01", work, _env(ov))
             assert rc == 0, out[-3000:]
             results[label] = (sorted(p.name for p in (work / "scans 01" / "ZIP").glob("*")),
                               sorted(p.name for p in (work / "scans 01").glob("*.tif")), out)
@@ -329,7 +265,7 @@ class TestEndToEnd:
             assert f"WARNING: settings overlay: {name} is not a setting the overlay can change in compress_tiff_zip" \
                 in results["safemode_false"][2]
 
-    @pytest.mark.parametrize("shell", SHELLS)
+    @pytest.mark.parametrize("lane", LANES)
     @pytest.mark.parametrize("label,raw,warns", [
         ("corrupt_json", b'{"compress_tiff_zip": {"ZipSubfolderName": ', True),
         ("root_array", b'[{"compress_tiff_zip": {"ZipSubfolderName": "ARR"}}]', True),
@@ -342,59 +278,56 @@ class TestEndToEnd:
         ("empty_file", b'', True),
         ("empty_object", b'{}', False),
     ])
-    def test_T8_a_bad_file_changes_nothing_and_says_so(self, tmp_path, shell, label, raw, warns):
+    def test_T8_a_bad_file_changes_nothing_and_says_so(self, tmp_path, lane, label, raw, warns):
         root, src = self._layout(tmp_path)
         ov = _write(root / "settings.json", None, raw=raw)
-        rc, out = self._mode1(shell, src, root, _env(ov))
+        rc, out = self._mode1(lane, src, root, _env(ov))
         assert rc == 0, out[-3000:]
         assert (src / "ZIP" / "DSCF0001 (2).tif").is_file(), out[-3000:]   # the script's own default
         assert sorted(p.name for p in src.iterdir()) == ["DSCF0001 (2).tif", "ZIP"]
         assert ("WARNING: settings overlay:" in out) == warns, out[-2500:]
         assert "Script settings overlay:" not in out
 
-    @pytest.mark.parametrize("shell", SHELLS)
-    def test_T8_a_utf8_bom_is_read(self, tmp_path, shell):
+    @pytest.mark.parametrize("lane", LANES)
+    def test_T8_a_utf8_bom_is_read(self, tmp_path, lane):
         root, src = self._layout(tmp_path)
         data = {"compress_tiff_zip": {"ZipSubfolderName": "写真 BOM"}}
         ov = _write(root / "settings.json", None,
                     raw=b"\xef\xbb\xbf" + json.dumps(data, ensure_ascii=False).encode("utf-8"))
-        rc, out = self._mode1(shell, src, root, _env(ov))
+        rc, out = self._mode1(lane, src, root, _env(ov))
         assert rc == 0, out[-3000:]
         assert (src / "写真 BOM" / "DSCF0001 (2).tif").is_file(), out[-3000:]
         assert "WARNING: settings overlay" not in out
 
-    @pytest.mark.parametrize("shell", SHELLS)
-    def test_T8_the_exit_code_of_a_failing_run_is_unchanged_by_a_bad_file(self, tmp_path, shell):
+    @pytest.mark.parametrize("lane", LANES)
+    def test_T8_the_exit_code_of_a_failing_run_is_unchanged_by_a_bad_file(self, tmp_path, lane):
         """A missing input folder exits 1 with or without an overlay problem: the overlay never
         turns an error into a pass nor a pass into an error."""
         root, _src = self._layout(tmp_path)
         ov = _write(root / "settings.json", None, raw=b"{ not json")
-        rc_bad, out_bad = _run(shell, "compress_tiff_zip.ps1", ["-Mode", "1", "-InputDir", root / "missing"],
+        rc_bad, out_bad = _run(lane, "compress_tiff_zip.py", ["-Mode", "1", "-InputDir", root / "missing"],
                                root, _env(ov))
-        rc_none, _ = _run(shell, "compress_tiff_zip.ps1", ["-Mode", "1", "-InputDir", root / "missing"],
+        rc_none, _ = _run(lane, "compress_tiff_zip.py", ["-Mode", "1", "-InputDir", root / "missing"],
                           root, _env(tmp_path / "absent.json"))
         assert rc_bad == rc_none
         assert "WARNING: settings overlay" in out_bad
 
-    @pytest.mark.parametrize("shell", SHELLS)
+    @pytest.mark.parametrize("lane", LANES)
     @pytest.mark.parametrize("script,section,key,value", [
-        ("generate_thumbnails.ps1", "generate_thumbnails", "Size", 128),
-        ("copy_exif_to_TIFF_ps5.ps1" , "copy_exif", "MagickTimeout", 77),
-        ("copy_exif_to_TIFF_ps7.ps1", "copy_exif", "MagickTimeout", 77),
+        ("generate_thumbnails.py", "generate_thumbnails", "Size", 128),
+        ("copy_exif_to_tiff.py", "copy_exif", "MagickTimeout", 77),
     ])
-    def test_T7_every_script_applies_its_own_section(self, tmp_path, shell, script, section, key, value):
-        if script.endswith("ps7.ps1") and shell == "powershell":
-            pytest.skip("the PS7 copy needs pwsh")
+    def test_T7_every_script_applies_its_own_section(self, tmp_path, lane, script, section, key, value):
         root, src = self._layout(tmp_path)
         ov = _write(root / "settings.json", {section: {key: value, "SafeMode": False}})
-        rc, out = _run(shell, script, ["-InputDir", src, "-DryRun"], root, _env(ov))
+        rc, out = _run(lane, script, ["-InputDir", src, "-DryRun"], root, _env(ov))
         assert rc == 0, out[-3000:]
         assert f"Script settings overlay: {ov}: 1 value(s): {key}" in out
         assert "SafeMode is not a setting the overlay can change" in out
         # the other section's script does not see this one's entries
         other = {"generate_thumbnails": "compress_tiff_zip"}.get(section, "generate_thumbnails")
         ov2 = _write(root / "other.json", {other: {"Size": 9}})
-        rc, out = _run(shell, script, ["-InputDir", src, "-DryRun"], root, _env(ov2))
+        rc, out = _run(lane, script, ["-InputDir", src, "-DryRun"], root, _env(ov2))
         assert rc == 0 and "settings overlay" not in out.lower()
 
 
@@ -420,23 +353,23 @@ def test_T9_python_discovery_order(tmp_path, monkeypatch):
     assert convert_tiff._settings_overlay_path() is None                 # set but blank: OFF
     monkeypatch.setenv(ENV, "   ")
     assert convert_tiff._settings_overlay_path() is None
-    assert convert_tiff._overlay_values("compress_tiff_zip.ps1") == {}   # and nothing is read
+    assert convert_tiff._overlay_values("compress_tiff_zip.py") == {}   # and nothing is read
 
 
-@need_shell
-@pytest.mark.parametrize("shell", SHELLS)
-def test_T9_powershell_discovery_order(tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_T9_backend_discovery_order(tmp_path, lane):
     scripts = tmp_path / "portable [x]"
     home = tmp_path / "home 写真"
     empty = tmp_path / "empty input"
     for d in (scripts, home, empty):
         d.mkdir()
-    shutil.copy(REPO / "generate_thumbnails.ps1", scripts / "generate_thumbnails.ps1")
+    for name in ("generate_thumbnails.py", "tiff_workflow_common.py"):   # a portable copy
+        shutil.copy(REPO / name, scripts / name)
     name = ".tiff_workflow_settings.json"
     explicit = _write(tmp_path / "explicit.json", {"generate_thumbnails": {"Size": 111}})
 
     def run(env):
-        return _run(shell, "generate_thumbnails.ps1", ["-InputDir", empty, "-DryRun"], tmp_path, env,
+        return _run(lane, "generate_thumbnails.py", ["-InputDir", empty, "-DryRun"], tmp_path, env,
                     script_dir=scripts)
 
     base = dict(USERPROFILE=home, HOME=home)
@@ -473,11 +406,11 @@ def test_T10_backend_default_and_tool_output_names_follow_the_overlay(tmp_path, 
     assert "zipped" not in before
     _use_overlay(monkeypatch, ov)
     bd = convert_tiff._backend_default
-    assert bd("compress_tiff_zip.ps1", "ZipSubfolderName") == "ZIPPED"
-    assert bd("compress_tiff_zip.ps1", "CapWorkers") == 3
-    assert bd("compress_tiff_zip.ps1", "ThumbQuality") == "90"           # intstr: a string, like the script's
-    assert bd("compress_tiff_zip.ps1", "ThumbSize") == 128
-    assert bd("generate_thumbnails.ps1", "Size") == 64 and bd("generate_thumbnails.ps1", "Format") == "png"
+    assert bd("compress_tiff_zip.py", "ZipSubfolderName") == "ZIPPED"
+    assert bd("compress_tiff_zip.py", "CapWorkers") == 3
+    assert bd("compress_tiff_zip.py", "ThumbQuality") == "90"           # intstr: a string, like the script's
+    assert bd("compress_tiff_zip.py", "ThumbSize") == 128
+    assert bd("generate_thumbnails.py", "Size") == 64 and bd("generate_thumbnails.py", "Format") == "png"
     names = convert_tiff._tool_output_names()
     assert "zipped" in names and "_out" in names
     # discovery's module constant is refreshed on request
@@ -492,9 +425,9 @@ def test_T10_backend_default_and_tool_output_names_follow_the_overlay(tmp_path, 
     _write(ov, {"compress_tiff_zip": {"ZipSubfolderName": "a/b", "ThumbPage": 5, "SafeMode": False,
                                       "CapWorkers": 99}})
     _use_overlay(monkeypatch, ov)
-    assert bd("compress_tiff_zip.ps1", "ZipSubfolderName") == "ZIP"
-    assert bd("compress_tiff_zip.ps1", "CapWorkers") == 0
-    assert bd("compress_tiff_zip.ps1", "SafeMode") is True
+    assert bd("compress_tiff_zip.py", "ZipSubfolderName") == "ZIP"
+    assert bd("compress_tiff_zip.py", "CapWorkers") == 0
+    assert bd("compress_tiff_zip.py", "SafeMode") is True
 
 
 def test_T10_a_value_of_the_wrong_type_falls_back(tmp_path, monkeypatch):
@@ -502,18 +435,18 @@ def test_T10_a_value_of_the_wrong_type_falls_back(tmp_path, monkeypatch):
     monkeypatch.setattr(convert_tiff, "_overlay_values",
                         lambda script: {"CapWorkers": "three", "ZipSubfolderName": 7, "ThumbQuality": 90})
     bd = convert_tiff._backend_default
-    assert bd("compress_tiff_zip.ps1", "CapWorkers") == 0
-    assert bd("compress_tiff_zip.ps1", "ZipSubfolderName") == "ZIP"
-    assert bd("compress_tiff_zip.ps1", "ThumbQuality") == "85"
+    assert bd("compress_tiff_zip.py", "CapWorkers") == 0
+    assert bd("compress_tiff_zip.py", "ZipSubfolderName") == "ZIP"
+    assert bd("compress_tiff_zip.py", "ThumbQuality") == "85"
 
 
 def test_T10_an_unreadable_overlay_changes_nothing(tmp_path, monkeypatch):
     for raw in (b"{ nope", b"[1]", b'{"compress_tiff_zip": 3}', b"\xff\xfe\x00"):
         ov = _write(tmp_path / "s.json", None, raw=raw)
         _use_overlay(monkeypatch, ov)
-        assert convert_tiff._backend_default("compress_tiff_zip.ps1", "ZipSubfolderName") == "ZIP"
-        assert convert_tiff._overlay_values("compress_tiff_zip.ps1") == {}
-        _path, values, warnings = convert_tiff._overlay_scan("compress_tiff_zip.ps1")
+        assert convert_tiff._backend_default("compress_tiff_zip.py", "ZipSubfolderName") == "ZIP"
+        assert convert_tiff._overlay_values("compress_tiff_zip.py") == {}
+        _path, values, warnings = convert_tiff._overlay_scan("compress_tiff_zip.py")
         assert values == {} and len(warnings) == 1 and "not read" in warnings[0]
 
 
@@ -586,7 +519,7 @@ def test_T11_creates_the_file_and_keeps_the_discovery_in_step(tmp_path, monkeypa
         assert _folder_files(ov) == ["settings.json"], "a temp file was left behind"
         assert "zipped" in convert_tiff._TOOL_OUTPUT_PARTS
         # and a script really reads what the menu wrote (same grammar, same file)
-        assert convert_tiff._overlay_values("compress_tiff_zip.ps1") == {"ZipSubfolderName": "ZIPPED"}
+        assert convert_tiff._overlay_values("compress_tiff_zip.py") == {"ZipSubfolderName": "ZIPPED"}
     finally:
         monkeypatch.setenv(ENV, "")
         convert_tiff._refresh_tool_output_parts()

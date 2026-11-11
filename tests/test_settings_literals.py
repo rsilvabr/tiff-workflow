@@ -1,12 +1,12 @@
-"""audit round 17: the wizard reads the backends' own param() defaults.
+"""audit round 17: the wizard reads the backends' own defaults (their PARAMS tables).
 
-The wizard used to carry literal copies of the .ps1 defaults (Safe mode, LZW,
+The wizard used to carry literal copies of the backends' defaults (Safe mode, LZW,
 thumbnails, duplicate action, ZIP/_EXPORT folder names) and, in two places, passed a
 setting only when the answer differed from the copy -- so a user editing a default in
-the .ps1 had it silently discarded (the jxl-photo #467/#528 class).
+the script had it silently discarded (the jxl-photo #467/#528 class).
 
 These tests pin: (a) the fallback table agrees with the scripts; (b) an edit to a
-script's param() default changes what the wizard offers/passes; (c) the builders pass
+script's default changes what the wizard offers/passes; (c) the builders pass
 the wizard's decision explicitly even when it equals the shipped default; (d) a real
 run proves the answer now overrides an edited backend default.
 """
@@ -27,84 +27,99 @@ import convert_tiff as ct
 
 @pytest.fixture
 def scripts_copy(tmp_path, monkeypatch):
-    """A copy of the four backends whose param defaults a test can edit; the wizard
-    reads its settings from there."""
-    for name in ("compress_tiff_zip.ps1", "copy_exif_to_TIFF_ps5.ps1",
-                 "copy_exif_to_TIFF_ps7.ps1", "generate_thumbnails.ps1"):
+    """A copy of the backends whose defaults a test can edit; the wizard reads its
+    settings from there."""
+    for name in ct.BACKEND_SCRIPTS + [ct.BACKEND_SHARED]:
         shutil.copy2(ct.SCRIPT_DIR / name, tmp_path / name)
     monkeypatch.setattr(ct, "SCRIPT_DIR", tmp_path)
-    # getattr: against the pre-fix code (the proof run) the cache does not exist yet;
-    # this keeps the proof reaching the tests' own assertions.
-    cache_clear = getattr(ct, "_ps_param_defaults", None)
-    if cache_clear is not None:
-        cache_clear.cache_clear()
+    ct._backend_tables.cache_clear()
     yield tmp_path
-    cache_clear = getattr(ct, "_ps_param_defaults", None)
-    if cache_clear is not None:
-        cache_clear.cache_clear()
+    ct._backend_tables.cache_clear()
 
 
 def _edit_default(path, param, new_literal):
-    """Replace the default of $<param> in the script's param() block with
-    `new_literal` (the PowerShell literal, quotes included)."""
-    text = path.read_text(encoding="ascii")
+    """Replace the default of `param` in the script's PARAMS table with `new_literal`
+    (the Python literal, quotes included)."""
+    text = path.read_text(encoding="utf-8")
     pattern = re.compile(
-        r"^(\s*(?:\[[^\]]*\]\s*)*\$" + re.escape(param) + r"\s*=\s*)"
-        r"(\"(?:[^\"]*)\"|'(?:[^']*)'|\$true|\$false|-?\d+(?:\.\d+)?)",
-        re.MULTILINE)
+        r'^(\s*P\("' + re.escape(param) + r'",\s*"\w+",\s*)'
+        r'("(?:[^"]*)"|True|False|-?\d+(?:\.\d+)?)', re.MULTILINE)
     new_text, n = pattern.subn(lambda m: m.group(1) + new_literal, text)
     assert n == 1, f"{param}: expected exactly 1 substitution in {path.name}, got {n}"
-    path.write_text(new_text, encoding="ascii")
+    path.write_text(new_text, encoding="utf-8", newline="")
 
 
 def test_fallbacks_match_the_scripts():
     """T1: every _BACKEND_PARAM_FALLBACKS value equals the script's real default."""
     for (script, param), fallback in ct._BACKEND_PARAM_FALLBACKS.items():
-        parsed = ct._ps_param_defaults(script)
-        assert param in parsed, f"{script}: param() default for {param} was not parsed"
+        parsed = ct._backend_param_defaults(script)
+        assert param in parsed, f"{script}: the default of {param} was not read"
         assert parsed[param] == fallback, (
             f"{script} -{param}: fallback {fallback!r} disagrees with the script's "
             f"{parsed[param]!r}")
 
 
+def test_the_table_the_wizard_reads_is_the_one_the_script_runs_with():
+    """T1b: read with `ast`, never imported -- and still exactly the script's own table."""
+    for script in ct.BACKEND_SCRIPTS:
+        module = __import__(script[:-3])
+        mine = [(n, k, d, h) for n, k, d, h in ct._backend_tables(script)[0]]
+        theirs = [(p.name, p.kind, None if p.kind == "switch" else p.default, p.help)
+                  for p in module.PARAMS]
+        assert mine == theirs, script
+        assert ct._backend_param_names(script) == tuple(p.name for p in module.PARAMS)
+
+
+def test_an_unreadable_script_gives_the_fallbacks(tmp_path, monkeypatch):
+    monkeypatch.setattr(ct, "SCRIPT_DIR", tmp_path)
+    ct._backend_tables.cache_clear()
+    try:
+        (tmp_path / "compress_tiff_zip.py").write_text("PARAMS = (P('ThumbSize', 'int', 512),\n", encoding="utf-8")
+        assert ct._backend_tables("compress_tiff_zip.py") == ((), ()), "a syntax error is not a table"
+        assert ct._backend_default("compress_tiff_zip.py", "ThumbSize") == 256
+        assert ct._backend_default("generate_thumbnails.py", "Format") == "jpg", "a missing file"
+    finally:
+        ct._backend_tables.cache_clear()
+
+
 def test_backend_default_follows_an_edit(scripts_copy):
     """T2: an edited default is what the wizard reads; a wrong-typed edit falls back."""
-    _edit_default(scripts_copy / "compress_tiff_zip.ps1", "ThumbSize", "512")
-    _edit_default(scripts_copy / "compress_tiff_zip.ps1", "ZipSubfolderName", '"ZIPPED"')
-    assert ct._backend_default("compress_tiff_zip.ps1", "ThumbSize") == 512
-    assert ct._backend_default("compress_tiff_zip.ps1", "ZipSubfolderName") == "ZIPPED"
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "ThumbSize", "512")
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "ZipSubfolderName", '"ZIPPED"')
+    assert ct._backend_default("compress_tiff_zip.py", "ThumbSize") == 512
+    assert ct._backend_default("compress_tiff_zip.py", "ZipSubfolderName") == "ZIPPED"
 
-    _edit_default(scripts_copy / "compress_tiff_zip.ps1", "ThumbSize", '"abc"')
-    ct._ps_param_defaults.cache_clear()  # re-read the edited file
-    assert ct._backend_default("compress_tiff_zip.ps1", "ThumbSize") == 256
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "ThumbSize", '"abc"')
+    ct._backend_tables.cache_clear()  # re-read the edited file
+    assert ct._backend_default("compress_tiff_zip.py", "ThumbSize") == 256
 
 
 def test_builders_pass_safe_mode_and_lzw_explicitly(tmp_path):
     """T3: the wizard's decision reaches the command line even when it equals the
     shipped default -- omitting it let an edited backend default win."""
     workflow = {"safe_mode": True, "skip_lzw": False, "cap_workers": 0}
-    cmd = ct.build_compress_command(workflow, folders=[tmp_path], ps_name="pwsh")
+    cmd = ct.build_compress_command(workflow, folders=[tmp_path])
     assert "-SafeMode:$true" in cmd
     assert "-SkipLzwAsCompressed:$false" in cmd
     assert "-CapWorkers" in cmd
     assert cmd[cmd.index("-CapWorkers") + 1] == "0"
 
     copy_cmd = ct.build_copy_exif_command(
-        {"safe_mode": True, "skip_lzw": False}, folders=[tmp_path], ps_name="pwsh")
+        {"safe_mode": True, "skip_lzw": False}, folders=[tmp_path])
     assert "-SafeMode:$true" in copy_cmd
     assert not any(a.startswith("-SkipLzwAsCompressed") for a in copy_cmd), (
-        "the Copy EXIF backend's -SkipLzwAsCompressed is a [switch]: only 'yes' is passed"
+        "the Copy EXIF backend's -SkipLzwAsCompressed is a switch: only 'yes' is passed"
     )
 
-    bare = ct.build_compress_command({}, folders=[tmp_path], ps_name="pwsh")
+    bare = ct.build_compress_command({}, folders=[tmp_path])
     assert not any(a.startswith("-SafeMode") for a in bare)
-    bare_copy = ct.build_copy_exif_command({}, folders=[tmp_path], ps_name="pwsh")
+    bare_copy = ct.build_copy_exif_command({}, folders=[tmp_path])
     assert not any(a.startswith("-SafeMode") for a in bare_copy)
 
 
 def test_tool_output_names_follow_the_backend(scripts_copy):
     """T4: an edited -ZipSubfolderName is skipped by discovery too."""
-    _edit_default(scripts_copy / "compress_tiff_zip.ps1", "ZipSubfolderName", '"ZIPPED"')
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "ZipSubfolderName", '"ZIPPED"')
     names = ct._tool_output_names()
     assert "zipped" in names
 
@@ -113,7 +128,7 @@ def test_thumbnail_no_configure_passes_no_values(tmp_path):
     """T5a: with no thumb_* keys the builder passes none of the three -- the backend
     runs on its own (possibly edited) defaults."""
     workflow = {"generate_thumbnail": True}
-    cmd = ct.build_compress_command(workflow, folders=[tmp_path], ps_name="pwsh")
+    cmd = ct.build_compress_command(workflow, folders=[tmp_path])
     assert "-GenerateThumbnail" in cmd
     for flag in ("-ThumbSize", "-ThumbQuality", "-ThumbFormat"):
         assert flag not in cmd
@@ -141,14 +156,13 @@ def test_run_free_compress_no_configure_adds_no_thumb_keys(tmp_path, monkeypatch
         "",             # skip LZW (default)
         "",             # cap workers (default)
         "",             # exclude folders
-        "",             # force parallel?
+        "",             # force sequential?
         "y",            # generate thumbnails?
         "n",            # configure thumbnail settings?
         "n",            # skip compressed with thumb?
     ])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
-    cfg.config.ps_name = "pwsh"
 
     assert ct.run_free_compress(cfg) is False  # cancelled at the (stubbed) summary
     assert captured.get("generate_thumbnail") is True
@@ -157,31 +171,16 @@ def test_run_free_compress_no_configure_adds_no_thumb_keys(tmp_path, monkeypatch
     assert "thumb_format" not in captured
 
 
-def test_ps5_wrap_keeps_true_unquoted():
-    """T6: the PS5 -Command wrapper must keep `:$true` unquoted, or powershell.exe
-    binds the string '$true'; the unwrap must read it back intact."""
-    wrapped = ct._wrap_ps5_command([
-        "powershell", "-NoProfile", "-File", "C:\\s\\compress_tiff_zip.ps1",
-        "-InputDir", "C:\\x", "-SafeMode:$true"])
-    invocation = wrapped[-1]
-    assert "-SafeMode:$true" in invocation
-    assert "'-SafeMode:$true'" not in invocation
-    parts = ct._unwrap_ps5_invocation(invocation)
-    assert parts is not None
-    assert "-SafeMode:$true" in parts
-
-
 def test_edited_safe_mode_default_is_overridden_by_the_answer(tmp_path, scripts_copy):
-    """T7 (the real proof of the #467 class here): with `$SafeMode = $false` edited in
-    the backend, the wizard's "Safe mode? Yes" answer must still skip the multi-page
+    """T7 (the real proof of the #467 class here): with SafeMode's default edited to False
+    in the backend, the wizard's "Safe mode? Yes" answer must still skip the multi-page
     TIFF. Pre-fix the wizard omitted -SafeMode and the backend processed the file."""
-    if not shutil.which("pwsh"):
-        pytest.skip("pwsh not on PATH")
     if not shutil.which("magick") or not shutil.which("exiftool"):
         pytest.skip("ImageMagick (magick) and exiftool required")
     from test_regression_classes import make_multipage_tiff
 
-    _edit_default(scripts_copy / "compress_tiff_zip.ps1", "SafeMode", "$false")
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "SafeMode", "False")
+    assert ct._backend_default("compress_tiff_zip.py", "SafeMode") is False
 
     in_dir = tmp_path / "in"
     in_dir.mkdir()
@@ -192,12 +191,12 @@ def test_edited_safe_mode_default_is_overridden_by_the_answer(tmp_path, scripts_
 
     cmd = ct.build_compress_command(
         {"mode": 3, "safe_mode": True, "workers": 1},
-        folders=[in_dir], ps_name="pwsh")
+        folders=[in_dir])
     result = subprocess.run(cmd, cwd=str(in_dir), stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=300)
 
     assert not (in_dir / "ZIP" / "two_pages.tif").exists(), (
-        "the wizard answered Safe mode=Yes but the backend's edited $SafeMode=$false "
+        "the wizard answered Safe mode=Yes but the backend's edited SafeMode=False "
         "processed the multi-page TIFF anyway\n"
         f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
     assert two_page.exists(), "the skipped source vanished"
@@ -213,7 +212,7 @@ def test_text_safe_mode_unknown_answer_keeps_default(monkeypatch):
     used in Portuguese); pre-fix every unrecognised answer fell into the False branch
     and silently disabled the gate, so the backend processed multi-page TIFFs."""
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
-    # workers, staging, dry-run, safe mode, skip LZW, cap, exclude, force parallel
+    # workers, staging, dry-run, safe mode, skip LZW, cap, exclude, force sequential
     answers = iter(["4", "", "n", "s", "", "", "", ""])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
 

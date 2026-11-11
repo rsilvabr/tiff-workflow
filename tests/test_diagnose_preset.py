@@ -32,9 +32,8 @@ REPO = Path(__file__).resolve().parent.parent
 requires_magick = pytest.mark.skipif(shutil.which("magick") is None,
                                      reason="ImageMagick (magick) required")
 requires_cli = pytest.mark.skipif(
-    shutil.which("magick") is None or shutil.which("exiftool") is None
-    or (shutil.which("pwsh") is None and shutil.which("powershell") is None),
-    reason="ImageMagick + exiftool + PowerShell required for the CLI run")
+    shutil.which("magick") is None or shutil.which("exiftool") is None,
+    reason="ImageMagick + exiftool required for the CLI run")
 
 
 # --- Helpers --------------------------------------------------------
@@ -81,7 +80,7 @@ def _entry(settings):
 
 
 def _cfg():
-    return SimpleNamespace(config=ct.ToolConfig(ps_name="pwsh", ps_major=7),
+    return SimpleNamespace(config=ct.ToolConfig(),
                            save_config=lambda: None)
 
 

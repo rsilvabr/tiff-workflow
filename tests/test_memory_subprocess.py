@@ -15,9 +15,8 @@ before the timeout is armed. These tests pin:
   T5  the pixel estimate comes from the real files (unknown size = larger);
   T6  `_work_timeout` scales with the number of workers sharing the disk;
   T7  run_diagnose_tiffs calls the cap and runs the pool with the result;
-  T8-T10 the backends cap by memory and accept the parameter on PS5;
-  the parity module (test_ps_helper_parity.py) pins Test-PixelIdentical across
-  its three copies and the -LoadFactor call sites.
+  T8-T10 the backends cap by memory, and accept the parameter with one worker;
+  tests/test_backend_invariants.py pins what the backends' own run_captured does.
 """
 
 import ast
@@ -34,15 +33,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import convert_tiff as ct
-from test_regression_classes import IMAGE_TOOLS, SHELLS, make_tiff, read_tag, run_ps, run_ps_switched
+from test_regression_classes import IMAGE_TOOLS, make_tiff, read_tag, run_ps
 
 REPO = Path(__file__).resolve().parent.parent
 
 requires_tools = pytest.mark.skipif(
     not IMAGE_TOOLS, reason="ImageMagick (magick) and exiftool required"
 )
-requires_pwsh = pytest.mark.skipif("pwsh" not in SHELLS, reason="needs pwsh")
-requires_ps5 = pytest.mark.skipif("powershell" not in SHELLS, reason="needs powershell")
 
 
 # ---------------------------------------------------------------------------
@@ -51,11 +48,10 @@ requires_ps5 = pytest.mark.skipif("powershell" not in SHELLS, reason="needs powe
 
 _SUBPROCESS_ATTRS = {"run", "Popen", "call", "check_call", "check_output"}
 # The only functions allowed to reach subprocess directly: the capture helper
-# itself, the two version probes (run once per executable, documented exception)
+# itself, the version probe (run once per executable, documented exception)
 # and the streaming Popen of run_subprocess (reader thread created once at
 # process start, no memory pressure -- documented exception).
-_ALLOWED_OWNERS = {"_run_captured", "detect_powershell_version", "_probe_version",
-                   "run_subprocess"}
+_ALLOWED_OWNERS = {"_run_captured", "_probe_version", "run_subprocess"}
 
 
 def _subprocess_call_owners(node, current):
@@ -263,7 +259,6 @@ def _logs(cwd, script_name, result):
     return text
 
 
-@requires_pwsh
 @requires_tools
 def test_compress_caps_workers_by_memory(tmp_path):
     """T8: a tiny -WorkerMemoryFraction forces the cap; the run logs the
@@ -273,7 +268,7 @@ def test_compress_caps_workers_by_memory(tmp_path):
     make_tiff(in_dir / "a.tif")
     make_tiff(in_dir / "b.tif")
 
-    result = run_ps("pwsh", "compress_tiff_zip.ps1",
+    result = run_ps("parallel", "compress_tiff_zip.py",
                     ["-Mode", "3", "-InputDir", str(in_dir), "-Workers", "8",
                      "-WorkerMemoryFraction", "0.000001"], tmp_path)
 
@@ -284,11 +279,10 @@ def test_compress_caps_workers_by_memory(tmp_path):
     assert [p.name for p in outputs] == ["a.tif", "b.tif"], log
 
 
-@requires_pwsh
 @requires_tools
-def test_copy_exif_ps7_caps_workers_by_memory(tmp_path):
-    """T9: the ps7 backend caps its -Parallel pool the same way, and the EXIF
-    copy still lands on the TIFF."""
+def test_copy_exif_caps_workers_by_memory(tmp_path):
+    """T9: the Copy EXIF backend caps its pool the same way, and the EXIF copy still
+    lands on the TIFF."""
     work = tmp_path / "S5pro"
     work.mkdir()
     make_tiff(work / "photo.tif")
@@ -302,7 +296,7 @@ def test_copy_exif_ps7_caps_workers_by_memory(tmp_path):
         capture_output=True, check=True, timeout=120,
     )
 
-    result = run_ps("pwsh", "copy_exif_to_TIFF_ps7.ps1",
+    result = run_ps("parallel", "copy_exif_to_tiff.py",
                     ["-InputDir", str(work), "-Workers", "8",
                      "-WorkerMemoryFraction", "0.000001"], tmp_path)
 
@@ -313,11 +307,10 @@ def test_copy_exif_ps7_caps_workers_by_memory(tmp_path):
     assert read_tag(work / "photo.tif", "EXIF:Model") == "FinePix S5Pro"
 
 
-@requires_ps5
 @requires_tools
-def test_ps5_accepts_the_memory_fraction(tmp_path):
-    """T10: the PS5 script accepts -WorkerMemoryFraction for interface parity
-    (it is sequential and ignores the value); the exit code must not change."""
+def test_one_worker_accepts_the_memory_fraction(tmp_path):
+    """T10: with one worker there is nothing to cap; -WorkerMemoryFraction is accepted
+    and the exit code does not change."""
     work = tmp_path / "S5pro"
     work.mkdir()
     make_tiff(work / "photo.tif")
@@ -332,18 +325,15 @@ def test_ps5_accepts_the_memory_fraction(tmp_path):
     )
 
     base = ["-InputDir", str(work)]
-    without = run_ps_switched("powershell", "copy_exif_to_TIFF_ps5.ps1", base, tmp_path)
-    with_param = run_ps_switched("powershell", "copy_exif_to_TIFF_ps5.ps1",
-                                 base + ["-WorkerMemoryFraction", "0.5"], tmp_path)
+    without = run_ps("sequential", "copy_exif_to_tiff.py", base, tmp_path)
+    with_param = run_ps("sequential", "copy_exif_to_tiff.py",
+                        base + ["-WorkerMemoryFraction", "0.5"], tmp_path)
 
     assert with_param.returncode == without.returncode, (
         f"without: {without.returncode}\n{without.stdout}\n{without.stderr}\n"
         f"with: {with_param.returncode}\n{with_param.stdout}\n{with_param.stderr}")
-    # The exit-code half cannot fail pre-fix: PowerShell routes an unknown named
-    # parameter into $args for a non-advanced script, so the old copy "accepted"
-    # it silently. The declaration in the param() block is what the interface
-    # parity is about -- without this, the test proves nothing about the fix.
-    assert "WorkerMemoryFraction" in ct._ps_param_defaults("copy_exif_to_TIFF_ps5.ps1")
+    assert without.returncode == 0, without.stdout
+    assert "WorkerMemoryFraction" in ct._backend_param_defaults("copy_exif_to_tiff.py")
 
 
 # ---------------------------------------------------------------------------
@@ -351,13 +341,12 @@ def test_ps5_accepts_the_memory_fraction(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(sys.platform != "win32", reason="cmd.exe and its OEM code page")
-@requires_pwsh
 @requires_tools
 def test_compress_memory_estimate_reads_non_ascii_paths(tmp_path):
-    """R18-1: exiftool prints UTF-8 (-charset filename=utf8), but PowerShell decodes
-    a native command's output with [Console]::OutputEncoding -- the OEM code page
-    (850) in a scheduled `cmd /k`. A folder name with an accent then never matched
-    and every file counted as UnknownImagePixels (150 MP), dwarfing the real cost.
+    """R18-1: exiftool prints UTF-8 (-charset filename=utf8); decoded in the console's
+    OEM code page (850 in a scheduled `cmd /k`, what PowerShell did) a folder name with an
+    accent never matched and every file counted as UnknownImagePixels (150 MP), dwarfing
+    the real cost. The backends decode what the tools print as UTF-8, whatever the console.
 
     Driven through a cp850 .cmd so the console code page is 850 even though pytest's
     own console may differ. 400x300 = 0.12 MP must format as "(0 MP)". """
@@ -368,12 +357,12 @@ def test_compress_memory_estimate_reads_non_ascii_paths(tmp_path):
                    capture_output=True, check=True, timeout=120)
 
     cmd_file = tmp_path / "run_compress.cmd"
-    script = REPO / "compress_tiff_zip.ps1"
+    script = REPO / "compress_tiff_zip.py"
     cmd_file.write_bytes(("\r\n".join([
         "@echo off",
         "chcp 850 >nul",
         f'cd /d "{tmp_path}"',
-        f'pwsh -NoProfile -NonInteractive -File "{script}" -Mode 3 '
+        f'"{sys.executable}" "{script}" -Mode 3 '
         f'-InputDir "{in_dir}" -Workers 4 -WorkerMemoryFraction 0.8',
         "exit /b %ERRORLEVEL%",
     ]) + "\r\n").encode("cp850"))

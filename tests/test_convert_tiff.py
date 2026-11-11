@@ -38,7 +38,6 @@ def _fake_exiftool_round28(kwargs):
 from convert_tiff import (
     _format_size,
     truncate_path,
-    detect_powershell_version,
     build_compress_command,
     build_copy_exif_command,
     _compare_tiff_metadata,
@@ -60,9 +59,6 @@ from convert_tiff import (
 
 MAGICK_AVAILABLE = shutil.which("magick") is not None
 EXIFTOOL_AVAILABLE = shutil.which("exiftool") is not None
-POWERSHELL_AVAILABLE = (
-    shutil.which("pwsh") is not None or shutil.which("powershell") is not None
-)
 
 
 class TestFormatSize:
@@ -114,24 +110,13 @@ class TestTruncatePath:
             assert len(truncate_path(path, max_len=max_len)) <= max_len
 
 
-@pytest.mark.skipif(not POWERSHELL_AVAILABLE, reason="no powershell/pwsh on PATH")
-class TestDetectPowershellVersion:
-    def test_returns_tuple(self):
-        major, name, version = detect_powershell_version()
-        assert isinstance(major, int)
-        assert isinstance(name, str)
-        assert isinstance(version, str)
-
-    def test_major_is_5_or_7(self):
-        major, _, _ = detect_powershell_version()
-        assert major in (5, 7)
-
 
 class TestBuildCompressCommand:
     def test_basic_command(self, tmp_path):
         workflow = {"mode": 0}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "compress_tiff_zip.ps1" in cmd[3]
+        assert cmd[0] == sys.executable
+        assert cmd[1].endswith("compress_tiff_zip.py")
         assert "-Mode" in cmd
         assert "0" in cmd
 
@@ -215,49 +200,40 @@ class TestBuildCompressCommand:
 class TestBuildCopyExifCommand:
     def test_basic_command(self, tmp_path):
         workflow = {}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
-        assert "copy_exif_to_TIFF_ps7.ps1" in cmd[3]
-        assert "-File" in cmd
+        cmd = build_copy_exif_command(workflow, folders=[tmp_path])
+        assert cmd[0] == sys.executable
+        assert cmd[1].endswith("copy_exif_to_tiff.py")
 
-    def test_ps5_script_for_powershell(self, tmp_path):
-        workflow = {}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="powershell")
-        assert "copy_exif_to_TIFF_ps5.ps1" in cmd[3]
-
-    def test_ps7_script_for_pwsh(self, tmp_path):
-        workflow = {}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
-        assert "copy_exif_to_TIFF_ps7.ps1" in cmd[3]
 
     def test_workers(self, tmp_path):
         workflow = {"workers": 4}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
+        cmd = build_copy_exif_command(workflow, folders=[tmp_path])
         assert "-Workers" in cmd
         assert "4" in cmd
 
     def test_dry_run(self, tmp_path):
         workflow = {"dry_run": True}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
+        cmd = build_copy_exif_command(workflow, folders=[tmp_path])
         assert "-DryRun" in cmd
 
     def test_skip_exif(self, tmp_path):
         workflow = {"skip_exif": True}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
+        cmd = build_copy_exif_command(workflow, folders=[tmp_path])
         assert "-SkipIfTiffHasExif" in cmd
 
     def test_compress_zip(self, tmp_path):
         workflow = {"compress_zip": True}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
+        cmd = build_copy_exif_command(workflow, folders=[tmp_path])
         assert "-CompressZip" in cmd
 
     def test_overwrite(self, tmp_path):
         workflow = {"overwrite": True}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
+        cmd = build_copy_exif_command(workflow, folders=[tmp_path])
         assert "-Overwrite" in cmd
 
     def test_compress_zip_false_not_added(self, tmp_path):
         workflow = {"compress_zip": False}
-        cmd = build_copy_exif_command(workflow, folders=[tmp_path], ps_name="pwsh")
+        cmd = build_copy_exif_command(workflow, folders=[tmp_path])
         assert "-CompressZip" not in cmd
 
 
@@ -371,18 +347,7 @@ class TestIsReal16Bit:
 
 
 class TestSaveConfig:
-    def test_ps_fields_not_persisted(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("USERPROFILE", str(tmp_path))
-        cm = ConfigManager()
-        cm.config.ps_major = 7
-        cm.config.ps_name = "pwsh"
-        cm.save_config()
 
-        config_file = tmp_path / ".convert_tiff_config.json"
-        assert config_file.exists()
-        data = json.loads(config_file.read_text())
-        assert "ps_major" not in data
-        assert "ps_name" not in data
 
     def test_other_fields_persisted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
@@ -524,39 +489,6 @@ class TestMainArgparse:
         out = capsys.readouterr().out
         assert "TIFF Workflow Manager" in out
 
-
-class TestWrapPs5Command:
-    def test_switch_bool_values_stay_unquoted(self):
-        from convert_tiff import _wrap_ps5_command
-        cmd = ["powershell", "-NoProfile", "-File", "C:\\s\\script.ps1",
-               "-InputDir", "F:\\My Photos", "-SafeMode:$false", "-DryRun"]
-        wrapped = _wrap_ps5_command(cmd)
-        assert wrapped[0] == "powershell"
-        assert "-Command" in wrapped
-        assert "-File" not in wrapped
-        invocation = wrapped[-1]
-        assert invocation.startswith("& '")
-        assert "-SafeMode:$false" in invocation  # unquoted, must be evaluated by the parser
-        assert "'-SafeMode:$false'" not in invocation
-        assert "-DryRun" in invocation  # param names unquoted
-        assert "'-DryRun'" not in invocation
-        assert "'F:\\My Photos'" in invocation  # values with spaces quoted
-
-    def test_single_quotes_in_paths_escaped(self):
-        from convert_tiff import _wrap_ps5_command
-        cmd = ["powershell", "-NoProfile", "-File", "C:\\s\\script.ps1", "-InputDir", "F:\\O'Brien"]
-        invocation = _wrap_ps5_command(cmd)[-1]
-        assert "'F:\\O''Brien'" in invocation
-
-    def test_pwsh_commands_not_wrapped(self):
-        cmd = build_compress_command({"mode": 3, "safe_mode": False}, [Path("F:\\x")], ps_name="pwsh")
-        assert "-File" in cmd
-        assert "-Command" not in cmd
-
-    def test_powershell_builder_wraps(self):
-        cmd = build_compress_command({"mode": 3, "safe_mode": False}, [Path("F:\\x")], ps_name="powershell")
-        assert "-Command" in cmd
-        assert "-File" not in cmd
 
 
 class TestComparePageCount:
@@ -919,7 +851,6 @@ class TestThumbFormatPlainTextFallback:
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
 
         cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
-        cfg.config.ps_name = "pwsh"
         assert run_free_compress(cfg) is True
 
         assert "Invalid format 'bmp', using jpg." in capsys.readouterr().out

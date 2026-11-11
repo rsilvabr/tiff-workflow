@@ -38,7 +38,7 @@ from convert_tiff import (
 def _cfg(**overrides):
     """Config stand-in with a no-op save (never touches the real JSON)."""
     cfg = SimpleNamespace(
-        config=ToolConfig(ps_name="pwsh", ps_major=7, **overrides),
+        config=ToolConfig(**overrides),
         save_config=lambda: None,
     )
     return cfg
@@ -623,18 +623,18 @@ class TestGeneration:
 
 class TestBuildEntryCmd:
     def test_mode8_gets_delete_source(self, tmp_path):
-        cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path), 8, _workflow(), "pwsh")
+        cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path), 8, _workflow())
         assert "-DeleteSource" in cmd
 
     def test_non_mode8_never_gets_delete_source(self, tmp_path):
-        cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path), 0, _workflow(), "pwsh")
+        cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path), 0, _workflow())
         assert "-DeleteSource" not in cmd
 
     def test_mode2_output_dir_honors_destination(self, tmp_path):
         dest = str(tmp_path / "out")
-        cmd = build_manifest_entry_cmd(str(tmp_path), dest, 2, _workflow(), "pwsh")
+        cmd = build_manifest_entry_cmd(str(tmp_path), dest, 2, _workflow())
         assert cmd[cmd.index("-OutputDir") + 1] == dest
 
     def test_destination_ignored_outside_mode2(self, tmp_path):
-        cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path / "out"), 1, _workflow(), "pwsh")
+        cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path / "out"), 1, _workflow())
         assert "-OutputDir" not in cmd

@@ -206,7 +206,6 @@ def test_run_preset_list_presets_and_version_never_ask(mgr, monkeypatch, capsys)
     calls = []
     monkeypatch.delenv(ct._UPDATE_ENV, raising=False)
     _answering(monkeypatch, _bump(patch=1), calls)
-    monkeypatch.setattr(ct, "detect_powershell_version", lambda: (7, "pwsh", "7.4.1"))
     monkeypatch.setattr(ct, "_run_journal", lambda *a, **k: 0)
     mgr.config.presets = {"p": {"label": "l", "commands": [["x"]], "kind": "compress"}}
     mgr.save_config()
@@ -221,7 +220,6 @@ def test_the_menu_run_does_ask(mgr, monkeypatch, capsys):
     calls = []
     monkeypatch.delenv(ct._UPDATE_ENV, raising=False)
     _answering(monkeypatch, _bump(patch=1), calls)
-    monkeypatch.setattr(ct, "detect_powershell_version", lambda: (7, "pwsh", "7.4.1"))
     monkeypatch.setattr(ct, "show_environment_panel", lambda cfg: None)
     shown = []
 

@@ -10,7 +10,11 @@ on disk afterwards.
     python tools/real_photo_battery.py --fixtures <folder>
     (or set TW_FIXTURES=<folder> and omit the flag)
 
-Options: --scratch <dir>, --keep, --shells powershell,pwsh.
+Options: --scratch <dir>, --keep, --lanes parallel,sequential.
+
+Every check runs once per lane: "parallel" (the backends' default) and "sequential"
+(compress: -ForceSequential; copy_exif and generate_thumbnails: -Workers 1) -- what the
+two PowerShell shells were until v2.9.1.
 
 Fixtures (never modified -- everything is copied to a scratch folder first):
     <fixtures>/TIFF16/*.tif    >= 2 single-image 16-bit RGB TIFFs with ICC + EXIF
@@ -25,7 +29,7 @@ and the report says so. On the owner's machine the fixtures live in E:\\TESTE.
 
 The scratch folder (default <fixtures drive>\\tw_battery_<YYMMDD_HHMMSS>) is
 deleted at the end unless --keep, or a check failed -- then it is kept and its
-path printed. Every backend run is logged under <scratch>\\_logs\\<shell>__<tag>.log.
+path printed. Every backend run is logged under <scratch>\\_logs\\<lane>__<tag>.log.
 The report is written to AI_tools/<YYMMDD>_battery_report.md and printed.
 Exit code 0 when every check passed, 1 otherwise. Needs magick and exiftool.
 """
@@ -63,9 +67,9 @@ except Exception:
 results = []          # (section, name, ok, detail)
 skips = []            # text lines for the report
 SCRATCH = None
-SHELL_DIR = None
+LANE_DIR = None
 LOGS = None
-CURRENT_SHELL = None
+CURRENT_LANE = None
 _section = ""
 
 
@@ -81,21 +85,33 @@ def check(name, ok, detail=""):
           flush=True)
 
 
-def run(tag, script, args, timeout=1800):
-    """One backend run as an unattended subprocess (stdin closed).
+# What starts a backend script: this Python. tiff-workflow-exe's battery puts the built
+# program here (tiff-workflow.exe runs a backend script it is handed).
+RUNNER = [sys.executable]
 
-    Under powershell the command goes through _wrap_ps5_command, so that
-    -SafeMode:$false binds (PS5 -File would bind the string '$false')."""
-    cmd = ([CURRENT_SHELL, "-NoProfile", "-File", str(REPO / script)]
-           + [str(a) for a in args])
-    if CURRENT_SHELL == "powershell":
-        cmd = convert_tiff._wrap_ps5_command(cmd)
+
+def backend_cmd(script, args):
+    """The command line of one backend run in the current lane."""
+    args = [str(a) for a in args]
+    if CURRENT_LANE == "sequential":
+        lowered = [a.lower() for a in args]
+        if script == "compress_tiff_zip.py":
+            if "-forcesequential" not in lowered and "-forceparallel" not in lowered:
+                args.append("-ForceSequential")
+        elif "-workers" not in lowered:
+            args += ["-Workers", "1"]
+    return RUNNER + [str(REPO / script)] + args
+
+
+def run(tag, script, args, timeout=1800):
+    """One backend run as an unattended subprocess (stdin closed)."""
+    cmd = backend_cmd(script, args)
     t = time.time()
     rc = None
     try:
         r = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True,
                            text=True, encoding="utf-8", errors="replace",
-                           timeout=timeout, cwd=str(SHELL_DIR))
+                           timeout=timeout, cwd=str(LANE_DIR))
         rc, out = r.returncode, (r.stdout or "") + (r.stderr or "")
     except subprocess.TimeoutExpired as e:
         def _part(v):
@@ -103,12 +119,13 @@ def run(tag, script, args, timeout=1800):
                 return ""
             return v if isinstance(v, str) else v.decode("utf-8", "replace")
         out = _part(e.stdout) + _part(e.stderr) + f"\n[TIMEOUT after {timeout}s]"
-    (LOGS / f"{CURRENT_SHELL}__{tag}.log").write_text(
+    (LOGS / f"{CURRENT_LANE}__{tag}.log").write_text(
         f"$ {' '.join(cmd)}\nrc={rc} ({time.time() - t:.0f}s)\n\n{out}",
         encoding="utf-8")
     print(f"   [{tag}] rc={rc} {time.time() - t:.0f}s", flush=True)
-    bad = [m for m in ("ParserError", "CategoryInfo", "Exception calling") if m in out]
-    check(f"{tag}: no PowerShell error record", not bad,
+    bad = [m for m in ("Traceback (most recent call last)", "FATAL (unhandled error)")
+           if m in out]
+    check(f"{tag}: no traceback or unhandled error", not bad,
           f"found {bad}" if bad else "")
     return rc, out
 
@@ -322,7 +339,7 @@ def _wizard(fn, folder, tag):
     finally:
         (convert_tiff.step_folder, convert_tiff.RICH_AVAILABLE,
          builtins.input) = old
-    (LOGS / f"{CURRENT_SHELL}__{tag}.log").write_text(
+    (LOGS / f"{CURRENT_LANE}__{tag}.log").write_text(
         buf.getvalue() + "\nPROMPTS:\n" + "\n".join(prompts) + "\n", encoding="utf-8")
     return result
 
@@ -330,14 +347,14 @@ def _wizard(fn, folder, tag):
 # -- checks -----------------------------------------------------------------
 
 def c1(A1, A2):
-    section(f"C1: mode 0 in place, full size [{CURRENT_SHELL}]")
-    m0 = SHELL_DIR / "m0"
+    section(f"C1: mode 0 in place, full size [{CURRENT_LANE}]")
+    m0 = LANE_DIR / "m0"
     files = [uncompressed(A1, m0 / A1.name), uncompressed(A2, m0 / A2.name)]
     before = {f.name: md5(f) for f in files}
     before_meta = {f.name: meta(f) for f in files}
     before_hist = {f.name: tw_history_count(f) for f in files}
 
-    rc, _ = run("c1_run1", "compress_tiff_zip.ps1",
+    rc, _ = run("c1_run1", "compress_tiff_zip.py",
                 ["-Mode", "0", "-InputDir", str(m0), "-Workers", "2"])
     check("C1: first run rc == 0", rc == 0, f"rc={rc}")
     for f in files:
@@ -358,7 +375,7 @@ def c1(A1, A2):
 
     old_list1 = sorted(p.name for p in (m0 / "OLD_TIFFs").glob("*"))
     md5_1 = {f.name: md5(f) for f in files}
-    rc, _ = run("c1_run2", "compress_tiff_zip.ps1",
+    rc, _ = run("c1_run2", "compress_tiff_zip.py",
                 ["-Mode", "0", "-InputDir", str(m0), "-Workers", "2"])
     check("C1: second run rc == 0", rc == 0, f"rc={rc}")
     check("C1: second run: output md5 unchanged",
@@ -370,14 +387,14 @@ def c1(A1, A2):
 
 
 def c2(A1, A2):
-    section(f"C2: mode 1 subfolder [{CURRENT_SHELL}]")
-    m1 = SHELL_DIR / "m1"
+    section(f"C2: mode 1 subfolder [{CURRENT_LANE}]")
+    m1 = LANE_DIR / "m1"
     files = [small(A1, m1 / A1.name), small(A2, m1 / A2.name)]
     src_md5 = {f.name: md5(f) for f in files}
     src_meta = {f.name: meta(f) for f in files}
     src_hist = {f.name: tw_history_count(f) for f in files}
 
-    rc, _ = run("c2_run1", "compress_tiff_zip.ps1",
+    rc, _ = run("c2_run1", "compress_tiff_zip.py",
                 ["-Mode", "1", "-InputDir", str(m1), "-Workers", "2"])
     check("C2: first run rc == 0", rc == 0, f"rc={rc}")
     for f in files:
@@ -400,18 +417,18 @@ def c2(A1, A2):
                 for f in files if (m1 / "ZIP" / f.name).is_file()}
 
     state = _out_state()
-    rc, _ = run("c2_run2", "compress_tiff_zip.ps1",
+    rc, _ = run("c2_run2", "compress_tiff_zip.py",
                 ["-Mode", "1", "-InputDir", str(m1), "-Workers", "2"])
     check("C2: second run rc == 0", rc == 0, f"rc={rc}")
     check("C2: second run: outputs md5/mtime unchanged", _out_state() == state)
 
 
 def c3(A1, A2):
-    section(f"C3: mode 2 flat name collision [{CURRENT_SHELL}]")
-    m2 = SHELL_DIR / "m2"
+    section(f"C3: mode 2 flat name collision [{CURRENT_LANE}]")
+    m2 = LANE_DIR / "m2"
     a = small(A1, m2 / "in" / "a" / "x.tif")
     b = small(A2, m2 / "in" / "b" / "x.tif")
-    rc, _ = run("c3", "compress_tiff_zip.ps1",
+    rc, _ = run("c3", "compress_tiff_zip.py",
                 ["-Mode", "2", "-InputDir", str(m2 / "in"),
                  "-OutputDir", str(m2 / "out"), "-Workers", "2"])
     check("C3: rc == 0", rc == 0, f"rc={rc}")
@@ -430,16 +447,16 @@ def c3(A1, A2):
 
 
 def c4(A1, A2):
-    section(f"C4: mode 8 with delete [{CURRENT_SHELL}]")
-    m8 = SHELL_DIR / "m8"
-    ref8 = SHELL_DIR / "ref8"
+    section(f"C4: mode 8 with delete [{CURRENT_LANE}]")
+    m8 = LANE_DIR / "m8"
+    ref8 = LANE_DIR / "ref8"
     pairs = []
     for src in (A1, A2):
         ref = small(src, ref8 / src.name)
         pairs.append((ref, cp(ref, m8 / src.name)))
-    rc, _ = run("c4", "compress_tiff_zip.ps1",
+    rc, _ = run("c4", "compress_tiff_zip.py",
                 ["-Mode", "8", "-InputDir", str(m8), "-DeleteSource",
-                 "-StagingDir", str(SHELL_DIR / "stage8"), "-Workers", "2"])
+                 "-StagingDir", str(LANE_DIR / "stage8"), "-Workers", "2"])
     check("C4: rc == 0", rc == 0, f"rc={rc}")
     for ref, f in pairs:
         comp = compression(f)
@@ -455,11 +472,11 @@ def c5(A1):
     # Without -StagingDir, mode 8 picks a default staging folder by itself (no prompt)
     # and replaces each original in place after the pixel check -- the documented
     # contract. The round 22 plan assumed a Read-Host that blocks; there is none.
-    section(f"C5: mode 8 without -StagingDir on a closed stdin [{CURRENT_SHELL}]")
-    m8b = SHELL_DIR / "m8b"
-    ref = small(A1, SHELL_DIR / "ref8b" / A1.name)
+    section(f"C5: mode 8 without -StagingDir on a closed stdin [{CURRENT_LANE}]")
+    m8b = LANE_DIR / "m8b"
+    ref = small(A1, LANE_DIR / "ref8b" / A1.name)
     f = cp(ref, m8b / A1.name)
-    rc, _ = run("c5", "compress_tiff_zip.ps1",
+    rc, _ = run("c5", "compress_tiff_zip.py",
                 ["-Mode", "8", "-InputDir", str(m8b), "-DeleteSource", "-Workers", "1"],
                 timeout=300)
     check("C5: run did not hang (timeout not hit)", rc is not None,
@@ -483,12 +500,12 @@ def _check_layout(tag, fixture, copy):
 
 
 def c6(raw_scan):
-    section(f"C6: multi-page, SafeMode on [{CURRENT_SHELL}]")
-    mp = SHELL_DIR / "mp"
+    section(f"C6: multi-page, SafeMode on [{CURRENT_LANE}]")
+    mp = LANE_DIR / "mp"
     f = uncompressed(raw_scan, mp / raw_scan.name)
     _check_layout("C6", raw_scan, f)
     before = md5(f)
-    rc, out = run("c6", "compress_tiff_zip.ps1",
+    rc, out = run("c6", "compress_tiff_zip.py",
                   ["-Mode", "0", "-InputDir", str(mp), "-Workers", "1"])
     check("C6: rc == 0", rc == 0, f"rc={rc}")
     check("C6: multi-page md5 unchanged", md5(f) == before)
@@ -497,13 +514,13 @@ def c6(raw_scan):
 
 
 def c7(raw_scan):
-    section(f"C7: multi-page, SafeMode off, mode 1 [{CURRENT_SHELL}]")
-    mp = SHELL_DIR / "mp"
+    section(f"C7: multi-page, SafeMode off, mode 1 [{CURRENT_LANE}]")
+    mp = LANE_DIR / "mp"
     src = mp / raw_scan.name
     before = md5(src)
     n_pages = pages(src)
     last = n_pages - 1
-    rc, _ = run("c7", "compress_tiff_zip.ps1",
+    rc, _ = run("c7", "compress_tiff_zip.py",
                 ["-Mode", "1", "-InputDir", str(mp), "-SafeMode:$false", "-Workers", "1"])
     check("C7: rc == 0", rc == 0, f"rc={rc}")
     out = mp / "ZIP" / src.name
@@ -519,12 +536,12 @@ def c7(raw_scan):
 
 
 def c8(tiff_scan):
-    section(f"C8: 2-page scan with preview, SafeMode on, mode 1 [{CURRENT_SHELL}]")
-    sc = SHELL_DIR / "sc"
+    section(f"C8: 2-page scan with preview, SafeMode on, mode 1 [{CURRENT_LANE}]")
+    sc = LANE_DIR / "sc"
     src = uncompressed(tiff_scan, sc / tiff_scan.name)
     _check_layout("C8", tiff_scan, src)
     n_pages = pages(src)
-    rc, _ = run("c8", "compress_tiff_zip.ps1",
+    rc, _ = run("c8", "compress_tiff_zip.py",
                 ["-Mode", "1", "-InputDir", str(sc), "-Workers", "1"])
     check("C8: rc == 0", rc == 0, f"rc={rc}")
     out = sc / "ZIP" / src.name
@@ -537,11 +554,11 @@ def c8(tiff_scan):
 
 
 def c9(A1):
-    section(f"C9: '%' in the name [{CURRENT_SHELL}]")
-    pct = SHELL_DIR / "pct"
+    section(f"C9: '%' in the name [{CURRENT_LANE}]")
+    pct = LANE_DIR / "pct"
     safe = small(A1, pct / "tmpsmall.tif")
     f = safe.rename(pct / "50%off.tif")
-    rc, _ = run("c9", "compress_tiff_zip.ps1",
+    rc, _ = run("c9", "compress_tiff_zip.py",
                 ["-Mode", "0", "-InputDir", str(pct), "-Workers", "1"])
     check("C9: rc == 0", rc == 0, f"rc={rc}")
     comp = compression(f)
@@ -553,12 +570,12 @@ def c9(A1):
 
 
 def c10(A1):
-    section(f"C10: path near 260 chars [{CURRENT_SHELL}]")
-    deep = _make_long_path(SHELL_DIR / "lp")
+    section(f"C10: path near 260 chars [{CURRENT_LANE}]")
+    deep = _make_long_path(LANE_DIR / "lp")
     f = small(A1, deep / "p.tif")
     assert len(str(f)) == 240
     before = md5(f)
-    rc, _ = run("c10", "compress_tiff_zip.ps1",
+    rc, _ = run("c10", "compress_tiff_zip.py",
                 ["-Mode", "0", "-InputDir", str(deep), "-Workers", "1"])
     comp = compression(f)
     ok_a = (rc == 0 and comp in ("Deflate", "Adobe Deflate")
@@ -571,12 +588,12 @@ def c10(A1):
 
 
 def c11(A1, A2):
-    section(f"C11: -ExcludeFolders [{CURRENT_SHELL}]")
-    ex = SHELL_DIR / "ex"
+    section(f"C11: -ExcludeFolders [{CURRENT_LANE}]")
+    ex = LANE_DIR / "ex"
     small(A1, ex / "a.tif")
     small(A2, ex / "_EXPORT" / "b.tif")
     small(A1, ex / "My_EXPORT_photos" / "c.tif")
-    rc, _ = run("c11a", "compress_tiff_zip.ps1",
+    rc, _ = run("c11a", "compress_tiff_zip.py",
                 ["-Mode", "3", "-InputDir", str(ex), "-ExcludeFolders", "_EXPORT",
                  "-Workers", "2"])
     check("C11: rc == 0", rc == 0, f"rc={rc}")
@@ -584,7 +601,7 @@ def c11(A1, A2):
     check("C11: My_EXPORT_photos processed",
           (ex / "My_EXPORT_photos" / "ZIP" / "c.tif").is_file())
     check("C11: _EXPORT skipped", not (ex / "_EXPORT" / "ZIP" / "b.tif").exists())
-    rc, _ = run("c11b", "compress_tiff_zip.ps1",
+    rc, _ = run("c11b", "compress_tiff_zip.py",
                 ["-Mode", "3", "-InputDir", str(ex / "_EXPORT"),
                  "-ExcludeFolders", "_EXPORT", "-Workers", "1"])
     check("C11: pointing AT the name rc == 0", rc == 0, f"rc={rc}")
@@ -593,10 +610,10 @@ def c11(A1, A2):
 
 
 def c12(A1):
-    section(f"C12: thumbnail add / remove [{CURRENT_SHELL}]")
-    th = SHELL_DIR / "th"
+    section(f"C12: thumbnail add / remove [{CURRENT_LANE}]")
+    th = LANE_DIR / "th"
     src = small(A1, th / A1.name)
-    rc, _ = run("c12a", "compress_tiff_zip.ps1",
+    rc, _ = run("c12a", "compress_tiff_zip.py",
                 ["-Mode", "1", "-InputDir", str(th), "-GenerateThumbnail", "-Workers", "1"])
     check("C12: add rc == 0", rc == 0, f"rc={rc}")
     out = th / "ZIP" / src.name
@@ -611,21 +628,21 @@ def c12(A1):
     # generate_thumbnails -Remove deletes standalone <name>_thumb.* FILES; it never edits
     # a TIFF, so the embedded thumbnail page above must survive it untouched.
     embedded_md5 = md5(out) if out.is_file() else None
-    rc, _ = run("c12b", "generate_thumbnails.ps1",
+    rc, _ = run("c12b", "generate_thumbnails.py",
                 ["-InputDir", str(th / "ZIP"), "-Remove"])
     check("C12: -Remove over embedded thumbnails rc == 0", rc == 0, f"rc={rc}")
     if embedded_md5:
         check("C12: -Remove leaves the TIFF with an embedded thumbnail untouched",
               out.is_file() and md5(out) == embedded_md5)
 
-    th2 = SHELL_DIR / "th2"
+    th2 = LANE_DIR / "th2"
     src2 = small(A1, th2 / A1.name)
     src2_md5 = md5(src2)
-    rc, _ = run("c12c", "generate_thumbnails.ps1", ["-InputDir", str(th2)])
+    rc, _ = run("c12c", "generate_thumbnails.py", ["-InputDir", str(th2)])
     check("C12: standalone add rc == 0", rc == 0, f"rc={rc}")
     thumbs = sorted(p.name for p in th2.glob(f"{src2.stem}_thumb*"))
     check("C12: a standalone thumbnail file was written", bool(thumbs), str(thumbs))
-    rc, _ = run("c12d", "generate_thumbnails.ps1", ["-InputDir", str(th2), "-Remove"])
+    rc, _ = run("c12d", "generate_thumbnails.py", ["-InputDir", str(th2), "-Remove"])
     check("C12: standalone remove rc == 0", rc == 0, f"rc={rc}")
     left = sorted(p.name for p in th2.glob(f"{src2.stem}_thumb*"))
     check("C12: -Remove deleted the standalone thumbnail", not left, str(left))
@@ -633,13 +650,13 @@ def c12(A1):
 
 
 def c13(A1, A2):
-    section(f"C13: Restore and Purge (wizard, in-process) [{CURRENT_SHELL}]")
-    m0 = SHELL_DIR / "m0"
+    section(f"C13: Restore and Purge (wizard, in-process) [{CURRENT_LANE}]")
+    m0 = LANE_DIR / "m0"
     if not m0.is_dir():
         check("C13: C1 tree available", False, "m0 missing")
         return
 
-    pg = SHELL_DIR / "pg"
+    pg = LANE_DIR / "pg"
     shutil.copytree(m0, pg)
     parent_md5 = {p.name: md5(p) for p in pg.iterdir() if p.is_file()}
     ok = _wizard(convert_tiff.run_purge_old_tiffs, pg, "c13_purge")
@@ -650,14 +667,14 @@ def c13(A1, A2):
     check("C13: parent files unchanged (md5)",
           {p.name: md5(p) for p in pg.iterdir() if p.is_file()} == parent_md5)
 
-    pgm = SHELL_DIR / "pgm"
+    pgm = LANE_DIR / "pgm"
     shutil.copytree(m0, pgm)
     victim = pgm / "OLD_TIFFs" / A1.name
     uncompressed(A2, victim)
     _wizard(convert_tiff.run_purge_old_tiffs, pgm, "c13_purge_mismatch")
     check("C13: mismatching backup is still there after the purge", victim.is_file())
 
-    rs = SHELL_DIR / "rs"
+    rs = LANE_DIR / "rs"
     shutil.copytree(m0, rs)
     pre = {p.name: md5(p) for p in (rs / "OLD_TIFFs").iterdir() if p.is_file()}
     ok = _wizard(convert_tiff.run_undo_old_tiffs, rs, "c13_undo")
@@ -669,15 +686,15 @@ def c13(A1, A2):
 
 
 def c14(fixtures):
-    section(f"C14: Copy EXIF on real Fuji sessions [{CURRENT_SHELL}]")
+    section(f"C14: Copy EXIF on real Fuji sessions [{CURRENT_LANE}]")
     fuji = fixtures / "fuji_s3s5"
     if not fuji.is_dir():
         print("(no fuji_s3s5 fixture: C14 skipped)")
         skips.append("C14 skipped: no fuji_s3s5 folder under the fixtures")
         return
     sessions = sorted(d for d in fuji.iterdir() if d.is_dir())
-    fj = SHELL_DIR / "fj"
-    fj_ref = SHELL_DIR / "fj_ref"
+    fj = LANE_DIR / "fj"
+    fj_ref = LANE_DIR / "fj_ref"
     for s in sessions:
         shutil.copytree(s, fj / s.name)
     tifs = sorted(p for p in fj.rglob("*")
@@ -685,8 +702,7 @@ def c14(fixtures):
     for tif in tifs:
         cp(tif, fj_ref / tif.relative_to(fj))
 
-    backend = ("copy_exif_to_TIFF_ps5.ps1" if CURRENT_SHELL == "powershell"
-               else "copy_exif_to_TIFF_ps7.ps1")
+    backend = "copy_exif_to_tiff.py"
     input_arg = ";".join(str(fj / s.name) for s in sessions)
     rc, _ = run("c14_run1", backend, ["-InputDir", input_arg, "-Workers", "2"])
     check("C14: first run rc == 0", rc == 0, f"rc={rc}")
@@ -709,10 +725,10 @@ def c14(fixtures):
     check("C14: second run: every TIF md5 unchanged",
           {t.relative_to(fj): md5(t) for t in tifs} == after1)
 
-    fj2 = SHELL_DIR / "fj2"
+    fj2 = LANE_DIR / "fj2"
     for s in sessions:
         shutil.copytree(s, fj2 / s.name)
-    list_file = SHELL_DIR / "fj2_dirs.txt"
+    list_file = LANE_DIR / "fj2_dirs.txt"
     list_file.write_text("".join(str(fj2 / s.name) + "\n" for s in sessions),
                          encoding="utf-8", newline="\n")
     rc, _ = run("c14_run3", backend, ["-InputDirFile", str(list_file), "-Workers", "2"])
@@ -733,7 +749,7 @@ def c14(fixtures):
     # Round 23: -SkipIfTiffHasExif on FRESH exports must still write them -- it used to
     # count the IFD0 tags every TIFF has as EXIF and skip every file (the second run
     # above passes either way).
-    fj3 = SHELL_DIR / "fj3"
+    fj3 = LANE_DIR / "fj3"
     for s in sessions:
         shutil.copytree(s, fj3 / s.name)
     rc, _ = run("c14_run4", backend, ["-InputDir", ";".join(str(fj3 / s.name) for s in sessions),
@@ -756,7 +772,7 @@ def c14(fixtures):
     if not tagless.is_dir():
         print("(no TIFF_tagless/S5Pro fixture: tagless check skipped)")
         return
-    ft = SHELL_DIR / "ft" / "S5Pro"
+    ft = LANE_DIR / "ft" / "S5Pro"
     shutil.copytree(tagless, ft)
     rc, _ = run("c14_tagless", backend, ["-InputDir", str(ft), "-SkipIfTiffHasExif",
                                          "-Workers", "2"])
@@ -773,17 +789,15 @@ def c14(fixtures):
 def c15(A1, A2):
     """Round 26: modes 0/9 archive an original only after its copy landed, and a staged
     file from another drive never lands as a copy straight over the original."""
-    section(f"C15: mode 9 killed mid-run; mode 8 with staging on another drive [{CURRENT_SHELL}]")
-    k = SHELL_DIR / "m9kill"
+    section(f"C15: mode 9 killed mid-run; mode 8 with staging on another drive [{CURRENT_LANE}]")
+    k = LANE_DIR / "m9kill"
     srcs = [A1, A2, A1, A2, A1, A2]
     files = [uncompressed(s, k / f"P{i:02d} ({i}) {s.stem}.tif") for i, s in enumerate(srcs)]
     before = {f.name: md5(f) for f in files}
-    cmd = ([CURRENT_SHELL, "-NoProfile", "-File", str(REPO / "compress_tiff_zip.ps1"),
-            "-Mode", "9", "-InputDir", str(k), "-ForceSequential"])
-    if CURRENT_SHELL == "powershell":
-        cmd = convert_tiff._wrap_ps5_command(cmd)
+    cmd = backend_cmd("compress_tiff_zip.py",
+                      ["-Mode", "9", "-InputDir", str(k), "-ForceSequential"])
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                         stderr=subprocess.STDOUT, cwd=str(SHELL_DIR))
+                         stderr=subprocess.STDOUT, cwd=str(LANE_DIR))
     empty_seen = set()
     stop = []
 
@@ -811,7 +825,7 @@ def c15(A1, A2):
     time.sleep(0.3)
     stop.append(1)
     w.join(timeout=5)
-    (LOGS / f"{CURRENT_SHELL}__c15_killed.log").write_text("".join(log), encoding="utf-8")
+    (LOGS / f"{CURRENT_LANE}__c15_killed.log").write_text("".join(log), encoding="utf-8")
     check("C15: the killed run had finished a file first", got_ok)
     check("C15: no original place was ever empty during the run", not empty_seen,
           str(sorted(empty_seen)))
@@ -823,7 +837,7 @@ def c15(A1, A2):
              and compression(f) in ("Deflate", "Adobe Deflate"))
             or (not b.exists() and md5(f) == before[f.name]))
         check(f"C15: after the kill {f.name}: original or verified copy in place", ok)
-    rc, out = run("c15_rerun", "compress_tiff_zip.ps1",
+    rc, out = run("c15_rerun", "compress_tiff_zip.py",
                   ["-Mode", "9", "-InputDir", str(k), "-Workers", "2"])
     check("C15: rerun rc == 0", rc == 0, f"rc={rc}")
     check("C15: rerun finds nothing stranded", "STRANDED" not in out)
@@ -836,15 +850,15 @@ def c15(A1, A2):
     # b) mode 8 with -StagingDir on ANOTHER drive than the photos (the owner's preset:
     #    E:\temp_tiff for G:\). The staged file must reach the original through a temp
     #    sibling + rename, never as a copy written straight over it.
-    m8 = SHELL_DIR / "m8xvol"
+    m8 = LANE_DIR / "m8xvol"
     f8 = [uncompressed(A1, m8 / A1.name), uncompressed(A2, m8 / A2.name)]
     ref = {f.name: md5(f) for f in f8}
-    stage = Path(tempfile.gettempdir()) / f"tw_c15_{CURRENT_SHELL}_{os.getpid()}"
+    stage = Path(tempfile.gettempdir()) / f"tw_c15_{CURRENT_LANE}_{os.getpid()}"
     same_drive = Path(stage).drive.lower() == m8.drive.lower()
-    keep = SHELL_DIR / "m8xvol_ref"
+    keep = LANE_DIR / "m8xvol_ref"
     for f in f8:
         cp(f, keep / f.name)
-    rc, out = run("c15_mode8_xvol", "compress_tiff_zip.ps1",
+    rc, out = run("c15_mode8_xvol", "compress_tiff_zip.py",
                   ["-Mode", "8", "-InputDir", str(m8), "-StagingDir", str(stage)])
     check("C15: mode 8, staging on another drive: rc == 0"
           + (" (NOTE: staging is on the same drive here)" if same_drive else ""),
@@ -859,11 +873,11 @@ def c15(A1, A2):
     shutil.rmtree(stage, ignore_errors=True)
 
 
-def run_checks_for_shell(shell, fixtures, A1, A2, raw_scan, tiff_scan):
-    global CURRENT_SHELL, SHELL_DIR, LOGS
-    CURRENT_SHELL = shell
-    SHELL_DIR = SCRATCH / shell
-    SHELL_DIR.mkdir(parents=True, exist_ok=True)
+def run_checks_for_lane(lane, fixtures, A1, A2, raw_scan, tiff_scan):
+    global CURRENT_LANE, LANE_DIR, LOGS
+    CURRENT_LANE = lane
+    LANE_DIR = SCRATCH / lane
+    LANE_DIR.mkdir(parents=True, exist_ok=True)
     LOGS = SCRATCH / "_logs"
     LOGS.mkdir(parents=True, exist_ok=True)
 
@@ -877,12 +891,12 @@ def run_checks_for_shell(shell, fixtures, A1, A2, raw_scan, tiff_scan):
         c7(raw_scan)
     else:
         print("\n(no raw_scan fixture: C6/C7 skipped)")
-        skips.append(f"C6/C7 skipped [{shell}]: no raw_scan folder under the fixtures")
+        skips.append(f"C6/C7 skipped [{lane}]: no raw_scan folder under the fixtures")
     if tiff_scan is not None:
         c8(tiff_scan)
     else:
         print("\n(no tiff_scan fixture: C8 skipped)")
-        skips.append(f"C8 skipped [{shell}]: no tiff_scan folder under the fixtures")
+        skips.append(f"C8 skipped [{lane}]: no tiff_scan folder under the fixtures")
     c9(A1)
     c10(A1)
     c11(A1, A2)
@@ -917,20 +931,19 @@ def main():
     ap.add_argument("--scratch", type=Path, default=None,
                     help="scratch folder (default: <fixtures drive>\\tw_battery_<date>)")
     ap.add_argument("--keep", action="store_true", help="keep the scratch folder")
-    default_shells = [s for s in ("powershell", "pwsh") if shutil.which(s)]
-    ap.add_argument("--shells", default=",".join(default_shells),
-                    help="comma-separated shells (default: powershell and pwsh on PATH)")
+    ap.add_argument("--lanes", default="parallel,sequential",
+                    help="comma-separated lanes: parallel, sequential (default: both)")
     args = ap.parse_args()
     if args.fixtures is None or not args.fixtures.is_dir():
         ap.error("pass --fixtures <folder> or set TW_FIXTURES "
                  "(see the module docstring for the layout)")
 
-    shells = [s.strip() for s in args.shells.split(",") if s.strip()]
-    if not shells:
-        ap.error("no shells selected (--shells)")
-    for sh in shells:
-        if sh not in ("powershell", "pwsh") or shutil.which(sh) is None:
-            ap.error(f"{sh} is not available on PATH")
+    lanes = [s.strip() for s in args.lanes.split(",") if s.strip()]
+    if not lanes:
+        ap.error("no lanes selected (--lanes)")
+    for sh in lanes:
+        if sh not in ("parallel", "sequential"):
+            ap.error(f"unknown lane: {sh}")
     for tool in ("magick", "exiftool"):
         if shutil.which(tool) is None:
             print(f"{tool} is not on PATH")
@@ -948,11 +961,11 @@ def main():
 
     t0 = time.time()
     try:
-        for shell in shells:
+        for lane in lanes:
             try:
-                run_checks_for_shell(shell, args.fixtures, A1, A2, raw_scan, tiff_scan)
+                run_checks_for_lane(lane, args.fixtures, A1, A2, raw_scan, tiff_scan)
             except Exception as e:
-                check(f"{shell}: section completed without crashing", False,
+                check(f"{lane}: section completed without crashing", False,
                       f"{type(e).__name__}: {e}")
     finally:
         n_ok = sum(1 for *_, ok, _ in results if ok)
@@ -960,7 +973,7 @@ def main():
         lines = [
             f"# Real-photo battery -- {time.strftime('%Y-%m-%d %H:%M')}", "",
             f"**{n_ok}/{len(results)} passed** in {time.time() - t0:.0f}s, "
-            f"fixtures `{args.fixtures}`, shells {', '.join(shells)}", ""]
+            f"fixtures `{args.fixtures}`, lanes {', '.join(lanes)}", ""]
         if skips:
             lines += [f"Skipped: {s}" for s in skips] + [""]
         cur = None

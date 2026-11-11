@@ -1,11 +1,11 @@
-"""compress_tiff_zip.ps1 appends an xmpMM:History entry to every TIFF it rewrites.
+"""compress_tiff_zip.py appends an xmpMM:History entry to every TIFF it rewrites.
 
 Action=converted, When, SoftwareAgent (tool, version, link), Parameters -- the format of
 convert_tiff.py's padded conversion and of jxl-photo. It is written in its OWN exiftool call
 (in the same call as `-tagsfromfile -all:all`, `+=` doubles every copied entry, jxl-photo
-#531), after the tag copy and BEFORE the page-count / integrity / pixel gates, in all three
-worker paths: Process-TiffJob (sequential), the legacy `-Parallel` block and the mode
-`-Parallel` block. Real runs under both shells, in a hostile folder; one file name has a '%'.
+#531), after the tag copy and BEFORE the page-count / integrity / pixel gates. Real runs in
+both lanes (sequential and parallel), legacy and -Mode, in a hostile folder; one file name
+has a '%'.
 """
 
 import hashlib
@@ -24,25 +24,22 @@ import convert_tiff
 from test_exiftool_stdin import exif_stdin
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "compress_tiff_zip.ps1"
-SHELLS = [s for s in ("powershell", "pwsh") if shutil.which(s)]
+SCRIPT = REPO / "compress_tiff_zip.py"
+from backends import LANES, backend_cmd, run_backend  # noqa: E402
 TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not None
 pytestmark = [
-    pytest.mark.skipif(not SHELLS, reason="PowerShell required"),
     pytest.mark.skipif(not TOOLS, reason="ImageMagick and exiftool required"),
 ]
 HOSTILE = "写真 [FINAL] x"
 AGENT = f"{convert_tiff.TOOLKIT_NAME} {convert_tiff.TOOLKIT_VERSION} ({convert_tiff.TOOLKIT_URL})"
 
-# The three worker paths: (id, shell, extra args, legacy?)
-PATHS = []
-if "powershell" in SHELLS:
-    PATHS.append(("ps5-sequential", "powershell", [], False))
-    PATHS.append(("ps5-legacy", "powershell", [], True))
-if "pwsh" in SHELLS:
-    PATHS.append(("pwsh-sequential", "pwsh", ["-ForceSequential"], False))
-    PATHS.append(("pwsh-mode-parallel", "pwsh", ["-ForceParallel", "-Workers", "3"], False))
-    PATHS.append(("pwsh-legacy-parallel", "pwsh", ["-Workers", "3"], True))
+# The ways the per-file work can run: (id, lane, extra args, legacy?)
+PATHS = [
+    ("mode-sequential", "sequential", [], False),
+    ("legacy-sequential", "sequential", [], True),
+    ("mode-parallel", "parallel", ["-Workers", "3"], False),
+    ("legacy-parallel", "parallel", ["-Workers", "3"], True),
+]
 PATH_IDS = [p[0] for p in PATHS]
 
 
@@ -77,32 +74,32 @@ def md5(path):
     return hashlib.md5(Path(path).read_bytes()).hexdigest()
 
 
-def run(shell, args, cwd, *more):
-    cmd = [shell, "-NoProfile", "-File", str(SCRIPT), *[str(a) for a in args], *more]
+def run(lane, args, cwd, *more):
+    cmd = backend_cmd(lane, SCRIPT, [*[str(a) for a in args], *more])
     r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, timeout=900)
     return r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace")
 
 
-def convert(shell, extra, legacy, src, mode_args=("-Mode", 1)):
+def convert(lane, extra, legacy, src, mode_args=("-Mode", 1)):
     """Run one worker path. Legacy mode takes the working folder as its root and writes in
     place; the others take -InputDir (mode 1 writes ZIP/<name>)."""
     if legacy:
-        return run(shell, extra, src)
-    return run(shell, [*mode_args, "-InputDir", src, *extra], src.parent)
+        return run(lane, extra, src)
+    return run(lane, [*mode_args, "-InputDir", src, *extra], src.parent)
 
 
 def output_of(src, name, legacy, mode_folder="ZIP"):
     return (src / f"{name}.tif") if legacy else (src / mode_folder / f"{name}.tif")
 
 
-@pytest.mark.parametrize("pid,shell,extra,legacy", PATHS, ids=PATH_IDS)
-def test_h1_every_worker_path_appends_one_entry(tmp_path, pid, shell, extra, legacy):
+@pytest.mark.parametrize("pid,lane,extra,legacy", PATHS, ids=PATH_IDS)
+def test_h1_every_worker_path_appends_one_entry(tmp_path, pid, lane, extra, legacy):
     """H1/H6: sources have no entry -> exactly one, in the format of the padded conversion."""
     src = tmp_path / HOSTILE / "S5pro 01"
     names = ["DSCF 50%off (2)", "DSCF0002 (3)", "DSCF0003 (4)"]
     files = [make_tiff_named(src, n, seed=i + 1) for i, n in enumerate(names)]
     before = {f.name: md5(f) for f in files}
-    rc, out = convert(shell, extra, legacy, src)
+    rc, out = convert(lane, extra, legacy, src)
     assert rc == 0, out[-3000:]
     assert "history not written" not in out, out[-2000:]
     for n in names:
@@ -121,15 +118,15 @@ def test_h1_every_worker_path_appends_one_entry(tmp_path, pid, shell, extra, leg
         assert {f.name: md5(f) for f in files} == before
 
 
-@pytest.mark.parametrize("pid,shell,extra,legacy", PATHS, ids=PATH_IDS)
-def test_h2_earlier_entries_are_kept_not_doubled(tmp_path, pid, shell, extra, legacy):
+@pytest.mark.parametrize("pid,lane,extra,legacy", PATHS, ids=PATH_IDS)
+def test_h2_earlier_entries_are_kept_not_doubled(tmp_path, pid, lane, extra, legacy):
     """H2 (jxl-photo #531): a source with one entry ends with exactly two."""
     src = tmp_path / HOSTILE / "S5pro 01"
     f = make_tiff_named(src, "DSCF 50%off (2)")
     exif_stdin(f, "-q", "-overwrite_original",
                "-XMP-xmpMM:History+={Action=saved,SoftwareAgent=Capture One 16}")
     assert len(history(f)) == 1
-    rc, out = convert(shell, extra, legacy, src)
+    rc, out = convert(lane, extra, legacy, src)
     assert rc == 0, out[-3000:]
     entries = history(output_of(src, "DSCF 50%off (2)", legacy))
     assert len(entries) == 2, entries
@@ -137,36 +134,36 @@ def test_h2_earlier_entries_are_kept_not_doubled(tmp_path, pid, shell, extra, le
     assert entries[1]["Action"] == "converted" and entries[1]["SoftwareAgent"] == AGENT
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_h3_mode0_second_run_adds_nothing(tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_h3_mode0_second_run_adds_nothing(tmp_path, lane):
     """H3: mode 0 compresses in place and keeps the original in OLD_TIFFs/. Run 2 skips the
     ZIP file: no new entry, same bytes."""
     src = tmp_path / HOSTILE / "S5pro 01"
     f = make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(shell, ["-Mode", 0, "-InputDir", src], tmp_path)
+    rc, out = run(lane, ["-Mode", 0, "-InputDir", src], tmp_path)
     assert rc == 0, out[-3000:]
     assert len(history(f)) == 1
     h1 = md5(f)
-    rc, out = run(shell, ["-Mode", 0, "-InputDir", src], tmp_path)
+    rc, out = run(lane, ["-Mode", 0, "-InputDir", src], tmp_path)
     assert rc == 0, out[-3000:]
     assert len(history(f)) == 1, "run 2 appended another entry"
     assert md5(f) == h1, "run 2 rewrote the file"
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_h4_mode8_delete_source_and_thumbnail(tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_h4_mode8_delete_source_and_thumbnail(tmp_path, lane):
     """H4: mode 8 -DeleteSource leaves the entry on the file in place; mode 1
     -GenerateThumbnail says so in Parameters and keeps the page markers."""
     src = tmp_path / HOSTILE / "mode8"
     f = make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(shell, ["-Mode", 8, "-InputDir", src, "-DeleteSource"], tmp_path)
+    rc, out = run(lane, ["-Mode", 8, "-InputDir", src, "-DeleteSource"], tmp_path)
     assert rc == 0, out[-3000:]
     entries = history(f)
     assert len(entries) == 1 and entries[0]["Parameters"] == "compress_tiff_zip mode 8: ZIP (Deflate)"
 
     src = tmp_path / HOSTILE / "thumb"
     make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(shell, ["-Mode", 1, "-InputDir", src, "-GenerateThumbnail"], tmp_path)
+    rc, out = run(lane, ["-Mode", 1, "-InputDir", src, "-GenerateThumbnail"], tmp_path)
     assert rc == 0, out[-3000:]
     dst = src / "ZIP" / "DSCF 50%off (2).tif"
     entries = history(dst)
@@ -177,13 +174,13 @@ def test_h4_mode8_delete_source_and_thumbnail(tmp_path, shell):
     assert exif_stdin(dst, "-a", "-G1", "-s", "-s", "-n", "-SubfileType").count("SubfileType: 1") >= 1
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_h5_the_purge_gate_still_accepts_the_pair(tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_h5_the_purge_gate_still_accepts_the_pair(tmp_path, lane):
     """H5: Delete OLD_TIFFs compares the backup with the new file; the History entry (XMP,
     not pixels, not SubfileType/EXIF presence) must not make the gate refuse."""
     src = tmp_path / HOSTILE / "S5pro 01"
     f = make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(shell, ["-Mode", 0, "-InputDir", src], tmp_path)
+    rc, out = run(lane, ["-Mode", 0, "-InputDir", src], tmp_path)
     assert rc == 0, out[-3000:]
     old = src / "OLD_TIFFs" / f.name
     assert old.exists()
@@ -193,14 +190,3 @@ def test_h5_the_purge_gate_still_accepts_the_pair(tmp_path, shell):
 
 # --- H6 static -----------------------------------------------------------------------------
 
-def test_h6_the_helper_is_wired_into_all_three_worker_paths():
-    # Without the <# ... #> help blocks: the function's own doc shows the injection line too.
-    src = re.sub(r"<#.*?#>", "", SCRIPT.read_text(encoding="ascii"), flags=re.S)
-    assert len(re.findall(r"if \(-not \(Add-TiffHistoryEntry -Path", src)) == 3
-    assert "$script:HistoryFnDef       = ${function:Add-TiffHistoryEntry}.ToString()" in src
-    assert src.count("= $using:HistoryFnDef") == 2, "both -Parallel blocks must inject it"
-    assert src.count("$historyAgentL = $using:historyAgent") == 2
-    assert src.count('" [history not written]"') == 3
-    assert src.count("$subfileNote$historyNote | $name") == 3
-    assert src.count("-or $historyFailed)") == 3
-    assert src.count("$historyFailed = $false") == 3

@@ -1,14 +1,15 @@
-"""The release number lives in every script, in each backend's log, and behind `--version`.
+"""The release number lives in two places, in each backend's log, and behind `--version`.
 
-Before this only convert_tiff.py knew it (TOOLKIT_VERSION, pinned to the newest
-docs/CHANGELOG.md section by tests/test_diagnose_preset.py), so a backend log did not say
-which release wrote it. The release bumps all five places at once; these tests fail when
-one is forgotten.
+convert_tiff.py has TOOLKIT_VERSION (pinned to the newest docs/CHANGELOG.md section by
+tests/test_diagnose_preset.py; the Windows program's build reads it there), and the three
+backends take theirs from tiff_workflow_common.py. The release bumps both at once; these
+tests fail when one is forgotten.
 """
 
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -19,26 +20,27 @@ import tifffile
 import convert_tiff
 
 REPO = Path(__file__).resolve().parent.parent
-PS1 = ["compress_tiff_zip.ps1", "copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1",
-       "generate_thumbnails.ps1"]
-SHELLS = [s for s in ("powershell", "pwsh") if shutil.which(s)]
+import tiff_workflow_common  # noqa: E402
+from backends import BACKENDS, LANES, backend_cmd  # noqa: E402
 TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not None
 HOSTILE = "写真 [FINAL] x"
 
 
-@pytest.mark.parametrize("name", PS1)
-def test_every_script_carries_the_release_of_convert_tiff(name):
-    text = (REPO / name).read_text(encoding="ascii")
-    found = re.findall(r"^\$script:ToolkitVersion = '([^']+)'$", text, re.M)
-    assert found == [convert_tiff.TOOLKIT_VERSION], (
-        f"{name}: $script:ToolkitVersion {found} != convert_tiff.TOOLKIT_VERSION "
-        f"{convert_tiff.TOOLKIT_VERSION!r}")
-    assert re.search(r"^\$script:ToolkitUrl = '" + re.escape(convert_tiff.TOOLKIT_URL) + "'$",
-                     text, re.M), f"{name}: $script:ToolkitUrl differs from TOOLKIT_URL"
+def test_the_backends_carry_the_release_of_convert_tiff():
+    assert tiff_workflow_common.TOOLKIT_VERSION == convert_tiff.TOOLKIT_VERSION
+    assert tiff_workflow_common.TOOLKIT_URL == convert_tiff.TOOLKIT_URL
+
+
+@pytest.mark.parametrize("name", BACKENDS)
+def test_no_backend_has_a_version_of_its_own(name):
+    """One number for the three of them: a literal in a backend would be a third place."""
+    text = (REPO / name).read_text(encoding="utf-8")
+    assert not re.search(r"^\s*(TOOLKIT_VERSION|__version__)\s*=", text, re.M), name
+    assert "tw.TOOLKIT_VERSION" in text
 
 
 def test_version_flag_prints_the_release_and_exits_0():
-    r = subprocess.run(["python", str(REPO / "convert_tiff.py"), "--version"],
+    r = subprocess.run([sys.executable, str(REPO / "convert_tiff.py"), "--version"],
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == f"tiff-workflow {convert_tiff.TOOLKIT_VERSION}"
@@ -59,26 +61,19 @@ def _fixture(tmp_path):
     return src
 
 
-def _script(shell, name):
-    if name == "copy_exif":
-        return "copy_exif_to_TIFF_ps5.ps1" if shell == "powershell" else "copy_exif_to_TIFF_ps7.ps1"
-    return name
-
-
-@pytest.mark.skipif(not SHELLS, reason="PowerShell required")
 @pytest.mark.skipif(not TOOLS, reason="ImageMagick and exiftool required")
-@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize("backend,extra", [
-    ("compress_tiff_zip.ps1", ["-Mode", "1", "-DryRun"]),
-    ("copy_exif", ["-DryRun"]),
-    ("generate_thumbnails.ps1", ["-DryRun"]),
+    ("compress_tiff_zip.py", ["-Mode", "1", "-DryRun"]),
+    ("copy_exif_to_tiff.py", ["-DryRun"]),
+    ("generate_thumbnails.py", ["-DryRun"]),
 ])
-def test_every_backend_logs_the_release(tmp_path, shell, backend, extra):
+def test_every_backend_logs_the_release(tmp_path, lane, backend, extra):
     src = _fixture(tmp_path)
-    script = _script(shell, backend)
-    r = subprocess.run([shell, "-NoProfile", "-File", str(REPO / script), "-InputDir", str(src),
-                        *extra], cwd=str(tmp_path), capture_output=True, timeout=600)
+    script = backend
+    r = subprocess.run(backend_cmd(lane, script, ["-InputDir", str(src), *extra]),
+                       cwd=str(tmp_path), capture_output=True, timeout=600)
     out = (r.stdout + r.stderr).decode("utf-8", "replace")
     assert r.returncode == 0, out[-3000:]
-    expected = f"tiff-workflow {convert_tiff.TOOLKIT_VERSION} | {script} | PowerShell "
+    expected = f"tiff-workflow {convert_tiff.TOOLKIT_VERSION} | {script} | Python "
     assert expected in out, f"no '{expected}' line:\n{out[:1500]}"

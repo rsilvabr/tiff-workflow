@@ -8,8 +8,8 @@ redo the AutoFind (P2), unattended runs refuse deleting presets and never
 prompt, malformed presets in a hand-edited config are discarded, and the CLI
 (--run-preset/--list-presets/--dry-run) drives a real compression end to end.
 
-The mock tests are fast; the CLI tests skip without pwsh + ImageMagick +
-exiftool and run a real mode-1 compression in a temp folder.
+The mock tests are fast; the CLI tests skip without ImageMagick + exiftool and run a
+real mode-1 compression in a temp folder.
 """
 
 import csv
@@ -36,9 +36,8 @@ from test_regression_classes import make_tiff
 REPO = Path(__file__).resolve().parent.parent
 
 requires_preset_cli = pytest.mark.skipif(
-    shutil.which("pwsh") is None or shutil.which("magick") is None
-    or shutil.which("exiftool") is None,
-    reason="pwsh + ImageMagick + exiftool required for the CLI end-to-end run",
+    shutil.which("magick") is None or shutil.which("exiftool") is None,
+    reason="ImageMagick + exiftool required for the CLI end-to-end run",
 )
 
 
@@ -48,7 +47,7 @@ requires_preset_cli = pytest.mark.skipif(
 def _cfg(**overrides):
     """Config stand-in with a no-op save (never touches the real JSON)."""
     return SimpleNamespace(
-        config=ToolConfig(ps_name="pwsh", ps_major=7, **overrides),
+        config=ToolConfig(**overrides),
         save_config=lambda: None,
     )
 
@@ -112,7 +111,7 @@ def _compress_entry(in_dir, mode=1, delete_source=False):
     wf = {"mode": mode, "workers": 1, "staging": "", "dry_run": False}
     if delete_source:
         wf["delete_source"] = True
-    cmd = build_compress_command(wf, folders=[Path(in_dir)], ps_name="pwsh")
+    cmd = build_compress_command(wf, folders=[Path(in_dir)])
     label = f"Compress TIFFs -- mode {mode} -- {in_dir}"
     if delete_source:
         label += " [DELETES SOURCES]"
@@ -226,9 +225,7 @@ class TestPresetsMenu:
     def test_save_run_and_delete_preset(self, tmp_path, monkeypatch, calls):
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         cfg = _isolated_manager(tmp_path, monkeypatch)
-        cfg.config.ps_name = "pwsh"  # keep the rebuilt command a plain -File list
-        cmd = [cfg.config.ps_name, "-NoProfile", "-File",
-               str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.ps1"),
+        cmd = [sys.executable, str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.py"),
                "-Mode", "1", "-InputDir", str(tmp_path / "in")]
         cfg.config.last_run_kind = "compress"
         cfg.config.last_run_label = "Compress TIFFs -- mode 1"
@@ -262,9 +259,7 @@ class TestPresetsMenu:
     def test_preset_is_a_copy(self, tmp_path, monkeypatch):
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         cfg = _isolated_manager(tmp_path, monkeypatch)
-        cfg.config.ps_name = "pwsh"  # keep the rebuilt command a plain -File list
-        cmd = [cfg.config.ps_name, "-NoProfile", "-File",
-               str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.ps1"),
+        cmd = [sys.executable, str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.py"),
                "-Mode", "1", "-InputDir", str(tmp_path / "in")]
         cfg.config.last_run_kind = "compress"
         cfg.config.last_run_label = "Compress TIFFs -- mode 1"
@@ -292,7 +287,7 @@ class TestPresetsMenu:
 class TestAutoFindRedone:
     def _fuji_entry(self, root, first_folder):
         cmd = build_copy_exif_command({"workers": 4, "staging": ""},
-                                      folders=[first_folder], ps_name="pwsh")
+                                      folders=[first_folder])
         return _entry("copy_exif", "Fuji: Copy EXIF -- pattern 'S5pro'", [cmd],
                       autofind={"root": str(root), "patterns": ["S5pro"]})
 
@@ -338,7 +333,7 @@ class TestAutoFindRedone:
         cfg = _cfg()
         cmd = build_compress_command({"mode": 9, "workers": 1, "staging": "",
                                       "dry_run": False},
-                                     folders=[tmp_path], ps_name="pwsh")
+                                     folders=[tmp_path])
         entry = _entry("compress", "Compress TIFFs -- mode 9 -- X", [cmd])
 
         assert convert_tiff._run_journal(cfg, entry, "Preset: compress",
@@ -375,7 +370,7 @@ class TestUnattendedRuns:
                                          dry_run=True) == 0
         assert len(calls) == 1
         cmd, kw = calls[0]["cmd"], calls[0]["kw"]
-        assert "-DryRun" in cmd and "-NonInteractive" in cmd
+        assert "-DryRun" in cmd
         assert kw.get("stdin") is subprocess.DEVNULL
 
         # same for a manifest with a mode-8 row
@@ -394,7 +389,7 @@ class TestUnattendedRuns:
                                          dry_run=True) == 0
         assert len(calls) == 1
         cmd = calls[0]["cmd"]
-        assert "-DryRun" in cmd and "-NonInteractive" in cmd
+        assert "-DryRun" in cmd
         assert calls[0]["kw"].get("stdin") is subprocess.DEVNULL
 
     def test_unattended_never_prompts(self, tmp_path, monkeypatch, calls):
@@ -513,8 +508,8 @@ class TestPresetRunsTheBackendNextToTheWizard:
     def _entry_from(in_dir, old_dir):
         entry = _compress_entry(in_dir)
         cmd = entry["commands"][0]
-        i = cmd.index("-File")
-        cmd[i + 1] = str(old_dir / "compress_tiff_zip.ps1")
+        assert cmd[1].endswith("compress_tiff_zip.py")
+        cmd[1] = str(old_dir / "compress_tiff_zip.py")
         return entry
 
     def test_a_deleted_folder(self, tmp_path):
@@ -535,7 +530,7 @@ class TestPresetRunsTheBackendNextToTheWizard:
         old_dir.mkdir()
         self._tiff(tmp_path, in_dir)
         marker = base / "old_backend_ran.txt"
-        (old_dir / "compress_tiff_zip.ps1").write_text(
+        (old_dir / "compress_tiff_zip.py").write_text(
             f"Set-Content -LiteralPath '{marker}' -Value x\nexit 0\n", encoding="utf-8")
         _write_preset_config(tmp_path, {"nightly": self._entry_from(in_dir, old_dir)})
 

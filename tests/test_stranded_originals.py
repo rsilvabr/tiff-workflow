@@ -4,7 +4,7 @@ Modes 0/9 move every original of a folder to OLD_TIFFs/ before writing its compr
 copy. On 2026-08-03 a mode 9 run died mid-group without running the round 16 trap (window
 closed / process killed), leaving 365 originals in OLD_TIFFs/ with NOTHING in their place;
 the next run walked past them (discovery excludes OLD_TIFFs/), and on 2026-10-17 a backup
-script moved them off the disk. These tests drive the real backend under both shells in a
+script moved them off the disk. These tests drive the real backend in both lanes in a
 hostile folder (Japanese, [ ], a space, %).
 """
 
@@ -17,10 +17,9 @@ import pytest
 import tifffile
 
 REPO = Path(__file__).resolve().parent.parent
-SHELLS = [s for s in ("powershell", "pwsh") if shutil.which(s)]
+from backends import LANES, backend_cmd, run_backend  # noqa: E402
 TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not None
 pytestmark = [
-    pytest.mark.skipif(not SHELLS, reason="PowerShell required"),
     pytest.mark.skipif(not TOOLS, reason="ImageMagick and exiftool required"),
 ]
 HOSTILE = "伊豆沼_夏 [FINAL] 5% off"
@@ -39,9 +38,8 @@ def compression(path: Path) -> int:
         return int(t.pages[0].compression)
 
 
-def run(shell, root: Path, *args, cwd: Path):
-    cmd = [shell, "-NoProfile", "-File", str(REPO / "compress_tiff_zip.ps1"),
-           "-InputDir", str(root), "-ForceSequential", *[str(a) for a in args]]
+def run(lane, root: Path, *args, cwd: Path):
+    cmd = backend_cmd(lane, REPO / "compress_tiff_zip.py", ["-InputDir", str(root), *[str(a) for a in args]])
     r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=600)
     return r, r.stdout + r.stderr
@@ -79,12 +77,12 @@ def tree(tmp_path):
     return root, cam, old
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_stranded_originals_are_reported_in_every_mode(tree, tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_stranded_originals_are_reported_in_every_mode(tree, tmp_path, lane):
     root, cam, old = tree
     before = {p: p.read_bytes() for p in old.rglob("*.tif*")}
     for mode in (8, 9):
-        r, out = run(shell, root, "-Mode", mode, "-DryRun", cwd=tmp_path)
+        r, out = run(lane, root, "-Mode", mode, "-DryRun", cwd=tmp_path)
         assert r.returncode == 0, out[-3000:]
         names = sorted(Path(ln.split("| ", 1)[1].strip()).name for ln in stranded_lines(out))
         assert names == ["a.tif", "c.tif", "c_20260803_081300.tif"], out[-3000:]
@@ -94,11 +92,11 @@ def test_stranded_originals_are_reported_in_every_mode(tree, tmp_path, shell):
     assert not (cam / "a.tif").exists()
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_restore_puts_them_back_and_this_run_compresses_them(tree, tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_restore_puts_them_back_and_this_run_compresses_them(tree, tmp_path, lane):
     root, cam, old = tree
     original_a = (old / "a.tif").read_bytes()
-    r, out = run(shell, root, "-Mode", 8, "-RestoreStranded",
+    r, out = run(lane, root, "-Mode", 8, "-RestoreStranded",
                  "-StagingDir", tmp_path / "staging", cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     # a.tif: back in place, compressed by this very run (mode 8: verified, in place)
@@ -118,20 +116,20 @@ def test_restore_puts_them_back_and_this_run_compresses_them(tree, tmp_path, she
     assert "1 restored" in out
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_restore_in_a_dry_run_moves_nothing(tree, tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_restore_in_a_dry_run_moves_nothing(tree, tmp_path, lane):
     root, cam, old = tree
-    r, out = run(shell, root, "-Mode", 9, "-RestoreStranded", "-DryRun", cwd=tmp_path)
+    r, out = run(lane, root, "-Mode", 9, "-RestoreStranded", "-DryRun", cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert "DRY: would restore to" in out
     assert (old / "a.tif").exists() and not (cam / "a.tif").exists()
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_long_paths_are_seen_and_restored(tmp_path, shell):
-    """Round 26: past 260 characters Windows PowerShell 5.1's Get-ChildItem/Test-Path lost
-    the trail -- a backup whose original WAS in place could read as stranded, and a real
-    one could be missed. The detection now goes through \\\\?\\ in both shells."""
+@pytest.mark.parametrize("lane", LANES)
+def test_long_paths_are_seen_and_restored(tmp_path, lane):
+    """Round 26: past 260 characters the directory listing lost the trail -- a backup whose
+    original WAS in place could read as stranded, and a real one could be missed. The
+    detection goes through the \\\\?\\ long-path prefix."""
     root = tmp_path / "root"
     deep = root / HOSTILE
     while len(str(deep)) < 250:
@@ -150,27 +148,27 @@ def test_long_paths_are_seen_and_restored(tmp_path, shell):
     put(deep / "healthy.tif", 1)                       # its original place is NOT empty
     put(deep / "OLD_TIFFs" / "lost.tif", 2)            # nothing in its place
     assert len(str(deep / "OLD_TIFFs" / "healthy.tif")) > 260
-    r, out = run(shell, root, "-Mode", 8, "-DryRun", cwd=tmp_path)
+    r, out = run(lane, root, "-Mode", 8, "-DryRun", cwd=tmp_path)
     names = sorted(Path(ln.split("| ", 1)[1].strip()).name for ln in stranded_lines(out))
     assert names == ["lost.tif"], out[-3000:]
-    r, out = run(shell, root, "-Mode", 8, "-DryRun", "-RestoreStranded", cwd=tmp_path)
+    r, out = run(lane, root, "-Mode", 8, "-DryRun", "-RestoreStranded", cwd=tmp_path)
     assert "DRY: would restore" in out
-    r, out = run(shell, root, "-Mode", 9, "-RestoreStranded", cwd=tmp_path)
+    r, out = run(lane, root, "-Mode", 9, "-RestoreStranded", cwd=tmp_path)
     assert os.path.exists(lp(deep / "lost.tif")), out[-3000:]
     assert not os.path.exists(lp(deep / "OLD_TIFFs" / "lost.tif"))
     assert "1 restored" in out
 
 
-@pytest.mark.parametrize("shell", SHELLS)
-def test_excluded_folders_and_mode0_depth(tree, tmp_path, shell):
+@pytest.mark.parametrize("lane", LANES)
+def test_excluded_folders_and_mode0_depth(tree, tmp_path, lane):
     root, cam, old = tree
     # an excluded folder's backups are not looked at
-    r, out = run(shell, root, "-Mode", 9, "-DryRun", "-ExcludeFolders", "01_D810",
+    r, out = run(lane, root, "-Mode", 9, "-DryRun", "-ExcludeFolders", "01_D810",
                  cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert stranded_lines(out) == []
     # mode 0 is not recursive: only <root>\OLD_TIFFs is its business
-    r, out = run(shell, root, "-Mode", 0, "-DryRun", cwd=tmp_path)
+    r, out = run(lane, root, "-Mode", 0, "-DryRun", cwd=tmp_path)
     assert stranded_lines(out) == []
-    r, out = run(shell, cam, "-Mode", 0, "-DryRun", cwd=tmp_path)
+    r, out = run(lane, cam, "-Mode", 0, "-DryRun", cwd=tmp_path)
     assert len(stranded_lines(out)) == 3, out[-3000:]

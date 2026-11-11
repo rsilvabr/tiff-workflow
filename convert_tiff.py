@@ -13,14 +13,14 @@ Unified wizard for TIFF processing workflows:
   [8] Generate Thumbnails create sRGB thumbnails from TIFFs
 
 Supports AutoFind for S3/S5 Pro folders, persistent config,
-and streaming output from PowerShell backends.
+and streaming output from the backend scripts.
 """
 
 # Written into xmpMM:History by the padded 16 -> 8-bit conversion. Not a setting: it is
 # the release this file belongs to (tests/test_diagnose_preset.py pins it to the newest
 # docs/CHANGELOG.md section).
 TOOLKIT_NAME = "tiff-workflow"
-TOOLKIT_VERSION = "2.9.1"
+TOOLKIT_VERSION = "3.0.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes
@@ -63,6 +63,7 @@ COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
 TIMEOUT_S_PER_MB = 0.25
 
 import argparse
+import ast
 import concurrent.futures
 import csv
 import functools
@@ -109,31 +110,31 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # --- Settings overlay ----------------------------------------------
 #
 # `.tiff_workflow_settings.json` changes the settings at the top of the scripts WITHOUT
-# editing them (jxl-photo's overlay, same rules). Sections: compress_tiff_zip, copy_exif (one
-# section for the ps5 and ps7 scripts), generate_thumbnails, convert_tiff. Only the names in a
-# script's OVERLAY-SPECS block (or _OVERLAY_SETTINGS below) are ever taken: nothing that
+# editing them (jxl-photo's overlay, same rules). Sections: compress_tiff_zip, copy_exif,
+# generate_thumbnails, convert_tiff. Only the names in a script's OVERLAY_SPECS table (or
+# _OVERLAY_SETTINGS below) are ever taken: nothing that
 # deletes, overwrites or is chosen per run (Mode, SafeMode, DeleteSource, ...). A value that
 # does not pass its spec, an unreadable file, an unknown name: the script's own value stays and
 # a warning says so; it never stops a run. A `-Param` on the command line always beats the file.
 
 _SETTINGS_OVERLAY_FILE = ".tiff_workflow_settings.json"
 _SETTINGS_OVERLAY_ENV = "TIFFWORKFLOW_SETTINGS"
-_OVERLAY_INT_MAX = 2147483647   # the scripts' [int] parameters; the PowerShell reader caps here too
+_OVERLAY_INT_MAX = 2147483647   # what a setting file written for v2.x could hold ([int] parameters)
 _OVERLAY_NAME_FORBIDDEN = '/\\:*?"<>|'
 
 #: script file -> its section of the overlay file
 _OVERLAY_SECTIONS = {
-    "compress_tiff_zip.ps1": "compress_tiff_zip",
-    "copy_exif_to_TIFF_ps5.ps1": "copy_exif",
-    "copy_exif_to_TIFF_ps7.ps1": "copy_exif",
-    "generate_thumbnails.ps1": "generate_thumbnails",
+    "compress_tiff_zip.py": "compress_tiff_zip",
+    "copy_exif_to_tiff.py": "copy_exif",
+    "generate_thumbnails.py": "generate_thumbnails",
 }
 
 
 def _settings_overlay_path() -> Optional[Path]:
     """The overlay file to read (it may not exist), or None when TIFFWORKFLOW_SETTINGS is
-    set but empty (overlay OFF). Same order as the PowerShell reader: the variable, then next
-    to the scripts if the file is there, then the user profile."""
+    set but empty (overlay OFF). Same order as the backends' reader
+    (tiff_workflow_common.settings_overlay_path): the variable, then next to the scripts if
+    the file is there, then the user profile."""
     env = os.environ.get(_SETTINGS_OVERLAY_ENV)
     if env is not None:
         return Path(env) if env.strip() else None
@@ -188,10 +189,11 @@ def _overlay_bound(text: str):
 
 def _overlay_value(spec: str, value):
     """`value` (from JSON) checked against an overlay spec: (True, the value to use) or
-    (False, what it should have been). Grammar -- identical to the PowerShell reader:
-    int:lo:hi | float:lo:hi | intstr:lo:hi (a JSON int; the value used is its string) |
-    bool | name | path? | choice:a|b|c (Python only). A bool is never a number; an int must
-    fit the scripts' [int] parameters."""
+    (False, what it should have been). Grammar: int:lo:hi | float:lo:hi | intstr:lo:hi (a
+    JSON int; the value used is its string) | bool | name | path? | choice:a|b|c. A bool is
+    never a number; an int must fit 32 bits. The wizard (convert_tiff.py) and the backends
+    (tiff_workflow_common.py) each carry this function, so the wizard plans with the value
+    the backend will run with: tests/test_backend_invariants.py keeps the two identical."""
     kind, _, rest = spec.partition(":")
     if kind == "choice":
         options = rest.split("|")
@@ -258,29 +260,57 @@ def _parse_setting_text(spec: str, text: str):
     return t
 
 
-_OVERLAY_SPEC_LINE = re.compile(r"^\s*'(\w+)'\s*=\s*'([^']*)'\s*$")
+# --- Reading the backend scripts -----------------------------------
+#
+# The backends declare their parameters in a PARAMS table (name, kind, default, help) and
+# what the overlay may change in an OVERLAY_SPECS table, both written with literals. They are
+# read here with `ast`, never imported: reading a default must not run the script, and an
+# edited default (a user's own setting) is read exactly as written.
 
-
-def _ps_overlay_specs(script_name: str) -> Dict[str, str]:
-    """{name: spec} from the OVERLAY-SPECS block of a backend; {} when the file cannot be
-    read or has none."""
+@functools.lru_cache(maxsize=None)
+def _backend_tables(script_name: str) -> Tuple[Tuple[Tuple, ...], Tuple[Tuple[str, str], ...]]:
+    """(params, overlay specs) of a backend next to this file: params as
+    ((name, kind, default, help), ...) in the script's order, specs as ((name, spec), ...).
+    ((), ()) when the file cannot be read or parsed."""
     try:
         text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    specs: Dict[str, str] = {}
-    inside = False
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped == "# OVERLAY-SPECS-BEGIN":
-            inside = True
-        elif stripped == "# OVERLAY-SPECS-END":
-            break
-        elif inside:
-            m = _OVERLAY_SPEC_LINE.match(line)
-            if m:
-                specs[m.group(1)] = m.group(2)
-    return specs
+        tree = ast.parse(text)
+    except (OSError, SyntaxError, ValueError):
+        return (), ()
+    params: List[Tuple] = []
+    specs: List[Tuple[str, str]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "PARAMS" in names and isinstance(node.value, (ast.Tuple, ast.List)):
+            for call in node.value.elts:
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                        and call.func.id == "P"):
+                    continue
+                try:
+                    args = [ast.literal_eval(a) for a in call.args]
+                    kw = {k.arg: ast.literal_eval(k.value) for k in call.keywords if k.arg}
+                except (ValueError, SyntaxError):
+                    continue
+                if len(args) < 2 or not isinstance(args[0], str):
+                    continue
+                default = args[2] if len(args) > 2 else kw.get("default")
+                params.append((args[0], args[1], default, str(kw.get("help") or "")))
+        elif "OVERLAY_SPECS" in names:
+            try:
+                table = ast.literal_eval(node.value)
+            except (ValueError, SyntaxError):
+                table = {}
+            if isinstance(table, dict):
+                specs = [(str(k), str(v)) for k, v in table.items()]
+    return tuple(params), tuple(specs)
+
+
+def _backend_overlay_specs(script_name: str) -> Dict[str, str]:
+    """{name: spec} of a backend's OVERLAY_SPECS table; {} when the file cannot be read or
+    has none."""
+    return dict(_backend_tables(script_name)[1])
 
 
 def _overlay_scan(script_name: str):
@@ -294,7 +324,7 @@ def _overlay_scan(script_name: str):
         return path, {}, [f"{path}: not read ({e}); no setting changed"]
     values: Dict[str, object] = {}
     warnings: List[str] = []
-    specs = _ps_overlay_specs(script_name)
+    specs = _backend_overlay_specs(script_name)
     for name, value in (section or {}).items():
         spec = specs.get(name)
         if spec is None:
@@ -387,8 +417,8 @@ class ToolConfig:
     # empty so nobody silently skips folders they did not choose to skip.
     last_exclude_folders: Optional[str] = None
     # Journal of the last executed workflow (for "Repeat last workflow").
-    # Stores the fully built command lines -- repeating re-runs them verbatim
-    # (with the PowerShell executable swapped for the currently detected one),
+    # Stores the fully built command lines -- repeating re-runs their script and
+    # arguments (under this Python and with the backend next to this wizard),
     # so no wizard state has to be reconstructed. Dry-run is never stored.
     last_run_kind: Optional[str] = None
     last_run_label: Optional[str] = None
@@ -418,8 +448,6 @@ class ToolConfig:
     check_for_updates: bool = True
     update_checked_on: str = ""       # YYYY-MM-DD of the last answer GitHub gave
     update_latest_seen: str = ""      # the tag it answered
-    ps_major: int = 0  # detected at startup, not persisted
-    ps_name: str = "powershell"  # "pwsh" or "powershell", not persisted
 
 
 class ConfigManager:
@@ -493,9 +521,6 @@ class ConfigManager:
             with self._save_lock:
                 self.config_path.parent.mkdir(parents=True, exist_ok=True)
                 data = asdict(self.config)
-                # Runtime-detected fields, not persisted
-                data.pop("ps_major", None)
-                data.pop("ps_name", None)
                 with open(self.config_path, 'w') as f:
                     json.dump(data, f, indent=2)
         except Exception as e:
@@ -666,41 +691,25 @@ def _update_check_now(cfg) -> Tuple[str, Optional[Tuple[str, str]]]:
             f"{TOOLKIT_VERSION}).", None)
 
 
-# --- PowerShell Version Detection -----------------------------------
-
-def detect_powershell_version():
-    """Detect PowerShell version. Returns (major, name, version), e.g. (7, "pwsh", "7.4.1")."""
-    import re
-    for ps_name in ["pwsh", "powershell"]:
-        try:
-            result = subprocess.run(
-                [ps_name, "-NoProfile", "-Command",
-                 "try { $PSVersionTable.PSVersion.Major } catch { 0 }; "
-                 "try { $PSVersionTable.PSVersion.ToString() } catch { 'unknown' }"],
-                capture_output=True, text=True, timeout=5
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                # Use regex to extract first number (version major)
-                match = re.search(r'(\d+)', result.stdout.strip())
-                major = int(match.group(1)) if match else 0
-                # Extract version string (e.g., "7.4.1")
-                version_match = re.search(r'(\d+\.\d+(?:\.\d+)?)', result.stdout.strip())
-                version = version_match.group(1) if version_match else "unknown"
-                if major > 0:
-                    return major, ps_name, version
-        except Exception:
-            pass
-    return 0, "powershell", "unknown"
-
-
 # --- Dependency check ----------------------------------------------
 
+#: The backends this wizard runs (next to this file).
 BACKEND_SCRIPTS = [
-    "compress_tiff_zip.ps1",
-    "generate_thumbnails.ps1",
-    "copy_exif_to_TIFF_ps7.ps1",
-    "copy_exif_to_TIFF_ps5.ps1",
+    "compress_tiff_zip.py",
+    "generate_thumbnails.py",
+    "copy_exif_to_tiff.py",
 ]
+#: ...and the module the three of them import.
+BACKEND_SHARED = "tiff_workflow_common.py"
+
+#: The backend a command line written for the PowerShell edition (up to v2.9.1) named:
+#: a saved preset or the last-run journal. Lower-case script name -> today's script.
+_LEGACY_BACKEND_NAMES = {
+    "compress_tiff_zip" + ".ps1": "compress_tiff_zip.py",
+    "copy_exif_to_tiff_ps5" + ".ps1": "copy_exif_to_tiff.py",
+    "copy_exif_to_tiff_ps7" + ".ps1": "copy_exif_to_tiff.py",
+    "generate_thumbnails" + ".ps1": "generate_thumbnails.py",
+}
 
 
 def _probe_version(cmd: List[str], timeout: int = 10) -> Optional[str]:
@@ -724,15 +733,7 @@ def check_dependencies(cfg) -> List[Tuple[str, bool, str]]:
     results.append(("magick", magick_ver is not None, magick_ver or "not found on PATH"))
     exif_ver = _probe_version(["exiftool", "-ver"]) if shutil.which("exiftool") else None
     results.append(("exiftool", exif_ver is not None, exif_ver or "not found on PATH"))
-    ps_major = cfg.config.ps_major
-    if ps_major > 0:
-        ps_detail = f"PS{ps_major} ({cfg.config.ps_name})"
-        if ps_major < 7:
-            ps_detail += " -- sequential only, parallelism DISABLED"
-        results.append(("PowerShell", True, ps_detail))
-    else:
-        results.append(("PowerShell", False, "not found on PATH"))
-    missing = [s for s in BACKEND_SCRIPTS if not (SCRIPT_DIR / s).exists()]
+    missing = [s for s in BACKEND_SCRIPTS + [BACKEND_SHARED] if not (SCRIPT_DIR / s).exists()]
     results.append(("backend scripts", not missing,
                     "all present" if not missing else "missing: " + ", ".join(missing)))
     results.append(("rich", RICH_AVAILABLE,
@@ -814,13 +815,13 @@ def truncate_path(p: Path, max_len: int = 50) -> str:
     return ellipsis + s[-keep:]
 
 
-#: The PowerShell backends declare [ValidateRange(1, 64)] on -Workers; anything outside
-#: that range fails at parameter binding and the backend never starts.
+#: The backends accept -Workers from 1 to 64; anything outside that range is refused
+#: when the command line is read and the backend never starts.
 MAX_WORKERS = 64
 
 
 def clamp_workers(value: int, default: int = 8) -> int:
-    """Keep -Workers inside the range the PowerShell backends accept."""
+    """Keep -Workers inside the range the backends accept."""
     try:
         n = int(value)
     except (TypeError, ValueError):
@@ -833,126 +834,59 @@ def clamp_workers(value: int, default: int = 8) -> int:
 
 
 #: Shipped defaults of the backend parameters the wizard offers or passes. Used ONLY
-#: when the .ps1 cannot be read or the parameter is missing -- the source of truth is
-#: the param() block of the script itself (tests pin these to it).
+#: when the script cannot be read or the parameter is missing -- the source of truth is
+#: the PARAMS table of the script itself (tests pin these to it).
 _BACKEND_PARAM_FALLBACKS = {
-    ("compress_tiff_zip.ps1", "SafeMode"): True,
-    ("compress_tiff_zip.ps1", "SkipLzwAsCompressed"): False,
-    ("compress_tiff_zip.ps1", "CapWorkers"): 0,
-    ("compress_tiff_zip.ps1", "DuplicateAction"): "Numbered",
-    ("compress_tiff_zip.ps1", "ThumbSize"): 256,
-    ("compress_tiff_zip.ps1", "ThumbQuality"): "85",
-    ("compress_tiff_zip.ps1", "ThumbFormat"): "jpg",
-    ("compress_tiff_zip.ps1", "ZipSuffix"): "_ZIP",
-    ("compress_tiff_zip.ps1", "ZipSubfolderName"): "ZIP",
-    ("compress_tiff_zip.ps1", "ExportZipSubfolder"): "ZIP",
-    ("compress_tiff_zip.ps1", "ExportMarker"): "_EXPORT",
-    ("copy_exif_to_TIFF_ps7.ps1", "SafeMode"): True,
-    ("copy_exif_to_TIFF_ps5.ps1", "SafeMode"): True,
-    ("generate_thumbnails.ps1", "Size"): 256,
-    ("generate_thumbnails.ps1", "Quality"): "85",
-    ("generate_thumbnails.ps1", "Format"): "jpg",
-    ("generate_thumbnails.ps1", "Page"): "0",
+    ("compress_tiff_zip.py", "SafeMode"): True,
+    ("compress_tiff_zip.py", "SkipLzwAsCompressed"): False,
+    ("compress_tiff_zip.py", "CapWorkers"): 0,
+    ("compress_tiff_zip.py", "DuplicateAction"): "Numbered",
+    ("compress_tiff_zip.py", "ThumbSize"): 256,
+    ("compress_tiff_zip.py", "ThumbQuality"): "85",
+    ("compress_tiff_zip.py", "ThumbFormat"): "jpg",
+    ("compress_tiff_zip.py", "ZipSuffix"): "_ZIP",
+    ("compress_tiff_zip.py", "ZipSubfolderName"): "ZIP",
+    ("compress_tiff_zip.py", "ExportZipSubfolder"): "ZIP",
+    ("compress_tiff_zip.py", "ExportMarker"): "_EXPORT",
+    ("copy_exif_to_tiff.py", "SafeMode"): True,
+    ("generate_thumbnails.py", "Size"): 256,
+    ("generate_thumbnails.py", "Quality"): "85",
+    ("generate_thumbnails.py", "Format"): "jpg",
+    ("generate_thumbnails.py", "Page"): "0",
 }
 
-_PS_PARAM_LINE = re.compile(
-    r"""^\s*(?:\[[^\]]*\]\s*)*\$(\w+)\s*=\s*("(?:[^"]*)"|'(?:[^']*)'|\$true|\$false|-?\d+(?:\.\d+)?)""",
-    re.IGNORECASE)
+
+def _backend_param_defaults(script_name: str) -> Dict[str, object]:
+    """name -> default of every parameter of the script's PARAMS table that takes a value
+    (a switch has none). {} when the file cannot be read."""
+    return {name: default for name, kind, default, _help in _backend_tables(script_name)[0]
+            if kind != "switch" and default is not None}
 
 
-@functools.lru_cache(maxsize=None)
-def _ps_param_defaults(script_name: str) -> Dict[str, object]:
-    """name -> default of every parameter in the script's top param() block.
-
-    Only the block from the first line that starts with `param(` to the first line
-    that is just `)`; values: $true/$false -> bool, "..."/'...' -> str, numbers ->
-    int/float. {} when the file cannot be read."""
-    try:
-        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    out: Dict[str, object] = {}
-    inside = False
-    for line in text.splitlines():
-        if not inside:
-            inside = line.lstrip().lower().startswith("param(")
-            continue
-        if line.strip() == ")":
-            break
-        m = _PS_PARAM_LINE.match(line)
-        if not m:
-            continue
-        raw = m.group(2)
-        low = raw.lower()
-        if low in ("$true", "$false"):
-            val: object = (low == "$true")
-        elif raw[0] in "\"'":
-            val = raw[1:-1]
-        elif "." in raw:
-            val = float(raw)
-        else:
-            val = int(raw)
-        out[m.group(1)] = val
-    return out
-
-
-@functools.lru_cache(maxsize=None)
-def _ps_param_names(script_name: str) -> Tuple[str, ...]:
-    """Every parameter name of the script's top param() block, in order -- also the
-    [switch] ones and those without a default (which _ps_param_defaults does not see).
+def _backend_param_names(script_name: str) -> Tuple[str, ...]:
+    """Every parameter name of the script's PARAMS table, in order -- the switches too.
     () when the file cannot be read."""
-    try:
-        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ()
-    names: List[str] = []
-    inside = False
-    for line in text.splitlines():
-        if not inside:
-            inside = line.lstrip().lower().startswith("param(")
-            continue
-        if line.strip() == ")":
-            break
-        m = re.match(r"^\s*(?:\[[^\]]*\]\s*)*\$(\w+)", line)
-        if m:
-            names.append(m.group(1))
-    return tuple(names)
+    return tuple(name for name, _kind, _default, _help in _backend_tables(script_name)[0])
 
 
-@functools.lru_cache(maxsize=None)
-def _ps_param_comments(script_name: str) -> Dict[str, str]:
-    """name -> the trailing `# comment` of the parameter's line in the param() block (the
-    one-line help the Script settings screen shows); {} when the file cannot be read."""
-    try:
-        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return {}
-    out: Dict[str, str] = {}
-    inside = False
-    for line in text.splitlines():
-        if not inside:
-            inside = line.lstrip().lower().startswith("param(")
-            continue
-        if line.strip() == ")":
-            break
-        m = re.match(r"^\s*(?:\[[^\]]*\]\s*)*\$(\w+)[^#]*#\s*(.*?)\s*$", line)
-        if m:
-            out[m.group(1)] = m.group(2)
-    return out
+def _backend_param_help(script_name: str) -> Dict[str, str]:
+    """name -> the `help` text of the parameter in the PARAMS table (the one-line help the
+    Script settings screen shows); {} when the file cannot be read."""
+    return {name: text for name, _kind, _default, text in _backend_tables(script_name)[0] if text}
 
 
 def _backend_default(script_name: str, param: str):
-    """The default of `param` as written in `script_name`'s param() block; the
+    """The default of `param` as written in `script_name`'s PARAMS table; the
     shipped value from _BACKEND_PARAM_FALLBACKS only when it cannot be read or has
     another type than the fallback (a typo must not reach a command line). A value the
-    settings overlay gives that backend (it passed its spec) wins over the param() block, as
+    settings overlay gives that backend (it passed its spec) wins over the PARAMS table, as
     it does when the script runs -- but only with the fallback's type."""
     fallback = _BACKEND_PARAM_FALLBACKS[(script_name, param)]
     if script_name in _OVERLAY_SECTIONS:
         over = _overlay_values(script_name).get(param)
         if over is not None and type(over) is type(fallback):
             return over
-    val = _ps_param_defaults(script_name).get(param)
+    val = _backend_param_defaults(script_name).get(param)
     if val is None or type(val) is not type(fallback):
         return fallback
     return val
@@ -960,11 +894,11 @@ def _backend_default(script_name: str, param: str):
 
 def _tool_output_names() -> set:
     """Lower-cased folder names that hold this toolkit's own output (discovery skips
-    them below the scan root). The ZIP/_EXPORT names come from compress_tiff_zip.ps1's
+    them below the scan root). The ZIP/_EXPORT names come from compress_tiff_zip.py's
     own settings: a copy here let an edited -ZipSubfolderName be walked into."""
     names = {"old_tiffs", "old_padded", "logs", "converted_zip"}
     for p in ("ZipSubfolderName", "ExportZipSubfolder", "ExportMarker"):
-        names.add(str(_backend_default("compress_tiff_zip.ps1", p)).lower())
+        names.add(str(_backend_default("compress_tiff_zip.py", p)).lower())
     return names
 
 
@@ -986,9 +920,9 @@ def _is_tool_output_path(path: Path, root: Path) -> bool:
     Evaluated RELATIVE to the scan root, never against the absolute path. Matching the
     absolute path also matched every ancestor: a library under `D:\\Backup\\zip\\2019\\`
     reported "No TIFF files found" and exited 0, and pointing a workflow straight AT a
-    folder named `ZIP` or `OLD_TIFFs` could never work. That is the same bug the three
-    PowerShell backends fixed in audit round 14 (Test-PathExcluded); the diagnose workflow
-    kept the absolute form, while the manifest generator already did it relative.
+    folder named `ZIP` or `OLD_TIFFs` could never work. That is the same bug the
+    backends fixed in audit round 14 (path_excluded); the diagnose workflow kept the
+    absolute form, while the manifest generator already did it relative.
 
     A path that is not under the root at all falls back to the whole path -- in doubt, skip.
     """
@@ -1348,7 +1282,7 @@ def _scoped_magick_aliases(fn):
 def _magick_spec(path) -> str:
     """Escape '%' for the filename SPECS ImageMagick expands.
 
-    Python mirror of ConvertTo-MagickPathSpec in the PowerShell backends. ImageMagick reads
+    Same rule as magick_path_spec in tiff_workflow_common.py. ImageMagick reads
     printf-style scene specifiers in a filename spec: `50%off.tif` addresses `500ff.tif`
     ('%o' consumed), `100%dpi.tif` addresses `1000pi.tif`. '%%' is the escape.
 
@@ -1394,7 +1328,7 @@ def _safe_tag_source(path: Path):
     `50%off.tif` is read as `50ff.tif` -- and exiftool STILL EXITS 0, so a returncode check
     passes while nothing was copied. Doubling the '%' does not escape it. The fix is to hand
     exiftool a name without one: park the tags in a temp MIE container first, exactly like
-    Backup-TiffMetadata does in the PowerShell backends. The source FILE OPERAND is not
+    backup_tiff_metadata does in the backends. The source FILE OPERAND is not
     format-expanded, only the -tagsfromfile argument is, so dumping FROM the '%' name works.
 
     Returns (None, None) when the container was needed but could not be written -- callers
@@ -1654,9 +1588,9 @@ def step_folder(cfg: ToolConfig, prompt_text: str = "Input folder") -> Optional[
 # --- Basic Parameters ---------------------------------------------
 
 def _supports_cap_workers(workflow: Dict) -> bool:
-    """True only for workflows whose backend is compress_tiff_zip.ps1.
+    """True only for workflows whose backend is compress_tiff_zip.py.
 
-    The Copy EXIF backends have no -CapWorkers parameter (they take -Workers directly),
+    The Copy EXIF backend has no -CapWorkers parameter (it takes -Workers directly),
     so asking the question there produced an answer nothing could act on. -ExcludeFolders
     is the opposite call: it now exists on all three backends and is emitted for all of them.
     """
@@ -1665,13 +1599,13 @@ def _supports_cap_workers(workflow: Dict) -> bool:
 
 def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
     """Workers, DryRun, Staging."""
-    # The backend this run will actually launch: each one's param() defaults are the
+    # The backend this run will actually launch: each one's PARAMS defaults are the
     # source of the prompt defaults below (audit round 17).
-    _ref = "compress_tiff_zip.ps1" if _supports_cap_workers(workflow) else ("copy_exif_to_TIFF_ps5.ps1" if cfg.config.ps_name == "powershell" else "copy_exif_to_TIFF_ps7.ps1")
+    _ref = "compress_tiff_zip.py" if _supports_cap_workers(workflow) else "copy_exif_to_tiff.py"
     safe_default = _backend_default(_ref, "SafeMode")
-    skip_default = (_backend_default("compress_tiff_zip.ps1", "SkipLzwAsCompressed")
-                    if _ref == "compress_tiff_zip.ps1" else False)
-    cap_default = _backend_default("compress_tiff_zip.ps1", "CapWorkers")
+    skip_default = (_backend_default("compress_tiff_zip.py", "SkipLzwAsCompressed")
+                    if _ref == "compress_tiff_zip.py" else False)
+    cap_default = _backend_default("compress_tiff_zip.py", "CapWorkers")
     if RICH_AVAILABLE and console:
         workers_str = Prompt.ask(
             "[cyan]Workers[/cyan]",
@@ -1702,7 +1636,7 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs)", default=safe_default)
         workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as already compressed?[/cyan] (LZW files will be ignored)", default=skip_default)
 
-        # -CapWorkers only exists on compress_tiff_zip.ps1; asking it for a Copy EXIF
+        # -CapWorkers only exists on compress_tiff_zip.py; asking it for a Copy EXIF
         # workflow produced an answer that was silently dropped by the command builder.
         if _supports_cap_workers(workflow):
             cap_str = Prompt.ask("[cyan]Cap workers?[/cyan] (0 = no cap)", default=str(cap_default))
@@ -1724,13 +1658,9 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
             workflow["exclude_folders"] = excl
             cfg.config.last_exclude_folders = excl
 
-        # ForceParallel/ForceSequential: offer to toggle detected behavior
-        if cfg.config.ps_major >= 7:
-            if Confirm.ask("[yellow]Force sequential? (override parallelism)[/yellow]", default=False):
-                workflow["force_sequential"] = True
-        else:
-            if Confirm.ask("[yellow]Force parallel? (enable parallelism via -ForceParallel)[/yellow]", default=False):
-                workflow["force_parallel"] = True
+        # The backends work on several files at once; -ForceSequential turns that off.
+        if Confirm.ask("[yellow]Force sequential? (override parallelism)[/yellow]", default=False):
+            workflow["force_sequential"] = True
     else:
         workers_str = input(f"Workers [{(cfg.config.last_workers or cfg.config.default_workers)}]: ").strip()
         try:
@@ -1768,14 +1698,9 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         else:
             workflow["exclude_folders"] = excl
             cfg.config.last_exclude_folders = excl
-        if cfg.config.ps_major >= 7:
-            fp = input("Force sequential? (y/N): ").strip().lower()
-            if fp == "y":
-                workflow["force_sequential"] = True
-        else:
-            fp = input("Force parallel? (y/N): ").strip().lower()
-            if fp == "y":
-                workflow["force_parallel"] = True
+        fp = input("Force sequential? (y/N): ").strip().lower()
+        if fp == "y":
+            workflow["force_sequential"] = True
 
     return True
 
@@ -1795,10 +1720,7 @@ def _advanced_backends(workflow: Dict) -> List[str]:
 
 
 def _backend_script(cfg: ToolConfig, backend: str) -> str:
-    if backend == "compress":
-        return "compress_tiff_zip.ps1"
-    return ("copy_exif_to_TIFF_ps5.ps1" if cfg.config.ps_name == "powershell"
-            else "copy_exif_to_TIFF_ps7.ps1")
+    return "compress_tiff_zip.py" if backend == "compress" else "copy_exif_to_tiff.py"
 
 
 def _advanced_current(cfg: ToolConfig, workflow: Dict, backend: str, opt: "Opt"):
@@ -1811,7 +1733,7 @@ def _advanced_current(cfg: ToolConfig, workflow: Dict, backend: str, opt: "Opt")
     over = _overlay_values(script).get(opt.param)
     if over is not None:
         return over, "settings file"
-    return _ps_param_defaults(script).get(opt.param), "script"
+    return _backend_param_defaults(script).get(opt.param), "script"
 
 
 def _advanced_shown(value, opt: "Opt") -> str:
@@ -1978,36 +1900,21 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
 
 # --- Command Builders ----------------------------------------------
 
-def _wrap_ps5_command(cmd: List[str]) -> List[str]:
-    """powershell.exe 5.1 cannot bind switch values like -SafeMode:$false passed
-    via -File (command-line args arrive as strings). Wrap the invocation in
-    -Command so $true/$false literals are evaluated by the PowerShell parser."""
-    import re
-    exe, rest = cmd[0], cmd[1:]
-    try:
-        file_idx = rest.index("-File")
-        script = rest[file_idx + 1]
-        args = rest[file_idx + 2:]
-    except (ValueError, IndexError):
-        return cmd
-    prefix = rest[:file_idx]
-
-    def _quote(a: str) -> str:
-        # Parameter names and $bool switch values must stay unquoted to bind correctly
-        if re.fullmatch(r"-\w+(:\$(?:true|false))?", a):
-            return a
-        return "'" + a.replace("'", "''") + "'"
-
-    invocation = "& " + _quote(script) + (" " + " ".join(_quote(a) for a in args) if args else "")
-    return [exe] + prefix + ["-Command", invocation]
+def _backend_command(script_name: str, args: List[str]) -> List[str]:
+    """The command line that runs a backend next to this wizard: this Python, the script,
+    its arguments. In the Windows program `sys.executable` is tiff-workflow.exe, whose
+    launcher runs a backend script it is handed the same way."""
+    return [sys.executable, str(SCRIPT_DIR / script_name)] + [str(a) for a in args]
 
 
 def _unwrap_ps5_invocation(invocation: str) -> Optional[List[str]]:
-    """Exact inverse of the quoting _wrap_ps5_command applies.
+    """[script, *args] of the `-Command "& 'script' args"` line the PowerShell edition (up
+    to v2.9.1) journalled for Windows PowerShell 5.1 -- the exact inverse of the quoting it
+    applied. Only read, never written: a preset or last run saved by that edition still
+    replays.
 
-    Returns [script, *args], or None when the string does not have the shape that
-    function produces (never guess: a mis-parsed argument list drives a converter that
-    can delete sources in mode 8)."""
+    Returns None when the string does not have that shape (never guess: a mis-parsed
+    argument list drives a converter that can delete sources in mode 8)."""
     s = invocation.strip()
     if not s.startswith("& "):
         return None
@@ -2052,9 +1959,9 @@ def _parts_replace_sources(parts: List[str]) -> bool:
     the manifest path has always counted a mode-8 row as deleting).
 
     audit round 28: the refusal used to look for the exact word "-DeleteSource", so an
-    edited preset with -deletesource, the abbreviation -DeleteS (PowerShell binds any
+    edited preset with -deletesource, the abbreviation -DeleteS (the backends bind any
     unambiguous prefix) or -DeleteSource:$true passed, and mode 8 without the switch was
-    not noticed at all. Read the way PowerShell binds: case-insensitive, any prefix of at
+    not noticed at all. Read the way the backends bind: case-insensitive, any prefix of at
     least two letters ("-D" alone is ambiguous with -DryRun), an explicit :$false is off.
     Fail closed: an unreadable -Mode value next to the name counts as mode 8."""
     for i, a in enumerate(parts):
@@ -2074,19 +1981,21 @@ def _parts_replace_sources(parts: List[str]) -> bool:
 
 
 def _journal_parts(cmd: List[str]) -> Optional[List[str]]:
-    """Reduce a built PowerShell command line to its shell-neutral [script, *args].
+    """Reduce a journalled command line to [script, *args], whatever wrote it.
 
-    A journalled command has to survive the PowerShell available changing between the run
-    and the repeat. Replaying a `-File ... -SafeMode:$false` command under powershell.exe
-    5.1 silently binds the STRING '$false' -- which is truthy -- so the repeat ran with
-    SafeMode ON, the exact trap _wrap_ps5_command exists to avoid; and a Copy EXIF command
-    kept pointing at the backend written for the other shell. Stripping the wrapper here
-    lets run_repeat_last rebuild the invocation for whatever PowerShell is detected now.
+    A journalled command has to survive the program around it changing between the run and
+    the repeat: another Python, the wizard moved to another folder -- and the PowerShell
+    edition (up to v2.9.1), whose journals named `pwsh -File <script>.ps1 args` or, for
+    Windows PowerShell 5.1, `powershell -Command "& '<script>.ps1' args"`. The arguments
+    mean the same to the Python backends, so those presets still run.
 
     Returns None when the shape is not recognised, so the caller can refuse instead of
     running something it does not understand."""
     if not cmd:
         return None
+    cmd = [str(a) for a in cmd]
+    if len(cmd) >= 2 and Path(cmd[1]).name in BACKEND_SCRIPTS:
+        return cmd[1:]
     if "-File" in cmd:
         i = cmd.index("-File")
         return cmd[i + 1:] if i + 1 < len(cmd) else None
@@ -2096,39 +2005,27 @@ def _journal_parts(cmd: List[str]) -> Optional[List[str]]:
     return None
 
 
-def _journaled_script_path(parts: List[str], ps_name: str) -> Path:
-    """The backend a journalled command will actually run under `ps_name`.
-
-    The two Copy EXIF backends are not interchangeable -- one is the PS5 sequential
-    implementation, the other drives PS7 runspaces -- so the script follows the shell we
-    are about to run, not the shell that happened to record the journal.
+def _journaled_script_path(parts: List[str]) -> Path:
+    """The backend a journalled command will actually run.
 
     Every backend is the one next to this wizard, whatever folder the journal recorded
     (round 24): a preset saved from another copy -- an older version, the program in
     another folder, a folder since deleted -- ran that copy's backend, or failed with
-    "Backend script no longer exists", while the wizard planned with its own settings."""
+    "Backend script no longer exists", while the wizard planned with its own settings.
+    A command saved by the PowerShell edition names a .ps1: it maps to today's script
+    (the two Copy EXIF scripts are one now). Anything else comes back as recorded and
+    _run_journal refuses it."""
     script = Path(parts[0])
-    if script.name in ("copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"):
-        return SCRIPT_DIR / ("copy_exif_to_TIFF_ps5.ps1" if ps_name == "powershell"
-                             else "copy_exif_to_TIFF_ps7.ps1")
-    if script.name in BACKEND_SCRIPTS:
-        return SCRIPT_DIR / script.name
+    name = _LEGACY_BACKEND_NAMES.get(script.name.lower(), script.name)
+    if name in BACKEND_SCRIPTS:
+        return SCRIPT_DIR / name
     return script
 
 
-def _rebuild_journaled_command(parts: List[str], ps_name: str,
-                               non_interactive: bool = False) -> List[str]:
-    """Turn a shell-neutral [script, *args] back into a command for `ps_name`.
-
-    `non_interactive` (--run-preset) adds -NonInteractive, so a prompt the
-    backend might still ask cannot wait forever on a closed stdin; the flag is
-    inserted before the PS5 wrap, which preserves the prefix."""
-    cmd = [ps_name, "-NoProfile", "-File", str(_journaled_script_path(parts, ps_name))] + list(parts[1:])
-    if non_interactive:
-        cmd = cmd[:2] + ["-NonInteractive"] + cmd[2:]
-    if ps_name == "powershell":
-        cmd = _wrap_ps5_command(cmd)
-    return cmd
+def _rebuild_journaled_command(parts: List[str]) -> List[str]:
+    """Turn a [script, *args] back into a command line for this Python and the backend
+    next to this wizard."""
+    return _backend_command(_journaled_script_path(parts).name, list(parts[1:]))
 
 
 # --- Option Registry -----------------------------------------------
@@ -2142,7 +2039,7 @@ def _rebuild_journaled_command(parts: List[str], ps_name: str,
 
 @dataclass(frozen=True)
 class Opt:
-    param: str           # the .ps1 parameter, without the dash
+    param: str           # the backend parameter, without the dash
     key: str             # slot in the workflow dict; "advanced.<param>" for the Advanced screen's
     kind: str            # how _emit_opt turns the value into argv (see _emit_opt)
     group: str           # "run", "files", "safety", "thumbnail", "performance"
@@ -2275,9 +2172,9 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
         Opt("DeleteSource", "delete_source", "flag", "safety", "asked", "Delete source",
             "Mode 8: delete the source after the output is verified.", danger=True),
         Opt("ForceParallel", "force_parallel", "true_flag", "performance", "asked",
-            "Force parallel", "Parallelism ON (PowerShell 5.1 with pwsh available)."),
+            "Force parallel", "Kept for presets saved by v2.x; parallel is the default."),
         Opt("ForceSequential", "force_sequential", "true_flag", "performance", "asked",
-            "Force sequential", "Parallelism OFF (PowerShell 7)."),
+            "Force sequential", "One file at a time."),
         Opt("GenerateThumbnail", "generate_thumbnail", "flag", "thumbnail", "asked",
             "Generate thumbnail", "Embed an sRGB thumbnail page in the TIFF."),
         Opt("ThumbSize", "thumb_size", "value", "thumbnail", "asked", "Thumbnail size",
@@ -2325,8 +2222,8 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             "Compress the TIFF in the same pass."),
         Opt("SafeMode", "safe_mode", "bool", "safety", "asked", "Safe mode",
             "Skip multi-page TIFFs.", danger=True),
-        # -SkipLzwAsCompressed is a [switch] in the Copy EXIF backends (a [bool] in
-        # compress_tiff_zip.ps1): its default is OFF by type, so only "yes" is passed.
+        # -SkipLzwAsCompressed is a switch in the Copy EXIF backend (a bool in
+        # compress_tiff_zip.py): its default is OFF by type, so only "yes" is passed.
         Opt("SkipLzwAsCompressed", "skip_lzw", "true_bool", "files", "asked", "Skip LZW",
             "Treat LZW files as already compressed and ignore them."),
         Opt("Overwrite", "overwrite", "flag", "safety", "asked", "Overwrite",
@@ -2379,47 +2276,31 @@ NOT_OFFERED: Dict[str, Dict[str, str]] = {
     },
 }
 
-#: backend key -> the script(s) whose param() blocks the coverage test compares with it
+#: backend key -> the script(s) whose PARAMS tables the coverage test compares with it
 REGISTRY_SCRIPTS = {
-    "compress": ("compress_tiff_zip.ps1",),
-    "copy_exif": ("copy_exif_to_TIFF_ps5.ps1", "copy_exif_to_TIFF_ps7.ps1"),
-    "thumbnails": ("generate_thumbnails.ps1",),
+    "compress": ("compress_tiff_zip.py",),
+    "copy_exif": ("copy_exif_to_tiff.py",),
+    "thumbnails": ("generate_thumbnails.py",),
 }
 
 
-def build_compress_command(workflow: Dict, folders: List[Path] = None, ps_name: str = "pwsh") -> List[str]:
-    """Build powershell command for compress_tiff_zip.ps1 (the argv comes from REGISTRY)."""
-    script = SCRIPT_DIR / "compress_tiff_zip.ps1"
-    cmd = [ps_name, "-NoProfile", "-File", str(script)] + _emit_all("compress", workflow, folders)
-
-    if ps_name == "powershell":
-        cmd = _wrap_ps5_command(cmd)
-
-    return cmd
+def build_compress_command(workflow: Dict, folders: List[Path] = None) -> List[str]:
+    """The command line for compress_tiff_zip.py (the argv comes from REGISTRY)."""
+    return _backend_command("compress_tiff_zip.py", _emit_all("compress", workflow, folders))
 
 
-def build_copy_exif_command(workflow: Dict, folders: List[Path] = None, extra_flags: List[str] = None, ps_name: str = "pwsh") -> List[str]:
-    """Build powershell command for copy_exif_to_TIFF.ps1."""
-    if ps_name == "powershell":
-        script = SCRIPT_DIR / "copy_exif_to_TIFF_ps5.ps1"
-    else:
-        script = SCRIPT_DIR / "copy_exif_to_TIFF_ps7.ps1"
-    cmd = [ps_name, "-NoProfile", "-File", str(script)] + _emit_all("copy_exif", workflow, folders)
-
-    if extra_flags:
-        cmd += extra_flags
-
-    if ps_name == "powershell":
-        cmd = _wrap_ps5_command(cmd)
-
-    return cmd
+def build_copy_exif_command(workflow: Dict, folders: List[Path] = None,
+                            extra_flags: List[str] = None) -> List[str]:
+    """The command line for copy_exif_to_tiff.py (the argv comes from REGISTRY)."""
+    return _backend_command("copy_exif_to_tiff.py",
+                            _emit_all("copy_exif", workflow, folders) + list(extra_flags or []))
 
 
 # --- Subprocess Runner ----------------------------------------------
 
 def _decode_console_line(raw: bytes) -> str:
-    """Decode subprocess output: try UTF-8, fall back to the console OEM codepage
-    (Windows PowerShell 5 emits OEM, e.g. cp850, not UTF-8)."""
+    """Decode subprocess output: UTF-8 (what the backends write to a pipe), else the
+    console OEM codepage (e.g. cp850: a tool that printed on its own)."""
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -2436,8 +2317,7 @@ def _decode_console_line(raw: bytes) -> str:
 # CreateProcess fails past 32767 characters. A Fuji preset redoes the AutoFind on
 # every run, so its ';'-joined -InputDir grows with every session (round 22).
 _CMDLINE_SPILL_CHARS = 24000
-_INPUTDIR_FILE_BACKENDS = ("compress_tiff_zip.ps1", "copy_exif_to_TIFF_ps5.ps1",
-                           "copy_exif_to_TIFF_ps7.ps1")
+_INPUTDIR_FILE_BACKENDS = ("compress_tiff_zip.py", "copy_exif_to_tiff.py")
 
 
 def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
@@ -2461,24 +2341,17 @@ def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(folders) + "\n")
     new_parts = parts[:i] + ["-InputDirFile", list_path] + parts[i + 2:]
-    cmd = [str(a) for a in cmd]
-    if "-File" in cmd:
-        j = cmd.index("-File")
-        return cmd[:j + 1] + new_parts, list_path
-    j = cmd.index("-Command")
-    return _wrap_ps5_command(cmd[:j] + ["-File"] + new_parts), list_path
+    return [str(cmd[0])] + new_parts, list_path
 
 
-# compress_tiff_zip.ps1's end-of-run line when originals are still stranded in OLD_TIFFs/
-# (audit round 25: Find-StrandedOriginals). The wizard offers -RestoreStranded on it.
+# compress_tiff_zip.py's end-of-run line when originals are still stranded in OLD_TIFFs/
+# (audit round 25: find_stranded_originals). The wizard offers -RestoreStranded on it.
 _STRANDED_LEFT_RE = re.compile(r"STRANDED: (\d+) original\(s\) still in OLD_TIFFs")
 
 
 def _with_restore_stranded(cmd: List[str]) -> List[str]:
-    """`cmd` plus -RestoreStranded, also for a PS 5.1 command wrapped in -Command."""
-    if len(cmd) >= 2 and cmd[-2] == "-Command":
-        return cmd[:-1] + [cmd[-1] + " -RestoreStranded"]
-    return cmd + ["-RestoreStranded"]
+    """`cmd` plus -RestoreStranded."""
+    return list(cmd) + ["-RestoreStranded"]
 
 
 def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[int]:
@@ -2494,8 +2367,7 @@ def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[in
     msg = (f"{stranded} original(s) are in OLD_TIFFs with nothing in their place -- left by an "
            f"interrupted run. They are the only copy of those images.")
     interactive = stdin is None and sys.stdin is not None and sys.stdin.isatty()
-    dry = any(str(c) == "-DryRun" or str(c).endswith(" -DryRun") or " -DryRun " in str(c)
-              for c in cmd)
+    dry = any(str(c) == "-DryRun" for c in cmd)
     if not interactive or dry:
         hint = (" Run the same compress again with -RestoreStranded (or answer yes to this "
                 "question in an interactive, non-dry run) to put them back.")
@@ -2710,7 +2582,7 @@ def _restore_stranded_only(stranded) -> bool:
 
 def _stranded_backups(old_dirs) -> list:
     """(backup, target) for each TIFF in these OLD_TIFFs folders whose original place is
-    EMPTY -- the same rule as compress_tiff_zip.ps1's Find-StrandedOriginals (round 25):
+    EMPTY -- the same rule as compress_tiff_zip.py's find_stranded_originals (round 25):
     no <stem>.tif / <stem>.tiff in the parent, nor the base stem of a timestamped backup
     (<stem>_yyyyMMdd_HHmmss[_n]). Target = base stem + the backup's extension. A folder
     nested in another OLD_TIFFs is a backup of a backup and is skipped.
@@ -2922,7 +2794,7 @@ def _strip_magick_noise(text: str) -> str:
 def _tiff_page_geometry(path) -> Optional[List[Tuple[str, int, int]]]:
     """(subfiletype, width, height) for every page, or None when it cannot be read.
 
-    One `identify` call, same format string the PowerShell page classifiers use. None means
+    One `identify` call, same format string the backends' page classifiers use. None means
     "cannot classify" and every caller must treat it as a refusal, never as "no thumbnails".
     """
     try:
@@ -3962,7 +3834,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
 
 
 def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
-    """Python mirror of Test-TiffHasOnlySubfilePages (compress_tiff_zip.ps1).
+    """The wizard's own tiff_has_only_subfile_pages (tiff_workflow_common.py).
 
     True when every page beyond IFD0 is a thumbnail: tagged REDUCEDIMAGE/REDUCED AND
     strictly smaller than the main image. False when any extra page is a real page
@@ -3976,8 +3848,8 @@ def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
     toolkit writes is tagged (Set-TiffThumbMarkers), so the strict rule still covers the
     case it exists for.
 
-    MASK and PAGE are deliberately NOT accepted, exactly like the four PowerShell call
-    sites: a full-size IR channel is a real page, not a preview.
+    MASK and PAGE are deliberately NOT accepted, exactly like the backends' SafeMode
+    calls: a full-size IR channel is a real page, not a preview.
     """
     try:
         r = _run_captured(
@@ -4040,7 +3912,8 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     -- had the tag DELETED from the output instead of preserved; and the symbolic names only
     covered four values, so anything else silently became "no tag". exiftool prints one line
     per IFD that really has the tag, with its numeric value, which tells the cases apart.
-    The PowerShell twin was fixed for exactly this; the mirror had been left behind.
+    The backends' restore_tiff_subfile_types was fixed for exactly this; this copy had been
+    left behind.
     """
     try:
         r = _run_exiftool(
@@ -4093,7 +3966,7 @@ def _tiff_sample_layout(path) -> Optional[List[Dict]]:
     profile -- and writes a 4-sample neutral RGB+IR scan as 2 samples, half of each row
     lost. Every pixel gate here compares through magick's own decode, where gray and
     neutral RGB are equal, so none of them could see it. Python mirror of
-    Get-TiffSampleLayout in the PowerShell backends.
+    tiff_sample_layout in the backends.
 
     One dict per main IFD (IFD0, IFD1, ... -- SubIFDs are not pages), in order:
       cls   -- "gray" (Photometric 0/1), "rgb" (2, or 6 = YCbCr, which magick writes as
@@ -4141,7 +4014,7 @@ def _tiff_sample_layout(path) -> Optional[List[Dict]]:
 def _magick_keep_type_args(layout: Optional[List[Dict]]) -> List[str]:
     """The magick write options that stop the TIFF writer from changing the sample layout.
 
-    Python mirror of Get-MagickKeepTypeArgs. `-type` is a WRITE setting that applies to
+    Same rule as magick_keep_type_args in the backends. `-type` is a WRITE setting that applies to
     every page of the output (per-page parentheses do not scope it -- verified on 7.1.2-27),
     so it is passed only when every page wants the same one: all RGB without alpha ->
     TrueColor (a neutral RGB+IR scan keeps its 4 samples, pixel-identical), all RGB with
@@ -4340,7 +4213,7 @@ def _process_single_padded(tiff_path, staging):
 
         # magick drops the per-page SubfileType markers on rewrite, so a Capture One
         # thumbnail came back stamped PAGE and stopped being recognised as a thumbnail by
-        # SafeMode and -SkipCompressedWithThumb on later runs. The three PowerShell
+        # SafeMode and -SkipCompressedWithThumb on later runs. The
         # backends all restore them; this path was the only one that did not.
         # The restore runs AFTER the integrity gate below: an unreadable page count must
         # surface as page_count_mismatch from the gate, not as a restore failure.
@@ -4449,7 +4322,7 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
     Returns (error_or_None, note_or_None); on an error the original is in its place.
 
     audit round 28 -- the irreversible step comes last (jxl-photo's rule, the one rounds
-    25-26 applied to the PowerShell backends):
+    25-26 applied to the backends):
       1. the converted file is brought NEXT TO the photo first, under a temp name
          (<name>.<8 hex>_<12 hex>.tif, which every backend skips as a leftover); from
          another volume that is a copy, size-checked -- a kill here leaves the original
@@ -4567,7 +4440,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     # Run-scoped staging dir. A shared "compress_staging" meant the cleanup below wiped
     # every file in it, including another concurrent run's in-flight output -- if that run
     # was between the OLD_PADDED backup and the final move, the file vanished from the
-    # source folder. Same reasoning as $runStagingId in compress_tiff_zip.ps1.
+    # source folder. Same reasoning as $runStagingId in compress_tiff_zip.py.
     staging = temp_dir / f"compress_staging_{uuid.uuid4().hex}"
     staging.mkdir(parents=True, exist_ok=True)
 
@@ -5256,7 +5129,7 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
         first_row = next(reader, None)
         # Excel in pt-BR/de-DE locales saves "CSV" delimited by ';'. Parsed with ','
         # each line collapses into one cell: the header check fails and the whole
-        # line becomes a "source" path containing ';' -- which the PowerShell backend
+        # line becomes a "source" path containing ';' -- which the backend
         # then SPLITS into two roots (it splits -InputDir on ';'). Detect and refuse.
         if first_row is not None and len(first_row) == 1 and ';' in first_row[0]:
             _manifest_error(
@@ -5536,15 +5409,15 @@ def manifest_source_overlaps(entries: List[Tuple]) -> List[Tuple[str, str]]:
 
 
 def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
-    """Mirror of Resolve-Output in compress_tiff_zip.ps1, returning only the
+    """Mirror of Resolve-Output in compress_tiff_zip.py, returning only the
     output FOLDER. Only modes 2/4/5 are resolved -- every other mode writes
     inside the Source tree and never reaches the collision scan."""
     parent = f.parent
     # audit round 28: the folder names are the backend's own settings (script or settings
     # file), never a copy of their defaults -- an edited ZipSuffix / ZipSubfolderName made
     # this scan look at a folder the backend never writes.
-    zip_suffix = str(_backend_default("compress_tiff_zip.ps1", "ZipSuffix"))
-    zip_sub = str(_backend_default("compress_tiff_zip.ps1", "ZipSubfolderName"))
+    zip_suffix = str(_backend_default("compress_tiff_zip.py", "ZipSuffix"))
+    zip_sub = str(_backend_default("compress_tiff_zip.py", "ZipSubfolderName"))
     if mode == 2:
         # Mode 2 is recursive-FLAT: every file under the source lands in the
         # Destination (or the input root when the cell is empty).
@@ -5635,7 +5508,7 @@ def manifest_output_collisions(entries: List[Tuple]) -> List[Tuple]:
 
 
 def build_manifest_entry_cmd(source: str, dest_path: str, mode: int,
-                             workflow: Dict, ps_name: str = "pwsh") -> List[str]:
+                             workflow: Dict) -> List[str]:
     """Build the compress command for a single manifest entry, reusing
     build_compress_command with a per-entry workflow dict.
 
@@ -5646,7 +5519,7 @@ def build_manifest_entry_cmd(source: str, dest_path: str, mode: int,
     entry_wf["mode"] = mode
     entry_wf["output_dir"] = dest_path if mode == 2 else None
     entry_wf["delete_source"] = (mode == 8 and not workflow.get("dry_run"))
-    return build_compress_command(entry_wf, folders=[Path(source)], ps_name=ps_name)
+    return build_compress_command(entry_wf, folders=[Path(source)])
 
 
 def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
@@ -5659,15 +5532,14 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
     cleanly.
 
     `unattended` (--run-preset) never asks: overlapping Sources refuse instead
-    of offering "Run anyway?", each child gets -NonInteractive and a closed
-    stdin, and the mode-8 gate below stays as a defensive refusal (the runner
+    of offering "Run anyway?", each child gets a closed stdin (a backend never asks
+    without a console), and the mode-8 gate below stays as a defensive refusal (the runner
     already refused a deleting preset before calling this)."""
     if not entries:
         _manifest_error("No manifest entries found!")
         return False
 
     dry_run = workflow.get("dry_run", False)
-    ps_name = cfg.config.ps_name
 
     # The Destination column is only honored by mode 2 -- every other mode
     # computes its own output location from the backend's rules.
@@ -5798,9 +5670,8 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
         else:
             print(f"[{i}/{total_entries}] Mode {mode} | {source} -> {dest_path}")
 
-        cmd = build_manifest_entry_cmd(source, dest_path, mode, workflow, ps_name)
+        cmd = build_manifest_entry_cmd(source, dest_path, mode, workflow)
         if unattended:
-            cmd = cmd[:1] + ["-NonInteractive"] + cmd[1:]
             rc = run_subprocess(cmd, stdin=subprocess.DEVNULL)
         else:
             rc = run_subprocess(cmd)
@@ -5922,7 +5793,7 @@ def run_manifest_workflow(cfg) -> bool:
 
     # Collision policy for mode-2 (flattened) entries, same as the wizard.
     if any(m == 2 for _, _, m in entries):
-        dup_default = _backend_default("compress_tiff_zip.ps1", "DuplicateAction")
+        dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
         if RICH_AVAILABLE and console:
             workflow["duplicate_action"] = Prompt.ask(
                 "[cyan]Duplicate filenames (mode 2)[/cyan]",
@@ -6032,7 +5903,7 @@ def run_free_compress(cfg: ToolConfig) -> bool:
             workflow["output_dir"] = out_dir
 
         # Collision policy for the flattened output
-        dup_default = _backend_default("compress_tiff_zip.ps1", "DuplicateAction")
+        dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
         if RICH_AVAILABLE and console:
             workflow["duplicate_action"] = Prompt.ask(
                 "[cyan]Duplicate filenames[/cyan]",
@@ -6047,12 +5918,12 @@ def run_free_compress(cfg: ToolConfig) -> bool:
     step_basic_params(cfg, workflow)
     step_advanced_options(cfg, workflow)
 
-    # Thumbnail generation option. The defaults come from the backend's own param()
-    # block; "Configure? No" adds no thumb_* keys at all, so the backend runs on its
+    # Thumbnail generation option. The defaults come from the backend's own PARAMS
+    # table; "Configure? No" adds no thumb_* keys at all, so the backend runs on its
     # own settings (audit round 17 -- the wizard used to force 256/"85"/jpg always).
-    thumb_size_default = _backend_default("compress_tiff_zip.ps1", "ThumbSize")
-    thumb_quality_default = _backend_default("compress_tiff_zip.ps1", "ThumbQuality")
-    thumb_format_default = _backend_default("compress_tiff_zip.ps1", "ThumbFormat")
+    thumb_size_default = _backend_default("compress_tiff_zip.py", "ThumbSize")
+    thumb_quality_default = _backend_default("compress_tiff_zip.py", "ThumbQuality")
+    thumb_format_default = _backend_default("compress_tiff_zip.py", "ThumbFormat")
     if RICH_AVAILABLE and console:
         if Confirm.ask("[cyan]Generate embedded thumbnails?[/cyan]", default=False):
             workflow["generate_thumbnail"] = True
@@ -6110,10 +5981,10 @@ def run_free_compress(cfg: ToolConfig) -> bool:
     cfg.config.last_workers = workflow["workers"]
     cfg.save_config()
 
-    cmd = build_compress_command(workflow, folders=[folder], ps_name=cfg.config.ps_name)
+    cmd = build_compress_command(workflow, folders=[folder])
     journal_wf = dict(workflow)
     journal_wf["dry_run"] = False
-    journal_cmd = build_compress_command(journal_wf, folders=[folder], ps_name=cfg.config.ps_name)
+    journal_cmd = build_compress_command(journal_wf, folders=[folder])
     label = f"Compress TIFFs -- mode {mode} -- {truncate_path(folder, 60)}"
     if workflow.get("delete_source"):
         label += " [DELETES SOURCES]"
@@ -6135,7 +6006,7 @@ def run_free_compress(cfg: ToolConfig) -> bool:
             if Confirm.ask("\n[yellow]Dry-run complete. Run for real now?[/yellow]", default=False):
                 console.print("[cyan]Running for real (DryRun disabled)...[/cyan]\n")
                 workflow["dry_run"] = False
-                cmd_real = build_compress_command(workflow, folders=[folder], ps_name=cfg.config.ps_name)
+                cmd_real = build_compress_command(workflow, folders=[folder])
                 run_subprocess(cmd_real)
             else:
                 console.print("[dim]Skipped.[/dim]")
@@ -6144,7 +6015,7 @@ def run_free_compress(cfg: ToolConfig) -> bool:
             if resp == "y":
                 print("Running for real (DryRun disabled)...\n")
                 workflow["dry_run"] = False
-                cmd_real = build_compress_command(workflow, folders=[folder], ps_name=cfg.config.ps_name)
+                cmd_real = build_compress_command(workflow, folders=[folder])
                 run_subprocess(cmd_real)
             else:
                 print("Skipped.")
@@ -6218,7 +6089,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                 if Confirm.ask("\n[yellow]Dry-run complete. Run for real now?[/yellow]", default=False):
                     console.print("[cyan]Running for real...[/cyan]\n")
                     workflow["dry_run"] = False
-                    real_cmd = build_compress_command(workflow, folders=folders, ps_name=cfg.config.ps_name) if "compress" in workflow_type or workflow_type == "both" else build_copy_exif_command(workflow, folders=folders, ps_name=cfg.config.ps_name)
+                    real_cmd = build_compress_command(workflow, folders=folders) if "compress" in workflow_type or workflow_type == "both" else build_copy_exif_command(workflow, folders=folders)
                     run_subprocess(real_cmd)
                 else:
                     console.print("[dim]Skipped.[/dim]")
@@ -6227,7 +6098,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                 if resp == "y":
                     print("Running for real...\n")
                     workflow["dry_run"] = False
-                    real_cmd = build_compress_command(workflow, folders=folders, ps_name=cfg.config.ps_name) if "compress" in workflow_type or workflow_type == "both" else build_copy_exif_command(workflow, folders=folders, ps_name=cfg.config.ps_name)
+                    real_cmd = build_compress_command(workflow, folders=folders) if "compress" in workflow_type or workflow_type == "both" else build_copy_exif_command(workflow, folders=folders)
                     run_subprocess(real_cmd)
                 else:
                     print("Skipped.")
@@ -6238,31 +6109,31 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
     label = (f"{wf_names[workflow_type]} -- pattern '{';'.join(patterns)}' under "
              f"{truncate_path(root, 60)} ({len(found_folders)} folders)")
     if workflow_type == "copy_exif":
-        journal_cmds = [build_copy_exif_command(journal_wf, folders=found_folders, ps_name=cfg.config.ps_name)]
+        journal_cmds = [build_copy_exif_command(journal_wf, folders=found_folders)]
     elif workflow_type == "compress":
-        journal_cmds = [build_compress_command(journal_wf, folders=found_folders, ps_name=cfg.config.ps_name)]
+        journal_cmds = [build_compress_command(journal_wf, folders=found_folders)]
     else:
         journal_step1 = dict(journal_wf)
         journal_step1["compress_zip"] = False
         journal_cmds = [
-            build_copy_exif_command(journal_step1, folders=found_folders, ps_name=cfg.config.ps_name),
-            build_compress_command(journal_wf, folders=found_folders, ps_name=cfg.config.ps_name),
+            build_copy_exif_command(journal_step1, folders=found_folders),
+            build_compress_command(journal_wf, folders=found_folders),
         ]
     _save_last_run(cfg, workflow_type, label, journal_cmds,
                    autofind={"root": str(root), "patterns": list(patterns)})
 
     if workflow_type == "copy_exif":
-        cmd = build_copy_exif_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
+        cmd = build_copy_exif_command(workflow, folders=found_folders)
         run_and_prompt(cmd, found_folders)
         return True
     elif workflow_type == "compress":
-        cmd = build_compress_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
+        cmd = build_compress_command(workflow, folders=found_folders)
         run_and_prompt(cmd, found_folders)
         return True
     else:  # both
         step1_workflow = workflow.copy()
         step1_workflow["compress_zip"] = False
-        cmd_copy = build_copy_exif_command(step1_workflow, folders=found_folders, ps_name=cfg.config.ps_name)
+        cmd_copy = build_copy_exif_command(step1_workflow, folders=found_folders)
         if RICH_AVAILABLE and console:
             console.print(f"\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
             console.print(f"[dim]Running: {' '.join(cmd_copy)}[/dim]\n")
@@ -6278,7 +6149,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                 print("ERROR: Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).")
             return False
 
-        cmd = build_compress_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
+        cmd = build_compress_command(workflow, folders=found_folders)
         if RICH_AVAILABLE and console:
             console.print(f"\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
             console.print(f"[dim]Running: {' '.join(cmd)}[/dim]\n")
@@ -6299,8 +6170,8 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                     workflow["dry_run"] = False
                     copy_workflow = workflow.copy()
                     copy_workflow["compress_zip"] = False
-                    cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders, ps_name=cfg.config.ps_name)
-                    cmd_real = build_compress_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
+                    cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders)
+                    cmd_real = build_compress_command(workflow, folders=found_folders)
                     if RICH_AVAILABLE and console:
                         console.print(f"\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
                         console.print(f"[dim]Running: {' '.join(cmd_copy_real)}[/dim]\n")
@@ -6328,8 +6199,8 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                     workflow["dry_run"] = False
                     copy_workflow = workflow.copy()
                     copy_workflow["compress_zip"] = False
-                    cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders, ps_name=cfg.config.ps_name)
-                    cmd_real = build_compress_command(workflow, folders=found_folders, ps_name=cfg.config.ps_name)
+                    cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders)
+                    cmd_real = build_compress_command(workflow, folders=found_folders)
                     print("=== Step 1/2: Copy EXIF ===")
                     if run_subprocess(cmd_copy_real) != 0:
                         print("ERROR: Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).")
@@ -6343,12 +6214,12 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
 
 def run_generate_thumbnails(cfg: ToolConfig) -> bool:
     """Workflow 8: Generate sRGB thumbnails from TIFFs."""
-    script = SCRIPT_DIR / "generate_thumbnails.ps1"
+    script = SCRIPT_DIR / "generate_thumbnails.py"
     if not script.exists():
         if RICH_AVAILABLE and console:
-            console.print("[red]generate_thumbnails.ps1 not found.[/red]")
+            console.print("[red]generate_thumbnails.py not found.[/red]")
         else:
-            print("ERROR: generate_thumbnails.ps1 not found.")
+            print("ERROR: generate_thumbnails.py not found.")
         return False
     
     # Input directory
@@ -6437,7 +6308,7 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
         if out_dir is None:
             return False
         recursive, dry_run = _ask_recursive_and_dry()
-        cmd = [cfg.config.ps_name, "-NoProfile", "-File", str(script), "-InputDir", input_dir, "-Remove"]
+        cmd = _backend_command("generate_thumbnails.py", ["-InputDir", input_dir, "-Remove"])
         if out_dir:
             cmd += ["-OutputDir", out_dir]
         if recursive:
@@ -6452,12 +6323,12 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
             print(f"\nRunning: {' '.join(cmd)}\n")
         return run_subprocess(cmd) == 0
 
-    # The four prompt defaults come from generate_thumbnails.ps1's own param() block
+    # The four prompt defaults come from generate_thumbnails.py's own PARAMS table
     # (audit round 17): a literal here silently overrode an edited backend setting.
-    size_default = _backend_default("generate_thumbnails.ps1", "Size")
-    quality_default = _backend_default("generate_thumbnails.ps1", "Quality")
-    format_default = _backend_default("generate_thumbnails.ps1", "Format")
-    page_default = _backend_default("generate_thumbnails.ps1", "Page")
+    size_default = _backend_default("generate_thumbnails.py", "Size")
+    quality_default = _backend_default("generate_thumbnails.py", "Quality")
+    format_default = _backend_default("generate_thumbnails.py", "Format")
+    page_default = _backend_default("generate_thumbnails.py", "Page")
 
     # Thumbnail size (backend accepts 32-4096)
     if RICH_AVAILABLE and console:
@@ -6513,15 +6384,14 @@ def run_generate_thumbnails(cfg: ToolConfig) -> bool:
     recursive, dry_run = _ask_recursive_and_dry()
     exclude_folders = _ask_exclude_folders() if recursive else ""
 
-    cmd = [
-        cfg.config.ps_name, "-NoProfile", "-File", str(script),
+    cmd = _backend_command("generate_thumbnails.py", [
         "-InputDir", input_dir,
         "-Size", str(size),
         "-Quality", quality_str,
         "-Format", fmt,
         "-Page", page,
         "-Workers", str(clamp_workers(cfg.config.last_workers or cfg.config.default_workers)),
-    ]
+    ])
     if out_dir:
         cmd += ["-OutputDir", out_dir]
     if exclude_folders:
@@ -6548,7 +6418,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
                  dry_run: bool = False) -> int:
     """Run a journal entry -- the last run (Repeat) or a preset. 0 = ran (or nothing
     to do), 1 = failed or refused. `unattended` (--run-preset): no prompt at all,
-    stdin closed, -NonInteractive; a run that deletes sources is refused unless
+    stdin closed; a run that deletes sources is refused unless
     dry_run. `dry_run` comes only from the command line, never from the entry."""
     if not _journal_runnable(entry):
         _say("Nothing saved to run.", "yellow")
@@ -6609,9 +6479,9 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
         ok = execute_manifest_workflow(cfg, entries, workflow, unattended=unattended)
         return 0 if ok else 1
 
-    # Command-driven journals (1-4, 8): rebuild for the PowerShell detected NOW
-    # instead of swapping argv[0] -- the journal may have been written by the other
-    # shell, and the two invocation forms are not interchangeable (see _journal_parts).
+    # Command-driven journals (1-4, 8): rebuilt from their [script, *args] for this
+    # Python and the backends next to this wizard -- the journal may have been written
+    # by another copy, or by the PowerShell edition (see _journal_parts).
     parts_list = [_journal_parts([str(a) for a in c]) for c in entry["commands"]]
     if any(p is None for p in parts_list):
         _say("Saved workflow cannot be replayed: its command line was recorded in a "
@@ -6650,16 +6520,18 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
                  f"sessions added since are not included)", "yellow")
 
     for parts in parts_list:
-        # Validate the script that will actually run, which _journaled_script_path may have
-        # swapped for the other Copy EXIF backend.
-        script = _journaled_script_path(parts, cfg.config.ps_name)
+        # Validate the script that will actually run: one of this wizard's backends, the
+        # copy next to it. Anything else is never handed to Python.
+        script = _journaled_script_path(parts)
+        if script.name not in BACKEND_SCRIPTS:
+            _say(f"Saved workflow names a script this version does not run: {script.name}",
+                 "red")
+            return 1
         if not script.exists():
             _say(f"Backend script no longer exists: {script}", "red")
             return 1
 
-    # Read the flag from the neutral parts: under powershell.exe every argument is folded
-    # into one -Command string, so a membership test on the command list never matched and
-    # the DELETES-SOURCES warning was silently skipped on PS5.
+    # Read the flag from the [script, *args] parts, the way the backend binds it.
     deletes = (not dry_run) and any(_parts_replace_sources(p) for p in parts_list)
     if dry_run:
         for parts in parts_list:
@@ -6671,8 +6543,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
              "it from the menu, or pass --dry-run.", "red")
         return 1
 
-    run_cmds = [_rebuild_journaled_command(p, cfg.config.ps_name, non_interactive=unattended)
-                for p in parts_list]
+    run_cmds = [_rebuild_journaled_command(p) for p in parts_list]
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[bold cyan]{escape(title)}[/bold cyan]")
@@ -6742,11 +6613,11 @@ def _clean_preset_name(raw: str) -> Optional[str]:
 
 # --- Script settings menu (main menu 6) ------------------------------
 
-#: (overlay section, menu label, script whose OVERLAY-SPECS block and param() comments it shows)
+#: (overlay section, menu label, script whose OVERLAY_SPECS and PARAMS help it shows)
 _OVERLAY_MENU = [
-    ("compress_tiff_zip", "Compress TIFFs (compress_tiff_zip.ps1)", "compress_tiff_zip.ps1"),
-    ("copy_exif", "Copy EXIF (copy_exif_to_TIFF_ps5.ps1 and _ps7.ps1)", "copy_exif_to_TIFF_ps7.ps1"),
-    ("generate_thumbnails", "Generate thumbnails (generate_thumbnails.ps1)", "generate_thumbnails.ps1"),
+    ("compress_tiff_zip", "Compress TIFFs (compress_tiff_zip.py)", "compress_tiff_zip.py"),
+    ("copy_exif", "Copy EXIF (copy_exif_to_tiff.py)", "copy_exif_to_tiff.py"),
+    ("generate_thumbnails", "Generate thumbnails (generate_thumbnails.py)", "generate_thumbnails.py"),
     ("convert_tiff", "This wizard (convert_tiff.py)", None),
 ]
 
@@ -6818,9 +6689,9 @@ def _overlay_menu_rows(section: str, script: Optional[str]):
         values = _convert_tiff_script_values()
         return [(n, s, values.get(n), _CONVERT_SETTING_HELP.get(n, ""))
                 for n, s in _OVERLAY_SETTINGS.items()]
-    defaults = _ps_param_defaults(script)
-    helps = _ps_param_comments(script)
-    return [(n, s, defaults.get(n), helps.get(n, "")) for n, s in _ps_overlay_specs(script).items()]
+    defaults = _backend_param_defaults(script)
+    helps = _backend_param_help(script)
+    return [(n, s, defaults.get(n), helps.get(n, "")) for n, s in _backend_overlay_specs(script).items()]
 
 
 def _overlay_json_value(spec: str, parsed, checked):
@@ -6910,7 +6781,7 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
 
 def script_settings_menu(cfg) -> None:
     """Main menu 6: the scripts' own settings (folder names, timeouts, thumbnail defaults, ...)
-    changed in `.tiff_workflow_settings.json` instead of the .py/.ps1 files. Every script
+    changed in `.tiff_workflow_settings.json` instead of the .py files. Every script
     checks each value again when it starts and never takes a safety or per-run setting from
     the file (Mode, SafeMode, Overwrite, DeleteSource, Workers, ...)."""
     env = os.environ.get(_SETTINGS_OVERLAY_ENV)
@@ -7089,8 +6960,8 @@ def main():
 
     cfg = ConfigManager()
 
-    # Read-only listing: no PowerShell detection, no environment panel, so it works
-    # even on a machine where the shells are not on PATH.
+    # Read-only listing: no environment panel, so it works even on a machine where
+    # the tools are not on PATH.
     if args.list_presets:
         presets = cfg.config.presets or {}
         if not presets:
@@ -7103,11 +6974,6 @@ def main():
         sys.exit(0)
 
     _overlay_notice()
-
-    # Detect PowerShell version at startup
-    ps_major, ps_name, ps_version = detect_powershell_version()
-    cfg.config.ps_major = ps_major
-    cfg.config.ps_name = ps_name  # store for use in command builders
 
     if args.run_preset:
         presets = cfg.config.presets or {}
@@ -7148,9 +7014,6 @@ def main():
             continue
 
         if choice == "4":
-            ps_major, ps_name, ps_version = detect_powershell_version()
-            cfg.config.ps_major = ps_major
-            cfg.config.ps_name = ps_name
             show_environment_panel(cfg)
             # ...and the releases, now (the daily background ask may be a day old).
             line, notice = _update_check_now(cfg)
