@@ -957,6 +957,231 @@ def effective_workers(run, paths, bytes_per_pixel):
 
 # -- Modes 0-9 ------------------------------------------------------
 
+@dataclass
+class _Plan:
+    """What run_modes is going to do."""
+    jobs: list                  # the Jobs, in file order
+    collision_notes: dict       # final_dst (lower case) -> the rename note of its result line
+
+
+def _flat_destination(run, plan, f, final_dst, used_names):
+    """Mode 2: where `f` goes in the flat output once -DuplicateAction has dealt with a
+    name another source folder already gave out; None when the file is skipped (reported
+    here). `used_names`: the names given out so far, per output folder. Overwrite takes
+    the earlier claimant out of the plan."""
+    opt = run.opt
+    log = run.log
+    dest_dir = os.path.dirname(final_dst)
+    dest_name = os.path.basename(final_dst)
+    names = used_names.setdefault(dest_dir.lower(), set())
+    stem, ext = os.path.splitext(dest_name)
+
+    def taken(n, p):
+        return n.lower() in names or os.path.exists(p)
+
+    if dest_name.lower() in names:
+        action = opt["DuplicateAction"]
+        if action == "Skip":
+            log(f"SKIP (duplicate filename in flat output) | {f.name}", "INFO")
+            run.skip += 1
+            run.counter += 1
+            return None
+        if action == "Overwrite":
+            # Last claimant wins; the dropped file is still REPORTED.
+            for sup in [t for t in plan.jobs if tw.same_path(t.final_dst, final_dst)]:
+                run.count(f"SKIP (superseded by a later duplicate in flat output) | {sup.name}")
+            plan.jobs = [t for t in plan.jobs if not tw.same_path(t.final_dst, final_dst)]
+            log(f"OVERWRITE (duplicate filename in flat output) | {f.name}", "INFO")
+        else:
+            dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
+    elif opt["DuplicateAction"] == "Numbered" and not opt["Overwrite"] \
+            and not tw.same_path(final_dst, f.path) and os.path.exists(final_dst):
+        # not claimed in this run but already on disk
+        dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
+    names.add(dest_name.lower())
+    return final_dst
+
+
+def _claimed_destination(run, plan, f, final_dst, claimed):
+    """Modes other than 2: where `f` goes once a destination another source already
+    claimed is renamed (the note for its result line goes into the plan); None when the
+    file is skipped (reported here). `claimed`: destination -> the source that claimed it."""
+    overwrite = run.opt["Overwrite"]
+    # Two sources can claim one destination: modes 4-7 flatten different trees
+    # into a shared folder, and photo.tif and photo.tiff both map onto photo.tif.
+    key = final_dst.lower()
+    first = claimed.get(key)
+    # When the earlier claimant IS the destination file (photo.tif, the output of an
+    # earlier run, next to the photo.tiff it came from) this output already exists.
+    if not overwrite and first and not tw.same_path(first, f.path) \
+            and tw.same_path(first, final_dst):
+        run.count(f"SKIP (exists) | {f.name}")
+        return None
+    if first and not tw.same_path(first, f.path):
+        stem, ext = os.path.splitext(os.path.basename(final_dst))
+        cand_name, cand = tw.numbered_name(
+            os.path.dirname(final_dst), stem, ext,
+            lambda n, p: p.lower() in claimed or os.path.exists(p))
+        plan.collision_notes[cand.lower()] = f" [renamed to {cand_name} to avoid collision]"
+        final_dst = cand
+    claimed[final_dst.lower()] = f.path
+    return final_dst
+
+
+def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging):
+    """Modes 0/9: the Job for `f`, or None when the file is refused or skipped (reported
+    here). `pre_comp`: its compression from the batch probe ("" when unknown);
+    `comp_map`: that probe's result, to tell "not probed" from "probed, nothing read"."""
+    opt = run.opt
+    dry = opt["DryRun"]
+    overwrite = opt["Overwrite"]
+    # Everything that can refuse the file is decided HERE, while planning, so a
+    # skipped file is never queued.
+    comp = pre_comp
+    if f.path.lower() not in comp_map:
+        ok, comp = tw.ifd0_compression(f.path)
+        if not ok:
+            comp = ""
+    if not comp:
+        run.count(f"ERROR (exiftool check) | {f.name} | cannot detect compression")
+        return None
+    if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
+        skip_compressed = True
+        if opt["SkipCompressedWithThumb"]:
+            # only skip when a thumbnail is already embedded; otherwise reprocess
+            skip_compressed = tw.tiff_has_thumbnail_page(f.path, opt["MagickTimeout"])
+        if skip_compressed:
+            note = (" [no thumbnail added: pass -SkipCompressedWithThumb]"
+                    if opt["GenerateThumbnail"] else "")
+            run.count(f"SKIP ({comp}) | {f.name}{note}")
+            return None
+
+    safe_checked = False
+    if opt["SafeMode"]:
+        pc = tw.tiff_page_count(f.path, opt["MagickTimeout"])
+        if not pc.ok:
+            run.count(tw.page_count_error_line(pc, f.name))
+            return None
+        if pc.count > 1 and not tw.tiff_has_only_subfile_pages(
+                f.path, pc.count, tw.THUMBNAIL_PAGE_TYPES, opt["MagickTimeout"]):
+            run.multi_paths.append(f.path)
+            run.count(f"MULTI ({pc.count} pages - skipped, original untouched) | {f.name}")
+            return None
+        safe_checked = True
+
+    if os.path.exists(final_dst) and not overwrite and not tw.same_path(final_dst, f.path):
+        run.count(f"SKIP (exists) | {f.name}")
+        return None
+
+    keep_dir = None
+    src_length = src_mtime_ns = 0
+    if not dry:
+        # Nothing moves here: the original stays in place until its compressed copy
+        # has been written, decoded and put next to it (complete_keep_original).
+        # Without -StagingDir the worker writes a temp sibling of final_dst, never
+        # final_dst itself: for a .tif source that IS the original.
+        if not staging:
+            write_dst = tw.new_temp_sibling_path(final_dst, run.run_id)
+            run.temp_files.add(write_dst)
+        try:
+            st = os.stat(f.path)
+        except OSError as e:
+            run.count(f"ERROR (cannot read the original) | {f.name} | {e}")
+            return None
+        keep_dir = tw.join_path(f.dir, "OLD_TIFFs")
+        src_length = st.st_size
+        src_mtime_ns = st.st_mtime_ns
+    return Job(src=f.path, write_dst=write_dst, final_dst=final_dst, name=f.name,
+               comp=comp, safe_checked=safe_checked, keep_dir=keep_dir,
+               src_length=src_length, src_mtime_ns=src_mtime_ns)
+
+
+def _plan_jobs(run, files, comp_map, staging):
+    """The Job of every file `mode` can work on: a _Plan. A file with no place to go, or
+    refused before any work (a path too long, an output onto its own source, in modes
+    0/9 an already compressed or multi-page file), is reported here, in file order, and
+    not queued. Creates the output folders (not in a dry run)."""
+    opt = run.opt
+    mode = opt["Mode"]
+    dry = opt["DryRun"]
+    plan = _Plan(jobs=[], collision_notes={})
+    used_names = {}        # mode 2: names given out per output folder
+    claimed = {}           # other modes: destination -> the source that claimed it
+    for f in files:
+        final_dst = resolve_output(f, mode, f.input_root or f.dir, opt)
+        if not final_dst:
+            run.count(f"SKIP (mode {mode} cannot resolve an output path) | {f.name}")
+            continue
+
+        # Modes 1-7 write a COPY elsewhere. A folder name can still make the output resolve
+        # onto the source (ExportZipSubfolder "TIFF" in mode 7, ZipSuffix "_TIFF" in mode
+        # 4), and the original was replaced with no OLD_TIFFs and no question. Modes
+        # 1/3/4/6/7 never mean that; modes 2 (-OutputDir on the input root) and 5 (a file
+        # already inside ZIP\) do when the user asked for it on the command line, but not
+        # when the settings overlay set the name.
+        if 1 <= mode <= 7 and tw.same_path(final_dst, f.path):
+            overlay_names = [n for n in run.overlay_applied if n in _OVERLAY_PATH_NAMES]
+            if mode not in (2, 5) or overlay_names:
+                why = (f"settings overlay: {', '.join(overlay_names)}" if overlay_names else
+                       "check -ZipSuffix / -ZipSubfolderName / -ExportZipSubfolder / -ExportTiffSubfolder")
+                run.count(f"ERROR (mode {mode} would write over its own source - refused; {why}) | {f.name}")
+                continue
+
+        # An over-long output path used to fail deep inside the worker with a bare "No such
+        # file or directory". Refused here, before any folder is created. An in-place write
+        # goes through a temp sibling: +26 characters.
+        final_len = len(final_dst) + (TEMP_SIBLING_CHARS if tw.same_path(final_dst, f.path) else 0)
+        if final_len > MAX_PATH_CHARS:
+            run.count(f"ERROR (path too long: {final_len} chars, Windows allows {MAX_PATH_CHARS}) | {f.name} | {final_dst}")
+            continue
+
+        final_dir = os.path.dirname(final_dst)
+        if not dry and final_dir.strip() and not os.path.isdir(final_dir):
+            os.makedirs(final_dir, exist_ok=True)
+
+        if mode == 2:
+            final_dst = _flat_destination(run, plan, f, final_dst, used_names)
+        else:
+            final_dst = _claimed_destination(run, plan, f, final_dst, claimed)
+        if not final_dst:
+            continue
+
+        if staging and not dry:
+            if os.path.isfile(staging):
+                run.count(f"ERROR (StagingDir exists as a file) | {f.name} | {staging}")
+                continue
+            os.makedirs(staging, exist_ok=True)
+            write_dst = tw.join_path(staging, tw.staged_name(run.run_id, f.name))
+        else:
+            write_dst = final_dst
+
+        # The same length guard for the staged path (and for a final_dst a rename
+        # lengthened). Modes 0/9 always land through a temp sibling of final_dst.
+        write_len = len(write_dst) + (TEMP_SIBLING_CHARS if tw.same_path(write_dst, f.path) else 0)
+        final_len2 = len(final_dst) + (TEMP_SIBLING_CHARS if (tw.same_path(final_dst, f.path)
+                                                               or mode in (0, 9)) else 0)
+        if write_len > MAX_PATH_CHARS:
+            run.count(f"ERROR (path too long: {write_len} chars, Windows allows {MAX_PATH_CHARS}) | {f.name} | {write_dst}")
+            continue
+        if final_len2 > MAX_PATH_CHARS:
+            run.count(f"ERROR (path too long: {final_len2} chars, Windows allows {MAX_PATH_CHARS}) | {f.name} | {final_dst}")
+            continue
+
+        pre_comp = comp_map.get(f.path.lower(), "")
+        if pre_comp == "-":
+            pre_comp = ""
+
+        if mode in (0, 9):
+            job = _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging)
+            if job is None:
+                continue
+            plan.jobs.append(job)
+        else:
+            plan.jobs.append(Job(src=f.path, write_dst=write_dst, final_dst=final_dst,
+                                 name=f.name, comp=pre_comp))
+    return plan
+
+
 def _input_roots(run, bound):
     """(the input folders, the entries that do not exist), or None after logging why the
     run cannot start: -InputDir together with -InputDirFile, an unusable list file, or no
@@ -1142,181 +1367,9 @@ def run_modes(run, bound):
         if staging is None:
             return 1
 
-    # Build the (src, write_dst, final_dst) tasks
-    tasks = []
-    used_names = {}        # mode 2: names given out per output folder
-    claimed = {}           # other modes: destination -> the source that claimed it
-    collision_notes = {}   # rename notes appended to the result lines
-    for f in files:
-        final_dst = resolve_output(f, mode, f.input_root or f.dir, opt)
-        if not final_dst:
-            run.count(f"SKIP (mode {mode} cannot resolve an output path) | {f.name}")
-            continue
-
-        # Modes 1-7 write a COPY elsewhere. A folder name can still make the output resolve
-        # onto the source (ExportZipSubfolder "TIFF" in mode 7, ZipSuffix "_TIFF" in mode
-        # 4), and the original was replaced with no OLD_TIFFs and no question. Modes
-        # 1/3/4/6/7 never mean that; modes 2 (-OutputDir on the input root) and 5 (a file
-        # already inside ZIP\) do when the user asked for it on the command line, but not
-        # when the settings overlay set the name.
-        if 1 <= mode <= 7 and tw.same_path(final_dst, f.path):
-            overlay_names = [n for n in run.overlay_applied if n in _OVERLAY_PATH_NAMES]
-            if mode not in (2, 5) or overlay_names:
-                why = (f"settings overlay: {', '.join(overlay_names)}" if overlay_names else
-                       "check -ZipSuffix / -ZipSubfolderName / -ExportZipSubfolder / -ExportTiffSubfolder")
-                run.count(f"ERROR (mode {mode} would write over its own source - refused; {why}) | {f.name}")
-                continue
-
-        # An over-long output path used to fail deep inside the worker with a bare "No such
-        # file or directory". Refused here, before any folder is created. An in-place write
-        # goes through a temp sibling: +26 characters.
-        final_len = len(final_dst) + (TEMP_SIBLING_CHARS if tw.same_path(final_dst, f.path) else 0)
-        if final_len > MAX_PATH_CHARS:
-            run.count(f"ERROR (path too long: {final_len} chars, Windows allows {MAX_PATH_CHARS}) | {f.name} | {final_dst}")
-            continue
-
-        final_dir = os.path.dirname(final_dst)
-        if not dry and final_dir.strip() and not os.path.isdir(final_dir):
-            os.makedirs(final_dir, exist_ok=True)
-
-        if mode == 2:
-            # Name collisions across source folders, by -DuplicateAction
-            dest_dir = os.path.dirname(final_dst)
-            dest_name = os.path.basename(final_dst)
-            names = used_names.setdefault(dest_dir.lower(), set())
-            stem, ext = os.path.splitext(dest_name)
-
-            def taken(n, p):
-                return n.lower() in names or os.path.exists(p)
-
-            if dest_name.lower() in names:
-                action = opt["DuplicateAction"]
-                if action == "Skip":
-                    log(f"SKIP (duplicate filename in flat output) | {f.name}", "INFO")
-                    run.skip += 1
-                    run.counter += 1
-                    continue
-                if action == "Overwrite":
-                    # Last claimant wins; the dropped file is still REPORTED.
-                    for sup in [t for t in tasks if tw.same_path(t.final_dst, final_dst)]:
-                        run.count(f"SKIP (superseded by a later duplicate in flat output) | {sup.name}")
-                    tasks = [t for t in tasks if not tw.same_path(t.final_dst, final_dst)]
-                    log(f"OVERWRITE (duplicate filename in flat output) | {f.name}", "INFO")
-                else:
-                    dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
-            elif opt["DuplicateAction"] == "Numbered" and not overwrite \
-                    and not tw.same_path(final_dst, f.path) and os.path.exists(final_dst):
-                # not claimed in this run but already on disk
-                dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
-            names.add(dest_name.lower())
-        else:
-            # Two sources can claim one destination: modes 4-7 flatten different trees
-            # into a shared folder, and photo.tif and photo.tiff both map onto photo.tif.
-            key = final_dst.lower()
-            first = claimed.get(key)
-            # When the earlier claimant IS the destination file (photo.tif, the output of an
-            # earlier run, next to the photo.tiff it came from) this output already exists.
-            if not overwrite and first and not tw.same_path(first, f.path) \
-                    and tw.same_path(first, final_dst):
-                run.count(f"SKIP (exists) | {f.name}")
-                continue
-            if first and not tw.same_path(first, f.path):
-                stem, ext = os.path.splitext(os.path.basename(final_dst))
-                cand_name, cand = tw.numbered_name(
-                    os.path.dirname(final_dst), stem, ext,
-                    lambda n, p: p.lower() in claimed or os.path.exists(p))
-                collision_notes[cand.lower()] = f" [renamed to {cand_name} to avoid collision]"
-                final_dst = cand
-            claimed[final_dst.lower()] = f.path
-
-        if staging and not dry:
-            if os.path.isfile(staging):
-                run.count(f"ERROR (StagingDir exists as a file) | {f.name} | {staging}")
-                continue
-            os.makedirs(staging, exist_ok=True)
-            write_dst = tw.join_path(staging, tw.staged_name(run.run_id, f.name))
-        else:
-            write_dst = final_dst
-
-        # The same length guard for the staged path (and for a final_dst a rename
-        # lengthened). Modes 0/9 always land through a temp sibling of final_dst.
-        write_len = len(write_dst) + (TEMP_SIBLING_CHARS if tw.same_path(write_dst, f.path) else 0)
-        final_len2 = len(final_dst) + (TEMP_SIBLING_CHARS if (tw.same_path(final_dst, f.path)
-                                                               or mode in (0, 9)) else 0)
-        if write_len > MAX_PATH_CHARS:
-            run.count(f"ERROR (path too long: {write_len} chars, Windows allows {MAX_PATH_CHARS}) | {f.name} | {write_dst}")
-            continue
-        if final_len2 > MAX_PATH_CHARS:
-            run.count(f"ERROR (path too long: {final_len2} chars, Windows allows {MAX_PATH_CHARS}) | {f.name} | {final_dst}")
-            continue
-
-        pre_comp = comp_map.get(f.path.lower(), "")
-        if pre_comp == "-":
-            pre_comp = ""
-
-        if mode in (0, 9):
-            # Everything that can refuse the file is decided HERE, while planning, so a
-            # skipped file is never queued.
-            comp = pre_comp
-            if f.path.lower() not in comp_map:
-                ok, comp = tw.ifd0_compression(f.path)
-                if not ok:
-                    comp = ""
-            if not comp:
-                run.count(f"ERROR (exiftool check) | {f.name} | cannot detect compression")
-                continue
-            if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
-                skip_compressed = True
-                if opt["SkipCompressedWithThumb"]:
-                    # only skip when a thumbnail is already embedded; otherwise reprocess
-                    skip_compressed = tw.tiff_has_thumbnail_page(f.path, opt["MagickTimeout"])
-                if skip_compressed:
-                    note = (" [no thumbnail added: pass -SkipCompressedWithThumb]"
-                            if opt["GenerateThumbnail"] else "")
-                    run.count(f"SKIP ({comp}) | {f.name}{note}")
-                    continue
-
-            safe_checked = False
-            if opt["SafeMode"]:
-                pc = tw.tiff_page_count(f.path, opt["MagickTimeout"])
-                if not pc.ok:
-                    run.count(tw.page_count_error_line(pc, f.name))
-                    continue
-                if pc.count > 1 and not tw.tiff_has_only_subfile_pages(
-                        f.path, pc.count, tw.THUMBNAIL_PAGE_TYPES, opt["MagickTimeout"]):
-                    run.multi_paths.append(f.path)
-                    run.count(f"MULTI ({pc.count} pages - skipped, original untouched) | {f.name}")
-                    continue
-                safe_checked = True
-
-            if os.path.exists(final_dst) and not overwrite and not tw.same_path(final_dst, f.path):
-                run.count(f"SKIP (exists) | {f.name}")
-                continue
-
-            keep_dir = None
-            src_length = src_mtime_ns = 0
-            if not dry:
-                # Nothing moves here: the original stays in place until its compressed copy
-                # has been written, decoded and put next to it (complete_keep_original).
-                # Without -StagingDir the worker writes a temp sibling of final_dst, never
-                # final_dst itself: for a .tif source that IS the original.
-                if not staging:
-                    write_dst = tw.new_temp_sibling_path(final_dst, run.run_id)
-                    run.temp_files.add(write_dst)
-                try:
-                    st = os.stat(f.path)
-                except OSError as e:
-                    run.count(f"ERROR (cannot read the original) | {f.name} | {e}")
-                    continue
-                keep_dir = tw.join_path(f.dir, "OLD_TIFFs")
-                src_length = st.st_size
-                src_mtime_ns = st.st_mtime_ns
-            tasks.append(Job(src=f.path, write_dst=write_dst, final_dst=final_dst, name=f.name,
-                             comp=comp, safe_checked=safe_checked, keep_dir=keep_dir,
-                             src_length=src_length, src_mtime_ns=src_mtime_ns))
-        else:
-            tasks.append(Job(src=f.path, write_dst=write_dst, final_dst=final_dst, name=f.name,
-                             comp=pre_comp))
+    plan = _plan_jobs(run, files, comp_map, staging)
+    tasks = plan.jobs
+    collision_notes = plan.collision_notes
 
     if not tasks:
         # INFO when nothing went wrong: every file skipped as already compressed is the
