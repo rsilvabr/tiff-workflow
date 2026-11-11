@@ -957,24 +957,23 @@ def effective_workers(run, paths, bytes_per_pixel):
 
 # -- Modes 0-9 ------------------------------------------------------
 
-def run_modes(run, bound):
+def _input_roots(run, bound):
+    """(the input folders, the entries that do not exist), or None after logging why the
+    run cannot start: -InputDir together with -InputDirFile, an unusable list file, or no
+    folder that exists. The missing ones are logged here; the caller counts them."""
     opt = run.opt
     log = run.log
-    mode = opt["Mode"]
-    dry = opt["DryRun"]
-    overwrite = opt["Overwrite"]
-
     # Several input folders separated by ';' (the wizard's AutoFind), or -InputDirFile.
     entries = opt["InputDir"].split(";")
     if opt["InputDirFile"]:
         if "InputDir" in bound:
             log("ERROR: pass -InputDir or -InputDirFile, not both", "ERROR")
-            return 1
+            return None
         try:
             entries = tw.read_input_dir_file(opt["InputDirFile"])
         except tw.UsageError as e:
             log(f"ERROR: {e}", "ERROR")
-            return 1
+            return None
 
     input_roots = []
     missing_roots = []
@@ -999,7 +998,21 @@ def run_modes(run, bound):
     if not input_roots:
         log("No valid input directories specified.", "ERROR")
         log(f"Log: {log.path}")
+        return None
+    return input_roots, missing_roots
+
+
+def run_modes(run, bound):
+    opt = run.opt
+    log = run.log
+    mode = opt["Mode"]
+    dry = opt["DryRun"]
+    overwrite = opt["Overwrite"]
+
+    resolved = _input_roots(run, bound)
+    if resolved is None:
         return 1
+    input_roots, missing_roots = resolved
 
     # A RELATIVE -OutputDir is resolved ONCE, against the current folder: re-based on each
     # input root it scattered one flat output across A\out and B\out.
