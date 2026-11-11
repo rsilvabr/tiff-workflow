@@ -68,6 +68,11 @@ THUMB_NAME_RE = re.compile(r"_thumb(_v\d+)?(-\d+)?$", re.I)
 # exist to process, and `ZIP/` is where modes 1/3/5/6/7 PUT the compressed library.
 TOOL_OUTPUT_NAMES = ("OLD_TIFFs", "OLD_TIFF", "converted_zip")
 
+# The thumbnails made at once, whatever -Workers asks for (it accepts up to 64, as the
+# other backends do): each one is a magick process that reads a whole TIFF. A run that asks
+# for more says so -- until v3.0.0 the limit was applied without a word.
+MAX_PARALLEL = 16
+
 
 class Counters:
     def __init__(self):
@@ -327,7 +332,10 @@ def run(argv):
     pairs = _plan(log, files, output_dir, fmt)
     cfg = ThumbSettings(size, quality, fmt, page, dry_run, srgb)
 
-    workers = min(opt["Workers"], 16)
+    workers = min(opt["Workers"], MAX_PARALLEL)
+    if opt["Workers"] > MAX_PARALLEL:
+        log(f"Workers: {opt['Workers']} asked, {MAX_PARALLEL} used "
+            f"(generate_thumbnails makes at most {MAX_PARALLEL} thumbnails at once)")
     for pair, result in tw.run_tasks(pairs, lambda p: make_thumbnail(p[0], p[1], cfg), workers):
         line = result if isinstance(result, str) else f"ERROR | {os.path.basename(pair[0])} | {result}"
         c.counter += 1

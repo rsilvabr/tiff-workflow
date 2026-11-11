@@ -2123,6 +2123,28 @@ class TestCommandLine:
 # ---------------------------------------------------------------------------
 
 class TestThumbnails:
+    @pytest.mark.parametrize("asked, used, said_so", [("64", gt.MAX_PARALLEL, True),
+                                                      (str(gt.MAX_PARALLEL + 1), gt.MAX_PARALLEL, True),
+                                                      (str(gt.MAX_PARALLEL), gt.MAX_PARALLEL, False),
+                                                      ("3", 3, False)])
+    def test_more_workers_than_the_limit_is_said_not_silent(self, tools, tmp_path, monkeypatch, capsys,
+                                                            asked, used, said_so):
+        """v3.1 (O7): -Workers accepts up to 64 and at most 16 ran, without a word."""
+        lib = tmp_path / "伊豆沼 [FINAL] 50% x"
+        lib.mkdir()
+        (lib / "a.tif").write_bytes(b"ORIGINAL")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tw, "find_tool", lambda n: n)
+        ran_with = []
+        real = tw.run_tasks
+        monkeypatch.setattr(tw, "run_tasks", lambda tasks, worker, workers: ran_with.append(workers)
+                            or real(tasks, worker, workers))
+        rc = gt.main(["-InputDir", str(lib), "-Workers", asked, "-DryRun"])
+        out = capsys.readouterr().out
+        assert rc == 0 and ran_with == [used], out
+        line = f"Workers: {asked} asked, {gt.MAX_PARALLEL} used"
+        assert (line in out) == said_so, out
+
     def test_remove_keeps_a_tiff_larger_than_size(self, monkeypatch):
         """Round 28: -Remove finds thumbnails by NAME, and a 1200x800 hitchhiker_thumb.tif
         was a photo. This script never writes a thumbnail larger than -Size."""
