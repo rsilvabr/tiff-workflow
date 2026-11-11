@@ -154,9 +154,12 @@ The wizard's AutoFind feature scans recursively for folders matching `S5pro` or 
 -InputDir "E:\photos\S5pro\session1;E:\photos\S5pro\session2;E:\photos\S3pro\session3"
 ```
 
-**Note on `-ExcludeFolders`:** the Copy EXIF backend accepts the flag for consistency with the
-other backends, but it reads each `-InputDir` folder **non-recursively** -- there is nothing below
-its roots to exclude, so the flag only really bites in the recursive compression modes.
+**Note on `-ExcludeFolders`:** the Copy EXIF backend reads each `-InputDir` folder
+**non-recursively**, so inside a folder there is nothing to exclude. Since v3.1 the names apply to
+the folders `-AutoFind` finds: a session that sits below a folder of that name (or is named so) is
+left out, and the log says how many (`Excluded 1 folder(s) under: temp`). Until v3.0.0 the flag did
+nothing in this backend. The tool's own folders (`Logs`, `OLD_TIFFs`, `ZIP`, `_EXPORT`,
+`converted_zip`) are never searched, with or without the flag.
 
 Each session folder is processed independently.
 

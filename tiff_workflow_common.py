@@ -444,6 +444,27 @@ def full_path(path):
     return os.path.abspath(str(path))
 
 
+def resolve_input_dirs(entries, allow_files=False):
+    """The entries of -InputDir / -InputDirFile as (the ones that exist, the ones that do
+    not): each made absolute ("." or "a\\..\\b" once broke the root compare of the folder
+    exclusion), blank ones dropped, and a repeated one taken ONCE -- "A;A" used to process a
+    folder twice, and a missing folder listed twice was two errors in one backend and one
+    in another. An entry must be a folder; `allow_files` also takes a file
+    (generate_thumbnails: a TIFF passed directly is its own root)."""
+    found, missing, seen = [], [], set()
+    for entry in entries:
+        entry = entry.strip()
+        if not entry:
+            continue
+        entry = full_path(entry)
+        if entry.lower() in seen:
+            continue
+        seen.add(entry.lower())
+        exists = os.path.exists(entry) if allow_files else os.path.isdir(entry)
+        (found if exists else missing).append(entry)
+    return found, missing
+
+
 def numbered_name(directory, stem, ext, taken):
     """<stem>_v2<ext>, _v3, ...: the first name `taken(name, path)` does not refuse.
     Returns (name, its path in `directory`)."""

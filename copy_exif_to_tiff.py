@@ -506,12 +506,6 @@ def process_folder(run, root):
     for d in sorted(set(unreadable), key=str.lower):
         log(f"cannot read folder (skipped): {d}", "WARN")
 
-    if run.exclude_names:
-        before = len(tiffs)
-        tiffs = [f for f in tiffs if not tw.path_excluded(f.dir, root, run.exclude_names)]
-        if before - len(tiffs) > 0:
-            log(f"Excluded {before - len(tiffs)} file(s) under: {'; '.join(run.exclude_names)}")
-
     if not tiffs:
         log(f"No TIFFs found in: {root}", "WARN")
         return
@@ -605,35 +599,21 @@ def _input_dirs(opt, log):
     elif opt["InputDir"]:
         entries = opt["InputDir"].split(";")
 
-    input_dirs = []
-    missing_roots = []
-    if entries:
-        seen = set()
-        for d in entries:
-            d = d.strip()
-            if not d:
-                continue
-            d = tw.full_path(d)
-            if not os.path.isdir(d):
-                missing_roots.append(d)
-                continue
-            # A doubled entry ("A;A") used to process the same folder twice.
-            if d.lower() in seen:
-                continue
-            seen.add(d.lower())
-            input_dirs.append(d)
-    else:
-        input_dirs = [os.getcwd()]
-    return input_dirs, missing_roots
+    if not entries:
+        return [os.getcwd()], []
+    return tw.resolve_input_dirs(entries)
 
 
-def _autofind_folders(root, pattern):
-    """The folders below `root` whose name contains `pattern`. The pattern is text, not a
-    wildcard: a '[' in a folder name is itself. The tool-output folders are matched as
-    segments BELOW the root."""
-    return [d for d in tw.list_dirs(root, True)
+def _autofind_folders(root, pattern, exclude_names=()):
+    """(the folders below `root` whose name contains `pattern`, how many more of them
+    -ExcludeFolders left out). The pattern is text, not a wildcard: a '[' in a folder name
+    is itself. The tool-output folders and the -ExcludeFolders names are matched as
+    segments BELOW the root (a session inside an excluded folder, or named like one)."""
+    hits = [d for d in tw.list_dirs(root, True)
             if pattern.lower() in os.path.basename(d).lower()
             and not tw.path_excluded(d, root, AUTOFIND_SKIP)]
+    kept = [d for d in hits if not tw.path_excluded(d, root, exclude_names)]
+    return kept, len(hits) - len(kept)
 
 
 def _log_summary(run):
@@ -667,8 +647,8 @@ def run_main(argv, state):
         tw.say(f"WARNING: settings overlay: {w}")
 
     # ';'-separated folder NAMES (not paths). This backend lists the TIFFs of a folder
-    # without descending, so every TIFF sits directly in a root and there is nothing below
-    # it to exclude; the flag is accepted so the wizard can pass one answer to every step.
+    # without descending, so inside a folder there is nothing to exclude: the names apply
+    # to the folders -AutoFind finds (v3.1; until v3.0.0 the flag did nothing here).
     try:
         exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])
     except tw.UsageError as e:
@@ -725,7 +705,9 @@ def run_main(argv, state):
         if opt["AutoFind"]:
             pattern = opt["FolderPattern"]
             log(f"AutoFind mode | Pattern: '{pattern}' | Root: {root}")
-            matching = _autofind_folders(root, pattern)
+            matching, left_out = _autofind_folders(root, pattern, run.exclude_names)
+            if left_out:
+                log(f"Excluded {left_out} folder(s) under: {'; '.join(run.exclude_names)}")
             if not matching:
                 log(f"No folders matching '{pattern}' found in: {root}", "WARN")
             else:

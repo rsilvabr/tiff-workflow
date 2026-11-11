@@ -831,8 +831,9 @@ def effective_workers(run, paths, bytes_per_pixel):
             run.log(f"Workers capped to {opt['CapWorkers']} (CapWorkers limit)")
         workers = min(workers, opt["CapWorkers"])
     if not opt["DryRun"]:
-        workers = min(workers, tw.memory_capped_workers(
-            opt["Workers"], paths, bytes_per_pixel, opt["WorkerMemoryFraction"], run.log))
+        # from the capped value: "reduced from 8 to 4" while 2 run said two wrong things
+        workers = tw.memory_capped_workers(
+            workers, paths, bytes_per_pixel, opt["WorkerMemoryFraction"], run.log)
     return max(1, workers)
 
 
@@ -863,9 +864,7 @@ def _flat_destination(run, plan, f, final_dst, used_names):
     if dest_name.lower() in names:
         action = opt["DuplicateAction"]
         if action == "Skip":
-            log(f"SKIP (duplicate filename in flat output) | {f.name}", "INFO")
-            run.skip += 1
-            run.counter += 1
+            run.count(f"SKIP (duplicate filename in flat output) | {f.name}")
             return None
         if action == "Overwrite":
             # Last claimant wins; the dropped file is still REPORTED.
@@ -927,11 +926,13 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging
         run.count(f"ERROR (exiftool check) | {f.name} | cannot detect compression")
         return None
     if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
-        skip_compressed = True
+        # the same two lines as process_job gives the modes 1-8
         if opt["SkipCompressedWithThumb"]:
             # only skip when a thumbnail is already embedded; otherwise reprocess
-            skip_compressed = tw.tiff_has_thumbnail_page(f.path, opt["MagickTimeout"])
-        if skip_compressed:
+            if tw.tiff_has_thumbnail_page(f.path, opt["MagickTimeout"]):
+                run.count(f"SKIP (compressed+thumb) | {f.name}")
+                return None
+        else:
             note = (" [no thumbnail added: pass -SkipCompressedWithThumb]"
                     if opt["GenerateThumbnail"] else "")
             run.count(f"SKIP ({comp}) | {f.name}{note}")
@@ -1229,23 +1230,8 @@ def _input_roots(run, bound):
             log(f"ERROR: {e}", "ERROR")
             return None
 
-    input_roots = []
-    missing_roots = []
-    seen_roots = set()
-    for d in entries:
-        d = d.strip()
-        if not d:
-            continue
-        # Normalised: "." or "a\..\b" once broke the root compare of the folder exclusion.
-        d = tw.full_path(d)
-        if d.lower() in seen_roots:
-            continue
-        seen_roots.add(d.lower())
-        # A typo used to fall through to "No TIFF files found" and exit 0.
-        if not os.path.isdir(d):
-            missing_roots.append(d)
-            continue
-        input_roots.append(d)
+    # A typo used to fall through to "No TIFF files found" and exit 0.
+    input_roots, missing_roots = tw.resolve_input_dirs(entries)
 
     for m in missing_roots:
         log(f"ERROR: input directory not found: {m}", "ERROR")

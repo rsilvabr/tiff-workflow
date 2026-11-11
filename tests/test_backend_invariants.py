@@ -944,6 +944,65 @@ class TestCopyExifOutputNames:
         assert len(self.renames(run)) == 1
 
 
+class TestCopyExifAutoFind:
+    """copy_exif -AutoFind: the folders below the root whose name holds the pattern. v3.1
+    (O4): -ExcludeFolders did nothing in this backend; its names now leave out the sessions
+    that sit below a folder of that name (or are named so), as in the other backends."""
+
+    @pytest.fixture
+    def lib(self, tmp_path):
+        root = tmp_path / "伊豆沼 [FINAL] 50% x"
+        for rel in ("070101 S5pro [1]", "temp 一時/070102 S5pro", "070103 s5PRO bak",
+                    "OLD_TIFFs/070104 S5pro", "070105 Z8"):
+            d = root / rel
+            d.mkdir(parents=True)
+            (d / "DSCF0001.tif").write_bytes(b"TIFF")
+            (d / "DSCF0001.jpg").write_bytes(b"JPEG")
+        return root
+
+    def names(self, folders, root):
+        return [os.path.relpath(d, root) for d in folders]
+
+    def test_without_exclusions_every_session_outside_the_tool_folders(self, lib):
+        kept, left_out = cx._autofind_folders(str(lib), "S5pro")
+        assert self.names(kept, lib) == ["070101 S5pro [1]", "070103 s5PRO bak", r"temp 一時\070102 S5pro"]
+        assert left_out == 0, "a tool-output folder (OLD_TIFFs) is not an exclusion of the user's"
+
+    def test_a_session_below_an_excluded_name_is_left_out(self, lib):
+        kept, left_out = cx._autofind_folders(str(lib), "S5pro", ["TEMP 一時"])
+        assert self.names(kept, lib) == ["070101 S5pro [1]", "070103 s5PRO bak"] and left_out == 1
+
+    def test_a_session_named_like_an_exclusion_is_left_out(self, lib):
+        kept, left_out = cx._autofind_folders(str(lib), "S5pro", ["070103 S5pro bak", "nothing"])
+        assert self.names(kept, lib) == ["070101 S5pro [1]", r"temp 一時\070102 S5pro"] and left_out == 1
+
+    def test_a_name_above_the_root_excludes_nothing(self, lib):
+        """Names are matched BELOW the scan root (round 14)."""
+        kept, left_out = cx._autofind_folders(str(lib), "S5pro", [lib.name, lib.parent.name])
+        assert len(kept) == 3 and left_out == 0
+
+    def test_the_run_processes_what_is_left_and_says_how_many_were_not(self, tools, lib, monkeypatch,
+                                                                     capsys):
+        monkeypatch.chdir(lib)
+        monkeypatch.setattr(tw, "find_tool", lambda n: n)
+        rc = cx.main(["-InputDir", str(lib), "-AutoFind", "-FolderPattern", "S5pro",
+                      "-ExcludeFolders", "temp 一時", "-DryRun", "-Workers", "1"])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "Excluded 1 folder(s) under: temp 一時" in out and "Folders found: 2" in out
+        assert out.count("] DRY (") == 2, out
+        assert "070102 S5pro" not in out, "the excluded session was listed or processed"
+
+    def test_every_session_excluded_is_a_warning_not_a_crash(self, tools, lib, monkeypatch, capsys):
+        monkeypatch.chdir(lib)
+        monkeypatch.setattr(tw, "find_tool", lambda n: n)
+        rc = cx.main(["-InputDir", str(lib / "temp 一時"), "-AutoFind", "-FolderPattern", "S5pro",
+                      "-ExcludeFolders", "070102 S5pro", "-DryRun"])
+        out = capsys.readouterr().out
+        assert rc == 0 and "Excluded 1 folder(s)" in out and "No folders matching 'S5pro'" in out
+        assert "] DRY (" not in out
+
+
 def error_lines(run):
     return [msg for level, msg in run.log.lines if level == "ERROR"]
 
@@ -1059,8 +1118,57 @@ class TestPlan:
                         "-DuplicateAction", "Skip")
         assert rc == 0 and os.listdir(out) == ["x 50%.tif"]
         assert [c[1] for c in tools.magick_calls] == [str(root / "a" / "x 50%.tif")]
-        assert len(said(run, "SKIP (duplicate filename in flat output) | x 50%.tif")) == 1
+        # v3.1: counted through Run.count like every other result, so it has its [n/total]
+        assert said(run, "SKIP (duplicate filename in flat output) | x 50%.tif") == \
+            ["[1/2] SKIP (duplicate filename in flat output) | x 50%.tif"]
         assert (run.ok, run.skip, run.counter, run.total) == (1, 1, 2, 2)
+
+    @pytest.mark.parametrize("mode", ["1", "0", "9"])
+    def test_a_compressed_file_with_its_thumbnail_is_skipped_with_one_line_in_every_mode(
+            self, tools, photo, mode, monkeypatch):
+        """v3.1 (O1): with -SkipCompressedWithThumb the modes 0/9 said `SKIP (Adobe Deflate)
+        ... [no thumbnail added: pass -SkipCompressedWithThumb]` -- the option that WAS passed."""
+        tools.comp = "Adobe Deflate"
+        monkeypatch.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: True)
+        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-GenerateThumbnail",
+                        "-SkipCompressedWithThumb")
+        assert rc == 0 and tools.magick_calls == []
+        assert said(run, "SKIP") == [f"[1/1] SKIP (compressed+thumb) | {photo.name}"]
+
+    @pytest.mark.parametrize("mode", ["1", "0", "9"])
+    def test_without_the_switch_the_skip_says_how_to_get_the_thumbnail(self, tools, photo, mode):
+        tools.comp = "Adobe Deflate"
+        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-GenerateThumbnail")
+        assert said(run, "SKIP") == [f"[1/1] SKIP (Adobe Deflate) | {photo.name} "
+                                     "[no thumbnail added: pass -SkipCompressedWithThumb]"]
+
+    @pytest.mark.parametrize("mode", ["0", "9"])
+    def test_a_compressed_file_without_a_thumbnail_is_reprocessed_when_asked(self, tools, photo, mode,
+                                                                           monkeypatch):
+        """-SkipCompressedWithThumb skips ONLY the files that have their thumbnail."""
+        tools.comp = "Adobe Deflate"
+        monkeypatch.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: False)
+        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-GenerateThumbnail",
+                        "-SkipCompressedWithThumb")
+        assert said(run, "SKIP") == [] and tools.magick_calls
+
+    @pytest.mark.parametrize("memory_for, runs, reduced", [(4, 2, False), (1, 1, True), (8, 2, False)])
+    def test_the_memory_limit_starts_from_the_capped_workers(self, tools, monkeypatch,
+                                                             memory_for, runs, reduced):
+        """v3.1 (O5): -Workers 8 -CapWorkers 2 with memory for 4 logged `Workers reduced
+        from 8 to 4` while 2 ran."""
+        run = compress_run("-Mode", "1", "-Workers", "8", "-CapWorkers", "2")
+        run.parallel = True
+        monkeypatch.setattr(tw, "available_memory_bytes", lambda: memory_for * 1000)
+        monkeypatch.setattr(tw, "max_image_pixels", lambda paths, chunk_size=400: 1000 / 75)
+        run.opt["WorkerMemoryFraction"] = 1.0
+        assert cz.effective_workers(run, ["a.tif"], tw.COMPARE_BYTES_PER_PIXEL) == runs
+        assert said(run, "Workers capped to 2 (CapWorkers limit)")
+        lines = said(run, "Workers reduced")
+        assert bool(lines) == reduced
+        if reduced:
+            assert lines[0].startswith("Workers reduced from 2 to 1: 2 ImageMagick processes")
+        assert not said(run, "from 8 to")
 
     @pytest.mark.parametrize("mode", ["0", "9"])
     def test_modes_0_and_9_refuse_a_multi_page_file_while_planning(self, tools, photo, mode):
@@ -1592,6 +1700,41 @@ class TestPathsAndMoves:
         assert tw.path_excluded("E:/Temp/OLD_TIFFs/2019/x/ZIP", "E:/Temp/OLD_TIFFs/2019/", ["zip"]) is True
         assert tw.path_excluded(r"E:\Tempest\zip", r"E:\Temp", ["zip"]) is True, "not under the root: skip"
         assert tw.path_excluded(root + r"\a", root, []) is False
+
+    def test_input_folders_are_taken_once_and_the_missing_ones_apart(self, tmp_path, monkeypatch):
+        """v3.1: one resolver for the three backends (tw.resolve_input_dirs)."""
+        lib = tmp_path / "伊豆沼 [FINAL] 50% x"
+        (lib / "a").mkdir(parents=True)
+        (lib / "f.tif").write_bytes(b"x")
+        monkeypatch.chdir(lib)
+        a, nope, f = str(lib / "a"), str(lib / "nope"), str(lib / "f.tif")
+        found, missing = tw.resolve_input_dirs([" a ", "", a.upper(), nope, "nope", r"a\..\a", f])
+        assert found == [a] and missing == [nope, f], "a file is not a folder"
+        found, missing = tw.resolve_input_dirs(["a", "f.tif", "nope", "F.TIF"], allow_files=True)
+        assert found == [a, f] and missing == [nope]
+        assert tw.resolve_input_dirs(["."]) == ([str(lib)], [])
+        assert tw.resolve_input_dirs([" ", ""]) == ([], [])
+
+    @pytest.mark.parametrize("backend", ["compress", "copy_exif", "thumbnails"])
+    def test_a_missing_folder_listed_twice_is_one_error(self, tools, tmp_path, monkeypatch, capsys,
+                                                        backend):
+        """v3.1 (O3): copy_exif and generate_thumbnails logged and counted it twice,
+        compress once. One line, one error, exit code 1 in the three."""
+        lib = tmp_path / "伊豆沼 [FINAL] x"
+        (lib / "ok").mkdir(parents=True)
+        (lib / "ok" / "a.tif").write_bytes(b"ORIGINAL")
+        monkeypatch.chdir(lib)
+        monkeypatch.setattr(tw, "find_tool", lambda n: n)
+        nope = str(lib / "nope")
+        dirs = f"{nope};{nope};{lib / 'ok'};{nope.upper()}"
+        rc = {"compress": lambda: cz.main(["-Mode", "1", "-InputDir", dirs, "-DryRun"]),
+              "copy_exif": lambda: cx.main(["-InputDir", dirs, "-DryRun"]),
+              "thumbnails": lambda: gt.main(["-InputDir", dirs, "-DryRun"])}[backend]()
+        out = capsys.readouterr().out
+        assert rc == 1, out
+        assert sum("input directory not found" in ln for ln in out.splitlines()) == 1, out
+        done = [ln for ln in out.splitlines() if "Done:" in ln]
+        assert len(done) == 1 and "| 1 errors" in done[0], out
 
     def test_exclude_folders_takes_names_not_paths(self):
         assert tw.parse_exclude_folders(" _EXPORT ; temp;; ") == ["_EXPORT", "temp"]

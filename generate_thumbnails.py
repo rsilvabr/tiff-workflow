@@ -163,18 +163,7 @@ def _input_roots(opt):
     """(the -InputDir entries that exist, the ones that do not). A ';' separated list like
     the other backends; a bad path is an ERROR, not a WARN: a typo used to look identical
     to "folder has no TIFFs" and exited 0."""
-    input_roots = []
-    missing_roots = []
-    for entry in opt["InputDir"].split(";"):
-        entry = entry.strip()
-        if not entry:
-            continue
-        entry = tw.full_path(entry)
-        if not os.path.exists(entry):
-            missing_roots.append(entry)
-            continue
-        input_roots.append(entry)
-    return input_roots, missing_roots
+    return tw.resolve_input_dirs(opt["InputDir"].split(";"), allow_files=True)
 
 
 def _discover(log, input_roots, recurse, tool_output_names):
