@@ -12,7 +12,7 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
-## Unreleased - Audit Round 28
+## v2.9.1 - Audit Round 28
 
 The bug sweep of 2026-11-11 (22 findings, `AI_tools/261111_Fable_review_bug-sweep.md`).
 

@@ -10,6 +10,46 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v2.9.1
+
+Fixes only (audit round 28: a bug sweep of v2.9.0, 22 findings, and its review).
+
+- **A black-and-white photo stored as RGB stays RGB.** When every pixel of an RGB TIFF had
+  R=G=B (B&W film scanned in colour mode, a B&W conversion exported as RGB), ImageMagick wrote
+  the compressed file with ONE gray channel and left the RGB colour profile in it. The tones
+  were all there, but the file was no longer RGB, and a gray file with an RGB profile is a pair
+  some programs reject. A VueScan RGB + infrared scan in the same case (4 samples, R=G=B) came
+  out scrambled in modes 0-7 and 9 (mode 8 refused it). Every check said OK, because they all
+  decode through ImageMagick, where gray and neutral RGB look the same. The compressed file
+  now keeps the channel layout of the source, and a new check compares it page by page before
+  anything is replaced. **If you compressed such files with v2.9.0 or earlier, see the release
+  notes of v2.9.1**
+- **IPTC text outside Latin (Japanese, Greek, ...) survives.** With a `%` anywhere in the path,
+  or in an in-place run, keywords and captions stored in IPTC came back as `???` (XMP was not
+  affected). Copy EXIF did the same to a JPEG's UTF-8 IPTC
+- **No swap leaves a photo's place empty.** Replacing a file is now a single rename everywhere
+  (PowerShell's own move deletes the destination first). Copy EXIF with `-CompressZip` and a
+  staging folder on another drive copied straight into the photo's name; the padded 16 -> 8-bit
+  conversion moved the original out before its replacement had arrived. Both now bring the new
+  file next to the photo first and swap last
+- **A file whose metadata could not be restored never replaces the original** (mode 8 and
+  in-place runs; it used to be a warning). On PowerShell 7 an error inside a worker could even
+  report `OK [SOURCE DELETED]` for a file left without EXIF
+- **With a staging folder, an in-place run is checked like any other** (the pixel check was
+  skipped when the destination was the file itself)
+- **Settings file:** a folder name in it can no longer turn a copy mode into an in-place
+  replace, and the PowerShell scripts now refuse exactly the files the wizard refuses (comments,
+  trailing commas, UTF-16, ...), so both always run with the same values
+- **Delete OLD_TIFFs** also compares XMP, IPTC and the channel layout before it deletes a backup
+- Associated alpha that is not fully opaque is refused (ImageMagick cannot rewrite it without
+  changing samples); such a file is left as it is and reported
+- Smaller: a backup named like `Scan_20190815_143000.tif` is restored under its own name;
+  `move_old_backups.py` keeps a `name_v2.tif` whose place is empty; AutoFind skips a folder with
+  `;` in its name; presets store absolute folders; `--run-preset` refuses every spelling of
+  `-DeleteSource` and mode 8 when unattended; mode 8 without `-DeleteSource` no longer makes
+  `_v2`, `_v3` copies of a `.tiff`; `generate_thumbnails.ps1 -Remove` keeps a full-size TIFF
+  named `*_thumb.tif`; a read-only TIFF is still replaced
+
 ## v2.9.0
 
 - **A settings file instead of editing the scripts.** The settings at the top of the scripts
