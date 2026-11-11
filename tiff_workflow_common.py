@@ -466,6 +466,19 @@ def long_path(path):
     return "\\\\?\\" + p
 
 
+def segments_below(directory, root):
+    """The folder segments of `directory` below `root`: [] for the root itself, None when
+    it is not under it. Without case, '/' and '\\' alike, and on a separator boundary:
+    "C:\\data" is also a prefix of "C:\\database", which is not below it."""
+    dir_n = str(directory).replace("/", "\\").rstrip("\\")
+    root_n = str(root).replace("/", "\\").rstrip("\\")
+    if dir_n.lower() == root_n.lower():
+        return []
+    if dir_n.lower().startswith(root_n.lower() + "\\"):
+        return dir_n[len(root_n) + 1:].split("\\")
+    return None
+
+
 def path_excluded(directory, root, names):
     """True when any folder segment BELOW `root` matches one of `names` (without case).
 
@@ -477,18 +490,11 @@ def path_excluded(directory, root, names):
     to the whole path: in doubt, skip the file."""
     if not names:
         return False
-    dir_n = str(directory).replace("/", "\\").rstrip("\\")
-    root_n = str(root).replace("/", "\\").rstrip("\\")
-    if dir_n.lower() == root_n.lower():
-        rel = ""
-    elif dir_n.lower().startswith(root_n.lower() + "\\"):
-        rel = dir_n[len(root_n) + 1:]
-    else:
-        rel = dir_n
-    if not rel:
-        return False
+    parts = segments_below(directory, root)
+    if parts is None:
+        parts = str(directory).replace("/", "\\").rstrip("\\").split("\\")
     lowered = {str(n).lower() for n in names}
-    return any(seg and seg.lower() in lowered for seg in rel.split("\\"))
+    return any(seg and seg.lower() in lowered for seg in parts)
 
 
 def parse_exclude_folders(text):

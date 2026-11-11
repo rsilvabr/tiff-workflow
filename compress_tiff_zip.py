@@ -383,16 +383,6 @@ def complete_keep_original(run, written, src, final_dst, keep_dir, src_length, s
 
 # -- Output path per mode -------------------------------------------
 
-def _rel_parts(directory, root_p):
-    """The folder segments of `directory` below `root_p`; None when it is not under it."""
-    dir_n = directory.replace("/", "\\").rstrip("\\")
-    if dir_n.lower() == root_p.lower():
-        return []
-    if dir_n.lower().startswith(root_p.lower() + "\\"):
-        return dir_n[len(root_p) + 1:].split("\\")
-    return None
-
-
 def resolve_output(f, mode, input_root, opt):
     """Where the compressed copy of `f` goes in `mode`; None when the mode has no place
     for it (reported, never dropped silently). The output is always <stem>.tif."""
@@ -429,18 +419,13 @@ def resolve_output(f, mode, input_root, opt):
         # Never climb above the input root: a TIFF sitting directly in the root would land
         # in the drive root, outside the chosen tree. The prefix compare needs a separator
         # boundary: "C:\data" also prefixes "C:\database".
-        if not grandparent:
+        if not grandparent or tw.segments_below(grandparent, root_p) is None:
             grandparent = root_p
-        else:
-            gp_l = grandparent.replace("/", "\\").rstrip("\\").lower()
-            root_l = root_p.lower()
-            if not (gp_l == root_l or gp_l.startswith(root_l + "\\")):
-                grandparent = root_p
         return tw.join_path(tw.join_path(grandparent, opt["ZipSubfolderName"]), out_name)
     if mode in (6, 7):
         # The marker only counts AT/BELOW the input root: an _EXPORT folder ABOVE the
         # chosen -InputDir once rebuilt the output outside the selected tree.
-        parts = _rel_parts(parent, root_p)
+        parts = tw.segments_below(parent, root_p)
         if parts is None:
             return None
         marker = opt["ExportMarker"].lower()
@@ -479,12 +464,11 @@ def discover(run, mode, root, unreadable):
         # the marker RELATIVE to the scan root, same contract as the folder exclusion
         files = [f for f in files if tw.path_excluded(f.dir, root, [opt["ExportMarker"]])]
     elif mode == 7:
-        root_p = root.replace("/", "\\").rstrip("\\")
         marker = opt["ExportMarker"].lower()
         sub = opt["ExportTiffSubfolder"].lower()
 
         def below_marker(f):
-            parts = _rel_parts(f.dir, root_p)
+            parts = tw.segments_below(f.dir, root)
             if not parts:
                 return False
             return any(parts[i].lower() == marker and parts[i + 1].lower() == sub
