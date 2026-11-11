@@ -536,6 +536,25 @@ class TestCopyExif:
         call = next(c for c in tools.exif_calls if "-EXIF:All" in c)
         assert "--FocalPlaneXResolution" in call and "-ICC_Profile" not in call
 
+    def test_the_tag_list_of_the_jpeg_copy(self):
+        """The same rules, on the list itself: the TIFF's own IPTC first, then the camera's
+        tags, the charset by name after -IPTC:All, the geometry and the embedded images
+        excluded by name, the file last."""
+        args = cx._jpeg_copy_args("JPEG", "C:\\t\\tw_0123.mie", "-ICC_Profile", "E:\\伊豆沼 [x]\\a 50%.tif")
+        assert args[:5] == ["-tagsfromfile", "@", "-IPTC:All", "-tagsfromfile", "C:\\t\\tw_0123.mie"]
+        assert args[5:8] == ["-EXIF:All", "-XMP:All", "-IPTC:All"]
+        assert args[8] == "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet"
+        assert args[-2:] == ["-ICC_Profile", "E:\\伊豆沼 [x]\\a 50%.tif"]
+        assert "-unsafe" not in args and not [a for a in args if a.startswith("--FocalPlane")]
+        geometry = {"--ImageWidth", "--ImageHeight", "--ImageLength", "--ExifImageWidth",
+                    "--ExifImageHeight", "--PixelXDimension", "--PixelYDimension", "--Orientation",
+                    "--ThumbnailImage", "--PreviewImage", "--JpgFromRaw"}
+        assert {a for a in args if a.startswith("--")} == geometry
+        raf = cx._jpeg_copy_args("RAF", "x.RAF", "", "a.tif")
+        assert raf[-4:] == ["--FocalPlaneXResolution", "--FocalPlaneYResolution",
+                            "--FocalPlaneResolutionUnit", "a.tif"]
+        assert "-ICC_Profile" not in raf and geometry < {a for a in raf if a.startswith("--")}
+
     def test_an_unreadable_tiff_is_never_overwritten(self, tools, photo):
         """-SkipIfTiffHasExif: the probe's exit code decides, fail closed."""
         tools.exif_result = (1, "")

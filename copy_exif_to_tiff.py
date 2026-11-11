@@ -171,6 +171,95 @@ def find_jpeg_pair(run, tif, jpg_index):
     return None
 
 
+def _jpeg_copy_args(source, tag_source, icc_tag, target):
+    """The exiftool tag arguments that copy the camera's EXIF onto the TIFF `target`.
+    `source` is "JPEG" or "RAF"; `tag_source` the file the tags are read from (the JPEG/RAF
+    itself, or the container made for a '%' name); `icc_tag` "-ICC_Profile" or "".
+
+    No -unsafe: it stamps the JPEG's GEOMETRY (ImageWidth/Height, ExifImageWidth/Height,
+    Orientation) onto a TIFF whose dimensions legitimately differ (Capture One crops and
+    resizes). Those tags are excluded by name; the embedded thumbnail/preview images do not
+    belong on the TIFF either.
+
+    -IPTC:All does not copy IPTC:CodedCharacterSet, so a JPEG whose IPTC is UTF-8 landed
+    on the TIFF as Latin: every Japanese keyword a '?' (audit round 28). The charset is
+    copied by name (only when the JPEG has one), and the TIFF's OWN IPTC is copied onto
+    itself first ('-tagsfromfile @'): exiftool then writes the whole block in the new
+    charset, so a Latin caption the TIFF already had is not left mislabelled as UTF-8."""
+    tags = ["-tagsfromfile", "@", "-IPTC:All",
+            "-tagsfromfile", tag_source, "-EXIF:All", "-XMP:All", "-IPTC:All",
+            "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet",
+            "--ImageWidth", "--ImageHeight", "--ImageLength",
+            "--ExifImageWidth", "--ExifImageHeight", "--PixelXDimension", "--PixelYDimension",
+            "--Orientation", "--ThumbnailImage", "--PreviewImage", "--JpgFromRaw"]
+    # A RAF's EXIF describes its embedded 1440x960 preview: the focal-plane resolution
+    # (630 vs 1861 px/cm on an S5 Pro) is wrong for the TIFF.
+    if source == "RAF":
+        tags += ["--FocalPlaneXResolution", "--FocalPlaneYResolution", "--FocalPlaneResolutionUnit"]
+    if icc_tag:
+        tags.append(icc_tag)
+    tags.append(target)
+    return tags
+
+
+def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy):
+    """The ZIP half of process_pair: write `tiff_target` as ZIP to the staged file
+    `write_dst` and prove it. Returns None when the staged file may be registered for the
+    move, else the ERROR result line -- by then the staged file is gone, and so is the copy
+    in -OutputDir (`drop_copy`)."""
+    # magick turned a neutral RGB TIFF into a 1-channel gray one with the RGB profile still
+    # in it, and the pixel gate below cannot see that (audit round 28). The source layout
+    # picks the -type that keeps it and is the reference for the layout gate after the write.
+    layout_ok, src_pages = tw.tiff_sample_layout(tiff_target)
+    if not layout_ok:
+        drop_copy()
+        return f"ERROR (sample layout unreadable) | {name}"
+    type_args = tw.magick_keep_type_args(src_pages)
+    if not tw.associated_alpha_rewritable(tiff_target, src_pages, timeout):
+        drop_copy()
+        return f"ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | {name}"
+
+    def drop_staged():
+        tw.remove_quietly(write_dst)
+        drop_copy()
+
+    # Input literal, OUTPUT escaped: a '%' in the name sends the output somewhere else while
+    # magick still exits 0.
+    rc, out = tw.magick_run(["-quiet", tiff_target, "-compress", "zip"] + type_args
+                            + [tw.magick_path_spec(write_dst)])
+    err = tw.one_line(out)
+    if rc == 0 and not os.path.exists(write_dst):
+        rc = 1
+        err = f"magick reported success but wrote no file (expected: {write_dst})"
+    if rc != 0:
+        drop_staged()
+        return f"ERROR (magick ZIP) | {name} | {err}"
+
+    # The staged ZIP is moved ON TOP of the TIFF it came from and there is no OLD_TIFFs
+    # backup on this path, so it must be proven pixel-identical first. A zero exit from
+    # magick is not proof: a page-short or truncated file still exits 0 and still decodes.
+    if not tw.tiff_sample_layout_kept(src_pages, write_dst):
+        drop_staged()
+        return f"ERROR (sample layout changed: {' '.join(src_pages)} - original untouched) | {name}"
+    if not tw.pixel_identical(tiff_target, write_dst, timeout, load_factor):
+        drop_staged()
+        return f"ERROR (ZIP pixel verification failed - original untouched) | {name}"
+
+    # Same '%' trap as the JPEG copy, for a TIFF whose NAME carries one.
+    needed, tiff_meta = tw.backup_tiff_metadata(tiff_target, write_dst)
+    restore_ok = False
+    if not (needed and not tiff_meta):
+        restore_ok = tw.restore_all_metadata(tiff_meta or tiff_target, write_dst)
+    tw.remove_quietly(tiff_meta)
+    if not restore_ok:
+        drop_staged()
+        return f"ERROR (exiftool metadata restore failed - original untouched) | {name}"
+    if not tw.restore_tiff_subfile_types(tiff_target, write_dst, timeout):
+        drop_staged()
+        return f"ERROR (subfiletype restore failed - original untouched) | {name}"
+    return None
+
+
 def process_pair(run, p, write_dir, final_dir, load_factor):
     """One TIFF: copy the EXIF from its JPEG/RAF and, with -CompressZip, stage a verified
     ZIP copy. Returns {"line": result line, "multi": path or None, "staged": staged file
@@ -268,29 +357,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
         return res(f"ERROR (metadata container failed - EXIF copy refused) | {name}")
     jpeg_tag_source = jpeg_meta or p["jpeg"]
 
-    # No -unsafe: it stamps the JPEG's GEOMETRY (ImageWidth/Height, ExifImageWidth/Height,
-    # Orientation) onto a TIFF whose dimensions legitimately differ (Capture One crops and
-    # resizes). Those tags are excluded by name; the embedded thumbnail/preview images do not
-    # belong on the TIFF either.
-    #
-    # -IPTC:All does not copy IPTC:CodedCharacterSet, so a JPEG whose IPTC is UTF-8 landed
-    # on the TIFF as Latin: every Japanese keyword a '?' (audit round 28). The charset is
-    # copied by name (only when the JPEG has one), and the TIFF's OWN IPTC is copied onto
-    # itself first ('-tagsfromfile @'): exiftool then writes the whole block in the new
-    # charset, so a Latin caption the TIFF already had is not left mislabelled as UTF-8.
-    tags = ["-tagsfromfile", "@", "-IPTC:All",
-            "-tagsfromfile", jpeg_tag_source, "-EXIF:All", "-XMP:All", "-IPTC:All",
-            "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet",
-            "--ImageWidth", "--ImageHeight", "--ImageLength",
-            "--ExifImageWidth", "--ExifImageHeight", "--PixelXDimension", "--PixelYDimension",
-            "--Orientation", "--ThumbnailImage", "--PreviewImage", "--JpgFromRaw"]
-    # A RAF's EXIF describes its embedded 1440x960 preview: the focal-plane resolution
-    # (630 vs 1861 px/cm on an S5 Pro) is wrong for the TIFF.
-    if p["source"] == "RAF":
-        tags += ["--FocalPlaneXResolution", "--FocalPlaneYResolution", "--FocalPlaneResolutionUnit"]
-    if icc_tag:
-        tags.append(icc_tag)
-    tags.append(tiff_target)
+    tags = _jpeg_copy_args(p["source"], jpeg_tag_source, icc_tag, tiff_target)
 
     # ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
     # exiftool gives when the tagsfromfile source could not be opened -- it still exits 0.
@@ -324,58 +391,11 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
             and not tiff_copied:
         return res(f"OK+SKIP-ZIP (exists) | {name}{raw_suffix}")
 
-    # magick turned a neutral RGB TIFF into a 1-channel gray one with the RGB profile still
-    # in it, and the pixel gate below cannot see that (audit round 28). The source layout
-    # picks the -type that keeps it and is the reference for the layout gate after the write.
-    layout_ok, src_pages = tw.tiff_sample_layout(tiff_target)
-    if not layout_ok:
-        drop_copy()
-        return res(f"ERROR (sample layout unreadable) | {name}")
-    type_args = tw.magick_keep_type_args(src_pages)
-    if not tw.associated_alpha_rewritable(tiff_target, src_pages, timeout):
-        drop_copy()
-        return res(f"ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | {name}")
-
-    def drop_staged():
-        tw.remove_quietly(write_dst)
-        drop_copy()
-
-    # Input literal, OUTPUT escaped: a '%' in the name sends the output somewhere else while
-    # magick still exits 0.
-    rc, out = tw.magick_run(["-quiet", tiff_target, "-compress", "zip"] + type_args
-                            + [tw.magick_path_spec(write_dst)])
-    err = tw.one_line(out)
-    if rc == 0 and not os.path.exists(write_dst):
-        rc = 1
-        err = f"magick reported success but wrote no file (expected: {write_dst})"
-    if rc != 0:
-        drop_staged()
-        return res(f"ERROR (magick ZIP) | {name} | {err}")
-
-    # The staged ZIP is moved ON TOP of the TIFF it came from and there is no OLD_TIFFs
-    # backup on this path, so it must be proven pixel-identical first. A zero exit from
-    # magick is not proof: a page-short or truncated file still exits 0 and still decodes.
-    if not tw.tiff_sample_layout_kept(src_pages, write_dst):
-        drop_staged()
-        return res(f"ERROR (sample layout changed: {' '.join(src_pages)} - original untouched) | {name}")
-    if not tw.pixel_identical(tiff_target, write_dst, timeout, load_factor):
-        drop_staged()
-        return res(f"ERROR (ZIP pixel verification failed - original untouched) | {name}")
-
-    # Same '%' trap as the JPEG copy above, for a TIFF whose NAME carries one.
-    needed, tiff_meta = tw.backup_tiff_metadata(tiff_target, write_dst)
-    restore_ok = False
-    if not (needed and not tiff_meta):
-        restore_ok = tw.restore_all_metadata(tiff_meta or tiff_target, write_dst)
-    tw.remove_quietly(tiff_meta)
     # The staged file is registered for the move ONLY after every gate has passed: a staged
     # ZIP whose metadata restore failed was once moved ON TOP of the EXIF-bearing original.
-    if not restore_ok:
-        drop_staged()
-        return res(f"ERROR (exiftool metadata restore failed - original untouched) | {name}")
-    if not tw.restore_tiff_subfile_types(tiff_target, write_dst, timeout):
-        drop_staged()
-        return res(f"ERROR (subfiletype restore failed - original untouched) | {name}")
+    error = _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy)
+    if error:
+        return res(error)
 
     drop_copy()
     head = "WARN (heuristic JPEG match)" if heur else "OK+ZIP"
