@@ -316,8 +316,9 @@ compression) can coexist instead of overwriting each other:
   folder it was saved from: it keeps working after the toolkit is moved or updated
   into another folder.
 - A preset or "Repeat last workflow" saved by v2.x holds a PowerShell command line
-  (`pwsh -File ...ps1 args`, or the `-Command` form of Windows PowerShell 5.1). It keeps
-  working: the wizard reads it and runs the Python backend with the same arguments.
+  (`pwsh -File ...ps1 args`, or the `-Command` form of Windows PowerShell 5.1). It is
+  no longer run: it stays in the list, and choosing it says `Saved workflow cannot be
+  replayed` and runs nothing. Run the workflow once more from the menu and save it again.
 
 ### Running a preset unattended (Task Scheduler)
 

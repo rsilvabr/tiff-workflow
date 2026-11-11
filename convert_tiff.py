@@ -702,16 +702,6 @@ BACKEND_SCRIPTS = [
 #: ...and the module the three of them import.
 BACKEND_SHARED = "tiff_workflow_common.py"
 
-#: The backend a command line written for the PowerShell edition (up to v2.9.1) named:
-#: a saved preset or the last-run journal. Lower-case script name -> today's script.
-_LEGACY_BACKEND_NAMES = {
-    "compress_tiff_zip" + ".ps1": "compress_tiff_zip.py",
-    "copy_exif_to_tiff_ps5" + ".ps1": "copy_exif_to_tiff.py",
-    "copy_exif_to_tiff_ps7" + ".ps1": "copy_exif_to_tiff.py",
-    "generate_thumbnails" + ".ps1": "generate_thumbnails.py",
-}
-
-
 def _probe_version(cmd: List[str], timeout: int = 10) -> Optional[str]:
     """Run a version probe, return the first non-empty output line or None."""
     try:
@@ -1907,52 +1897,6 @@ def _backend_command(script_name: str, args: List[str]) -> List[str]:
     return [sys.executable, str(SCRIPT_DIR / script_name)] + [str(a) for a in args]
 
 
-def _unwrap_ps5_invocation(invocation: str) -> Optional[List[str]]:
-    """[script, *args] of the `-Command "& 'script' args"` line the PowerShell edition (up
-    to v2.9.1) journalled for Windows PowerShell 5.1 -- the exact inverse of the quoting it
-    applied. Only read, never written: a preset or last run saved by that edition still
-    replays.
-
-    Returns None when the string does not have that shape (never guess: a mis-parsed
-    argument list drives a converter that can delete sources in mode 8)."""
-    s = invocation.strip()
-    if not s.startswith("& "):
-        return None
-    s = s[2:]
-    out: List[str] = []
-    i, n = 0, len(s)
-    while i < n:
-        if s[i] == " ":
-            i += 1
-            continue
-        if s[i] == "'":
-            i += 1
-            buf = []
-            closed = False
-            while i < n:
-                if s[i] == "'":
-                    # '' is an escaped single quote inside a single-quoted PowerShell string
-                    if i + 1 < n and s[i + 1] == "'":
-                        buf.append("'")
-                        i += 2
-                        continue
-                    i += 1
-                    closed = True
-                    break
-                buf.append(s[i])
-                i += 1
-            if not closed:
-                return None
-            out.append("".join(buf))
-        else:
-            j = s.find(" ", i)
-            if j < 0:
-                j = n
-            out.append(s[i:j])
-            i = j
-    return out or None
-
-
 def _parts_replace_sources(parts: List[str]) -> bool:
     """True when a journaled command line deletes or replaces its source files: it binds
     -DeleteSource, or runs compress mode 8 (which puts the ZIP over each .tif it read --
@@ -1981,27 +1925,21 @@ def _parts_replace_sources(parts: List[str]) -> bool:
 
 
 def _journal_parts(cmd: List[str]) -> Optional[List[str]]:
-    """Reduce a journalled command line to [script, *args], whatever wrote it.
+    """Reduce a journalled command line to [script, *args].
 
     A journalled command has to survive the program around it changing between the run and
-    the repeat: another Python, the wizard moved to another folder -- and the PowerShell
-    edition (up to v2.9.1), whose journals named `pwsh -File <script>.ps1 args` or, for
-    Windows PowerShell 5.1, `powershell -Command "& '<script>.ps1' args"`. The arguments
-    mean the same to the Python backends, so those presets still run.
+    the repeat (another Python, the wizard moved to another folder), so only the backend's
+    file name and the arguments are read: `[<python>, <folder>/<backend>.py, *args]`.
 
-    Returns None when the shape is not recognised, so the caller can refuse instead of
-    running something it does not understand."""
+    Returns None when the shape is not that one, so the caller can refuse instead of
+    running something it does not understand. A preset saved by the PowerShell edition
+    (up to v2.9.1: `pwsh -File <script>.ps1 args`, `powershell -Command "..."`) is such a
+    shape since v3.1: it has to be saved again from the menu."""
     if not cmd:
         return None
     cmd = [str(a) for a in cmd]
     if len(cmd) >= 2 and Path(cmd[1]).name in BACKEND_SCRIPTS:
         return cmd[1:]
-    if "-File" in cmd:
-        i = cmd.index("-File")
-        return cmd[i + 1:] if i + 1 < len(cmd) else None
-    if "-Command" in cmd:
-        i = cmd.index("-Command")
-        return _unwrap_ps5_invocation(cmd[i + 1]) if i + 1 < len(cmd) else None
     return None
 
 
@@ -2012,13 +1950,11 @@ def _journaled_script_path(parts: List[str]) -> Path:
     (round 24): a preset saved from another copy -- an older version, the program in
     another folder, a folder since deleted -- ran that copy's backend, or failed with
     "Backend script no longer exists", while the wizard planned with its own settings.
-    A command saved by the PowerShell edition names a .ps1: it maps to today's script
-    (the two Copy EXIF scripts are one now). Anything else comes back as recorded and
-    _run_journal refuses it."""
+    Anything that is not one of the backends comes back as recorded and _run_journal
+    refuses it."""
     script = Path(parts[0])
-    name = _LEGACY_BACKEND_NAMES.get(script.name.lower(), script.name)
-    if name in BACKEND_SCRIPTS:
-        return SCRIPT_DIR / name
+    if script.name in BACKEND_SCRIPTS:
+        return SCRIPT_DIR / script.name
     return script
 
 
@@ -6481,7 +6417,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
 
     # Command-driven journals (1-4, 8): rebuilt from their [script, *args] for this
     # Python and the backends next to this wizard -- the journal may have been written
-    # by another copy, or by the PowerShell edition (see _journal_parts).
+    # by another copy (see _journal_parts).
     parts_list = [_journal_parts([str(a) for a in c]) for c in entry["commands"]]
     if any(p is None for p in parts_list):
         _say("Saved workflow cannot be replayed: its command line was recorded in a "

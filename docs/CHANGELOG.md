@@ -10,6 +10,12 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## Unreleased (3.1.0)
+
+Work in progress on the branch `python-v3.1`; nothing here is released.
+
+- **Presets and *Repeat last* saved by v3.0.0 or earlier in the PowerShell form are no longer run.** Until v3.0.0 the wizard still read a command line the PowerShell edition had saved (`pwsh -File <script>.ps1 args`, or the `-Command` form of Windows PowerShell 5.1). Such a preset stays in the list; choosing it says `Saved workflow cannot be replayed` and runs nothing. Run the workflow once more from the menu and save it again. Presets saved by v3.0.0 itself (they name a `.py` script) keep working
+
 ## v3.0.0
 
 **The backends are Python now.** Until v2.9.1 the wizard was Python and the backends were

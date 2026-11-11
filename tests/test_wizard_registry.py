@@ -4,8 +4,9 @@ T1  golden   -- the argv the command builders produced BEFORE the registry exist
                 workflow dicts (tests/data/wizard_registry_golden.json). Generated once from
                 the pre-registry builders of the PowerShell edition; never regenerate it. Each
                 case holds the `pwsh -NoProfile -File <script>.ps1 args` line and the Windows
-                PowerShell 5.1 `-Command` line: the ARGUMENTS are what today's builders must
-                still produce, and both lines are what a preset saved by v2.x holds.
+                PowerShell 5.1 `-Command` line: the ARGUMENTS of the first are what today's
+                builders must still produce. Both lines are what a preset saved by v2.x holds,
+                and since v3.1 neither is replayed (tests/test_powershell_journals.py).
 T2  coverage -- every parameter of every backend is in REGISTRY or NOT_OFFERED, and vice versa.
 T3  advanced -- the per-run Advanced options screen.
 T4  a saved workflow that carries `advanced` rebuilds the same argv.
@@ -76,6 +77,13 @@ def _golden_cmd(cid, shell):
     return [a.replace(TOKEN, str(convert_tiff.SCRIPT_DIR)) for a in _golden()[cid][shell]]
 
 
+#: The script each golden line named -> the backend that takes the same arguments today.
+_PS1_TO_PY = {
+    "compress_tiff_zip.ps1": "compress_tiff_zip.py",
+    "copy_exif_to_TIFF_ps7.ps1": "copy_exif_to_tiff.py",
+}
+
+
 def _build(builder: str, workflow: dict, folders, extra):
     paths = [Path(f) for f in folders] if folders is not None else None
     if builder == "compress":
@@ -94,20 +102,20 @@ def test_T1_golden_argv_unchanged(case):
     assert golden[:3] == ["pwsh", "-NoProfile", "-File"]
     argv = _build(builder, wf, folders, extra)
     assert argv[0] == sys.executable
-    assert argv[1] == str(convert_tiff._journaled_script_path([golden[3]]))
+    assert argv[1] == str(convert_tiff.SCRIPT_DIR / _PS1_TO_PY[Path(golden[3]).name])
     assert Path(argv[1]).name in convert_tiff.BACKEND_SCRIPTS
     assert argv[2:] == golden[4:]
 
 
 @pytest.mark.parametrize("shell", ["pwsh", "powershell"])
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
-def test_T1_a_golden_command_line_replays_as_todays(case, shell):
-    """What a preset saved by v2.x holds (either shell's form) rebuilds into exactly the
-    command today's builder produces for the same workflow."""
+def test_T1_a_golden_command_line_is_no_longer_replayed(case, shell):
+    """What a preset saved by v2.x holds (either shell's form) is not read since v3.1: the
+    journal reader knows one form, the one today's builders write."""
     cid, builder, wf, folders, extra = case
-    parts = convert_tiff._journal_parts(_golden_cmd(cid, shell))
-    assert parts is not None, "a golden command line was not recognised"
-    assert convert_tiff._rebuild_journaled_command(parts) == _build(builder, wf, folders, extra)
+    assert convert_tiff._journal_parts(_golden_cmd(cid, shell)) is None
+    today = _build(builder, wf, folders, extra)
+    assert convert_tiff._rebuild_journaled_command(convert_tiff._journal_parts(today)) == today
 
 
 def test_T1_golden_file_covers_exactly_the_cases():

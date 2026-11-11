@@ -114,9 +114,9 @@ def test_spill_rewrites_only_long_commands(tmp_path):
     assert out == thumb_cmd
     assert spill is None
 
-    # a preset: rebuilt from its [script, *args], also when the PowerShell edition saved it
+    # a preset: rebuilt from its [script, *args]
     base_args = ["-Mode", "1", "-InputDir", ";".join(expected), "-DryRun"]
-    for saved in ("compress_tiff_zip.py", "compress_tiff_zip" + ".ps1"):
+    for saved in ("compress_tiff_zip.py",):
         rebuilt = convert_tiff._rebuild_journaled_command(["D:\\saved elsewhere\\" + saved] + base_args)
         out, spill = convert_tiff._spill_long_input_dir(rebuilt)
         try:
