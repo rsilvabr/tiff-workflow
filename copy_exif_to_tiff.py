@@ -213,7 +213,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
         if pc.count > 1:
             # REDUCEDIMAGE/REDUCED only, like compress_tiff_zip.py: MASK and PAGE are real
             # pages here (scanner RGB+IR files).
-            if not tw.tiff_has_only_subfile_pages(tiff, pc.count, ("REDUCEDIMAGE", "REDUCED"), timeout):
+            if not tw.tiff_has_only_subfile_pages(tiff, pc.count, tw.THUMBNAIL_PAGE_TYPES, timeout):
                 return res(f"MULTI ({pc.count} IFDs -- skipped) | {name}", multi=tiff)
 
     icc_policy = opt["IccPolicy"].lower()

@@ -60,6 +60,12 @@ LEFTOVER_NAME_RE = re.compile(
 
 TIFF_EXT_RE = re.compile(r"^\.(tif|tiff)$", re.I)
 
+# The page markers that make an extra page a thumbnail, for SafeMode and -GenerateThumbnail.
+# MASK and PAGE are NOT in it: they are real pages (a scanner's IR channel, a second photo),
+# and with the default list of tiff_has_only_subfile_pages, which has them, an RGB+IR scan
+# was accepted and rewritten (audit round 9).
+THUMBNAIL_PAGE_TYPES = ("REDUCEDIMAGE", "REDUCED")
+
 
 # --- Command line ---------------------------------------------------
 
@@ -986,7 +992,7 @@ def tiff_has_only_subfile_pages(path, page_count, allowed=("REDUCEDIMAGE", "REDU
 def tiff_has_thumbnail_page(path, timeout=30):
     """True when a page of the TIFF is tagged REDUCEDIMAGE (an embedded thumbnail)."""
     r = magick_probe(["identify", "-format", "%[tiff:subfiletype]\\n", path], timeout)
-    return any(ln.strip().upper() in ("REDUCEDIMAGE", "REDUCED") for ln in r.lines)
+    return any(ln.strip().upper() in THUMBNAIL_PAGE_TYPES for ln in r.lines)
 
 
 _SUBFILE_LINE = re.compile(r"^\[IFD(\d+)\]\s+SubfileType:\s*(\d+)\s*$")
@@ -1085,7 +1091,7 @@ def thumbnail_safe_source(path, timeout=30):
         return ThumbSafe(False, 0, f"page count unreadable ({pc.error})")
     if pc.count <= 1:
         return ThumbSafe(True, pc.count, "")
-    if tiff_has_only_subfile_pages(path, pc.count, ("REDUCEDIMAGE", "REDUCED"), timeout):
+    if tiff_has_only_subfile_pages(path, pc.count, THUMBNAIL_PAGE_TYPES, timeout):
         return ThumbSafe(True, pc.count, "thumb-replaced")
     return ThumbSafe(False, pc.count,
                      f"would drop {pc.count - 1} extra page(s), not all of them thumbnails "

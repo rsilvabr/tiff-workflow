@@ -544,7 +544,7 @@ def process_job(run, t, load):
         if not pc.ok:
             return res(tw.page_count_error_line(pc, name))
         if pc.count > 1 and not tw.tiff_has_only_subfile_pages(
-                src, pc.count, ("REDUCEDIMAGE", "REDUCED"), timeout):
+                src, pc.count, tw.THUMBNAIL_PAGE_TYPES, timeout):
             return res(f"MULTI ({pc.count} pages - skipped) | {name}", multi=src)
         # only thumbnails: go on
 
@@ -1228,7 +1228,7 @@ def run_modes(run, bound):
                     run.count(tw.page_count_error_line(pc, f.name))
                     continue
                 if pc.count > 1 and not tw.tiff_has_only_subfile_pages(
-                        f.path, pc.count, ("REDUCEDIMAGE", "REDUCED"), opt["MagickTimeout"]):
+                        f.path, pc.count, tw.THUMBNAIL_PAGE_TYPES, opt["MagickTimeout"]):
                     run.multi_paths.append(f.path)
                     run.count(f"MULTI ({pc.count} pages - skipped, original untouched) | {f.name}")
                     continue
