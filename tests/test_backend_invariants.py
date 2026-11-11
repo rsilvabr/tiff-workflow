@@ -1107,6 +1107,56 @@ class TestPathsAndMoves:
         assert dst.read_bytes() == b"OLD" and src.exists()
         assert sorted(os.listdir(tmp_path)) == ["photo.tif", "s.tif"]
 
+    def _staged(self, tmp_path):
+        stg, lib = tmp_path / "stg 伊豆沼 [x]", tmp_path / "lib 50%"
+        stg.mkdir()
+        lib.mkdir()
+        staged = stg / "abcd1234_0123456789ab_photo.tif"
+        staged.write_bytes(b"NEW DATA")
+        return staged, lib / "photo.tif"
+
+    @pytest.mark.parametrize("same_volume", [True, False])
+    def test_land_staged_file(self, tmp_path, monkeypatch, same_volume):
+        """The one function every staging loop lands a file with: through
+        move_file_into_place, then the destination must exist and have the staged size."""
+        monkeypatch.setattr(tw, "_same_volume", lambda a, b: same_volume)
+        staged, dest = self._staged(tmp_path)
+        dest.write_bytes(b"OLD")
+        assert tw.land_staged_file(str(staged), str(dest), "abcd1234") is None
+        assert dest.read_bytes() == b"NEW DATA" and not staged.exists()
+        assert os.listdir(dest.parent) == ["photo.tif"]
+
+    def test_land_staged_file_reports_what_the_move_left(self, tmp_path, monkeypatch):
+        staged, dest = self._staged(tmp_path)
+        calls = []
+
+        def says(result, leave=None):
+            def move(src, dst, run_id):
+                calls.append((src, dst, run_id))
+                if leave is not None:
+                    Path(dst).write_bytes(leave)
+                return result
+            monkeypatch.setattr(tw, "move_file_into_place", move)
+        says(None)
+        assert tw.land_staged_file(str(staged), str(dest), "abcd1234") == ("missing", "")
+        assert calls == [(str(staged), str(dest), "abcd1234")]
+        says(None, leave=b"NEW DAT")
+        assert tw.land_staged_file(str(staged), str(dest), "abcd1234") == ("size", ""), \
+            "one byte short is not the staged file"
+        says("copy failed: disk full")
+        assert tw.land_staged_file(str(staged), str(dest), "abcd1234") == ("error", "copy failed: disk full")
+        assert staged.read_bytes() == b"NEW DATA", "a failed move keeps the staged file"
+
+    def test_land_staged_file_without_a_staged_file_or_a_folder(self, tmp_path, monkeypatch):
+        staged, dest = self._staged(tmp_path)
+        kind, detail = tw.land_staged_file(str(staged) + ".gone", str(dest), "abcd1234")
+        assert kind == "error" and detail and not dest.exists()
+        deeper = dest.parent / "new folder" / "photo.tif"
+        kind, detail = tw.land_staged_file(str(staged), str(deeper), "abcd1234")
+        assert kind == "error" and staged.exists(), "the folder is only made when asked"
+        assert tw.land_staged_file(str(staged), str(deeper), "abcd1234", make_parent=True) is None
+        assert deeper.read_bytes() == b"NEW DATA"
+
     def test_listing_skips_hidden_and_links_and_sorts(self, tmp_path):
         root = tmp_path / "写真 [x]"
         (root / "b").mkdir(parents=True)

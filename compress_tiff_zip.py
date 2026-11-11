@@ -916,19 +916,13 @@ def run_legacy(run):
                 stage_path = tw.join_path(write_dir, staged)
                 if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
                     continue
-                try:
-                    stage_size = os.stat(stage_path).st_size
-                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                    # never a copy straight onto the destination (a cross-volume staging)
-                    mv_err = tw.move_file_into_place(stage_path, dest_path, run.run_id)
-                    if mv_err:
-                        raise OSError(mv_err)
-                    if os.path.exists(dest_path) and os.stat(dest_path).st_size == stage_size:
-                        moved += 1
-                    else:
-                        run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}")
-                except OSError as e:
-                    run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}: {e}")
+                failure = tw.land_staged_file(stage_path, dest_path, run.run_id, make_parent=True)
+                if failure is None:
+                    moved += 1
+                elif failure[0] == "error":
+                    run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}: {failure[1]}")
+                else:
+                    run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}")
             if moved > 0:
                 log(f"  -> Moved {moved} file(s) -> {final_dir}")
 
@@ -1367,23 +1361,18 @@ def run_modes(run, bound):
                 if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
                     continue
                 dest_name = os.path.basename(dest_path)
-                try:
-                    stage_size = os.stat(stage_path).st_size
-                    # never a copy straight onto the destination (a cross-volume staging)
-                    mv_err = tw.move_file_into_place(stage_path, dest_path, run.run_id)
-                    if mv_err:
-                        raise OSError(mv_err)
-                    if not os.path.exists(dest_path):
-                        error_srcs.add(t.src.lower())
-                        run.error(f"ERROR (move failed) | {dest_name}")
-                    elif os.stat(dest_path).st_size != stage_size:
-                        error_srcs.add(t.src.lower())
-                        run.error(f"ERROR (size mismatch after move) | {dest_name}")
-                    else:
-                        moved += 1
-                except OSError as e:
-                    error_srcs.add(t.src.lower())
-                    run.error(f"ERROR (move exception) | {dest_name}: {e}")
+                failure = tw.land_staged_file(stage_path, dest_path, run.run_id)
+                if failure is None:
+                    moved += 1
+                    continue
+                error_srcs.add(t.src.lower())
+                kind, detail = failure
+                if kind == "missing":
+                    run.error(f"ERROR (move failed) | {dest_name}")
+                elif kind == "size":
+                    run.error(f"ERROR (size mismatch after move) | {dest_name}")
+                else:
+                    run.error(f"ERROR (move exception) | {dest_name}: {detail}")
             if moved > 0:
                 log(f"  -> Moved {moved} file(s) -> {group_dir}")
 

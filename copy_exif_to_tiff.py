@@ -464,33 +464,29 @@ def _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir
         dest_path = tw.join_path(final_dir, dest_names.get(tif.path.lower(), tif.name))
         if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
             continue
+        # In place, dest_path IS the TIFF: its write time is read BEFORE the move --
+        # afterwards it is the staged file's own fresh timestamp.
+        orig_mtime = None
         try:
-            # In place, dest_path IS the TIFF: its write time is read BEFORE the
-            # move -- afterwards it is the staged file's own fresh timestamp.
-            orig_mtime = None
-            try:
-                orig_mtime = os.stat(tif.path).st_mtime_ns
-            except OSError:
-                pass
-            stage_size = os.stat(stage_path).st_size
-            # Never a copy straight onto the photo's name (a -StagingDir on another
-            # drive): copied next to it, then swapped with one rename.
-            mv_err = tw.move_file_into_place(stage_path, dest_path, run.run_id)
-            if mv_err:
-                raise OSError(mv_err)
-            if os.path.exists(dest_path) and os.stat(dest_path).st_size == stage_size:
-                # The EXIF-only path keeps the source date (exiftool -P); the ZIP
-                # path does the same.
-                if orig_mtime is not None:
-                    try:
-                        os.utime(dest_path, ns=(os.stat(dest_path).st_atime_ns, orig_mtime))
-                    except OSError:
-                        pass
-                moved += 1
-            else:
-                run.error(f"ERROR (move failed) | {tif.name}")
-        except OSError as e:
-            run.error(f"ERROR (move failed) | {tif.name}: {e}")
+            orig_mtime = os.stat(tif.path).st_mtime_ns
+        except OSError:
+            pass
+        # Never a copy straight onto the photo's name (a -StagingDir on another drive):
+        # copied next to it, then swapped with one rename.
+        failure = tw.land_staged_file(stage_path, dest_path, run.run_id)
+        if failure is None:
+            # The EXIF-only path keeps the source date (exiftool -P); the ZIP path does
+            # the same.
+            if orig_mtime is not None:
+                try:
+                    os.utime(dest_path, ns=(os.stat(dest_path).st_atime_ns, orig_mtime))
+                except OSError:
+                    pass
+            moved += 1
+        elif failure[0] == "error":
+            run.error(f"ERROR (move failed) | {tif.name}: {failure[1]}")
+        else:
+            run.error(f"ERROR (move failed) | {tif.name}")
     if moved > 0:
         run.log(f"  -> Moved {moved} file(s) -> {final_dir}")
 
