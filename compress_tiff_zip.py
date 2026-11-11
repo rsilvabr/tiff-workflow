@@ -1045,6 +1045,45 @@ def _collect_files(run, mode, input_roots):
     return sorted(all_files, key=lambda f: f.path.lower())
 
 
+def _default_mode8_staging(run, input_roots):
+    """Mode 8 without -StagingDir: this run's own staging folder, created and registered
+    for the cleanup. Returns it, or None when the user refuses it (asked only on an
+    interactive console; the refusal is logged here)."""
+    opt = run.opt
+    log = run.log
+    # Same-volume staging makes the final move one rename. With several input roots
+    # there is no single same-volume choice: the temp folder (the move then copies next
+    # to the destination first).
+    if len(input_roots) == 1:
+        # a short name: it sits INSIDE the user's tree and every staged path is built
+        # under it
+        default_staging = tw.join_path(input_roots[0], "_cs8_" + tw.new_run_id())
+    else:
+        default_staging = os.path.join(tempfile.gettempdir(), "_cs8_" + tw.new_run_id())
+    msg = ("Mode 8 deletes source files after compression. A staging directory is required "
+           "to avoid overwriting originals before verification.")
+    log(msg, "WARN")
+    log("Recommended: provide -StagingDir on a fast local drive.", "WARN")
+    log(f"Default temporary staging will be used: {default_staging}", "WARN")
+    if _is_interactive():
+        tw.say("")
+        tw.say(msg)
+        tw.say(f"Staging directory: {default_staging}")
+        try:
+            answer = input("Use default temporary staging? [Y/n]: ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower().startswith("n"):
+            log("Mode 8 aborted: no staging directory selected.", "ERROR")
+            return None
+    staging = default_staging
+    opt["StagingDir"] = staging
+    os.makedirs(staging, exist_ok=True)
+    run.cleanup_dirs.append(staging)
+    run.created_default_staging = True
+    return staging
+
+
 def run_modes(run, bound):
     opt = run.opt
     log = run.log
@@ -1099,36 +1138,9 @@ def run_modes(run, bound):
 
     # Mode 8 always stages: the original stays until its replacement is verified.
     if mode == 8 and not dry and not staging.strip():
-        # Same-volume staging makes the final move one rename. With several input roots
-        # there is no single same-volume choice: the temp folder (the move then copies next
-        # to the destination first).
-        if len(input_roots) == 1:
-            # a short name: it sits INSIDE the user's tree and every staged path is built
-            # under it
-            default_staging = tw.join_path(input_roots[0], "_cs8_" + tw.new_run_id())
-        else:
-            default_staging = os.path.join(tempfile.gettempdir(), "_cs8_" + tw.new_run_id())
-        msg = ("Mode 8 deletes source files after compression. A staging directory is required "
-               "to avoid overwriting originals before verification.")
-        log(msg, "WARN")
-        log("Recommended: provide -StagingDir on a fast local drive.", "WARN")
-        log(f"Default temporary staging will be used: {default_staging}", "WARN")
-        if _is_interactive():
-            tw.say("")
-            tw.say(msg)
-            tw.say(f"Staging directory: {default_staging}")
-            try:
-                answer = input("Use default temporary staging? [Y/n]: ")
-            except EOFError:
-                answer = ""
-            if answer.strip().lower().startswith("n"):
-                log("Mode 8 aborted: no staging directory selected.", "ERROR")
-                return 1
-        staging = default_staging
-        opt["StagingDir"] = staging
-        os.makedirs(staging, exist_ok=True)
-        run.cleanup_dirs.append(staging)
-        run.created_default_staging = True
+        staging = _default_mode8_staging(run, input_roots)
+        if staging is None:
+            return 1
 
     # Build the (src, write_dst, final_dst) tasks
     tasks = []
