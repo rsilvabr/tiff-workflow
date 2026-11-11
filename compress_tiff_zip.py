@@ -233,7 +233,7 @@ def find_stranded_originals(root, recurse, backup_names, exclude_names):
                 continue
             if not recurse:
                 continue
-            if tw._entry_flags(e)[1]:
+            if tw.entry_flags(e)[1]:
                 continue
             stack.append(plain)
     backup_dirs.sort(key=str.lower)

@@ -540,7 +540,7 @@ class FoundFile:
         return os.path.splitext(self.name)[1]
 
 
-def _entry_flags(entry):
+def entry_flags(entry):
     """(hidden, link) of a directory entry. link = a symbolic link or a junction: a name
     for a folder that lives somewhere else. A OneDrive folder is a reparse point too, but
     not a link, and is walked like any other."""
@@ -580,7 +580,7 @@ def list_files(root, recurse, unreadable=None):
                 unreadable.append(cur)
             continue
         for e in entries:
-            hidden, link = _entry_flags(e)
+            hidden, link = entry_flags(e)
             if hidden:
                 continue
             path = os.path.join(cur, e.name)
@@ -614,7 +614,7 @@ def list_dirs(root, recurse, unreadable=None):
                 unreadable.append(cur)
             continue
         for e in entries:
-            hidden, link = _entry_flags(e)
+            hidden, link = entry_flags(e)
             if hidden:
                 continue
             try:
@@ -1401,7 +1401,7 @@ def staged_name(run_id, name):
     return f"{run_id}_{uuid.uuid4().hex[:12]}_{name}"
 
 
-def _is_read_only(path):
+def is_read_only(path):
     try:
         return not os.stat(path).st_mode & 0o200
     except OSError:
@@ -1417,7 +1417,7 @@ def move_file_replacing(src, dst):
     A read-only `dst` is replaced too: a scan copied from a CD keeps that attribute and the
     rename refuses it. It is cleared for the swap and put back when the swap fails, so a
     refused swap leaves the original exactly as it was; the new file is not read-only."""
-    was_read_only = os.path.isfile(dst) and _is_read_only(dst)
+    was_read_only = os.path.isfile(dst) and is_read_only(dst)
     if was_read_only:
         os.chmod(dst, 0o666)
     try:
@@ -1464,7 +1464,7 @@ def move_file_into_place(src, dst, run_id):
         if os.stat(tmp).st_size != size:
             remove_quietly(tmp)
             return "size mismatch after copy"
-        if _is_read_only(tmp):
+        if is_read_only(tmp):
             os.chmod(tmp, 0o666)
         move_file_replacing(tmp, dst)
     except OSError as e:

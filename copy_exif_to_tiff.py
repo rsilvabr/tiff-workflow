@@ -236,7 +236,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
         if not os.path.exists(dest_tiff) or opt["Overwrite"]:
             try:
                 os.makedirs(final_dir, exist_ok=True)
-                if os.path.isfile(dest_tiff) and tw._is_read_only(dest_tiff):
+                if os.path.isfile(dest_tiff) and tw.is_read_only(dest_tiff):
                     os.chmod(dest_tiff, 0o666)
                 shutil.copy2(tiff, dest_tiff)
                 tiff_target = dest_tiff
