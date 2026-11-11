@@ -226,7 +226,8 @@ class TestInPlaceExifPreservation:
     workers must use it.
     """
 
-    # (label, lane-independent args): mode 2 without -OutputDir writes over each file.
+    # (label, lane-independent args): mode 2 without -OutputDir has the input root as its flat
+    # output, so it writes over each file that is directly in that folder.
     WORKERS = [
         ("mode2-sequential", ["-Mode", "2", "-InputDir", "work", "-ForceSequential"]),
         ("mode2-parallel", ["-Mode", "2", "-InputDir", "work", "-ForceParallel"]),
@@ -1037,7 +1038,8 @@ class TestThumbnailNeverDropsPages:
     @requires_tools
     @pytest.mark.parametrize("lane", LANES)
     def test_in_place_keeps_every_page(self, tmp_path, lane):
-        """The irreversible case: mode 2 without -OutputDir overwrites the only copy."""
+        """The irreversible case: mode 2 without -OutputDir overwrites the only copy (a file
+        directly in the input root)."""
         work = tmp_path / "work"
         work.mkdir()
         src = work / "scan.tif"
@@ -2348,6 +2350,33 @@ class TestBackupsAreNeverInput:
         assert not list((work / "OLD_TIFFs").glob("ZIP/*")), (
             f"output was written INSIDE the backup folder\n{result.stdout}"
         )
+
+    @pytest.mark.parametrize("mode", ["2", "3", "8"])
+    def test_a_photo_next_to_old_tiffs_is_still_compressed(self, tmp_path, lane, mode):
+        """The other half: the exclusion must not be too broad. An UNCOMPRESSED photo beside
+        an OLD_TIFFs folder is compressed; the pristine backup keeps its bytes. (Until v3.0.0
+        this was pinned on the legacy mode only.)"""
+        work = tmp_path / "work"
+        old = work / "OLD_TIFFs"
+        old.mkdir(parents=True)
+        photo = make_tiff(work / "photo.tif")
+        # the backup of photo.tif itself: a backup with nothing in its place would be
+        # reported as STRANDED (round 25), which is another story
+        backup = make_tiff(old / "photo.tif")
+        before = backup.read_bytes()
+
+        result = run_ps(lane, "compress_tiff_zip.py",
+                        ["-Mode", mode, "-InputDir", str(work), "-Workers", "1"], tmp_path)
+
+        assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+        out = work / "ZIP" / "photo.tif" if mode == "3" else photo
+        assert read_compression(out).lower() == "zip", (
+            f"the real source was not compressed -- the exclusion is too broad\n{result.stdout}"
+        )
+        assert backup.read_bytes() == before, "the OLD_TIFFs backup was rewritten"
+        assert sorted(p.name for p in old.iterdir()) == ["photo.tif"]
+        assert "Skipped 1 file(s) in OLD_TIFFs" in result.stdout, result.stdout
+        assert "Found: 1 TIFF(s)" in result.stdout and "STRANDED" not in result.stdout, result.stdout
 
     def test_pointing_at_old_tiffs_still_works(self, tmp_path, lane):
         """Relative matching, not absolute: the round 14 rule. An explicit -InputDir wins."""

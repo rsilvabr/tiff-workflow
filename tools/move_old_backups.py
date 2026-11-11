@@ -21,8 +21,10 @@ there with nothing in their place, and on 2026-10-17 this script moved them to H
 they were leftovers. "Its place" is the parent folder of OLD_*: the same name, the other
 TIFF extension (.tif/.tiff), and the base name of a renamed backup (name_v2.tif from the
 padded conversion, name_20260803_081300.tif from compress). Put an OLD_TIFFs one back with
-`compress_tiff_zip.py -RestoreStranded` (or the wizard's Restore OLD_TIFFs); an OLD_PADDED
-one by hand -- move it back into the folder above OLD_PADDED (neither knows OLD_PADDED).
+`compress_tiff_zip.py -Mode 9 -InputDir <folder> -RestoreStranded` (it moves them back, then
+compresses the folder as mode 9 does; add -DryRun to see first) or with the wizard's Restore
+OLD_TIFFs; an OLD_PADDED one by hand -- move it back into the folder above OLD_PADDED
+(neither knows OLD_PADDED).
 
 Audit round 28: a name counts as RENAMED only in the folder whose writer makes that rename
 (_vN in OLD_PADDED, the date stamp in OLD_TIFFs) and only when the backup it collided with,
@@ -163,8 +165,8 @@ def main(argv=None) -> int:
             # -RestoreStranded and the wizard's Restore only know OLD_TIFFs (audit round 28).
             print("Put them back first: move each one by hand into the folder above OLD_PADDED.\n")
         else:
-            print("Put them back first (compress_tiff_zip.py -RestoreStranded, the wizard's "
-                  "Restore OLD_TIFFs, or by hand).\n")
+            print("Put them back first (compress_tiff_zip.py -Mode 9 -InputDir <folder> "
+                  "-RestoreStranded, the wizard's Restore OLD_TIFFs, or by hand).\n")
     if not a.go:
         for j in jobs[:15]:
             print(f"  {j}  ->  {dest / j.relative_to(source)}")

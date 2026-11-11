@@ -116,18 +116,18 @@ def test_spill_rewrites_only_long_commands(tmp_path):
 
     # a preset: rebuilt from its [script, *args]
     base_args = ["-Mode", "1", "-InputDir", ";".join(expected), "-DryRun"]
-    for saved in ("compress_tiff_zip.py",):
-        rebuilt = convert_tiff._rebuild_journaled_command(["D:\\saved elsewhere\\" + saved] + base_args)
-        out, spill = convert_tiff._spill_long_input_dir(rebuilt)
-        try:
-            assert spill is not None
-            assert out[:2] == rebuilt[:2]
-            parts = convert_tiff._journal_parts(out)
-            assert "-InputDirFile" in parts
-            assert "-InputDir" not in parts
-        finally:
-            if spill:
-                os.unlink(spill)
+    rebuilt = convert_tiff._rebuild_journaled_command(
+        ["D:\\saved elsewhere\\compress_tiff_zip.py"] + base_args)
+    out, spill = convert_tiff._spill_long_input_dir(rebuilt)
+    try:
+        assert spill is not None
+        assert out[:2] == rebuilt[:2]
+        parts = convert_tiff._journal_parts(out)
+        assert "-InputDirFile" in parts
+        assert "-InputDir" not in parts
+    finally:
+        if spill:
+            os.unlink(spill)
 
 
 @requires_tools

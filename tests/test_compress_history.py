@@ -82,8 +82,8 @@ def run(lane, args, cwd, *more):
 
 def convert(lane, extra, in_place, src):
     """Run one worker path: mode 1 writes ZIP/<name>; mode 2 without -OutputDir has the
-    input root as its flat output, so it writes over each file (a temp sibling, the gates,
-    then the rename)."""
+    input root as its flat output, so it writes over each file that is directly in that
+    folder (a temp sibling, the gates, then the rename). `src` has no subfolders."""
     return run(lane, ["-Mode", 2 if in_place else 1, "-InputDir", src, *extra], src.parent)
 
 

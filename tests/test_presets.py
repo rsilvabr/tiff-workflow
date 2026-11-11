@@ -565,6 +565,23 @@ class TestCliExitCodes:
         assert refused.returncode == 1
         assert src.exists(), "a refused preset must not touch the sources"
 
+        # v3.1: a preset saved by v2.x (the PowerShell form) is refused -- with and without
+        # --dry-run -- and stays in the config, byte for byte.
+        cfg_file = tmp_path / ".convert_tiff_config.json"
+        saved = json.loads(cfg_file.read_text(encoding="utf-8"))
+        saved["presets"]["old"] = dict(
+            _compress_entry(in_dir),
+            commands=[["pwsh", "-NoProfile", "-File", "D:\\gone\\compress_tiff_zip.ps1",
+                       "-Mode", "1", "-InputDir", str(in_dir)]])
+        cfg_file.write_text(json.dumps(saved), encoding="utf-8")
+        config_before = cfg_file.read_bytes()
+        for extra in ([], ["--dry-run"]):
+            old = _run_cli(["--run-preset", "old"] + extra, tmp_path)
+            assert old.returncode == 1, old.stdout + old.stderr
+            assert "cannot be replayed" in old.stdout, old.stdout
+        assert not (in_dir / "ZIP").exists(), "a refused preset ran its backend"
+        assert cfg_file.read_bytes() == config_before, "the refused preset was changed or removed"
+
         stray = _run_cli(["--dry-run"], tmp_path)
         assert stray.returncode == 2, "a stray --dry-run must be an error, never ignored"
         assert "--run-preset" in (stray.stdout + stray.stderr)

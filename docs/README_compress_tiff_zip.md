@@ -4,7 +4,7 @@ Python compression backend with modes 0-9 CLI flags. Called by `convert_tiff.py`
 
 **Requires:** Python 3.9+ (standard library only), ImageMagick 7, exiftool. `tiff_workflow_common.py`, the module the three backends share, must sit next to the script.
 
-Until v2.9.1 this backend was `compress_tiff_zip.ps1`; that edition is described in [powershell_edition.md](powershell_edition.md). The command line is the same -- only the way to start it changed.
+Until v2.9.1 this backend was `compress_tiff_zip.ps1`; that edition is described in [powershell_edition.md](powershell_edition.md). The command line is the same -- only the way to start it changed, and since v3.1 `-Mode` is required (the legacy mode of a run without it is gone).
 
 ---
 
@@ -51,7 +51,7 @@ The defaults below are the `PARAMS` table at the top of `compress_tiff_zip.py`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-Mode` | int | (required) | **0-9**, see the mode table. There is no default: without `-Mode` the script refuses to run (exit code 1), and so does a value outside 0-9. Until v3.0.0 a run without `-Mode` was the "legacy mode" (the current folder, compressed in place); to write in place use `-Mode 2 -InputDir <folder>` without `-OutputDir`, or mode 8 |
+| `-Mode` | int | (required) | **0-9**, see the mode table. There is no default: without `-Mode` the script refuses to run (exit code 1), and so does a value outside 0-9. Until v3.0.0 a run without `-Mode` was the "legacy mode" (the current folder and its subfolders, compressed in place, no backup). Mode 8 does that (`-Mode 8 -InputDir .`; a `.tiff` gets its `.tif` written next to it and is only removed with `-DeleteSource`); mode 9 does it and keeps the originals in `OLD_TIFFs/` (mode 0: the same for one folder, without its subfolders). Not mode 2: its output is flat, so the files of subfolders would be copied into the root |
 | `-InputDir` | string | `.` | Input folder. Can be relative or absolute |
 | `-InputDirFile` | string | `""` | UTF-8 text file with one input folder per line, used instead of `-InputDir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. |
 

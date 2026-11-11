@@ -63,6 +63,17 @@ def test_a_journal_saved_from_another_folder_runs_this_copy():
                        "-InputDir", "x"]
 
 
+@pytest.mark.parametrize("script", ["C:\\x\\not_a_backend.py", "D:\\old copy\\compress_tiff_zip.ps1",
+                                    "C:\\Windows\\System32\\cmd.exe"])
+def test_only_a_backend_becomes_a_script_path(script):
+    """_journal_parts lets nothing else through; if something ever did, the path is not
+    built -- a foreign script is never handed to Python."""
+    with pytest.raises(ValueError):
+        convert_tiff._journaled_script_path([script, "-InputDir", "x"])
+    with pytest.raises(ValueError):
+        convert_tiff._rebuild_journaled_command([script, "-InputDir", "x"])
+
+
 @pytest.mark.parametrize("args,deletes", [
     (["-Mode", "8", "-InputDir", "x"], True),
     (["-Mode", "9", "-InputDir", "x", "-DeleteSource"], True),

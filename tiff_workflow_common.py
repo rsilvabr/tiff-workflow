@@ -1490,18 +1490,16 @@ def move_file_into_place(src, dst, run_id):
     return None
 
 
-def land_staged_file(stage_path, dest_path, run_id, make_parent=False):
+def land_staged_file(stage_path, dest_path, run_id):
     """Move a staged file to its destination and check that it is there: the one way a
     staging loop lands a file. Never a copy straight onto the destination (a staging folder
     on another volume): move_file_into_place. Returns None when `dest_path` now holds the
     staged file, else (kind, detail): ("missing", "") -- the move reported success and
     nothing is there; ("size", "") -- what is there has another size than the staged file;
     ("error", text) -- the move, or reading either file, failed. The caller words the
-    error line. `make_parent` creates the destination folder first."""
+    error line. The destination folder is the caller's to make."""
     try:
         stage_size = os.stat(stage_path).st_size
-        if make_parent:
-            os.makedirs(os.path.dirname(dest_path), exist_ok=True)
         err = move_file_into_place(stage_path, dest_path, run_id)
         if err:
             raise OSError(err)

@@ -152,7 +152,8 @@ class NoLog:
 
 
 #: The mode of a job whose final_dst is its own source: mode 2 with the output on the
-#: input root writes in place (a temp sibling, the gates, then the rename).
+#: input root writes a file of that folder in place (a temp sibling, the gates, then the
+#: rename).
 IN_PLACE = ("-Mode", "2")
 
 
@@ -1312,9 +1313,8 @@ class TestPathsAndMoves:
         assert kind == "error" and detail and not dest.exists()
         deeper = dest.parent / "new folder" / "photo.tif"
         kind, detail = tw.land_staged_file(str(staged), str(deeper), "abcd1234")
-        assert kind == "error" and staged.exists(), "the folder is only made when asked"
-        assert tw.land_staged_file(str(staged), str(deeper), "abcd1234", make_parent=True) is None
-        assert deeper.read_bytes() == b"NEW DATA"
+        assert kind == "error" and staged.exists(), "the destination folder is the caller's to make"
+        assert not deeper.parent.exists()
 
     def test_listing_skips_hidden_and_links_and_sorts(self, tmp_path):
         root = tmp_path / "写真 [x]"

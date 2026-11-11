@@ -1950,12 +1950,13 @@ def _journaled_script_path(parts: List[str]) -> Path:
     (round 24): a preset saved from another copy -- an older version, the program in
     another folder, a folder since deleted -- ran that copy's backend, or failed with
     "Backend script no longer exists", while the wizard planned with its own settings.
-    Anything that is not one of the backends comes back as recorded and _run_journal
-    refuses it."""
-    script = Path(parts[0])
-    if script.name in BACKEND_SCRIPTS:
-        return SCRIPT_DIR / script.name
-    return script
+    `parts` comes from _journal_parts, which lets nothing but a backend's name through;
+    anything else here is a programming error and raises -- it is never a path handed to
+    Python."""
+    name = Path(parts[0]).name
+    if name not in BACKEND_SCRIPTS:
+        raise ValueError(f"not a backend script: {name}")
+    return SCRIPT_DIR / name
 
 
 def _rebuild_journaled_command(parts: List[str]) -> List[str]:
@@ -6456,13 +6457,9 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
                  f"sessions added since are not included)", "yellow")
 
     for parts in parts_list:
-        # Validate the script that will actually run: one of this wizard's backends, the
-        # copy next to it. Anything else is never handed to Python.
+        # The script that will actually run: one of this wizard's backends, the copy next
+        # to it (_journal_parts let nothing else through).
         script = _journaled_script_path(parts)
-        if script.name not in BACKEND_SCRIPTS:
-            _say(f"Saved workflow names a script this version does not run: {script.name}",
-                 "red")
-            return 1
         if not script.exists():
             _say(f"Backend script no longer exists: {script}", "red")
             return 1

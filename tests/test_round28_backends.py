@@ -101,7 +101,8 @@ def color_rgb(path: Path, h=40, w=56):
 # #1 / #2: the sample layout survives every mode
 # ---------------------------------------------------------------------------------------------
 
-# mode 2 without -OutputDir writes over each file (the in-place replace)
+# mode 2 without -OutputDir: the input root is the flat output, so each file directly in it
+# is written over (the in-place replace). The fixtures here have no subfolders.
 MODE_ARGS = {
     "mode2": ["-Mode", 2],
     "mode1": ["-Mode", 1],
