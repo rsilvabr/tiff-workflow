@@ -957,6 +957,22 @@ def backup_tiff_metadata(src, write_dst):
     return True, None
 
 
+def restore_all_metadata(tag_source, dst):
+    """Copy every tag of `tag_source` (the source TIFF, or the container
+    backup_tiff_metadata made) onto `dst`, a TIFF magick just wrote. True when written.
+
+    ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
+    exiftool gives when the -tagsfromfile source could not be opened -- it still exits 0.
+    Only that one message is a failure besides the exit code: the SOURCE was never opened.
+    A tag-less source legitimately reports "No writable tags set".
+    IPTC:CodedCharacterSet is not part of -all:all: without it UTF-8 IPTC text was written
+    back as Latin, every Japanese keyword a '?' (audit round 28)."""
+    rc, out = exiftool(["-q", "-overwrite_original", "-tagsfromfile", tag_source, "-all:all",
+                        "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe", dst],
+                       merge_stderr=True)
+    return rc == 0 and not re.search("Error opening file", out, re.I)
+
+
 def tiff_has_only_subfile_pages(path, page_count, allowed=("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE"),
                                 timeout=30):
     """True when every page after the first is a thumbnail/preview: its subfiletype is in

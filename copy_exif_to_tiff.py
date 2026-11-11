@@ -360,12 +360,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
     needed, tiff_meta = tw.backup_tiff_metadata(tiff_target, write_dst)
     restore_ok = False
     if not (needed and not tiff_meta):
-        # ONE -q (see above). IPTC:CodedCharacterSet is not part of -all:all: without it
-        # UTF-8 IPTC text came back as '?' (audit round 28).
-        rc, out = tw.exiftool(["-q", "-overwrite_original", "-tagsfromfile", tiff_meta or tiff_target,
-                               "-all:all", "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet",
-                               "-unsafe", write_dst], merge_stderr=True)
-        restore_ok = rc == 0 and not re.search("Error opening file", out, re.I)
+        restore_ok = tw.restore_all_metadata(tiff_meta or tiff_target, write_dst)
     tw.remove_quietly(tiff_meta)
     # The staged file is registered for the move ONLY after every gate has passed: a staged
     # ZIP whose metadata restore failed was once moved ON TOP of the EXIF-bearing original.

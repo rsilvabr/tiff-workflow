@@ -649,18 +649,10 @@ def process_job(run, t, load):
         return res(f"ERROR (sample layout changed: {' '.join(layout_pages)} - output dropped, original untouched) | {name}", fd=True)
 
     staging_name = os.path.basename(write_dst)
-    # Always restore the metadata from the source (or the container). ONE -q, not two: the
-    # second suppresses WARNINGS, and a warning is the only signal exiftool gives when the
-    # tagsfromfile source could not be opened -- it still exits 0. IPTC:CodedCharacterSet is
-    # not part of -all:all: without it UTF-8 IPTC text was written back as Latin.
+    # Always restore the metadata from the source (or the container).
     exif_warn = True
     try:
-        rc, out = tw.exiftool(["-q", "-overwrite_original", "-tagsfromfile", meta_backup or src,
-                               "-all:all", "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet",
-                               "-unsafe", write_dst], merge_stderr=True)
-        # Only this one message is a failure besides the exit code: the SOURCE was never
-        # opened. A tag-less source legitimately reports "No writable tags set".
-        exif_warn = rc != 0 or bool(re.search("Error opening file", out, re.I))
+        exif_warn = not tw.restore_all_metadata(meta_backup or src, write_dst)
     except Exception:
         exif_warn = True
     tw.remove_quietly(meta_backup)
