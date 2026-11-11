@@ -655,6 +655,10 @@ def run_main(argv, state):
         tw.say(f"ERROR: {e}")
         return 1
 
+    if tw.output_dir_error(opt["OutputDir"]):
+        tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
+        return 1
+
     need = ["exiftool"] + (["magick"] if (opt["SafeMode"] or opt["CompressZip"]) else [])
     missing = tw.missing_tools(need)
     if missing:

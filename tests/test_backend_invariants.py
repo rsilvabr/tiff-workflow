@@ -1533,6 +1533,18 @@ class TestGatesFailClosed:
         monkeypatch.setattr(tw, "magick_probe", probe(lines=["3", "3", "3"]))
         assert tw.tiff_page_count("x").count == 3
 
+    def test_page_count_reads_the_directories_not_the_pixels(self, monkeypatch):
+        """v3.1: `identify -ping`. Without it every page was decoded: a healthy 700 MB scan
+        ran past the timeout on a busy machine and was reported as possibly corrupted."""
+        sent = []
+
+        def fake(args, timeout=30):
+            sent.append(([str(a) for a in args], timeout))
+            return tw.MagickResult(False, 0, ["2", "2"])
+        monkeypatch.setattr(tw, "magick_probe", fake)
+        assert tw.tiff_page_count(r"E:\伊豆沼 [x]\50%off.tif", 45) == tw.PageCount(True, 2, "")
+        assert sent == [(["identify", "-ping", "-format", "%n\\n", r"E:\伊豆沼 [x]\50%off.tif"], 45)]
+
     def test_zip_integrity(self, monkeypatch, tmp_path):
         f = tmp_path / "a.tif"
         f.write_bytes(b"x")
@@ -1735,6 +1747,38 @@ class TestPathsAndMoves:
         assert sum("input directory not found" in ln for ln in out.splitlines()) == 1, out
         done = [ln for ln in out.splitlines() if "Done:" in ln]
         assert len(done) == 1 and "| 1 errors" in done[0], out
+
+    @pytest.mark.parametrize("backend", ["compress", "copy_exif", "thumbnails"])
+    def test_an_output_dir_that_is_a_file_is_refused_before_anything(self, tools, tmp_path,
+                                                                     monkeypatch, capsys, backend):
+        """v3.1: one line and exit code 1, before the tools are looked for and before a log
+        exists. compress used to end in `FATAL (unhandled error) | FileExistsError`."""
+        lib = tmp_path / "伊豆沼 [FINAL] 50% x"
+        lib.mkdir()
+        (lib / "a.tif").write_bytes(b"ORIGINAL")
+        (lib / "a.jpg").write_bytes(b"JPEG")
+        not_a_folder = tmp_path / "out 一時 [x].txt"
+        not_a_folder.write_bytes(b"MINE")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tw, "find_tool", lambda n: None)        # not even looked for
+        args = ["-InputDir", str(lib), "-OutputDir", str(not_a_folder)]
+        rc = {"compress": lambda: cz.main(["-Mode", "2"] + args),
+              "copy_exif": lambda: cx.main(args),
+              "thumbnails": lambda: gt.main(args)}[backend]()
+        out = capsys.readouterr().out
+        assert rc == 1 and f"ERROR: -OutputDir is a file, not a folder: {not_a_folder}" in out, out
+        assert "FATAL" not in out and "not found in PATH" not in out, out
+        assert not (tmp_path / "Logs").exists(), "a refused run made its log"
+        assert not_a_folder.read_bytes() == b"MINE" and sorted(os.listdir(lib)) == ["a.jpg", "a.tif"]
+        assert tools.magick_calls == [] and tools.exif_calls == []
+
+    def test_a_relative_output_dir_is_judged_against_the_current_folder(self, tmp_path, monkeypatch):
+        (tmp_path / "f.txt").write_bytes(b"x")
+        (tmp_path / "d").mkdir()
+        monkeypatch.chdir(tmp_path)
+        assert tw.output_dir_error("f.txt") == f"-OutputDir is a file, not a folder: {tmp_path / 'f.txt'}"
+        assert tw.output_dir_error("d") == "" and tw.output_dir_error("new") == ""
+        assert tw.output_dir_error("") == "" and tw.output_dir_error("  ") == ""
 
     def test_exclude_folders_takes_names_not_paths(self):
         assert tw.parse_exclude_folders(" _EXPORT ; temp;; ") == ["_EXPORT", "temp"]

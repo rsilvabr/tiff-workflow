@@ -465,6 +465,17 @@ def resolve_input_dirs(entries, allow_files=False):
     return found, missing
 
 
+def output_dir_error(path):
+    """The usage error for an -OutputDir that names an existing FILE, or "". Until v3.0.0
+    compress ended in `FATAL (unhandled error) | FileExistsError` when it tried to make the
+    folder; the answer is the same (exit code 1, nothing touched), said before anything
+    starts. A relative path is checked against the current folder."""
+    path = str(path).strip()
+    if path and os.path.isfile(full_path(path)):
+        return f"-OutputDir is a file, not a folder: {full_path(path)}"
+    return ""
+
+
 def numbered_name(directory, stem, ext, taken):
     """<stem>_v2<ext>, _v3, ...: the first name `taken(name, path)` does not refuse.
     Returns (name, its path in `directory`)."""
@@ -853,8 +864,14 @@ class PageCount(NamedTuple):
 def tiff_page_count(path, timeout=30):
     """PageCount(ok, count, error) of a TIFF. error is "timeout", "failed" or
     "parse:<raw>" -- never silently 0. `%n` prints once per frame, so the first line of
-    "%n\\n" is the only reliable form."""
-    r = magick_probe(["identify", "-format", "%n\\n", path], timeout)
+    "%n\\n" is the only reliable form.
+
+    `-ping` (v3.1): the pages are counted from the file's directories, without decoding a
+    pixel. Without it identify decoded every page -- seconds on a large scan, half the time
+    of a Copy EXIF run -- and under load a healthy file ran past the timeout and was
+    reported as "possibly corrupted". The count never said anything about the pixels (the
+    exit code is not read here): zip_integrity and pixel_identical do that."""
+    r = magick_probe(["identify", "-ping", "-format", "%n\\n", path], timeout)
     if r.timed_out:
         return PageCount(False, 0, "timeout")
     lines = [ln for ln in r.lines if ln.strip()]

@@ -1481,6 +1481,9 @@ def run_main(argv, state):
     if not 0 <= opt["Mode"] <= 9:
         tw.say(f"ERROR: -Mode {opt['Mode']} does not exist: the modes are 0 to 9")
         return 1
+    if tw.output_dir_error(opt["OutputDir"]):
+        tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
+        return 1
 
     try:
         exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])

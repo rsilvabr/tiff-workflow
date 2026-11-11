@@ -242,6 +242,12 @@ def run(argv):
     for w in overlay["warnings"]:
         tw.say(f"WARNING: settings overlay: {w}")
 
+    # A relative -OutputDir is resolved per file folder here, so only an absolute one can be
+    # judged before the run.
+    if os.path.isabs(opt["OutputDir"].strip()) and tw.output_dir_error(opt["OutputDir"]):
+        tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
+        return 1
+
     log = tw.RunLog(SCRIPT_NAME)
     log(f"tiff-workflow {tw.TOOLKIT_VERSION} | generate_thumbnails.py | {tw.python_label()}")
     if overlay["info"]:

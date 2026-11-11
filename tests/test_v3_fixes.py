@@ -107,10 +107,10 @@ def test_a_file_where_a_folder_is_needed_exits_1(tmp_path, lane, flag):
     if flag == "-StagingDir":
         assert "ERROR (StagingDir exists as a file) | a.tif" in result.stdout, result.stdout
     else:
-        # Today -OutputDir on a file is not caught by a check of its own: os.makedirs raises
-        # and the run ends in `FATAL (unhandled error) | FileExistsError`. Exit 1 and nothing
-        # touched, which is what this test pins; the line of its own is phase 3 of v3.1.
-        assert "FATAL (unhandled error) | FileExistsError" in result.stdout, result.stdout
+        # v3.1: said before anything starts. Until v3.0.0 os.makedirs raised in the middle of
+        # the run and it ended in `FATAL (unhandled error) | FileExistsError`.
+        assert f"ERROR: -OutputDir is a file, not a folder: {not_a_folder}" in result.stdout, result.stdout
+        assert "FATAL" not in result.stdout and not (tmp_path / "Logs").exists(), result.stdout
     assert (work / "a.tif").read_bytes() == before
     assert not_a_folder.read_text() == "x"
     assert sorted(p.name for p in work.iterdir()) == ["a.tif"], "something was left next to it"
