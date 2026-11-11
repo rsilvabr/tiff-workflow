@@ -24,7 +24,9 @@ import shutil
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -486,29 +488,55 @@ def discover(run, mode, root, unreadable):
 
 # -- One TIFF -> ZIP job --------------------------------------------
 
+@dataclass(frozen=True)
+class Job:
+    """One TIFF to compress: what process_job works on. `write_dst` is where the worker
+    writes (a staged file, a temp sibling, or final_dst itself), `final_dst` where the
+    result ends up."""
+    src: str
+    write_dst: str
+    final_dst: str
+    name: str
+    comp: str = ""                      # IFD0 compression when the plan already read it
+    safe_checked: bool = False          # the plan already ran the SafeMode page check
+    keep_dir: Optional[str] = None      # modes 0/9: where the original is archived
+    src_length: int = 0                 # modes 0/9: the original as it was when planned
+    src_mtime_ns: int = 0
+
+
+@dataclass(frozen=True)
+class JobResult:
+    """What process_job returns. `result` is the line to log and count."""
+    result: str
+    name: str
+    src: str
+    staging_name: Optional[str] = None  # the file written, by name: registered for the move
+    final_dst: Optional[str] = None     # None on the results that carry no rename note
+    multi: Optional[str] = None         # the path of a multi-page TIFF that was skipped
+    can_delete: bool = False            # mode 8 -DeleteSource: every gate passed
+    integrity_failed: bool = False
+    integrity_reason: str = ""
+
+
 def process_job(run, t, load):
-    """Compress one TIFF. Runs on a worker thread: it never logs or counts. Returns
-    {"result": line, "staging_name", "name", "src", "final_dst" (None on the results that
-    carry no rename note), "multi", "can_delete", "integrity_failed", "integrity_reason"}.
+    """Compress one TIFF (`t`, a Job). Runs on a worker thread: it never logs or counts.
+    Returns a JobResult.
 
     `load` = workers running at once (they share the disk; it scales the probe timeouts)."""
     opt = run.opt
     mode = opt["Mode"]
-    src = t["src"]
-    write_dst = t["write_dst"]
-    final_dst = t["final_dst"]
+    src = t.src
+    write_dst = t.write_dst
+    final_dst = t.final_dst
     name = os.path.basename(src)
     timeout = opt["MagickTimeout"]
     generate_thumb = opt["GenerateThumbnail"]
 
     def res(line, fd=False, **extra):
-        d = {"result": line, "staging_name": None, "name": name, "src": src,
-             "final_dst": final_dst if fd else None, "multi": None, "can_delete": False,
-             "integrity_failed": False, "integrity_reason": ""}
-        d.update(extra)
-        return d
+        return JobResult(result=line, name=name, src=src,
+                         final_dst=final_dst if fd else None, **extra)
 
-    comp = t.get("comp") or ""
+    comp = t.comp
     if not comp:
         ok, comp = tw.ifd0_compression(src)
         if not ok:
@@ -528,7 +556,7 @@ def process_job(run, t, load):
     if os.path.exists(final_dst) and not opt["Overwrite"] and not tw.same_path(final_dst, src):
         return res(f"SKIP (exists) | {name}")
 
-    if opt["SafeMode"] and not t.get("safe_checked"):
+    if opt["SafeMode"] and not t.safe_checked:
         pc = tw.tiff_page_count(src, timeout)
         if not pc.ok:
             return res(tw.page_count_error_line(pc, name))
@@ -758,11 +786,9 @@ def process_job(run, t, load):
 def _job_result(t, result):
     """A worker that raised is that file's error, never a lost file."""
     if isinstance(result, Exception):
-        name = os.path.basename(t["src"])
-        return {"result": f"ERROR (unexpected) | {name} | {type(result).__name__}: {result}",
-                "staging_name": None, "name": name, "src": t["src"], "final_dst": None,
-                "multi": None, "can_delete": False, "integrity_failed": False,
-                "integrity_reason": ""}
+        name = os.path.basename(t.src)
+        return JobResult(f"ERROR (unexpected) | {name} | {type(result).__name__}: {result}",
+                         name, t.src)
     return result
 
 
@@ -842,18 +868,17 @@ def run_legacy(run):
                 write_dst = tw.join_path(write_dir, tw.staged_name(run.run_id, f.name))
             else:
                 write_dst = final_dst
-            tasks.append({"src": f.path, "write_dst": write_dst, "final_dst": final_dst,
-                          "name": f.name})
+            tasks.append(Job(src=f.path, write_dst=write_dst, final_dst=final_dst, name=f.name))
 
         staging_map = {}
         load = float(max(1, min(workers, len(tasks))))
         for t, result in tw.run_tasks(tasks, lambda q: process_job(run, q, load), workers):
             r = _job_result(t, result)
-            if r["staging_name"]:
-                staging_map[t["final_dst"].lower()] = (r["staging_name"], t["final_dst"])
-            if r["multi"]:
-                run.multi_paths.append(r["multi"])
-            run.count(r["result"])
+            if r.staging_name:
+                staging_map[t.final_dst.lower()] = (r.staging_name, t.final_dst)
+            if r.multi:
+                run.multi_paths.append(r.multi)
+            run.count(r.result)
 
         # Move from staging to the final destination
         if not tw.same_path(write_dir, final_dir) and not dry:
@@ -1120,9 +1145,9 @@ def run_modes(run, bound):
                     continue
                 if action == "Overwrite":
                     # Last claimant wins; the dropped file is still REPORTED.
-                    for sup in [t for t in tasks if tw.same_path(t["final_dst"], final_dst)]:
-                        run.count(f"SKIP (superseded by a later duplicate in flat output) | {sup['name']}")
-                    tasks = [t for t in tasks if not tw.same_path(t["final_dst"], final_dst)]
+                    for sup in [t for t in tasks if tw.same_path(t.final_dst, final_dst)]:
+                        run.count(f"SKIP (superseded by a later duplicate in flat output) | {sup.name}")
+                    tasks = [t for t in tasks if not tw.same_path(t.final_dst, final_dst)]
                     log(f"OVERWRITE (duplicate filename in flat output) | {f.name}", "INFO")
                 else:
                     dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
@@ -1215,28 +1240,30 @@ def run_modes(run, bound):
                 run.count(f"SKIP (exists) | {f.name}")
                 continue
 
-            task = {"src": f.path, "write_dst": write_dst, "final_dst": final_dst,
-                    "name": f.name, "comp": comp, "safe_checked": safe_checked}
+            keep_dir = None
+            src_length = src_mtime_ns = 0
             if not dry:
                 # Nothing moves here: the original stays in place until its compressed copy
                 # has been written, decoded and put next to it (complete_keep_original).
                 # Without -StagingDir the worker writes a temp sibling of final_dst, never
                 # final_dst itself: for a .tif source that IS the original.
                 if not staging:
-                    task["write_dst"] = tw.new_temp_sibling_path(final_dst, run.run_id)
-                    run.temp_files.add(task["write_dst"])
+                    write_dst = tw.new_temp_sibling_path(final_dst, run.run_id)
+                    run.temp_files.add(write_dst)
                 try:
                     st = os.stat(f.path)
                 except OSError as e:
                     run.count(f"ERROR (cannot read the original) | {f.name} | {e}")
                     continue
-                task["keep_dir"] = tw.join_path(f.dir, "OLD_TIFFs")
-                task["src_length"] = st.st_size
-                task["src_mtime_ns"] = st.st_mtime_ns
-            tasks.append(task)
+                keep_dir = tw.join_path(f.dir, "OLD_TIFFs")
+                src_length = st.st_size
+                src_mtime_ns = st.st_mtime_ns
+            tasks.append(Job(src=f.path, write_dst=write_dst, final_dst=final_dst, name=f.name,
+                             comp=comp, safe_checked=safe_checked, keep_dir=keep_dir,
+                             src_length=src_length, src_mtime_ns=src_mtime_ns))
         else:
-            tasks.append({"src": f.path, "write_dst": write_dst, "final_dst": final_dst,
-                          "name": f.name, "comp": pre_comp, "safe_checked": False})
+            tasks.append(Job(src=f.path, write_dst=write_dst, final_dst=final_dst, name=f.name,
+                             comp=pre_comp))
 
     if not tasks:
         # INFO when nothing went wrong: every file skipped as already compressed is the
@@ -1250,19 +1277,19 @@ def run_modes(run, bound):
 
     # Only an in-place write or mode 8's delete gate runs a pixel compare in the workers;
     # modes 0/9 only decode-check the output before it lands.
-    needs_compare = mode == 8 or any(tw.same_path(t["write_dst"], t["src"]) for t in tasks)
-    workers = effective_workers(run, [t["src"] for t in tasks],
+    needs_compare = mode == 8 or any(tw.same_path(t.write_dst, t.src) for t in tasks)
+    workers = effective_workers(run, [t.src for t in tasks],
                                 tw.COMPARE_BYTES_PER_PIXEL if needs_compare
                                 else tw.CONVERT_BYTES_PER_PIXEL)
 
     # Grouped by the folder the outputs land in
     groups = {}
     for t in tasks:
-        groups.setdefault(os.path.dirname(t["final_dst"]).lower(), []).append(t)
+        groups.setdefault(os.path.dirname(t.final_dst).lower(), []).append(t)
 
     for key in sorted(groups):
         group_tasks = groups[key]
-        group_dir = os.path.dirname(group_tasks[0]["final_dst"])
+        group_dir = os.path.dirname(group_tasks[0].final_dst)
         # the header names the folder the outputs land in
         if len(groups) > 1 or len(group_tasks) > 1:
             log("")
@@ -1278,19 +1305,19 @@ def run_modes(run, bound):
         for t, result in tw.run_tasks(group_tasks, lambda q: process_job(run, q, load), workers):
             r = _job_result(t, result)
             results.append((t, r))
-            key_dst = t["final_dst"].lower()
-            if r["staging_name"]:
-                staging_map[key_dst] = r["staging_name"]
-            if r["multi"]:
-                run.multi_paths.append(r["multi"])
-            text = r["result"]
+            key_dst = t.final_dst.lower()
+            if r.staging_name:
+                staging_map[key_dst] = r.staging_name
+            if r.multi:
+                run.multi_paths.append(r.multi)
+            text = r.result
             if text.startswith("ERROR"):
-                error_srcs.add(t["src"].lower())
-            if r["integrity_failed"]:
+                error_srcs.add(t.src.lower())
+            if r.integrity_failed:
                 integrity_failed_dst.add(key_dst)
-                text = (f"ERROR ({r['integrity_reason'] or 'ZIP integrity check failed'} - "
-                        f"source preserved) | {r['name']}")
-            if r["final_dst"] and key_dst in collision_notes:
+                text = (f"ERROR ({r.integrity_reason or 'ZIP integrity check failed'} - "
+                        f"source preserved) | {r.name}")
+            if r.final_dst and key_dst in collision_notes:
                 text += collision_notes[key_dst]
             run.count(text)
 
@@ -1298,9 +1325,9 @@ def run_modes(run, bound):
         if staging and not dry:
             moved = 0
             for t in group_tasks:
-                if t.get("keep_dir"):
+                if t.keep_dir:
                     continue
-                key_dst = t["final_dst"].lower()
+                key_dst = t.final_dst.lower()
                 if key_dst not in staging_map:
                     continue
                 stage_path = tw.join_path(staging, staging_map[key_dst])
@@ -1308,7 +1335,7 @@ def run_modes(run, bound):
                     # a bad ZIP must not replace the original: drop the staged file
                     tw.remove_quietly(stage_path)
                     continue
-                dest_path = t["final_dst"]
+                dest_path = t.final_dst
                 if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
                     continue
                 dest_name = os.path.basename(dest_path)
@@ -1319,15 +1346,15 @@ def run_modes(run, bound):
                     if mv_err:
                         raise OSError(mv_err)
                     if not os.path.exists(dest_path):
-                        error_srcs.add(t["src"].lower())
+                        error_srcs.add(t.src.lower())
                         run.error(f"ERROR (move failed) | {dest_name}")
                     elif os.stat(dest_path).st_size != stage_size:
-                        error_srcs.add(t["src"].lower())
+                        error_srcs.add(t.src.lower())
                         run.error(f"ERROR (size mismatch after move) | {dest_name}")
                     else:
                         moved += 1
                 except OSError as e:
-                    error_srcs.add(t["src"].lower())
+                    error_srcs.add(t.src.lower())
                     run.error(f"ERROR (move exception) | {dest_name}: {e}")
             if moved > 0:
                 log(f"  -> Moved {moved} file(s) -> {group_dir}")
@@ -1338,23 +1365,23 @@ def run_modes(run, bound):
         if not dry:
             kept = 0
             for t in group_tasks:
-                if not t.get("keep_dir"):
+                if not t.keep_dir:
                     continue
-                key_dst = t["final_dst"].lower()
+                key_dst = t.final_dst.lower()
                 if staging:
                     written = tw.join_path(staging, staging_map[key_dst]) if key_dst in staging_map else None
                 else:
-                    written = t["write_dst"]
+                    written = t.write_dst
                 if not written or not os.path.exists(written):
                     continue
-                if t["src"].lower() in error_srcs or key_dst in integrity_failed_dst:
+                if t.src.lower() in error_srcs or key_dst in integrity_failed_dst:
                     tw.remove_quietly(written)
                     continue
-                k_err = complete_keep_original(run, written, t["src"], t["final_dst"], t["keep_dir"],
-                                               t["src_length"], t["src_mtime_ns"])
+                k_err = complete_keep_original(run, written, t.src, t.final_dst, t.keep_dir,
+                                               t.src_length, t.src_mtime_ns)
                 if k_err:
                     tw.remove_quietly(written)
-                    run.error(f"ERROR (keep original) | {t['name']} | {k_err}")
+                    run.error(f"ERROR (keep original) | {t.name} | {k_err}")
                 else:
                     kept += 1
             if kept > 0:
@@ -1364,22 +1391,22 @@ def run_modes(run, bound):
         if mode == 8 and not dry:
             deleted = 0
             for t, r in results:
-                if not r["can_delete"] or not os.path.exists(t["src"]):
+                if not r.can_delete or not os.path.exists(t.src):
                     continue
-                if tw.same_path(t["src"], t["final_dst"]):
+                if tw.same_path(t.src, t.final_dst):
                     # in place: the original was already replaced by the compressed file
                     continue
-                src_name = os.path.basename(t["src"])
-                if not os.path.exists(t["final_dst"]):
+                src_name = os.path.basename(t.src)
+                if not os.path.exists(t.final_dst):
                     run.error(f"ERROR (final destination missing, source preserved) | {src_name}")
                     continue
                 # The pixel gate ran on the STAGED file: the file that authorises the delete
                 # is checked again where it actually sits.
-                if not tw.zip_integrity(t["final_dst"], opt["MagickTimeout"]):
+                if not tw.zip_integrity(t.final_dst, opt["MagickTimeout"]):
                     run.error(f"ERROR (final ZIP failed integrity - source preserved) | {src_name}")
                     continue
                 try:
-                    tw.remove_file(t["src"])     # a read-only source is deleted too
+                    tw.remove_file(t.src)     # a read-only source is deleted too
                     deleted += 1
                 except OSError:
                     run.error(f"ERROR (failed to delete source after move) | {src_name}")

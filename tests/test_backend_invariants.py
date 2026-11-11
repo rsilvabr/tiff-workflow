@@ -157,9 +157,8 @@ def compress_run(*argv):
 
 
 def job(run, src, write_dst=None, final_dst=None, **extra):
-    t = {"src": str(src), "write_dst": str(write_dst or src), "final_dst": str(final_dst or src),
-         "name": Path(src).name}
-    t.update(extra)
+    t = cz.Job(src=str(src), write_dst=str(write_dst or src), final_dst=str(final_dst or src),
+               name=Path(src).name, **extra)
     return cz.process_job(run, t, 1.0)
 
 
@@ -192,7 +191,7 @@ class TestInPlaceReplace:
     @pytest.mark.parametrize("argv", [[], ["-Mode", "2"], ["-Mode", "5"]], ids=["legacy", "mode2", "mode5"])
     def test_the_original_is_replaced_only_after_every_gate(self, tools, photo, argv):
         r = job(compress_run(*argv), photo)
-        assert r["result"].startswith("OK (Uncompressed -> ZIP)"), r["result"]
+        assert r.result.startswith("OK (Uncompressed -> ZIP)"), r.result
         assert photo.read_bytes() == b"COMPRESSED"
         assert leftovers(photo.parent) == []
         ev = tools.events
@@ -210,7 +209,7 @@ class TestInPlaceReplace:
         else:
             setattr(tools, failing, False)
         r = job(compress_run(), photo)
-        assert r["result"] == f"ERROR ({why} - original untouched) | {photo.name}"
+        assert r.result == f"ERROR ({why} - original untouched) | {photo.name}"
         assert photo.read_bytes() == b"ORIGINAL"
         assert leftovers(photo.parent) == [], "the dropped temp sibling stayed behind"
         assert "replace" not in tools.events
@@ -218,7 +217,7 @@ class TestInPlaceReplace:
     def test_a_nonzero_exiftool_exit_is_a_failed_restore_too(self, tools, photo):
         tools.exif_result = (1, "")
         r = job(compress_run(), photo)
-        assert "metadata restore failed - original untouched" in r["result"]
+        assert "metadata restore failed - original untouched" in r.result
         assert photo.read_bytes() == b"ORIGINAL"
 
     def test_no_writable_tags_is_not_a_failure(self, tools, photo):
@@ -226,7 +225,7 @@ class TestInPlaceReplace:
         SOURCE was never read."""
         tools.exif_result = (0, "Warning: No writable tags set from x.tif")
         r = job(compress_run(), photo)
-        assert r["result"].startswith("OK "), r["result"]
+        assert r.result.startswith("OK "), r.result
 
     def test_staged_for_its_own_place_is_verified_like_an_in_place_write(self, tools, photo, tmp_path):
         """Round 28: with -StagingDir the output is not a temp sibling, and the gate keyed on
@@ -236,8 +235,8 @@ class TestInPlaceReplace:
         tools.pixels = False
         r = job(compress_run("-Mode", "2"), photo, write_dst=stg / "abcd1234_0123456789ab_photo.tif",
                 final_dst=photo)
-        assert r["result"].startswith("ERROR (in-place verification failed"), r["result"]
-        assert r["staging_name"] is None, "a refused file must never reach the staging move"
+        assert r.result.startswith("ERROR (in-place verification failed"), r.result
+        assert r.staging_name is None, "a refused file must never reach the staging move"
         assert os.listdir(stg) == []
 
     def test_the_metadata_is_parked_first_and_a_failed_container_refuses_the_write(self, tools, photo):
@@ -245,7 +244,7 @@ class TestInPlaceReplace:
         container the write would strip every tag: refuse it, fail closed."""
         tools.meta = (True, None)
         r = job(compress_run(), photo)
-        assert r["result"] == f"ERROR (metadata container failed - write refused) | {photo.name}"
+        assert r.result == f"ERROR (metadata container failed - write refused) | {photo.name}"
         assert tools.magick_calls == [], "magick must not run without the container"
         assert photo.read_bytes() == b"ORIGINAL"
 
@@ -278,30 +277,30 @@ class TestMagickArguments:
         out = tmp_path / "o.tif"
         tools.magick_writes = False
         r = job(compress_run("-Mode", "1"), photo, write_dst=out, final_dst=out)
-        assert r["result"].startswith("ERROR (magick reported success but wrote no file)"), r["result"]
+        assert r.result.startswith("ERROR (magick reported success but wrote no file)"), r.result
 
     def test_a_failed_conversion_drops_its_partial_output(self, tools, photo, tmp_path):
         out = tmp_path / "o.tif"
         out.write_bytes(b"PARTIAL")
         tools.magick_rc = 1
         r = job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
-        assert r["result"].startswith("ERROR (magick) |"), r["result"]
+        assert r.result.startswith("ERROR (magick) |"), r.result
         assert not out.exists()
 
     def test_a_changed_layout_drops_the_output(self, tools, photo, tmp_path):
         out = tmp_path / "o.tif"
         tools.layout_kept = False
         r = job(compress_run("-Mode", "1"), photo, write_dst=out, final_dst=out)
-        assert r["result"].startswith("ERROR (sample layout changed: rgb/3/8,8,8/ - output dropped"), r["result"]
+        assert r.result.startswith("ERROR (sample layout changed: rgb/3/8,8,8/ - output dropped"), r.result
         assert not out.exists()
         assert photo.read_bytes() == b"ORIGINAL"
 
     def test_unreadable_layout_and_non_opaque_associated_alpha_are_refused(self, tools, photo):
         tools.layout = (False, [])
-        assert job(compress_run(), photo)["result"].startswith("ERROR (sample layout unreadable)")
+        assert job(compress_run(), photo).result.startswith("ERROR (sample layout unreadable)")
         tools.layout = (True, ["rgb/4/8,8,8,8/1"])
         tools.alpha_ok = False
-        assert "associated alpha that is not opaque" in job(compress_run(), photo)["result"]
+        assert "associated alpha that is not opaque" in job(compress_run(), photo).result
         assert tools.magick_calls == []
 
 
@@ -312,26 +311,26 @@ class TestSafeModeAndSkips:
         tools.pages = 3
         tools.only_subfile = False
         r = job(compress_run("-Mode", "1"), photo, final_dst=photo.with_name("o.tif"))
-        assert r["result"] == f"MULTI (3 pages - skipped) | {photo.name}"
-        assert r["multi"] == str(photo)
+        assert r.result == f"MULTI (3 pages - skipped) | {photo.name}"
+        assert r.multi == str(photo)
         assert tools.allowed_seen == [("REDUCEDIMAGE", "REDUCED")]
         assert tools.magick_calls == []
 
     def test_already_compressed_is_skipped_on_the_main_image(self, tools, photo):
         tools.comp = "Adobe Deflate"
-        assert job(compress_run(), photo)["result"] == f"SKIP (Adobe Deflate) | {photo.name}"
+        assert job(compress_run(), photo).result == f"SKIP (Adobe Deflate) | {photo.name}"
         tools.comp = "LZW"
-        assert job(compress_run(), photo)["result"].startswith("OK (LZW -> ZIP)")
-        assert job(compress_run("-SkipLzwAsCompressed:$true"), photo)["result"].startswith("SKIP (")
+        assert job(compress_run(), photo).result.startswith("OK (LZW -> ZIP)")
+        assert job(compress_run("-SkipLzwAsCompressed:$true"), photo).result.startswith("SKIP (")
 
     def test_a_refused_thumbnail_is_reported_by_a_dry_run_too(self, tools, photo):
         tools.thumb_safe = tw.ThumbSafe(False, 3, "would drop 2 extra page(s)")
         r = job(compress_run("-GenerateThumbnail", "-DryRun"), photo)
-        assert r["result"].startswith("ERROR (-GenerateThumbnail refused)"), r["result"]
+        assert r.result.startswith("ERROR (-GenerateThumbnail refused)"), r.result
 
     def test_dry_run_writes_nothing(self, tools, photo):
         r = job(compress_run("-DryRun"), photo)
-        assert r["result"] == f"DRY (Uncompressed -> ZIP) | {photo.name}"
+        assert r.result == f"DRY (Uncompressed -> ZIP) | {photo.name}"
         assert tools.magick_calls == [] and tools.exif_calls == []
 
 
@@ -342,27 +341,27 @@ class TestGatesPerMode:
         stg.mkdir()
         run = compress_run("-Mode", "8", "-DeleteSource")
         ok = job(run, photo, write_dst=stg / "a.tif")
-        assert ok["can_delete"] is True and "[SOURCE DELETED]" in ok["result"]
-        assert not ok["integrity_failed"]
+        assert ok.can_delete is True and "[SOURCE DELETED]" in ok.result
+        assert not ok.integrity_failed
         tools.pixels = False
         bad = job(run, photo, write_dst=stg / "b.tif")
-        assert bad["integrity_failed"] is True and bad["can_delete"] is False
+        assert bad.integrity_failed is True and bad.can_delete is False
         tools.pixels = True
         tools.exif_result = (0, "Error opening file")
         noexif = job(run, photo, write_dst=stg / "c.tif")
-        assert noexif["integrity_failed"] and noexif["integrity_reason"] == "metadata restore failed"
-        assert noexif["can_delete"] is False
+        assert noexif.integrity_failed and noexif.integrity_reason == "metadata restore failed"
+        assert noexif.can_delete is False
 
     def test_mode8_without_delete_source_never_asks_for_a_delete(self, tools, photo, tmp_path):
         r = job(compress_run("-Mode", "8"), photo, write_dst=tmp_path / "a.tif")
-        assert r["can_delete"] is False and "[SOURCE DELETED]" not in r["result"]
+        assert r.can_delete is False and "[SOURCE DELETED]" not in r.result
 
     def test_mode8_thumbnail_output_is_checked_on_page_zero(self, tools, photo, tmp_path):
         """Round 15: whole-file identity refused EVERY -GenerateThumbnail file in mode 8."""
         r = job(compress_run("-Mode", "8", "-GenerateThumbnail"), photo, write_dst=tmp_path / "a.tif")
         assert "thumb_match" in tools.events and "pixels" not in tools.events
         assert tools.thumb_expected == 2
-        assert not r["integrity_failed"]
+        assert not r.integrity_failed
         assert tools.history_params.endswith("+ thumbnail page")
 
     @pytest.mark.parametrize("mode", ["0", "9"])
@@ -372,7 +371,7 @@ class TestGatesPerMode:
         tools.integrity = False
         sibling = str(photo) + ".abcd1234_0123456789ab.tif"
         r = job(compress_run("-Mode", mode), photo, write_dst=sibling, keep_dir=str(photo.parent / "OLD_TIFFs"))
-        assert r["integrity_failed"] is True
+        assert r.integrity_failed is True
         assert photo.read_bytes() == b"ORIGINAL", "the worker never touches the original in modes 0/9"
 
     @pytest.mark.parametrize("mode", [str(m) for m in range(1, 8)])
@@ -384,7 +383,7 @@ class TestGatesPerMode:
         monkeypatch.setattr(tw, "tiff_has_only_subfile_pages", lambda *a, **k: True)
         out = tmp_path / "o.tif"
         r = job(compress_run("-Mode", mode), photo, write_dst=out, final_dst=out)
-        assert r["result"] == f"ERROR (page count shrink) | {photo.name} | 2 -> 1 pages"
+        assert r.result == f"ERROR (page count shrink) | {photo.name} | 2 -> 1 pages"
         assert not out.exists()
 
     def test_a_degraded_outcome_is_folded_into_the_result_line(self, tools, photo, tmp_path):
@@ -394,9 +393,9 @@ class TestGatesPerMode:
         tools.subfile_restore = False
         tools.history = False
         r = job(compress_run("-Mode", "1"), photo, write_dst=out, final_dst=out)
-        assert r["result"] == (f"WARN (exiftool failed, ZIP ok) [subfiletype restore failed]"
+        assert r.result == (f"WARN (exiftool failed, ZIP ok) [subfiletype restore failed]"
                                f" [history not written] | {photo.name}")
-        assert r["staging_name"] == "o.tif"
+        assert r.staging_name == "o.tif"
 
     def test_history_names_the_mode(self, tools, photo, tmp_path):
         job(compress_run("-Mode", "9"), photo, write_dst=str(photo) + ".abcd1234_0123456789ab.tif")
