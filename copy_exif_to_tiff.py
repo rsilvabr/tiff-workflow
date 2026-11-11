@@ -382,6 +382,71 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
     return res(f"{head} | {name} <= {jpeg_name}{heur_suffix}{raw_suffix}", staged=staging_name)
 
 
+def _dest_name(run, tif, final_dir):
+    """The name `tif` gets in its destination folder.
+
+    With -OutputDir every session writes into the SAME folder, so two sessions holding
+    DSC_0001.tif used to overwrite/skip each other. Later claimants get _v2, _v3, ..."""
+    dest_name = tif.name
+    if run.opt["OutputDir"] and final_dir.lower() != tif.dir.lower():
+        d_key = tw.join_path(final_dir, dest_name).lower()
+        if d_key in run.claimed_dest and run.claimed_dest[d_key].lower() != tif.path.lower():
+            dest_name, cand_path = tw.numbered_name(
+                final_dir, tif.stem, tif.ext,
+                lambda name, path: path.lower() in run.claimed_dest or os.path.exists(path))
+            d_key = cand_path.lower()
+            run.log(f"  RENAME (name already taken in OutputDir) | {tif.name} -> {dest_name}", "WARN")
+        run.claimed_dest[d_key] = tif.path
+    return dest_name
+
+
+def _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir):
+    """Move the staged ZIPs of a group to their final destination. Only what this run
+    registered: an unprefixed file of the same name in the staging folder belongs to
+    somebody else."""
+    opt = run.opt
+    if not (opt["CompressZip"] and not opt["DryRun"]):
+        return
+    moved = 0
+    for tif in group_files:
+        staged = staging_map.get(tif.path.lower())
+        if not staged:
+            continue
+        stage_path = tw.join_path(write_dir, staged)
+        dest_path = tw.join_path(final_dir, dest_names.get(tif.path.lower(), tif.name))
+        if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
+            continue
+        try:
+            # In place, dest_path IS the TIFF: its write time is read BEFORE the
+            # move -- afterwards it is the staged file's own fresh timestamp.
+            orig_mtime = None
+            try:
+                orig_mtime = os.stat(tif.path).st_mtime_ns
+            except OSError:
+                pass
+            stage_size = os.stat(stage_path).st_size
+            # Never a copy straight onto the photo's name (a -StagingDir on another
+            # drive): copied next to it, then swapped with one rename.
+            mv_err = tw.move_file_into_place(stage_path, dest_path, run.run_id)
+            if mv_err:
+                raise OSError(mv_err)
+            if os.path.exists(dest_path) and os.stat(dest_path).st_size == stage_size:
+                # The EXIF-only path keeps the source date (exiftool -P); the ZIP
+                # path does the same.
+                if orig_mtime is not None:
+                    try:
+                        os.utime(dest_path, ns=(os.stat(dest_path).st_atime_ns, orig_mtime))
+                    except OSError:
+                        pass
+                moved += 1
+            else:
+                run.error(f"ERROR (move failed) | {tif.name}")
+        except OSError as e:
+            run.error(f"ERROR (move failed) | {tif.name}: {e}")
+    if moved > 0:
+        run.log(f"  -> Moved {moved} file(s) -> {final_dir}")
+
+
 def process_folder(run, root):
     """Every TIFF directly in `root` (the session folder)."""
     opt = run.opt
@@ -440,23 +505,11 @@ def process_folder(run, root):
             if opt["CompressZip"] and opt["OutputDir"]:
                 os.makedirs(opt["OutputDir"], exist_ok=True)
 
-        # DestName: with -OutputDir every session writes into the SAME folder, so two
-        # sessions holding DSC_0001.tif used to overwrite/skip each other. Later claimants
-        # get _v2, _v3, ...
         dest_names = {}
         pairs = []
         for tif in group_files:
             pair = find_jpeg_pair(run, tif, jpg_index)
-            dest_name = tif.name
-            if opt["OutputDir"] and final_dir.lower() != tif.dir.lower():
-                d_key = tw.join_path(final_dir, dest_name).lower()
-                if d_key in run.claimed_dest and run.claimed_dest[d_key].lower() != tif.path.lower():
-                    dest_name, cand_path = tw.numbered_name(
-                        final_dir, tif.stem, tif.ext,
-                        lambda name, path: path.lower() in run.claimed_dest or os.path.exists(path))
-                    d_key = cand_path.lower()
-                    log(f"  RENAME (name already taken in OutputDir) | {tif.name} -> {dest_name}", "WARN")
-                run.claimed_dest[d_key] = tif.path
+            dest_name = _dest_name(run, tif, final_dir)
             dest_names[tif.path.lower()] = dest_name
             pairs.append({
                 "tiff": tif.path, "tif_name": tif.name, "tif_base": tif.stem, "dest_name": dest_name,
@@ -487,47 +540,74 @@ def process_folder(run, root):
                 staging_map[p["tiff"].lower()] = result["staged"]
             run.count(result["line"])
 
-        # Move from staging to the final destination. Only what this run registered: an
-        # unprefixed file of the same name in the staging folder belongs to somebody else.
-        if opt["CompressZip"] and not opt["DryRun"]:
-            moved = 0
-            for tif in group_files:
-                staged = staging_map.get(tif.path.lower())
-                if not staged:
-                    continue
-                stage_path = tw.join_path(write_dir, staged)
-                dest_path = tw.join_path(final_dir, dest_names.get(tif.path.lower(), tif.name))
-                if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
-                    continue
-                try:
-                    # In place, dest_path IS the TIFF: its write time is read BEFORE the
-                    # move -- afterwards it is the staged file's own fresh timestamp.
-                    orig_mtime = None
-                    try:
-                        orig_mtime = os.stat(tif.path).st_mtime_ns
-                    except OSError:
-                        pass
-                    stage_size = os.stat(stage_path).st_size
-                    # Never a copy straight onto the photo's name (a -StagingDir on another
-                    # drive): copied next to it, then swapped with one rename.
-                    mv_err = tw.move_file_into_place(stage_path, dest_path, run.run_id)
-                    if mv_err:
-                        raise OSError(mv_err)
-                    if os.path.exists(dest_path) and os.stat(dest_path).st_size == stage_size:
-                        # The EXIF-only path keeps the source date (exiftool -P); the ZIP
-                        # path does the same.
-                        if orig_mtime is not None:
-                            try:
-                                os.utime(dest_path, ns=(os.stat(dest_path).st_atime_ns, orig_mtime))
-                            except OSError:
-                                pass
-                        moved += 1
-                    else:
-                        run.error(f"ERROR (move failed) | {tif.name}")
-                except OSError as e:
-                    run.error(f"ERROR (move failed) | {tif.name}: {e}")
-            if moved > 0:
-                log(f"  -> Moved {moved} file(s) -> {final_dir}")
+        _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir)
+
+
+def _input_dirs(opt, log):
+    """(the folders to process, the entries that do not exist), or None after logging why
+    the command line cannot be used. Without -InputDir and -InputDirFile: the current
+    folder.
+
+    A bad path used to fall through to "No TIFFs found" and exit 0, and convert_tiff.py
+    gates Step 2 of the combined workflow on this exit code."""
+    entries = []
+    if opt["InputDirFile"]:
+        if opt["InputDir"]:
+            log("ERROR: pass -InputDir or -InputDirFile, not both", "ERROR")
+            return None
+        try:
+            entries = tw.read_input_dir_file(opt["InputDirFile"])
+        except tw.UsageError as e:
+            log(f"ERROR: {e}", "ERROR")
+            return None
+    elif opt["InputDir"]:
+        entries = opt["InputDir"].split(";")
+
+    input_dirs = []
+    missing_roots = []
+    if entries:
+        seen = set()
+        for d in entries:
+            d = d.strip()
+            if not d:
+                continue
+            d = tw.full_path(d)
+            if not os.path.isdir(d):
+                missing_roots.append(d)
+                continue
+            # A doubled entry ("A;A") used to process the same folder twice.
+            if d.lower() in seen:
+                continue
+            seen.add(d.lower())
+            input_dirs.append(d)
+    else:
+        input_dirs = [os.getcwd()]
+    return input_dirs, missing_roots
+
+
+def _autofind_folders(root, pattern):
+    """The folders below `root` whose name contains `pattern`. The pattern is text, not a
+    wildcard: a '[' in a folder name is itself. The tool-output folders are matched as
+    segments BELOW the root."""
+    return [d for d in tw.list_dirs(root, True)
+            if pattern.lower() in os.path.basename(d).lower()
+            and not tw.path_excluded(d, root, AUTOFIND_SKIP)]
+
+
+def _log_summary(run):
+    log = run.log
+    log("")
+    log("-" * 50)
+    zip_note = f" (ZIP step skipped on {run.zip_skip})" if run.zip_skip > 0 else ""
+    log(f"Done: {run.ok} OK{zip_note} | {run.skip} skipped | {run.miss} no JPEG pair | "
+        f"{run.multi} multi-page | {run.warn} warnings | {run.err} errors | "
+        f"{run.counter}/{run.total} processed")
+    if run.multi > 0:
+        log("")
+        log("-- Multi-page TIFFs found (not touched):")
+        for mp in sorted(run.multi_paths, key=str.lower):
+            log(f"   {mp}", "WARN")
+    log(f"Log: {log.path}")
 
 
 def run_main(argv, state):
@@ -572,40 +652,11 @@ def run_main(argv, state):
     else:
         opt["OutputDir"] = ""
 
-    # A bad path used to fall through to "No TIFFs found" and exit 0, and convert_tiff.py
-    # gates Step 2 of the combined workflow on this exit code.
-    entries = []
-    if opt["InputDirFile"]:
-        if opt["InputDir"]:
-            log("ERROR: pass -InputDir or -InputDirFile, not both", "ERROR")
-            return 1
-        try:
-            entries = tw.read_input_dir_file(opt["InputDirFile"])
-        except tw.UsageError as e:
-            log(f"ERROR: {e}", "ERROR")
-            return 1
-    elif opt["InputDir"]:
-        entries = opt["InputDir"].split(";")
-
-    input_dirs = []
-    missing_roots = []
-    if entries:
-        seen = set()
-        for d in entries:
-            d = d.strip()
-            if not d:
-                continue
-            d = tw.full_path(d)
-            if not os.path.isdir(d):
-                missing_roots.append(d)
-                continue
-            # A doubled entry ("A;A") used to process the same folder twice.
-            if d.lower() in seen:
-                continue
-            seen.add(d.lower())
-            input_dirs.append(d)
-    else:
-        input_dirs = [os.getcwd()]
+    # Before the banner: the two -InputDir/-InputDirFile errors are the first lines of the log.
+    resolved = _input_dirs(opt, log)
+    if resolved is None:
+        return 1
+    input_dirs, missing_roots = resolved
 
     log(f"tiff-workflow {tw.TOOLKIT_VERSION} | copy_exif_to_tiff.py | {tw.python_label()}")
     if overlay["info"]:
@@ -632,11 +683,7 @@ def run_main(argv, state):
         if opt["AutoFind"]:
             pattern = opt["FolderPattern"]
             log(f"AutoFind mode | Pattern: '{pattern}' | Root: {root}")
-            # The pattern is text, not a wildcard: a '[' in a folder name is itself. The
-            # tool-output folders are matched as segments BELOW the root.
-            matching = [d for d in tw.list_dirs(root, True)
-                        if pattern.lower() in os.path.basename(d).lower()
-                        and not tw.path_excluded(d, root, AUTOFIND_SKIP)]
+            matching = _autofind_folders(root, pattern)
             if not matching:
                 log(f"No folders matching '{pattern}' found in: {root}", "WARN")
             else:
@@ -652,18 +699,7 @@ def run_main(argv, state):
             log(f"Root: {root}")
             process_folder(run, root)
 
-    log("")
-    log("-" * 50)
-    zip_note = f" (ZIP step skipped on {run.zip_skip})" if run.zip_skip > 0 else ""
-    log(f"Done: {run.ok} OK{zip_note} | {run.skip} skipped | {run.miss} no JPEG pair | "
-        f"{run.multi} multi-page | {run.warn} warnings | {run.err} errors | "
-        f"{run.counter}/{run.total} processed")
-    if run.multi > 0:
-        log("")
-        log("-- Multi-page TIFFs found (not touched):")
-        for mp in sorted(run.multi_paths, key=str.lower):
-            log(f"   {mp}", "WARN")
-    log(f"Log: {log.path}")
+    _log_summary(run)
 
     if run.err > 0 or (opt["FailOnWarn"] and (run.warn + run.miss) > 0):
         return 1
