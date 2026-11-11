@@ -94,21 +94,23 @@ def test_copy_exif_dry_run_creates_no_output_folder(tmp_path, lane):
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize("flag", ["-StagingDir", "-OutputDir"])
-def test_legacy_with_a_file_where_a_folder_is_needed_exits_1(tmp_path, lane, flag):
-    """3. Nothing was compressed: that is a failed run, not a clean one."""
+def test_a_file_where_a_folder_is_needed_exits_1(tmp_path, lane, flag):
+    """3. Nothing was compressed: that is a failed run, not a clean one. (Found in the
+    legacy mode, which left with v3.1; the same question for mode 2, in place.)"""
     work = hostile_folder(tmp_path, "a.tif")
     before = (work / "a.tif").read_bytes()
     not_a_folder = tmp_path / "a file.txt"
     not_a_folder.write_text("x")
-    result = run_ps(lane, "compress_tiff_zip.py", [flag, not_a_folder], work)
-    assert "exists as a file" in result.stdout, result.stdout
+    result = run_ps(lane, "compress_tiff_zip.py",
+                    ["-Mode", "2", "-InputDir", work, flag, not_a_folder], tmp_path)
     assert result.returncode == 1, result.stdout
     assert (work / "a.tif").read_bytes() == before
     assert not_a_folder.read_text() == "x"
+    assert sorted(p.name for p in work.iterdir()) == ["a.tif"], "something was left next to it"
 
 
 @pytest.mark.parametrize("lane", LANES)
-@pytest.mark.parametrize("mode", ["10", "19", "99"])
+@pytest.mark.parametrize("mode", ["10", "19", "99", "-1", "-5"])
 def test_a_mode_that_does_not_exist_is_refused(tmp_path, lane, mode):
     """4. A typo in -Mode must not read as "nothing to do"."""
     if shutil.which("magick") is None or shutil.which("exiftool") is None:
@@ -117,3 +119,21 @@ def test_a_mode_that_does_not_exist_is_refused(tmp_path, lane, mode):
     assert result.returncode == 1, result.stdout
     assert f"-Mode {mode} does not exist" in result.stdout
     assert not (tmp_path / "Logs").exists(), "refused before anything is created"
+
+
+@requires_tools
+@pytest.mark.parametrize("lane", LANES)
+@pytest.mark.parametrize("args", [[], ["-InputDir", "."], ["-RestoreStranded"],
+                                  ["-StagingDir", "stg", "-GenerateThumbnail"]],
+                         ids=["nothing", "inputdir", "restore-stranded", "other-options"])
+def test_compress_without_a_mode_is_refused(tmp_path, lane, args):
+    """v3.1: until v3.0.0 a run without -Mode was the "legacy" mode -- it compressed every
+    TIFF under the CURRENT folder in place, with no OLD_TIFFs backup. There is no default
+    mode now: a forgotten -Mode touches nothing."""
+    work = hostile_folder(tmp_path, "a.tif")
+    before = (work / "a.tif").read_bytes()
+    result = run_ps(lane, "compress_tiff_zip.py", args, work)
+    assert result.returncode == 1, result.stdout
+    assert "-Mode is required" in result.stdout, result.stdout
+    assert (work / "a.tif").read_bytes() == before, "a run without -Mode rewrote the file"
+    assert sorted(p.name for p in work.iterdir()) == ["a.tif"], "refused before anything is created"

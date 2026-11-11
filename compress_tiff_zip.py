@@ -2,7 +2,6 @@
 """compress_tiff_zip.py -- TIFF -> ZIP/Deflate, lossless and verified.
 
     python compress_tiff_zip.py -Mode 9 -InputDir <folder> [-DryRun]
-    python compress_tiff_zip.py                (legacy: the current folder, in place)
 
 Modes: 0 in place (one folder, originals kept in OLD_TIFFs/), 1 ZIP/ subfolder, 2 flat
 output, 3 ZIP/ subfolder (recursive), 4 sibling folder (_TIFF -> _ZIP), 5 ZIP/ next to the
@@ -37,7 +36,7 @@ from tiff_workflow_common import P  # noqa: E402
 # The defaults are the settings of this script: edit them here, or leave the file alone
 # and put them in .tiff_workflow_settings.json (the names in OVERLAY_SPECS).
 PARAMS = (
-    P("Mode", "int", -1, help="-1 = legacy mode (no CLI params = old behavior)"),
+    P("Mode", "int", -1, help="required: 0-9 (the default only means: not given)"),
 
     P("InputDir", "str", "."),
 
@@ -724,8 +723,7 @@ def process_job(run, t, load):
 
     # xmpMM:History: this rewrite, in its own exiftool call. Before the gates, so they check
     # the final bytes; the irreversible step stays last. A failed entry is a WARN.
-    history = ("compress_tiff_zip legacy: ZIP (Deflate)" if mode < 0
-               else f"compress_tiff_zip mode {mode}: ZIP (Deflate)")
+    history = f"compress_tiff_zip mode {mode}: ZIP (Deflate)"
     if generate_thumb and not no_thumb_note:
         history += " + thumbnail page"
     if not tw.add_tiff_history_entry(write_dst, tw.history_agent(), history):
@@ -752,10 +750,10 @@ def process_job(run, t, load):
 
     # This output REPLACES the original when it is written in place (temp sibling) -- and
     # also when it is staged (-StagingDir) for a destination that is the source itself
-    # (legacy, mode 2 with -OutputDir on the input root, mode 5 inside ZIP/). Modes 0/9
-    # keep the original in OLD_TIFFs/ and mode 8 has its own gate below.
+    # (mode 2 with -OutputDir on the input root, mode 5 inside ZIP/). Modes 0/9 keep the
+    # original in OLD_TIFFs/ and mode 8 has its own gate below.
     replaces_source = bool(in_place_final) or (
-        (mode < 0 or 1 <= mode <= 7) and tw.same_path(final_dst, src))
+        1 <= mode <= 7 and tw.same_path(final_dst, src))
     if replaces_source:
         # Only a fully decoded, pixel-verified ZIP whose metadata was restored may replace
         # the original; on any failure the new file is dropped and the source stays.
@@ -818,123 +816,6 @@ def _job_result(t, result):
         return JobResult(f"ERROR (unexpected) | {name} | {type(result).__name__}: {result}",
                          name, t.src)
     return result
-
-
-# -- Legacy mode (Mode = -1): the current folder, in place -----------
-
-def run_legacy(run):
-    opt = run.opt
-    log = run.log
-    if opt["InputDirFile"]:
-        tw.say("ERROR: -InputDirFile needs -Mode 0-9")
-        return 1
-    root = os.getcwd()
-    unreadable = []
-    # Not the backups in OLD_TIFFs (relative to the root, so pointing legacy AT an
-    # OLD_TIFFs folder on purpose still works), not a staged/temp file an interrupted run
-    # left behind.
-    files = [f for f in tw.list_files(root, True, unreadable)
-             if tw.is_tiff_name(f.name)
-             and not tw.path_excluded(f.dir, root, TOOL_OUTPUT_NAMES)
-             and not tw.LEFTOVER_NAME_RE.search(f.name)]
-    run.total = len(files)
-    log(f"Log: {log.path}")
-    for d in unreadable:
-        log(f"cannot read folder (skipped): {d}", "WARN")
-
-    if run.total == 0:
-        log(f"No TIFF files found in: {root}", "WARN")
-        log("Make sure you are in the right folder and that .tif or .tiff files exist")
-        log(f"Log: {log.path}")
-        return 1 if run.err > 0 else 0
-
-    out_dir = opt["OutputDir"]
-    staging = opt["StagingDir"]
-    dry = opt["DryRun"]
-    mode_label = ("SAFE (multi-page TIFFs will be skipped)" if opt["SafeMode"]
-                  else "STANDARD (all TIFFs will be compressed)")
-    log(f"TIFFs: {run.total} | Workers: {opt['Workers']} | "
-        f"OutputDir: {out_dir or '(overwrite in place)'} | Staging: {staging or 'disabled'} | "
-        f"DryRun: {dry}")
-    log(f"Mode: {mode_label}")
-
-    workers = effective_workers(run, [f.path for f in files], tw.COMPARE_BYTES_PER_PIXEL)
-
-    groups = {}
-    for f in files:
-        groups.setdefault(f.dir.lower(), []).append(f)
-
-    for key in sorted(groups):
-        group_files = groups[key]
-        group_dir = group_files[0].dir
-        if len(groups) > 1 or len(group_files) > 1:
-            log("")
-            log(f"-- Group: {group_dir} ({len(group_files)} file(s))")
-
-        if out_dir:
-            final_dir = out_dir if os.path.isabs(out_dir) else tw.join_path(group_dir, out_dir)
-        else:
-            final_dir = group_dir
-        write_dir = staging if (staging and not dry) else final_dir
-
-        if staging and not dry:
-            if os.path.isfile(staging):
-                run.error(f"ERROR: StagingDir exists as a file: {staging}")
-                continue
-            os.makedirs(staging, exist_ok=True)
-        if out_dir and not dry:
-            if os.path.isfile(final_dir):
-                run.error(f"ERROR: Output path exists as a file: {final_dir}")
-                continue
-            os.makedirs(final_dir, exist_ok=True)
-
-        tasks = []
-        for f in group_files:
-            final_dst = tw.join_path(final_dir, f.name)
-            # staged names carry the run id so an interrupt can clean them up
-            if not tw.same_path(write_dir, final_dir):
-                write_dst = tw.join_path(write_dir, tw.staged_name(run.run_id, f.name))
-            else:
-                write_dst = final_dst
-            tasks.append(Job(src=f.path, write_dst=write_dst, final_dst=final_dst, name=f.name))
-
-        staging_map = {}
-        load = float(max(1, min(workers, len(tasks))))
-        for t, result in tw.run_tasks(tasks, lambda q: process_job(run, q, load), workers):
-            r = _job_result(t, result)
-            if r.staging_name:
-                staging_map[t.final_dst.lower()] = (r.staging_name, t.final_dst)
-            if r.multi:
-                run.multi_paths.append(r.multi)
-            run.count(r.result)
-
-        # Move from staging to the final destination
-        if not tw.same_path(write_dir, final_dir) and not dry:
-            moved = 0
-            for key2 in sorted(staging_map):
-                staged, dest_path = staging_map[key2]
-                stage_path = tw.join_path(write_dir, staged)
-                if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
-                    continue
-                failure = tw.land_staged_file(stage_path, dest_path, run.run_id, make_parent=True)
-                if failure is None:
-                    moved += 1
-                elif failure[0] == "error":
-                    run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}: {failure[1]}")
-                else:
-                    run.error(f"ERROR (legacy move failed) | {os.path.basename(dest_path)}")
-            if moved > 0:
-                log(f"  -> Moved {moved} file(s) -> {final_dir}")
-
-    log("")
-    log("-" * 50)
-    dry_note = f" | {run.dry} dry-run (nothing written)" if run.dry > 0 else ""
-    multi_note = f" | {run.multi} multi-page (not touched)" if opt["SafeMode"] else ""
-    log(f"Done: {run.ok} OK | {run.skip} skipped{multi_note} | {run.warn} warnings | "
-        f"{run.err} errors | {run.counter}/{run.total} processed{dry_note}")
-    run.multi_list()
-    log(f"Log: {log.path}")
-    return 1 if run.err > 0 else 0
 
 
 def effective_workers(run, paths, bytes_per_pixel):
@@ -1605,7 +1486,13 @@ def run_main(argv, state):
     for w in overlay["warnings"]:
         tw.say(f"WARNING: settings overlay: {w}")
 
-    if opt["Mode"] > 9:
+    # There is no default mode: until v3.0.0 a run without -Mode was the "legacy" mode,
+    # which compressed the CURRENT folder in place. A forgotten -Mode must never do that.
+    if "Mode" not in bound:
+        tw.say("ERROR: -Mode is required: the modes are 0 to 9")
+        tw.say("       Example: python compress_tiff_zip.py -Mode 9 -InputDir <folder>")
+        return 1
+    if not 0 <= opt["Mode"] <= 9:
         tw.say(f"ERROR: -Mode {opt['Mode']} does not exist: the modes are 0 to 9")
         return 1
 
@@ -1663,9 +1550,6 @@ def run_main(argv, state):
     if opt["GenerateThumbnail"] and opt["ThumbPage"] > 1:
         log(f"WARN: -ThumbPage {opt['ThumbPage']} is not implemented -- the thumbnail is always "
             f"written at page 1 (right after the main image). Ignoring the value.", "WARN")
-
-    if opt["Mode"] < 0:
-        return run_legacy(run)
 
     note = " [FORCED via -ForceSequential]" if opt["ForceSequential"] else ""
     tw.say(f"{tw.python_label()} ({'PARALLEL' if run.parallel else 'SEQUENTIAL'}){note}")

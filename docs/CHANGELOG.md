@@ -15,6 +15,7 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 Work in progress on the branch `python-v3.1`; nothing here is released.
 
 - **Presets and *Repeat last* saved by v3.0.0 or earlier in the PowerShell form are no longer run.** Until v3.0.0 the wizard still read a command line the PowerShell edition had saved (`pwsh -File <script>.ps1 args`, or the `-Command` form of Windows PowerShell 5.1). Such a preset stays in the list; choosing it says `Saved workflow cannot be replayed` and runs nothing. Run the workflow once more from the menu and save it again. Presets saved by v3.0.0 itself (they name a `.py` script) keep working
+- **`compress_tiff_zip.py` needs `-Mode`; the legacy mode is gone.** Until v3.0.0, `python compress_tiff_zip.py` with no `-Mode` compressed every TIFF under the *current* folder in place, with no `OLD_TIFFs` backup. A forgotten `-Mode` now does nothing: the script says `-Mode is required` and exits with code 1 (so does `-Mode -1`). To write in place, pixel-verified, use `-Mode 2 -InputDir <folder>` without `-OutputDir`, or mode 8; to keep the originals, mode 0 or 9. The wizard always passed `-Mode`: nothing changes there. New files no longer get the `xmpMM:History` note `compress_tiff_zip legacy: ...`
 
 ## v3.0.0
 

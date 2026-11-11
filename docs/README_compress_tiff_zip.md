@@ -51,9 +51,9 @@ The defaults below are the `PARAMS` table at the top of `compress_tiff_zip.py`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-Mode` | int | `-1` | **-1 = legacy mode** (no CLI params = original behavior). **0-9** = new mode behavior. A value above 9 is refused (exit code 1) |
+| `-Mode` | int | (required) | **0-9**, see the mode table. There is no default: without `-Mode` the script refuses to run (exit code 1), and so does a value outside 0-9. Until v3.0.0 a run without `-Mode` was the "legacy mode" (the current folder, compressed in place); to write in place use `-Mode 2 -InputDir <folder>` without `-OutputDir`, or mode 8 |
 | `-InputDir` | string | `.` | Input folder. Can be relative or absolute |
-| `-InputDirFile` | string | `""` | UTF-8 text file with one input folder per line, used instead of `-InputDir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. compress: modes 0-9 only. |
+| `-InputDirFile` | string | `""` | UTF-8 text file with one input folder per line, used instead of `-InputDir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. |
 
 ### Output path control
 
@@ -347,8 +347,8 @@ format of the wizard's padded 16 -> 8-bit conversion and of jxl-photo:
 Action=converted
 When=2026-11-10T22:04:16+09:00
 SoftwareAgent=tiff-workflow 3.0.0 (https://github.com/rsilvabr/tiff-workflow)
-Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (legacy mode: "legacy"; with a
-                                                             thumbnail: "... + thumbnail page")
+Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (with a thumbnail:
+                                                             "... + thumbnail page")
 ```
 
 - Earlier entries (Capture One, scanner software) are kept, never doubled: the entry is its

@@ -101,8 +101,9 @@ def color_rgb(path: Path, h=40, w=56):
 # #1 / #2: the sample layout survives every mode
 # ---------------------------------------------------------------------------------------------
 
+# mode 2 without -OutputDir writes over each file (the in-place replace)
 MODE_ARGS = {
-    "legacy": [],
+    "mode2": ["-Mode", 2],
     "mode1": ["-Mode", 1],
     "mode8": ["-Mode", 8, "-DeleteSource"],
     "mode9": ["-Mode", 9],
@@ -124,10 +125,7 @@ class TestNeutralRgbStaysRgb:
         src = neutral_rgb(cam / "0014_14 (2).tif")
         ref = tifffile.imread(str(src))
         args = MODE_ARGS[key]
-        if key == "legacy":
-            r, out = run(lane, COMPRESS, [], cam)
-        else:
-            r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *args], tmp_path)
+        r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *args], tmp_path)
         assert r.returncode == 0, out[-3000:]
         dst = _output(root, cam, "0014_14 (2).tif", key)
         assert layout(dst) == [("3", "2", "")], (layout(dst), out[-2000:])
@@ -238,10 +236,10 @@ class TestIptcSurvivesTheMieContainer:
         assert exif(src, "-s3", "-IPTC:Keywords") == "伊豆沼", out[-2000:]
         assert exif(src, "-s3", "-IPTC:Caption-Abstract") == "伊豆沼の夏"
 
-    def test_legacy_in_place_without_percent(self, tmp_path, lane):
+    def test_mode2_in_place_without_percent(self, tmp_path, lane):
         cam = tmp_path / HOSTILE / "NORITSU"
         src = _with_iptc(cam / "0014_14 (2).tif")
-        r, out = run(lane, COMPRESS, [], cam)
+        r, out = run(lane, COMPRESS, ["-Mode", 2, "-InputDir", cam], tmp_path)
         assert r.returncode == 0, out[-3000:]
         assert exif(src, "-s3", "-IPTC:Keywords") == "伊豆沼", out[-2000:]
         assert exif(src, "-s3", "-EXIF:Make") == "FUJIFILM"
@@ -293,17 +291,19 @@ def test_copy_exif_creates_no_iptc_when_neither_file_has_one(tmp_path, lane):
 
 
 # ---------------------------------------------------------------------------------------------
-# #8: legacy with -StagingDir is still verified (and still works)
+# #8: an in-place write with -StagingDir is still verified (and still works)
 # ---------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("lane", LANES)
 @need_tools[0]
-def test_legacy_with_staging_replaces_through_the_gate(tmp_path, lane):
+def test_mode2_in_place_with_staging_replaces_through_the_gate(tmp_path, lane):
     cam = tmp_path / HOSTILE / "NORITSU"
     src = color_rgb(cam / "0014_14 (2).tif")
     ref = tifffile.imread(str(src))
-    r, out = run(lane, COMPRESS, ["-StagingDir", tmp_path / "stg [x]"], cam)
+    stg = tmp_path / "stg [x]"
+    r, out = run(lane, COMPRESS, ["-Mode", 2, "-InputDir", cam, "-StagingDir", stg], tmp_path)
     assert r.returncode == 0, out[-3000:]
+    assert "Moved 1 file(s)" in out and os.listdir(stg) == [], out[-2000:]
     assert exif(src, "-s3", "-IFD0:Compression") in ("Adobe Deflate", "Deflate")
     assert np.array_equal(tifffile.imread(str(src)), ref)
 
@@ -341,7 +341,7 @@ def _failing_restore_env(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="the injected exiftool is a .cmd")
 @pytest.mark.parametrize("lane", LANES)
-@pytest.mark.parametrize("key", ["legacy", "mode8", "mode9"])
+@pytest.mark.parametrize("key", ["mode2", "mode8", "mode9"])
 @need_tools[0]
 def test_a_failed_metadata_restore_never_replaces_the_original(tmp_path, lane, key):
     cam = tmp_path / HOSTILE / "NORITSU"
@@ -349,11 +349,8 @@ def test_a_failed_metadata_restore_never_replaces_the_original(tmp_path, lane, k
     exif(src, "-q", "-overwrite_original", "-EXIF:Make=FUJIFILM")
     orig = src.read_bytes()
     env = _failing_restore_env(tmp_path)
-    if key == "legacy":
-        r, out = run(lane, COMPRESS, ["-Workers", 2], cam, env=env)
-    else:
-        r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
-                     tmp_path, env=env)
+    r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
+                 tmp_path, env=env)
     if key == "mode9":
         # the original is kept in OLD_TIFFs, so this stays a warning (and exit 0)
         assert r.returncode == 0 and "WARN (exiftool failed, ZIP ok)" in out, out[-3000:]
@@ -452,7 +449,7 @@ def test_move_file_replacing_replaces_a_read_only_destination(tmp_path):
 
 
 @pytest.mark.parametrize("lane", LANES)
-@pytest.mark.parametrize("key", ["legacy", "mode8"])
+@pytest.mark.parametrize("key", ["mode2", "mode8"])
 @need_tools[0]
 def test_a_read_only_original_is_still_replaced(tmp_path, lane, key):
     """v2.9.0 compressed a read-only TIFF in place and in mode 8; with the first
@@ -462,15 +459,12 @@ def test_a_read_only_original_is_still_replaced(tmp_path, lane, key):
     ref = tifffile.imread(str(src))
     os.chmod(src, stat.S_IREAD)
     try:
-        if key == "legacy":
-            r, out = run(lane, COMPRESS, [], cam)
-        else:
-            r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
-                         tmp_path)
+        r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
+                     tmp_path)
         assert r.returncode == 0, out[-3000:]
         assert exif(src, "-s3", "-IFD0:Compression") in ("Adobe Deflate", "Deflate"), out[-2000:]
         assert np.array_equal(tifffile.imread(str(src)), ref)
-        # no staged copy or temp sibling left behind (legacy keeps its log under Logs\)
+        # no staged copy or temp sibling left behind
         tiffs = [p.name for p in cam.rglob("*") if p.suffix.lower() in (".tif", ".tiff")]
         assert tiffs == ["0014_14 (2).tif"], out[-2000:]
     finally:

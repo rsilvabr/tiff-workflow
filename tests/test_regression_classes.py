@@ -226,11 +226,8 @@ class TestInPlaceExifPreservation:
     workers must use it.
     """
 
-    # (label, lane-independent args) -- covers Process-TiffJob, the legacy -Parallel worker
-    # and the mode -Parallel worker.
+    # (label, lane-independent args): mode 2 without -OutputDir writes over each file.
     WORKERS = [
-        ("legacy-sequential", ["-ForceSequential"]),
-        ("legacy-parallel", ["-ForceParallel"]),
         ("mode2-sequential", ["-Mode", "2", "-InputDir", "work", "-ForceSequential"]),
         ("mode2-parallel", ["-Mode", "2", "-InputDir", "work", "-ForceParallel"]),
     ]
@@ -264,7 +261,8 @@ class TestInPlaceExifPreservation:
 
         result = run_ps(
             lane, "compress_tiff_zip.py",
-            [parallel, "-GenerateThumbnail", "-ThumbFormat", "notaformat"], tmp_path,
+            ["-Mode", "2", "-InputDir", "work", parallel, "-GenerateThumbnail",
+             "-ThumbFormat", "notaformat"], tmp_path,
         )
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
@@ -276,28 +274,6 @@ class TestInPlaceExifPreservation:
         )
 
 
-@requires_tools
-@pytest.mark.parametrize("lane", LANES)
-def test_legacy_mode_leaves_old_tiffs_untouched(tmp_path, lane):
-    """
-    OLD_TIFFs holds the pristine originals modes 0/9 preserved on purpose. Every mode >= 0
-    excludes it; legacy scanned $PWD with no exclusion at all and recompressed the backups.
-    """
-    work = tmp_path / "work"
-    old = work / "OLD_TIFFs"
-    old.mkdir(parents=True)
-    make_tiff(work / "photo.tif")
-    backup = make_tiff(old / "pristine.tif")
-
-    result = run_ps(lane, "compress_tiff_zip.py", ["-ForceSequential"], tmp_path)
-
-    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
-    assert read_compression(backup).lower() != "zip", (
-        "the OLD_TIFFs backup was recompressed in place"
-    )
-    assert read_compression(work / "photo.tif").lower() == "zip", (
-        "the real source was not compressed -- the exclusion is too broad"
-    )
 
 
 def make_multipage_tiff(path, subfiletypes, sizes=None, padded=False):
@@ -1037,7 +1013,7 @@ class TestThumbnailNeverDropsPages:
     freshly generated thumbnail. Replacing an existing REDUCEDIMAGE preview is the intent;
     dropping a scanner IR (MASK) page or a Photoshop layer is silent data loss -- and the
     in-place integrity gate cannot see it, because a page-short TIFF still decodes cleanly.
-    Legacy mode writes IN PLACE, so there the loss was irreversible."""
+    A mode that writes IN PLACE made the loss irreversible."""
 
     @requires_tools
     @pytest.mark.parametrize("lane", LANES)
@@ -1060,8 +1036,8 @@ class TestThumbnailNeverDropsPages:
 
     @requires_tools
     @pytest.mark.parametrize("lane", LANES)
-    def test_legacy_in_place_keeps_every_page(self, tmp_path, lane):
-        """The irreversible case: legacy mode (no -Mode) overwrites the only copy."""
+    def test_in_place_keeps_every_page(self, tmp_path, lane):
+        """The irreversible case: mode 2 without -OutputDir overwrites the only copy."""
         work = tmp_path / "work"
         work.mkdir()
         src = work / "scan.tif"
@@ -1069,11 +1045,13 @@ class TestThumbnailNeverDropsPages:
         pages_before = len(read_subfiletypes(src))
         assert pages_before == 3
 
-        run_ps_switched(lane, "compress_tiff_zip.py",
-                        ["-SafeMode:$false", "-GenerateThumbnail"], work)
+        result = run_ps_switched(lane, "compress_tiff_zip.py",
+                                 ["-Mode", "2", "-InputDir", str(work), "-SafeMode:$false",
+                                  "-GenerateThumbnail"], work)
 
+        assert "-GenerateThumbnail refused" in result.stdout, result.stdout
         assert len(read_subfiletypes(src)) == 3, (
-            "legacy in-place -GenerateThumbnail destroyed a page of the only copy"
+            "in-place -GenerateThumbnail destroyed a page of the only copy"
         )
 
     @requires_tools
@@ -2339,7 +2317,7 @@ class TestPercentSurvivesExiftool:
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 class TestBackupsAreNeverInput:
-    """OLD_TIFFs holds the PRISTINE originals modes 0/9 archived. Only legacy, mode 8 and the
+    """OLD_TIFFs holds the PRISTINE originals modes 0/9 archived. Only mode 8 and the
     modes 0/9 builder ever excluded it, each with its own ABSOLUTE regex, so modes 1-7 walked
     in and compressed the backups. The real file is already Deflate and was SKIPped, which left
     the BACKUP as the only candidate -- it took the output name, or lost the collision and

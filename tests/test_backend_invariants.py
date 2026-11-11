@@ -151,8 +151,14 @@ class NoLog:
         self.lines.append((level, msg))
 
 
+#: The mode of a job whose final_dst is its own source: mode 2 with the output on the
+#: input root writes in place (a temp sibling, the gates, then the rename).
+IN_PLACE = ("-Mode", "2")
+
+
 def compress_run(*argv):
-    opt, _bound = tw.parse_args(list(argv), cz.PARAMS)
+    opt, bound = tw.parse_args(list(argv), cz.PARAMS)
+    assert "Mode" in bound, "a compress run has a mode: run_main refuses one without"
     return cz.Run(opt, NoLog(), [])
 
 
@@ -180,7 +186,7 @@ def leftovers(folder):
 
 
 # ---------------------------------------------------------------------------
-# compress: a write onto its own source (legacy, mode 2 on the input root, mode 5 in ZIP\)
+# compress: a write onto its own source (mode 2 on the input root, mode 5 in ZIP\)
 # ---------------------------------------------------------------------------
 
 class TestInPlaceReplace:
@@ -188,7 +194,7 @@ class TestInPlaceReplace:
     sibling, proven (metadata restored, decodes, pixel-identical) and only then renamed onto
     the original -- in every mode that can resolve final_dst == src (rounds 15, 28)."""
 
-    @pytest.mark.parametrize("argv", [[], ["-Mode", "2"], ["-Mode", "5"]], ids=["legacy", "mode2", "mode5"])
+    @pytest.mark.parametrize("argv", [["-Mode", "2"], ["-Mode", "5"]], ids=["mode2", "mode5"])
     def test_the_original_is_replaced_only_after_every_gate(self, tools, photo, argv):
         r = job(compress_run(*argv), photo)
         assert r.result.startswith("OK (Uncompressed -> ZIP)"), r.result
@@ -208,7 +214,7 @@ class TestInPlaceReplace:
             tools.exif_result = (0, "Warning: Error opening file - x.mie")
         else:
             setattr(tools, failing, False)
-        r = job(compress_run(), photo)
+        r = job(compress_run(*IN_PLACE), photo)
         assert r.result == f"ERROR ({why} - original untouched) | {photo.name}"
         assert photo.read_bytes() == b"ORIGINAL"
         assert leftovers(photo.parent) == [], "the dropped temp sibling stayed behind"
@@ -216,7 +222,7 @@ class TestInPlaceReplace:
 
     def test_a_nonzero_exiftool_exit_is_a_failed_restore_too(self, tools, photo):
         tools.exif_result = (1, "")
-        r = job(compress_run(), photo)
+        r = job(compress_run(*IN_PLACE), photo)
         assert "metadata restore failed - original untouched" in r.result
         assert photo.read_bytes() == b"ORIGINAL"
 
@@ -224,7 +230,7 @@ class TestInPlaceReplace:
         """A tag-less source legitimately reports this; only 'Error opening file' means the
         SOURCE was never read."""
         tools.exif_result = (0, "Warning: No writable tags set from x.tif")
-        r = job(compress_run(), photo)
+        r = job(compress_run(*IN_PLACE), photo)
         assert r.result.startswith("OK "), r.result
 
     def test_staged_for_its_own_place_is_verified_like_an_in_place_write(self, tools, photo, tmp_path):
@@ -243,13 +249,13 @@ class TestInPlaceReplace:
         """In place the original is gone before the restore runs (round 2); without the
         container the write would strip every tag: refuse it, fail closed."""
         tools.meta = (True, None)
-        r = job(compress_run(), photo)
+        r = job(compress_run(*IN_PLACE), photo)
         assert r.result == f"ERROR (metadata container failed - write refused) | {photo.name}"
         assert tools.magick_calls == [], "magick must not run without the container"
         assert photo.read_bytes() == b"ORIGINAL"
 
     def test_the_restore_reads_the_container_not_the_overwritten_source(self, tools, photo):
-        job(compress_run(), photo)
+        job(compress_run(*IN_PLACE), photo)
         copy = next(c for c in tools.exif_calls if "-tagsfromfile" in c)
         assert copy[copy.index("-tagsfromfile") + 1] == str(photo) + ".meta"
         assert "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet" in copy, "round 28: UTF-8 IPTC"
@@ -269,7 +275,7 @@ class TestMagickArguments:
 
     def test_the_source_layout_picks_the_type(self, tools, photo):
         """Round 28: magick writes a neutral RGB file as 1-channel gray unless told."""
-        job(compress_run(), photo)
+        job(compress_run(*IN_PLACE), photo)
         call = tools.magick_calls[0]
         assert call[call.index("-type") + 1] == "TrueColor"
 
@@ -297,10 +303,10 @@ class TestMagickArguments:
 
     def test_unreadable_layout_and_non_opaque_associated_alpha_are_refused(self, tools, photo):
         tools.layout = (False, [])
-        assert job(compress_run(), photo).result.startswith("ERROR (sample layout unreadable)")
+        assert job(compress_run(*IN_PLACE), photo).result.startswith("ERROR (sample layout unreadable)")
         tools.layout = (True, ["rgb/4/8,8,8,8/1"])
         tools.alpha_ok = False
-        assert "associated alpha that is not opaque" in job(compress_run(), photo).result
+        assert "associated alpha that is not opaque" in job(compress_run(*IN_PLACE), photo).result
         assert tools.magick_calls == []
 
 
@@ -318,18 +324,18 @@ class TestSafeModeAndSkips:
 
     def test_already_compressed_is_skipped_on_the_main_image(self, tools, photo):
         tools.comp = "Adobe Deflate"
-        assert job(compress_run(), photo).result == f"SKIP (Adobe Deflate) | {photo.name}"
+        assert job(compress_run(*IN_PLACE), photo).result == f"SKIP (Adobe Deflate) | {photo.name}"
         tools.comp = "LZW"
-        assert job(compress_run(), photo).result.startswith("OK (LZW -> ZIP)")
-        assert job(compress_run("-SkipLzwAsCompressed:$true"), photo).result.startswith("SKIP (")
+        assert job(compress_run(*IN_PLACE), photo).result.startswith("OK (LZW -> ZIP)")
+        assert job(compress_run(*IN_PLACE, "-SkipLzwAsCompressed:$true"), photo).result.startswith("SKIP (")
 
     def test_a_refused_thumbnail_is_reported_by_a_dry_run_too(self, tools, photo):
         tools.thumb_safe = tw.ThumbSafe(False, 3, "would drop 2 extra page(s)")
-        r = job(compress_run("-GenerateThumbnail", "-DryRun"), photo)
+        r = job(compress_run(*IN_PLACE, "-GenerateThumbnail", "-DryRun"), photo)
         assert r.result.startswith("ERROR (-GenerateThumbnail refused)"), r.result
 
     def test_dry_run_writes_nothing(self, tools, photo):
-        r = job(compress_run("-DryRun"), photo)
+        r = job(compress_run(*IN_PLACE, "-DryRun"), photo)
         assert r.result == f"DRY (Uncompressed -> ZIP) | {photo.name}"
         assert tools.magick_calls == [] and tools.exif_calls == []
 
@@ -400,8 +406,8 @@ class TestGatesPerMode:
     def test_history_names_the_mode(self, tools, photo, tmp_path):
         job(compress_run("-Mode", "9"), photo, write_dst=str(photo) + ".abcd1234_0123456789ab.tif")
         assert tools.history_params == "compress_tiff_zip mode 9: ZIP (Deflate)"
-        job(compress_run(), photo)
-        assert tools.history_params == "compress_tiff_zip legacy: ZIP (Deflate)"
+        job(compress_run(*IN_PLACE), photo)
+        assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate)"
 
 
 class TestKeepOriginal:
@@ -749,24 +755,9 @@ def error_lines(run):
 
 class TestStagedMoveFailures:
     """A staged file that did not land is ONE counted error line (exit code 1), and the
-    run goes on. The loops: legacy, modes 1-8, copy_exif -CompressZip."""
+    run goes on. The loops: modes 1-8, copy_exif -CompressZip."""
 
     NAME = "photo 50%off.tif"
-
-    @pytest.mark.parametrize("kind,text", [
-        ("missing", f"ERROR (legacy move failed) | {NAME}"),
-        ("size", f"ERROR (legacy move failed) | {NAME}"),
-        ("error", f"ERROR (legacy move failed) | {NAME}: move failed: boom"),
-    ])
-    def test_legacy(self, tools, photo, tmp_path, monkeypatch, kind, text):
-        monkeypatch.chdir(photo.parent)
-        monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
-        run = compress_run("-OutputDir", "outz", "-StagingDir", str(tmp_path / "stg"), "-ForceSequential")
-        assert cz.run_legacy(run) == 1
-        assert error_lines(run) == [text]
-        assert (run.err, run.ok) == (1, 1), "the worker's OK is counted, and so is the failed move"
-        assert not [m for _lv, m in run.log.lines if "Moved" in m]
-        assert photo.read_bytes() == b"ORIGINAL"
 
     @pytest.mark.parametrize("kind,text", [
         ("missing", f"ERROR (move failed) | {NAME}"),
@@ -797,17 +788,6 @@ class TestStagedMoveFailures:
         assert (run.err, run.ok) == (1, 1)
         assert not [m for _lv, m in run.log.lines if "Moved" in m]
         assert photo.read_bytes() == b"ORIGINAL"
-
-    def test_legacy_lands_the_staged_file(self, tools, photo, tmp_path, monkeypatch):
-        """The same run with the real move: the file lands and is counted as moved."""
-        monkeypatch.chdir(photo.parent)
-        stg = tmp_path / "stg"
-        run = compress_run("-OutputDir", "outz", "-StagingDir", str(stg), "-ForceSequential")
-        assert cz.run_legacy(run) == 0
-        out = photo.parent / "outz"
-        assert (out / self.NAME).read_bytes() == b"COMPRESSED" and os.listdir(stg) == []
-        assert ("INFO", f"  -> Moved 1 file(s) -> {out}") in run.log.lines
-        assert (run.err, run.ok) == (0, 1) and photo.read_bytes() == b"ORIGINAL"
 
     def test_modes_land_the_staged_file(self, tools, photo, tmp_path):
         stg = tmp_path / "stg"
@@ -1650,7 +1630,7 @@ class TestSourceRules:
     def test_run_functions_never_return_nothing(self, name):
         tree = _tree(name)
         for fn in [n for n in tree.body if isinstance(n, ast.FunctionDef)
-                   and n.name in ("run", "run_main", "run_modes", "run_legacy", "remove_thumbnails")]:
+                   and n.name in ("run", "run_main", "run_modes", "remove_thumbnails")]:
             for ret in [n for n in ast.walk(fn) if isinstance(n, ast.Return)]:
                 assert ret.value is not None, f"{name}:{ret.lineno}: bare return in {fn.name}"
             assert isinstance(fn.body[-1], ast.Return), f"{name}: {fn.name} can fall off its end"

@@ -4,7 +4,7 @@ Action=converted, When, SoftwareAgent (tool, version, link), Parameters -- the f
 convert_tiff.py's padded conversion and of jxl-photo. It is written in its OWN exiftool call
 (in the same call as `-tagsfromfile -all:all`, `+=` doubles every copied entry, jxl-photo
 #531), after the tag copy and BEFORE the page-count / integrity / pixel gates. Real runs in
-both lanes (sequential and parallel), legacy and -Mode, in a hostile folder; one file name
+both lanes (sequential and parallel), a copy mode and in place, in a hostile folder; one file name
 has a '%'.
 """
 
@@ -33,12 +33,12 @@ pytestmark = [
 HOSTILE = "写真 [FINAL] x"
 AGENT = f"{convert_tiff.TOOLKIT_NAME} {convert_tiff.TOOLKIT_VERSION} ({convert_tiff.TOOLKIT_URL})"
 
-# The ways the per-file work can run: (id, lane, extra args, legacy?)
+# The ways the per-file work can run: (id, lane, extra args, in place?)
 PATHS = [
     ("mode-sequential", "sequential", [], False),
-    ("legacy-sequential", "sequential", [], True),
+    ("inplace-sequential", "sequential", [], True),
     ("mode-parallel", "parallel", ["-Workers", "3"], False),
-    ("legacy-parallel", "parallel", ["-Workers", "3"], True),
+    ("inplace-parallel", "parallel", ["-Workers", "3"], True),
 ]
 PATH_IDS = [p[0] for p in PATHS]
 
@@ -80,55 +80,56 @@ def run(lane, args, cwd, *more):
     return r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace")
 
 
-def convert(lane, extra, legacy, src, mode_args=("-Mode", 1)):
-    """Run one worker path. Legacy mode takes the working folder as its root and writes in
-    place; the others take -InputDir (mode 1 writes ZIP/<name>)."""
-    if legacy:
-        return run(lane, extra, src)
-    return run(lane, [*mode_args, "-InputDir", src, *extra], src.parent)
+def convert(lane, extra, in_place, src):
+    """Run one worker path: mode 1 writes ZIP/<name>; mode 2 without -OutputDir has the
+    input root as its flat output, so it writes over each file (a temp sibling, the gates,
+    then the rename)."""
+    return run(lane, ["-Mode", 2 if in_place else 1, "-InputDir", src, *extra], src.parent)
 
 
-def output_of(src, name, legacy, mode_folder="ZIP"):
-    return (src / f"{name}.tif") if legacy else (src / mode_folder / f"{name}.tif")
+def output_of(src, name, in_place):
+    return (src / f"{name}.tif") if in_place else (src / "ZIP" / f"{name}.tif")
 
 
-@pytest.mark.parametrize("pid,lane,extra,legacy", PATHS, ids=PATH_IDS)
-def test_h1_every_worker_path_appends_one_entry(tmp_path, pid, lane, extra, legacy):
+@pytest.mark.parametrize("pid,lane,extra,in_place", PATHS, ids=PATH_IDS)
+def test_h1_every_worker_path_appends_one_entry(tmp_path, pid, lane, extra, in_place):
     """H1/H6: sources have no entry -> exactly one, in the format of the padded conversion."""
     src = tmp_path / HOSTILE / "S5pro 01"
     names = ["DSCF 50%off (2)", "DSCF0002 (3)", "DSCF0003 (4)"]
     files = [make_tiff_named(src, n, seed=i + 1) for i, n in enumerate(names)]
     before = {f.name: md5(f) for f in files}
-    rc, out = convert(lane, extra, legacy, src)
+    rc, out = convert(lane, extra, in_place, src)
     assert rc == 0, out[-3000:]
     assert "history not written" not in out, out[-2000:]
     for n in names:
-        dst = output_of(src, n, legacy)
+        dst = output_of(src, n, in_place)
         entries = history(dst)
         assert len(entries) == 1, (n, entries, out[-1500:])
         e = entries[0]
         assert e["Action"] == "converted"
         assert e["SoftwareAgent"] == AGENT
-        expected = "compress_tiff_zip legacy: ZIP (Deflate)" if legacy else "compress_tiff_zip mode 1: ZIP (Deflate)"
-        assert e["Parameters"] == expected
+        assert e["Parameters"] == f"compress_tiff_zip mode {2 if in_place else 1}: ZIP (Deflate)"
         when = iso_when(e["When"])
         assert when.utcoffset() is not None, e["When"]
-    if not legacy:
+    if in_place:
+        assert all(md5(f) != before[f.name] for f in files), "the files were not replaced in place"
+        assert sorted(p.name for p in src.iterdir()) == sorted(f.name for f in files)
+    else:
         # mode 1 leaves the source alone
         assert {f.name: md5(f) for f in files} == before
 
 
-@pytest.mark.parametrize("pid,lane,extra,legacy", PATHS, ids=PATH_IDS)
-def test_h2_earlier_entries_are_kept_not_doubled(tmp_path, pid, lane, extra, legacy):
+@pytest.mark.parametrize("pid,lane,extra,in_place", PATHS, ids=PATH_IDS)
+def test_h2_earlier_entries_are_kept_not_doubled(tmp_path, pid, lane, extra, in_place):
     """H2 (jxl-photo #531): a source with one entry ends with exactly two."""
     src = tmp_path / HOSTILE / "S5pro 01"
     f = make_tiff_named(src, "DSCF 50%off (2)")
     exif_stdin(f, "-q", "-overwrite_original",
                "-XMP-xmpMM:History+={Action=saved,SoftwareAgent=Capture One 16}")
     assert len(history(f)) == 1
-    rc, out = convert(lane, extra, legacy, src)
+    rc, out = convert(lane, extra, in_place, src)
     assert rc == 0, out[-3000:]
-    entries = history(output_of(src, "DSCF 50%off (2)", legacy))
+    entries = history(output_of(src, "DSCF 50%off (2)", in_place))
     assert len(entries) == 2, entries
     assert entries[0]["Action"] == "saved" and entries[0]["SoftwareAgent"] == "Capture One 16"
     assert entries[1]["Action"] == "converted" and entries[1]["SoftwareAgent"] == AGENT
