@@ -834,6 +834,185 @@ class TestStagedMoveFailures:
         assert (run.err, run.ok) == (0, 1)
 
 
+class TestGroupSteps:
+    """What run_modes does with a group once its workers are done: move the staged files,
+    archive the originals (modes 0/9), delete the sources (mode 8) -- each step on its own."""
+
+    def _outcome(self, **given):
+        fields = dict(staging_map={}, error_srcs=set(), integrity_failed_dst=set(), results=[])
+        fields.update(given)
+        return cz._GroupOutcome(**fields)
+
+    def _tiff_and_tif(self, tmp_path):
+        d = tmp_path / "伊豆沼 [FINAL] x"
+        d.mkdir()
+        src, dst = d / "p 50%.tiff", d / "p 50%.tif"
+        src.write_bytes(b"ORIGINAL")
+        dst.write_bytes(b"COMPRESSED")
+        job = cz.Job(src=str(src), write_dst=str(tmp_path / "stg" / "x.tif"), final_dst=str(dst),
+                     name=src.name)
+        return src, dst, job, cz.JobResult("OK (Uncompressed -> ZIP) [SOURCE DELETED] | p 50%.tiff",
+                                           src.name, str(src), can_delete=True)
+
+    def test_mode8_checks_the_file_where_it_landed_before_it_deletes_the_source(
+            self, tmp_path, monkeypatch):
+        """Round 12: the pixel gate ran on the STAGED file. The .tiff source goes only after
+        the .tif that replaces it decodes at its destination."""
+        src, dst, job, result = self._tiff_and_tif(tmp_path)
+        run = compress_run("-Mode", "8", "-DeleteSource")
+        checked, verdict = [], [False]
+
+        def integrity(path, timeout=30, load_factor=1.0):
+            checked.append(path)
+            assert src.exists(), "the source must still be there while its replacement is checked"
+            return verdict[0]
+        monkeypatch.setattr(tw, "zip_integrity", integrity)
+        cz._delete_sources(run, self._outcome(results=[(job, result)]))
+        assert src.read_bytes() == b"ORIGINAL" and checked == [str(dst)]
+        assert error_lines(run) == [f"ERROR (final ZIP failed integrity - source preserved) | {src.name}"]
+        assert run.err == 1
+        verdict[0] = True
+        os.chmod(src, stat.S_IREAD)                      # a read-only source is deleted too
+        cz._delete_sources(run, self._outcome(results=[(job, result)]))
+        assert not src.exists() and dst.read_bytes() == b"COMPRESSED"
+        assert ("INFO", "  -> Deleted 1 source file(s) after successful move") in run.log.lines
+        assert run.err == 1, "no new error"
+
+    def test_mode8_keeps_the_source_when_nothing_landed_or_nothing_asked(self, tmp_path, monkeypatch):
+        src, dst, job, result = self._tiff_and_tif(tmp_path)
+        checked = []
+        monkeypatch.setattr(tw, "zip_integrity", lambda p, t=30, load_factor=1.0: checked.append(p) or True)
+        run = compress_run("-Mode", "8", "-DeleteSource")
+        os.remove(dst)
+        cz._delete_sources(run, self._outcome(results=[(job, result)]))
+        assert error_lines(run) == [f"ERROR (final destination missing, source preserved) | {src.name}"]
+        assert src.exists() and checked == []
+        dst.write_bytes(b"COMPRESSED")
+        refused = cz.JobResult("ERROR (x) | p", src.name, str(src), can_delete=False)
+        cz._delete_sources(run, self._outcome(results=[(job, refused)]))
+        dry = compress_run("-Mode", "8", "-DeleteSource", "-DryRun")
+        cz._delete_sources(dry, self._outcome(results=[(job, result)]))
+        other_mode = compress_run("-Mode", "1", "-DeleteSource")
+        cz._delete_sources(other_mode, self._outcome(results=[(job, result)]))
+        in_place = cz.Job(src=str(dst), write_dst=job.write_dst, final_dst=str(dst), name=dst.name)
+        replaced = cz.JobResult("OK (Uncompressed -> ZIP) | p 50%.tif", dst.name, str(dst), can_delete=True)
+        cz._delete_sources(run, self._outcome(results=[(in_place, replaced)]))
+        assert src.exists() and dst.exists() and checked == [], "nothing may be deleted in any of these"
+        assert run.err == 1 and dry.err == 0 and other_mode.err == 0
+
+    def test_a_staged_file_that_failed_its_gate_is_dropped_never_moved(self, tmp_path, monkeypatch):
+        """Round 12: a bad ZIP must not replace the original. The staged file goes; the good
+        one of the same group lands."""
+        stg, lib = tmp_path / "stg", tmp_path / "lib [x] 50%"
+        stg.mkdir()
+        lib.mkdir()
+        jobs, staging_map = [], {}
+        for name in ("a.tif", "b.tif", "c.tif"):
+            (lib / name).write_bytes(b"ORIGINAL " + name.encode())
+            staged = "abcd1234_0123456789ab_" + name
+            (stg / staged).write_bytes(b"COMPRESSED " + name.encode())
+            staging_map[str(lib / name).lower()] = staged
+            # c.tif is a mode 0/9 job in this group: it lands through _archive_originals
+            jobs.append(cz.Job(src=str(lib / name), write_dst=str(stg / staged), final_dst=str(lib / name),
+                               name=name, keep_dir=str(lib / "OLD_TIFFs") if name == "c.tif" else None))
+        moves = []
+        real = tw.move_file_into_place
+
+        def spy(src, dst, run_id):
+            moves.append(os.path.basename(dst))
+            return real(src, dst, run_id)
+        monkeypatch.setattr(tw, "move_file_into_place", spy)
+        run = compress_run("-Mode", "8", "-StagingDir", str(stg))
+        outcome = self._outcome(staging_map=staging_map, integrity_failed_dst={str(lib / "b.tif").lower()})
+        cz._move_staged(run, jobs, str(lib), outcome)
+        assert (lib / "a.tif").read_bytes() == b"COMPRESSED a.tif"
+        assert (lib / "b.tif").read_bytes() == b"ORIGINAL b.tif"
+        assert (lib / "c.tif").read_bytes() == b"ORIGINAL c.tif"
+        assert moves == ["a.tif"]
+        assert os.listdir(stg) == ["abcd1234_0123456789ab_c.tif"], "the failed file is dropped, c.tif waits"
+        assert ("INFO", f"  -> Moved 1 file(s) -> {lib}") in run.log.lines and run.err == 0
+        (stg / "abcd1234_0123456789ab_a.tif").write_bytes(b"SECOND")
+        dry = compress_run("-Mode", "8", "-StagingDir", str(stg), "-DryRun")
+        cz._move_staged(dry, jobs[:1], str(lib), self._outcome(staging_map=staging_map))
+        assert (lib / "a.tif").read_bytes() == b"COMPRESSED a.tif" and moves == ["a.tif"], \
+            "a dry run moves nothing"
+
+    @pytest.mark.parametrize("failing,reason", [("pixels", "ZIP integrity check failed"),
+                                                ("exif", "metadata restore failed")])
+    def test_mode8_a_failed_gate_is_an_error_line_and_its_staged_file_never_lands(
+            self, tools, photo, tmp_path, failing, reason):
+        """Rounds 12 and 28, the whole chain: the worker says the gate failed, the line that
+        is counted is an ERROR, the staged file is dropped and the source is kept."""
+        stg = tmp_path / "stg"
+        stg.mkdir()
+        if failing == "exif":
+            tools.exif_result = (0, "Warning: Error opening file - x.mie")
+        else:
+            tools.pixels = False
+        run = compress_run("-Mode", "8", "-DeleteSource", "-StagingDir", str(stg), "-ForceSequential")
+        run.total = 1
+        staged = stg / "abcd1234_0123456789ab_photo.tif"
+        job = cz.Job(src=str(photo), write_dst=str(staged), final_dst=str(photo), name=photo.name,
+                     comp="Uncompressed")
+        outcome = cz._run_group(run, [job], 1, {})
+        assert error_lines(run) == [f"[1/1] ERROR ({reason} - source preserved) | {photo.name}"]
+        key = str(photo).lower()
+        assert outcome.integrity_failed_dst == {key} and outcome.staging_map == {key: staged.name}
+        assert staged.exists()
+        cz._move_staged(run, [job], str(photo.parent), outcome)
+        cz._delete_sources(run, outcome)
+        assert photo.read_bytes() == b"ORIGINAL" and os.listdir(stg) == []
+        assert (run.err, run.ok) == (1, 0)
+
+    def test_a_worker_that_raised_never_gets_its_original_archived(self, tools, photo, monkeypatch):
+        """Modes 0/9: a worker that fails AFTER it wrote the copy is that file's ERROR line;
+        the copy is dropped and the original stays where it is (round 26)."""
+        def boom(path, agent, params):
+            raise RuntimeError("history exploded")
+        monkeypatch.setattr(tw, "add_tiff_history_entry", boom)
+        run = compress_run("-Mode", "9", "-ForceSequential")
+        run.total = 1
+        st = os.stat(photo)
+        sibling = str(photo) + ".abcd1234_0123456789ab.tif"
+        job = cz.Job(src=str(photo), write_dst=sibling, final_dst=str(photo), name=photo.name,
+                     comp="Uncompressed", safe_checked=True, keep_dir=str(photo.parent / "OLD_TIFFs"),
+                     src_length=st.st_size, src_mtime_ns=st.st_mtime_ns)
+        outcome = cz._run_group(run, [job], 1, {})
+        assert error_lines(run) == [
+            f"[1/1] ERROR (unexpected) | {photo.name} | RuntimeError: history exploded"]
+        assert outcome.error_srcs == {str(photo).lower()} and run.err == 1
+        assert os.path.exists(sibling), "the worker left its copy behind"
+        cz._archive_originals(run, [job], outcome)
+        assert photo.read_bytes() == b"ORIGINAL" and not os.path.exists(sibling)
+        assert not (photo.parent / "OLD_TIFFs").exists()
+        assert run.err == 1 and not [m for _lv, m in run.log.lines if "archived" in m]
+
+    @pytest.mark.parametrize("why", ["error", "integrity"])
+    def test_modes_0_9_never_archive_an_original_whose_copy_failed(self, tmp_path, why):
+        """Round 26: a copy that failed never causes the archive; its leftover is dropped."""
+        d = tmp_path / "写真 [x]"
+        d.mkdir()
+        src = d / "p.tif"
+        src.write_bytes(b"ORIGINAL")
+        written = d / "p.tif.abcd1234_0123456789ab.tif"
+        written.write_bytes(b"BAD COPY")
+        st = os.stat(src)
+        job = cz.Job(src=str(src), write_dst=str(written), final_dst=str(src), name=src.name,
+                     keep_dir=str(d / "OLD_TIFFs"), src_length=st.st_size, src_mtime_ns=st.st_mtime_ns)
+        run = compress_run("-Mode", "9")
+        failed = (self._outcome(error_srcs={str(src).lower()}) if why == "error"
+                  else self._outcome(integrity_failed_dst={str(src).lower()}))
+        cz._archive_originals(run, [job], failed)
+        assert src.read_bytes() == b"ORIGINAL" and not written.exists()
+        assert not (d / "OLD_TIFFs").exists() and run.err == 0
+        written.write_bytes(b"COMPRESSED")
+        cz._archive_originals(run, [job], self._outcome())
+        assert src.read_bytes() == b"COMPRESSED"
+        assert (d / "OLD_TIFFs" / "p.tif").read_bytes() == b"ORIGINAL"
+        assert ("INFO", "  -> 1 original(s) archived in OLD_TIFFs after their compressed copy landed") \
+            in run.log.lines
+
+
 # ---------------------------------------------------------------------------
 # tiff_workflow_common: the gates fail closed
 # ---------------------------------------------------------------------------

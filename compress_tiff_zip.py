@@ -1182,6 +1182,154 @@ def _plan_jobs(run, files, comp_map, staging):
     return plan
 
 
+class _GroupOutcome(NamedTuple):
+    """What the workers of one group left for the steps that land their files."""
+    staging_map: dict               # final_dst (lower case) -> the name of the file written
+    error_srcs: set                 # the sources (lower case) whose result is an ERROR
+    integrity_failed_dst: set       # the final_dst (lower case) whose output failed its gate
+    results: list                   # [(Job, JobResult)], in the order the workers finished
+
+
+def _run_group(run, group_tasks, workers, collision_notes):
+    """Run the workers of one group. Each result is logged and counted here, on the
+    caller's thread, as it arrives. Returns a _GroupOutcome."""
+    staging_map = {}
+    error_srcs = set()
+    integrity_failed_dst = set()
+    results = []
+    load = float(max(1, min(workers, len(group_tasks))))
+    for t, result in tw.run_tasks(group_tasks, lambda q: process_job(run, q, load), workers):
+        r = _job_result(t, result)
+        results.append((t, r))
+        key_dst = t.final_dst.lower()
+        if r.staging_name:
+            staging_map[key_dst] = r.staging_name
+        if r.multi:
+            run.multi_paths.append(r.multi)
+        text = r.result
+        if text.startswith("ERROR"):
+            error_srcs.add(t.src.lower())
+        if r.integrity_failed:
+            integrity_failed_dst.add(key_dst)
+            text = (f"ERROR ({r.integrity_reason or 'ZIP integrity check failed'} - "
+                    f"source preserved) | {r.name}")
+        if r.final_dst and key_dst in collision_notes:
+            text += collision_notes[key_dst]
+        run.count(text)
+    return _GroupOutcome(staging_map, error_srcs, integrity_failed_dst, results)
+
+
+def _move_staged(run, group_tasks, group_dir, outcome):
+    """Move the staged files of a group to their final destination (modes 0/9 land in
+    _archive_originals). A staged file whose gate failed is dropped, never moved."""
+    log = run.log
+    staging = run.opt["StagingDir"]
+    dry = run.opt["DryRun"]
+    staging_map = outcome.staging_map
+    error_srcs = outcome.error_srcs
+    integrity_failed_dst = outcome.integrity_failed_dst
+    if staging and not dry:
+        moved = 0
+        for t in group_tasks:
+            if t.keep_dir:
+                continue
+            key_dst = t.final_dst.lower()
+            if key_dst not in staging_map:
+                continue
+            stage_path = tw.join_path(staging, staging_map[key_dst])
+            if key_dst in integrity_failed_dst:
+                # a bad ZIP must not replace the original: drop the staged file
+                tw.remove_quietly(stage_path)
+                continue
+            dest_path = t.final_dst
+            if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
+                continue
+            dest_name = os.path.basename(dest_path)
+            failure = tw.land_staged_file(stage_path, dest_path, run.run_id)
+            if failure is None:
+                moved += 1
+                continue
+            error_srcs.add(t.src.lower())
+            kind, detail = failure
+            if kind == "missing":
+                run.error(f"ERROR (move failed) | {dest_name}")
+            elif kind == "size":
+                run.error(f"ERROR (size mismatch after move) | {dest_name}")
+            else:
+                run.error(f"ERROR (move exception) | {dest_name}: {detail}")
+        if moved > 0:
+            log(f"  -> Moved {moved} file(s) -> {group_dir}")
+
+
+def _archive_originals(run, group_tasks, outcome):
+    """Modes 0/9: the copy lands first, THEN the original goes to OLD_TIFFs/. A task
+    whose worker failed, skipped or wrote a copy that does not decode never touches
+    its original; its leftover is dropped."""
+    log = run.log
+    staging = run.opt["StagingDir"]
+    dry = run.opt["DryRun"]
+    staging_map = outcome.staging_map
+    error_srcs = outcome.error_srcs
+    integrity_failed_dst = outcome.integrity_failed_dst
+    if not dry:
+        kept = 0
+        for t in group_tasks:
+            if not t.keep_dir:
+                continue
+            key_dst = t.final_dst.lower()
+            if staging:
+                written = tw.join_path(staging, staging_map[key_dst]) if key_dst in staging_map else None
+            else:
+                written = t.write_dst
+            if not written or not os.path.exists(written):
+                continue
+            if t.src.lower() in error_srcs or key_dst in integrity_failed_dst:
+                tw.remove_quietly(written)
+                continue
+            k_err = complete_keep_original(run, written, t.src, t.final_dst, t.keep_dir,
+                                           t.src_length, t.src_mtime_ns)
+            if k_err:
+                tw.remove_quietly(written)
+                run.error(f"ERROR (keep original) | {t.name} | {k_err}")
+            else:
+                kept += 1
+        if kept > 0:
+            log(f"  -> {kept} original(s) archived in OLD_TIFFs after their compressed copy landed")
+
+
+def _delete_sources(run, outcome):
+    """Mode 8: a .tiff source is deleted only after its .tif landed and decodes there."""
+    opt = run.opt
+    log = run.log
+    mode = opt["Mode"]
+    dry = opt["DryRun"]
+    results = outcome.results
+    if mode == 8 and not dry:
+        deleted = 0
+        for t, r in results:
+            if not r.can_delete or not os.path.exists(t.src):
+                continue
+            if tw.same_path(t.src, t.final_dst):
+                # in place: the original was already replaced by the compressed file
+                continue
+            src_name = os.path.basename(t.src)
+            if not os.path.exists(t.final_dst):
+                run.error(f"ERROR (final destination missing, source preserved) | {src_name}")
+                continue
+            # The pixel gate ran on the STAGED file: the file that authorises the delete
+            # is checked again where it actually sits.
+            if not tw.zip_integrity(t.final_dst, opt["MagickTimeout"]):
+                run.error(f"ERROR (final ZIP failed integrity - source preserved) | {src_name}")
+                continue
+            try:
+                tw.remove_file(t.src)     # a read-only source is deleted too
+                deleted += 1
+            except OSError:
+                run.error(f"ERROR (failed to delete source after move) | {src_name}")
+        if deleted > 0:
+            log(f"  -> Deleted {deleted} source file(s) after successful move")
+
+
 def _input_roots(run, bound):
     """(the input folders, the entries that do not exist), or None after logging why the
     run cannot start: -InputDir together with -InputDirFile, an unusable list file, or no
@@ -1369,7 +1517,6 @@ def run_modes(run, bound):
 
     plan = _plan_jobs(run, files, comp_map, staging)
     tasks = plan.jobs
-    collision_notes = plan.collision_notes
 
     if not tasks:
         # INFO when nothing went wrong: every file skipped as already compressed is the
@@ -1403,116 +1550,10 @@ def run_modes(run, bound):
         if not dry and group_dir and not os.path.isdir(group_dir):
             os.makedirs(group_dir, exist_ok=True)
 
-        staging_map = {}
-        error_srcs = set()
-        integrity_failed_dst = set()
-        results = []
-        load = float(max(1, min(workers, len(group_tasks))))
-        for t, result in tw.run_tasks(group_tasks, lambda q: process_job(run, q, load), workers):
-            r = _job_result(t, result)
-            results.append((t, r))
-            key_dst = t.final_dst.lower()
-            if r.staging_name:
-                staging_map[key_dst] = r.staging_name
-            if r.multi:
-                run.multi_paths.append(r.multi)
-            text = r.result
-            if text.startswith("ERROR"):
-                error_srcs.add(t.src.lower())
-            if r.integrity_failed:
-                integrity_failed_dst.add(key_dst)
-                text = (f"ERROR ({r.integrity_reason or 'ZIP integrity check failed'} - "
-                        f"source preserved) | {r.name}")
-            if r.final_dst and key_dst in collision_notes:
-                text += collision_notes[key_dst]
-            run.count(text)
-
-        # Move from staging to the final destination (modes 0/9 land below).
-        if staging and not dry:
-            moved = 0
-            for t in group_tasks:
-                if t.keep_dir:
-                    continue
-                key_dst = t.final_dst.lower()
-                if key_dst not in staging_map:
-                    continue
-                stage_path = tw.join_path(staging, staging_map[key_dst])
-                if key_dst in integrity_failed_dst:
-                    # a bad ZIP must not replace the original: drop the staged file
-                    tw.remove_quietly(stage_path)
-                    continue
-                dest_path = t.final_dst
-                if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
-                    continue
-                dest_name = os.path.basename(dest_path)
-                failure = tw.land_staged_file(stage_path, dest_path, run.run_id)
-                if failure is None:
-                    moved += 1
-                    continue
-                error_srcs.add(t.src.lower())
-                kind, detail = failure
-                if kind == "missing":
-                    run.error(f"ERROR (move failed) | {dest_name}")
-                elif kind == "size":
-                    run.error(f"ERROR (size mismatch after move) | {dest_name}")
-                else:
-                    run.error(f"ERROR (move exception) | {dest_name}: {detail}")
-            if moved > 0:
-                log(f"  -> Moved {moved} file(s) -> {group_dir}")
-
-        # Modes 0/9: the copy lands first, THEN the original goes to OLD_TIFFs/. A task
-        # whose worker failed, skipped or wrote a copy that does not decode never touches
-        # its original; its leftover is dropped.
-        if not dry:
-            kept = 0
-            for t in group_tasks:
-                if not t.keep_dir:
-                    continue
-                key_dst = t.final_dst.lower()
-                if staging:
-                    written = tw.join_path(staging, staging_map[key_dst]) if key_dst in staging_map else None
-                else:
-                    written = t.write_dst
-                if not written or not os.path.exists(written):
-                    continue
-                if t.src.lower() in error_srcs or key_dst in integrity_failed_dst:
-                    tw.remove_quietly(written)
-                    continue
-                k_err = complete_keep_original(run, written, t.src, t.final_dst, t.keep_dir,
-                                               t.src_length, t.src_mtime_ns)
-                if k_err:
-                    tw.remove_quietly(written)
-                    run.error(f"ERROR (keep original) | {t.name} | {k_err}")
-                else:
-                    kept += 1
-            if kept > 0:
-                log(f"  -> {kept} original(s) archived in OLD_TIFFs after their compressed copy landed")
-
-        # Mode 8: a .tiff source is deleted only after its .tif landed and decodes there.
-        if mode == 8 and not dry:
-            deleted = 0
-            for t, r in results:
-                if not r.can_delete or not os.path.exists(t.src):
-                    continue
-                if tw.same_path(t.src, t.final_dst):
-                    # in place: the original was already replaced by the compressed file
-                    continue
-                src_name = os.path.basename(t.src)
-                if not os.path.exists(t.final_dst):
-                    run.error(f"ERROR (final destination missing, source preserved) | {src_name}")
-                    continue
-                # The pixel gate ran on the STAGED file: the file that authorises the delete
-                # is checked again where it actually sits.
-                if not tw.zip_integrity(t.final_dst, opt["MagickTimeout"]):
-                    run.error(f"ERROR (final ZIP failed integrity - source preserved) | {src_name}")
-                    continue
-                try:
-                    tw.remove_file(t.src)     # a read-only source is deleted too
-                    deleted += 1
-                except OSError:
-                    run.error(f"ERROR (failed to delete source after move) | {src_name}")
-            if deleted > 0:
-                log(f"  -> Deleted {deleted} source file(s) after successful move")
+        outcome = _run_group(run, group_tasks, workers, plan.collision_notes)
+        _move_staged(run, group_tasks, group_dir, outcome)
+        _archive_originals(run, group_tasks, outcome)
+        _delete_sources(run, outcome)
 
     run.summary()
     log(f"Log: {log.path}")
