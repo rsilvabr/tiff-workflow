@@ -265,7 +265,15 @@ same `<topic>` across the three.
    should-fix list and a commit verdict.
 
 ## Docs map
-- `README.md` -- overview, install, quick start, current release.
+- `README.md` -- short by design, in jxl-photo's format (owner's rule, 2026-11-11:
+  the README must not grow): the opening lines and the size table, the scripts, a
+  short install, the wizard's quick start, one command per script, the mode table,
+  a one-line-per-item "Good to know", the documentation table and a SHORT "What's
+  new" for the current release ONLY (replaced at each release, never appended to;
+  earlier releases are `docs/CHANGELOG.md`). Anything longer goes to a page below
+  with a link.
+- `docs/install.md` -- the Python install step by step (downloads, PATH, verify,
+  troubleshooting).
 - `docs/README_compress_tiff_zip.md`, `docs/README_convert_tiff_py.md`,
   `docs/README_copy_exif.md`, `docs/README_generate_thumbnails.md` -- per-script
   reference.

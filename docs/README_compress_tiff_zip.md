@@ -153,11 +153,11 @@ that have no thumbnail yet.
 | `1` | Subfolder | Directory (non-recursive) | `ZIP/` subfolder next to each TIFF | `photo.tif` → `ZIP/photo.tif` |
 | `2` | Flat | Directory (recursive) | Single output folder (flat) | `in/photo.tif` → `out/photo.tif` |
 | `3` | Recursive subfolders | Directory (recursive) | `ZIP/` inside each folder | `in/folder/photo.tif` → `in/folder/ZIP/photo.tif` |
-| `4` | Folder rename | Directory (recursive) | Parent folder renamed `_TIFF` → `_ZIP` | `photo_TIFF/` → `photo_ZIP/` |
+| `4` | Sibling `_ZIP` folder | Directory (recursive) | Sibling folder named `<parent>_ZIP` (the source folder is NOT renamed) | `photo_TIFF/a.tif` → `photo_ZIP/a.tif` |
 | `5` | Sibling folder | Directory (recursive) | `TIFF/ZIP/` → grandparent `ZIP/` | `in/2024/photo.tif` → `in/ZIP/photo.tif` |
 | `6` | Export marker | Directory (recursive) | ONLY inside `_EXPORT` trees | `_EXPORT/photo.tif` → `_EXPORT/ZIP/photo.tif` |
 | `7` | Export marker subfolder | Directory (recursive) | Only inside `_EXPORT/TIFF` trees | `_EXPORT/TIFF/photo.tif` → `_EXPORT/ZIP/photo.tif` |
-| `8` | In-place + delete | Directory (recursive) | In-place. Originals deleted after confirm | `photo.tif` → deleted after compression |
+| `8` | In-place + delete | Directory (recursive) | In-place, always: the verified output replaces each original. `-DeleteSource` additionally removes a `.tiff` source | `photo.tif` → replaced; `photo.tiff` → `photo.tif`, source deleted |
 | `9` | In-place recursive + OLD_TIFFs | Directory (recursive) | In-place. Originals → `OLD_TIFFs/` | `photo.tif` → compressed in place |
 
 **Modes 6/7** write inside the `_EXPORT` folder each file actually came from — `in\2024\JobA\_EXPORT\photo.tif` produces `in\2024\JobA\_EXPORT\ZIP\photo.tif`. Different jobs never share an output folder.

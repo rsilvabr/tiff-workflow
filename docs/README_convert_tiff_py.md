@@ -130,6 +130,25 @@ Verify each TIFF in OLD_TIFFs matches the parent copy (via RMSE), then delete if
 
 Check if 16-bit TIFFs are real 16-bit data or padded 8-bit (stretched from 8-bit by software that only converted depth). Uses round-trip RMSE method.
 
+**How it works:** Round-trip test — converts 16-bit → 8-bit → 16-bit via ImageMagick, then compares RMSE. If RMSE=0, the original was 8-bit padded. If RMSE>0, it's real 16-bit.
+
+**Temporary files compression:** During comparison, you can choose how to compress temp TIFFs (option 1-3):
+- `[1] Uncompressed` — fastest processing, higher I/O (no compression overhead)
+- `[2] LZW` — balanced, 8-bit LZW compression reduces I/O with low CPU cost
+- `[3] ZIP` — compresses both 8-bit and 16-bit temp files, reduces I/O but higher CPU cost
+
+**Benchmark results** (Ryzen 5950x, SSD SATA M.2, 155 photos):
+
+| Mode | Total Time |
+|------|------------|
+| Uncompressed | 78.9s |
+| LZW | 80.8s |
+| ZIP | 135.8s |
+
+On fast storage (SSD), processing cost >> I/O cost, so uncompressed is fastest. On slow storage (HDD, network), LZW may win.
+
+**What a padded file costs** (45 MP, Deflate): 70 MB kept as 16-bit, 59 MB as 8-bit (~17% smaller).
+
 Two questions narrow the search before anything is checked:
 
 - **Only inside this folder path** -- e.g. `_EXPORT/TIFF16` (either slash, any case):
@@ -240,6 +259,8 @@ F:\2025\Tokyo\TIFF,F:\2025\Tokyo\ZIP_flat,2
   outside 0-9 — any invalid row refuses the whole manifest.
 - Only mode **2** honors the `Destination` column; other modes compute their own
   outputs (a warning lists ignored Destinations).
+- A manifest is guaranteed to work with the version that generated it. Regenerate
+  after upgrading.
 
 **Run:** main menu [3] lists manifests (newest first), shows a preview table, asks
 for workers/staging/dry-run (and the duplicate policy when mode 2 is present), then
