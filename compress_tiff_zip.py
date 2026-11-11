@@ -978,6 +978,28 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging
                src_length=src_length, src_mtime_ns=src_mtime_ns)
 
 
+def _warn_flat_output_in_the_input(run, files):
+    """Mode 2 whose output folder is an input folder itself (no -OutputDir, or -OutputDir on
+    the root): the files of its subfolders are COPIED into it, their originals stay
+    uncompressed where they are, and every run adds another set of copies. Said once,
+    before the work; nothing is refused for it."""
+    opt = run.opt
+    roots = {(f.input_root or f.dir).lower() for f in files}
+    copies = {}
+    for f in files:
+        dst = resolve_output(f, 2, f.input_root or f.dir, opt)
+        if not dst:
+            continue
+        out_dir = os.path.dirname(dst)
+        if out_dir.lower() in roots and not tw.same_path(out_dir, f.dir):
+            copies[out_dir] = copies.get(out_dir, 0) + 1
+    for out_dir, n in copies.items():
+        run.log(f"Mode 2 writes into the input folder itself: {n} file(s) from its subfolders will be "
+                f"COPIED into {out_dir} (the originals stay where they are, uncompressed, and "
+                f"another run adds another set of copies). Pass -OutputDir to keep the output apart.",
+                "WARN")
+
+
 def _plan_jobs(run, files, comp_map, staging):
     """The Job of every file `mode` can work on: a _Plan. A file with no place to go, or
     refused before any work (a path too long, an output onto its own source, in modes
@@ -989,6 +1011,9 @@ def _plan_jobs(run, files, comp_map, staging):
     plan = _Plan(jobs=[], collision_notes={})
     used_names = {}        # mode 2: names given out per output folder
     claimed = {}           # other modes: destination -> the source that claimed it
+    sources = {f.path.lower() for f in files} if mode == 2 else set()
+    if mode == 2:
+        _warn_flat_output_in_the_input(run, files)
     for f in files:
         final_dst = resolve_output(f, mode, f.input_root or f.dir, opt)
         if not final_dst:
@@ -1020,6 +1045,19 @@ def _plan_jobs(run, files, comp_map, staging):
         final_dir = os.path.dirname(final_dst)
         if not dry and final_dir.strip() and not os.path.isdir(final_dir):
             os.makedirs(final_dir, exist_ok=True)
+
+        # Mode 2 with its output in the input folder: the flat name of a file from a
+        # subfolder can be ANOTHER source of this run (a.tif in the root, a.tif in a
+        # subfolder). With -Overwrite that photo was replaced by the other one, the only
+        # copy of it gone, exit code 0. Never: the file is refused, and the source it would
+        # have replaced is compressed in its own place as usual. (Without -Overwrite nothing
+        # is written over it: the worker answers SKIP (exists), or -DuplicateAction gives
+        # another name.) A file whose destination is ITSELF is the in-place write, allowed.
+        replaces_another = final_dst.lower() in sources and not tw.same_path(final_dst, f.path)
+        if mode == 2 and opt["Overwrite"] and replaces_another:
+            run.count(f"ERROR (mode 2 would replace another source file of this run - refused; "
+                      f"pass -OutputDir) | {f.name} | {final_dst}")
+            continue
 
         if mode == 2:
             final_dst = _flat_destination(run, plan, f, final_dst, used_names)

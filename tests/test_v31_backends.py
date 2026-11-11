@@ -15,11 +15,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import tiff_workflow_common as tw  # noqa: E402
+from backends import LANES  # noqa: E402
 from test_regression_classes import (  # noqa: E402
-    make_multipage_tiff, page_count, requires_tools,
+    make_multipage_tiff, page_count, read_compression, requires_tools, run_ps,
 )
 
 HOSTILE = "190815_Film_伊豆沼 [FINAL] 50% x"
+RED, GREEN = "srgb(255,0,0)", "srgb(0,128,0)"       # what identify prints for xc:red, xc:green
 
 
 @pytest.fixture
@@ -83,3 +85,61 @@ class TestPageCountWithPing:
         built.write_bytes(bytes(data))
         assert page_count(built) == 1, "the full identify, on the plain name"
         assert tw.tiff_page_count(str(land(built))) == tw.PageCount(True, 1, "")
+
+
+def solid(path, colour):
+    """An uncompressed 16-bit TIFF of one colour, built where the tools can read the name."""
+    subprocess.run(["magick", "-size", "64x48", f"xc:{colour}", "-depth", "16", "-type", "TrueColor",
+                    "-compress", "none", str(path)], capture_output=True, check=True, timeout=120)
+    return path
+
+
+def first_pixel(path):
+    r = subprocess.run(["magick", "identify", "-format", "%[pixel:p{0,0}]", f"{path}[0]"],
+                       capture_output=True, text=True, timeout=120)
+    return r.stdout.strip()
+
+
+@requires_tools
+@pytest.mark.parametrize("lane", LANES)
+@pytest.mark.parametrize("extra", [["-Overwrite"], ["-DuplicateAction", "Overwrite", "-Overwrite"]],
+                         ids=["overwrite", "duplicates-overwrite"])
+def test_mode2_never_replaces_a_photo_with_another_one(tmp_path, lane, extra):
+    """Mode 2 without -OutputDir flattens into the input folder itself. With -Overwrite the
+    red photo of the root was replaced by the blue one of a subfolder that has the same
+    name -- the only copy of it gone, "OK", exit code 0 (v3.0.0, found by the review of
+    phase 1). The blue one is refused; the red one is compressed in its own place."""
+    plain = tmp_path / "plain"
+    (plain / "NORITSU").mkdir(parents=True)
+    solid(plain / "a.tif", "red")
+    solid(plain / "NORITSU" / "a.tif", "blue")
+    solid(plain / "NORITSU" / "c.tif", "green")
+    root = tmp_path / HOSTILE
+    plain.rename(root)
+    (root / "NORITSU").rename(root / "NORITSU [1] 一時")
+    sub = root / "NORITSU [1] 一時"
+    blue_before = (sub / "a.tif").read_bytes()
+    assert first_pixel_plain(root / "a.tif", tmp_path) == RED
+
+    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", "2", "-InputDir", root] + extra, tmp_path)
+
+    out = result.stdout
+    assert result.returncode == 1, out
+    assert "ERROR (mode 2 would replace another source file of this run - refused; pass -OutputDir) | a.tif" in out
+    assert "Mode 2 writes into the input folder itself: 2 file(s) from its subfolders will be COPIED" in out
+    assert first_pixel_plain(root / "a.tif", tmp_path) == RED, "the red photo is gone"
+    assert read_compression(root / "a.tif").lower() == "zip", "and it is compressed in its own place"
+    assert (sub / "a.tif").read_bytes() == blue_before
+    assert first_pixel_plain(root / "c.tif", tmp_path) == GREEN, "the copy of c.tif in the root"
+    assert sorted(p.name for p in root.iterdir()) == ["NORITSU [1] 一時", "a.tif", "c.tif"]
+
+
+def first_pixel_plain(path, tmp_path):
+    """The first pixel of `path`, read from a copy under a plain name (magick globs '[ ]' in
+    a spec with a [0] selector, and the folder has them)."""
+    copy = tmp_path / "px_probe.tif"
+    copy.write_bytes(Path(path).read_bytes())
+    try:
+        return first_pixel(copy)
+    finally:
+        copy.unlink()

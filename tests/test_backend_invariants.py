@@ -1247,6 +1247,78 @@ class TestPlan:
         assert out(root + "base\\x") == root + "\\ZIP\\p.tif"
 
 
+class TestMode2InTheInputFolder:
+    """Mode 2 writes every output into ONE folder. Without -OutputDir (or with -OutputDir on
+    the root) that folder is the input folder itself: the files of its subfolders become
+    copies in the root. v3.1: that is announced, and the one case that lost a photo -- with
+    -Overwrite, a source replaced by another source of the same name -- is refused."""
+
+    @pytest.fixture(params=["!first [1]", "zz NORITSU [1]"], ids=["subfolder-listed-first", "root-first"])
+    def lib(self, request, tmp_path):
+        root = tmp_path / "190815_伊豆沼 [FINAL] 50% x"
+        sub = root / request.param
+        sub.mkdir(parents=True)
+        (root / "a 50%.tif").write_bytes(b"ROOT PHOTO")
+        (sub / "a 50%.tif").write_bytes(b"ANOTHER PHOTO")
+        (sub / "c.tif").write_bytes(b"C")
+        return root, sub
+
+    def converted(self, tools):
+        return sorted(c[1] for c in tools.magick_calls)
+
+    @pytest.mark.parametrize("extra", [["-Overwrite"], ["-DuplicateAction", "Overwrite", "-Overwrite"],
+                                       ["-DuplicateAction", "Skip", "-Overwrite"]],
+                             ids=["overwrite", "duplicates-overwrite", "duplicates-skip"])
+    def test_a_photo_is_never_replaced_by_another_source(self, tools, lib, extra):
+        root, sub = lib
+        run, rc = modes("-Mode", "2", "-InputDir", str(root), *extra)
+        assert rc == 1, run.log.lines
+        refused = said(run, "ERROR (mode 2 would replace another source file of this run - refused; "
+                            "pass -OutputDir) | a 50%.tif | " + str(root / "a 50%.tif"))
+        assert len(refused) == 1 and run.err == 1, run.log.lines
+        assert str(sub / "a 50%.tif") not in self.converted(tools), "the other photo was converted"
+        assert str(root / "a 50%.tif") in self.converted(tools), "the root photo is compressed in place"
+        assert (sub / "a 50%.tif").read_bytes() == b"ANOTHER PHOTO"
+        assert (root / "a 50%.tif").read_bytes() == b"COMPRESSED"
+        assert not said(run, "superseded"), "the root photo was dropped from the plan"
+        assert sorted(os.listdir(root)) == sorted(["a 50%.tif", "c.tif", sub.name])
+
+    def test_without_overwrite_the_other_photo_gets_its_own_name(self, tools, lib):
+        """As before: nothing is written over a source; the copy is numbered."""
+        root, sub = lib
+        run, rc = modes("-Mode", "2", "-InputDir", str(root))
+        assert rc == 0 and run.err == 0, run.log.lines
+        assert not said(run, "would replace another source")
+        assert sorted(os.listdir(root)) == sorted(["a 50%.tif", "a 50%_v2.tif", "c.tif", sub.name])
+        assert (sub / "a 50%.tif").read_bytes() == b"ANOTHER PHOTO"
+
+    def test_the_copies_into_the_input_folder_are_announced_once(self, tools, lib):
+        root, sub = lib
+        for argv in (["-InputDir", str(root)], ["-InputDir", str(root), "-OutputDir", str(root)],
+                     ["-InputDir", str(root), "-DryRun"]):
+            run, rc = modes("-Mode", "2", *argv)
+            lines = said(run, "Mode 2 writes into the input folder itself")
+            assert len(lines) == 1, (argv, run.log.lines)
+            assert lines[0].startswith(f"Mode 2 writes into the input folder itself: 2 file(s) from its "
+                                       f"subfolders will be COPIED into {root} ")
+            assert ("WARN", lines[0]) in run.log.lines and "Pass -OutputDir" in lines[0]
+
+    def test_an_output_folder_of_its_own_is_not_announced(self, tools, lib, tmp_path):
+        root, sub = lib
+        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(tmp_path / "out [x]"),
+                        "-Overwrite")
+        assert rc == 0, run.log.lines
+        assert not said(run, "Mode 2 writes into the input folder itself")
+        assert not said(run, "would replace another source"), "the root photo is not a destination here"
+
+    def test_a_folder_without_subfolders_is_not_announced(self, tools, photo):
+        """The mode 2 "in place" of one flat folder: every file is its own destination."""
+        run, rc = modes("-Mode", "2", "-InputDir", str(photo.parent), "-Overwrite")
+        assert rc == 0 and photo.read_bytes() == b"COMPRESSED", run.log.lines
+        assert not said(run, "Mode 2 writes into the input folder itself")
+        assert not said(run, "would replace another source")
+
+
 class TestMode8DefaultStaging:
     """Mode 8 without -StagingDir stages in a folder of its own (_cs8_<id>): inside the input
     folder when there is one, in the temp folder when there are several. On an interactive
