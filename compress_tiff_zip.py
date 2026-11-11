@@ -933,17 +933,6 @@ def effective_workers(run, paths, bytes_per_pixel):
 
 # -- Modes 0-9 ------------------------------------------------------
 
-def _numbered(directory, stem, ext, taken):
-    """<stem>_v2<ext>, _v3, ...: the first name `taken(name, path)` does not refuse."""
-    n = 2
-    while True:
-        name = f"{stem}_v{n}{ext}"
-        path = tw.join_path(directory, name)
-        n += 1
-        if not taken(name, path):
-            return name, path
-
-
 def run_modes(run, bound):
     opt = run.opt
     log = run.log
@@ -1159,11 +1148,11 @@ def run_modes(run, bound):
                     tasks = [t for t in tasks if not tw.same_path(t["final_dst"], final_dst)]
                     log(f"OVERWRITE (duplicate filename in flat output) | {f.name}", "INFO")
                 else:
-                    dest_name, final_dst = _numbered(dest_dir, stem, ext, taken)
+                    dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
             elif opt["DuplicateAction"] == "Numbered" and not overwrite \
                     and not tw.same_path(final_dst, f.path) and os.path.exists(final_dst):
                 # not claimed in this run but already on disk
-                dest_name, final_dst = _numbered(dest_dir, stem, ext, taken)
+                dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
             names.add(dest_name.lower())
         else:
             # Two sources can claim one destination: modes 4-7 flatten different trees
@@ -1178,7 +1167,7 @@ def run_modes(run, bound):
                 continue
             if first and not tw.same_path(first, f.path):
                 stem, ext = os.path.splitext(os.path.basename(final_dst))
-                cand_name, cand = _numbered(
+                cand_name, cand = tw.numbered_name(
                     os.path.dirname(final_dst), stem, ext,
                     lambda n, p: p.lower() in claimed or os.path.exists(p))
                 collision_notes[cand.lower()] = f" [renamed to {cand_name} to avoid collision]"

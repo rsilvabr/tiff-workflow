@@ -450,16 +450,10 @@ def process_folder(run, root):
             if opt["OutputDir"] and final_dir.lower() != tif.dir.lower():
                 d_key = tw.join_path(final_dir, dest_name).lower()
                 if d_key in run.claimed_dest and run.claimed_dest[d_key].lower() != tif.path.lower():
-                    n = 2
-                    while True:
-                        cand = f"{tif.stem}_v{n}{tif.ext}"
-                        cand_key = tw.join_path(final_dir, cand).lower()
-                        n += 1
-                        if cand_key not in run.claimed_dest and \
-                                not os.path.exists(tw.join_path(final_dir, cand)):
-                            break
-                    dest_name = cand
-                    d_key = cand_key
+                    dest_name, cand_path = tw.numbered_name(
+                        final_dir, tif.stem, tif.ext,
+                        lambda name, path: path.lower() in run.claimed_dest or os.path.exists(path))
+                    d_key = cand_path.lower()
                     log(f"  RENAME (name already taken in OutputDir) | {tif.name} -> {dest_name}", "WARN")
                 run.claimed_dest[d_key] = tif.path
             dest_names[tif.path.lower()] = dest_name

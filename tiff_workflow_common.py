@@ -438,6 +438,18 @@ def full_path(path):
     return os.path.abspath(str(path))
 
 
+def numbered_name(directory, stem, ext, taken):
+    """<stem>_v2<ext>, _v3, ...: the first name `taken(name, path)` does not refuse.
+    Returns (name, its path in `directory`)."""
+    n = 2
+    while True:
+        name = f"{stem}_v{n}{ext}"
+        path = join_path(directory, name)
+        n += 1
+        if not taken(name, path):
+            return name, path
+
+
 def long_path(path):
     """`path` behind the \\\\?\\ prefix, which lifts Windows' 260-character limit for the
     file calls of this process (ImageMagick and exiftool are not long-path aware: the

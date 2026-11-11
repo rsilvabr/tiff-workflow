@@ -295,13 +295,8 @@ def run(argv):
             out_dir = f.dir
         dest = tw.join_path(out_dir, f"{f.stem}_thumb.{fmt}")
         if dest.lower() in claimed:
-            n = 2
-            while True:
-                cand_name = f"{f.stem}_thumb_v{n}.{fmt}"
-                cand = tw.join_path(out_dir, cand_name)
-                n += 1
-                if cand.lower() not in claimed:
-                    break
+            cand_name, cand = tw.numbered_name(out_dir, f"{f.stem}_thumb", f".{fmt}",
+                                               lambda name, path: path.lower() in claimed)
             log(f"RENAME (thumbnail name already taken) | {f.name} -> {cand_name}", "WARN")
             dest = cand
         claimed[dest.lower()] = f.path
