@@ -593,6 +593,78 @@ class TestCopyExif:
         ev = tools.events
         assert ev.index("layout") < ev.index("pixels") < ev.index("subfile")
 
+    def _to_outputdir(self, photo, tmp_path, *argv):
+        out = tmp_path / "out 伊豆沼 [x] 100%"
+        r = cx.process_pair(exif_run("-OutputDir", str(out), *argv), pair(photo, photo.with_suffix(".jpg")),
+                            str(out), str(out), 1.0)
+        return out, r
+
+    @pytest.mark.parametrize("failing,text", [
+        ("exif_copy", "ERROR (exiftool EXIF) |"),
+        ("jpeg_container", "ERROR (metadata container failed - EXIF copy refused) |"),
+        ("compression", "ERROR (exiftool check) |"),
+        ("layout", "ERROR (sample layout unreadable) |"),
+        ("alpha_ok", "ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) |"),
+        ("magick_rc", "ERROR (magick ZIP) |"),
+        ("magick_writes", "ERROR (magick ZIP) |"),
+        ("layout_kept", "ERROR (sample layout changed: rgb/3/8,8,8/ - original untouched) |"),
+        ("pixels", "ERROR (ZIP pixel verification failed - original untouched) |"),
+        ("tiff_container", "ERROR (exiftool metadata restore failed - original untouched) |"),
+        ("restore", "ERROR (exiftool metadata restore failed - original untouched) |"),
+        ("subfile_restore", "ERROR (subfiletype restore failed - original untouched) |"),
+    ])
+    def test_with_outputdir_a_failure_leaves_neither_the_copy_nor_a_staged_file(
+            self, tools, photo, tmp_path, monkeypatch, failing, text):
+        """With -OutputDir the TIFF is copied there first and the ZIP staged next to the
+        copy. Whatever fails after the copy, both go: a copy left behind is skipped as
+        "exists in OutputDir" by the next run, without EXIF and uncompressed."""
+        if failing == "exif_copy":
+            tools.exif_result = (0, "Warning: Error opening file - x.jpg")
+        elif failing == "jpeg_container":
+            tools.meta = (True, None)
+        elif failing == "compression":
+            monkeypatch.setattr(tw, "ifd0_compression", lambda p: (False, ""))
+        elif failing == "layout":
+            tools.layout = (False, [])
+        elif failing == "magick_rc":
+            tools.magick_rc = 1
+        elif failing == "tiff_container":
+            answers = [(False, None), (True, None)]      # the JPEG's, then the TIFF's
+            monkeypatch.setattr(tw, "backup_tiff_metadata", lambda s, d: answers.pop(0))
+        elif failing == "restore":
+            monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: (
+                (0, "Warning: Error opening file") if "-all:all" in args else (0, "")))
+        else:
+            setattr(tools, failing, False)
+        out, r = self._to_outputdir(photo, tmp_path, "-CompressZip")
+        assert r["line"].startswith(text), r["line"]
+        if failing == "magick_writes":
+            assert "magick reported success but wrote no file" in r["line"]
+        assert r["staged"] is None
+        assert os.listdir(out) == [], "the copy or the staged file stayed in -OutputDir"
+        assert photo.read_bytes() == b"ORIGINAL"
+        assert sorted(os.listdir(photo.parent)) == [photo.name]
+
+    def test_with_outputdir_success_leaves_only_the_staged_zip(self, tools, photo, tmp_path):
+        """The copy has served (EXIF written to it, the ZIP made from it): the staged ZIP
+        takes its name in the move that follows."""
+        out, r = self._to_outputdir(photo, tmp_path, "-CompressZip")
+        assert r["line"].startswith("OK+ZIP |"), r["line"]
+        assert os.listdir(out) == [r["staged"]]
+        assert photo.read_bytes() == b"ORIGINAL"
+        ev = tools.events
+        assert ev.index("magick") < ev.index("layout") < ev.index("pixels") < ev.index("subfile")
+        restore = next(c for c in tools.exif_calls if "-all:all" in c)
+        assert ev.index("pixels") < [i for i, e in enumerate(ev) if e == "exif"][-1] < ev.index("subfile"), \
+            "the metadata restore runs between the pixel gate and the subfiletype restore"
+        assert restore[-1] == str(out / r["staged"])
+
+    def test_with_outputdir_and_no_zip_the_copy_carries_the_exif(self, tools, photo, tmp_path):
+        out, r = self._to_outputdir(photo, tmp_path)
+        assert r["line"] == f"OK | {photo.name} <= {photo.with_suffix('.jpg').name} -> {out}"
+        assert os.listdir(out) == [photo.name]
+        assert tools.exif_calls[0][-1] == str(out / photo.name), "never written to the original"
+
     def test_a_copy_to_outputdir_that_fails_leaves_no_partial_file(self, tools, photo, tmp_path, monkeypatch):
         out = tmp_path / "out"
 
