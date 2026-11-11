@@ -727,6 +727,114 @@ class TestCopyExif:
 
 
 # ---------------------------------------------------------------------------
+# The three staging loops: what they say when the move does not land the file
+# ---------------------------------------------------------------------------
+
+def failing_move(kind):
+    """A move_file_into_place that fails in one of the three ways a staging loop tells
+    apart: it reports an error; it reports success and nothing is at the destination; it
+    reports success and the destination has another size than the staged file."""
+    def move(src, dst, run_id):
+        if kind == "error":
+            return "move failed: boom"
+        if kind == "size":
+            Path(dst).write_bytes(b"SHORT")
+        return None
+    return move
+
+
+def error_lines(run):
+    return [msg for level, msg in run.log.lines if level == "ERROR"]
+
+
+class TestStagedMoveFailures:
+    """A staged file that did not land is ONE counted error line (exit code 1), and the
+    run goes on. The loops: legacy, modes 1-8, copy_exif -CompressZip."""
+
+    NAME = "photo 50%off.tif"
+
+    @pytest.mark.parametrize("kind,text", [
+        ("missing", f"ERROR (legacy move failed) | {NAME}"),
+        ("size", f"ERROR (legacy move failed) | {NAME}"),
+        ("error", f"ERROR (legacy move failed) | {NAME}: move failed: boom"),
+    ])
+    def test_legacy(self, tools, photo, tmp_path, monkeypatch, kind, text):
+        monkeypatch.chdir(photo.parent)
+        monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
+        run = compress_run("-OutputDir", "outz", "-StagingDir", str(tmp_path / "stg"), "-ForceSequential")
+        assert cz.run_legacy(run) == 1
+        assert error_lines(run) == [text]
+        assert (run.err, run.ok) == (1, 1), "the worker's OK is counted, and so is the failed move"
+        assert not [m for _lv, m in run.log.lines if "Moved" in m]
+        assert photo.read_bytes() == b"ORIGINAL"
+
+    @pytest.mark.parametrize("kind,text", [
+        ("missing", f"ERROR (move failed) | {NAME}"),
+        ("size", f"ERROR (size mismatch after move) | {NAME}"),
+        ("error", f"ERROR (move exception) | {NAME}: move failed: boom"),
+    ])
+    def test_modes(self, tools, photo, tmp_path, monkeypatch, kind, text):
+        monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
+        run = compress_run("-Mode", "1", "-InputDir", str(photo.parent),
+                           "-StagingDir", str(tmp_path / "stg"), "-ForceSequential")
+        assert cz.run_modes(run, {"Mode", "InputDir", "StagingDir", "ForceSequential"}) == 1
+        assert error_lines(run) == [text]
+        assert (run.err, run.ok) == (1, 1)
+        assert not [m for _lv, m in run.log.lines if "Moved" in m]
+        assert photo.read_bytes() == b"ORIGINAL"
+
+    @pytest.mark.parametrize("kind,text", [
+        ("missing", f"ERROR (move failed) | {NAME}"),
+        ("size", f"ERROR (move failed) | {NAME}"),
+        ("error", f"ERROR (move failed) | {NAME}: move failed: boom"),
+    ])
+    def test_copy_exif(self, tools, photo, tmp_path, monkeypatch, kind, text):
+        photo.with_suffix(".jpg").write_bytes(b"JPEG")
+        monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
+        run = exif_run("-CompressZip", "-OutputDir", str(tmp_path / "out [x]"), "-Workers", "1")
+        cx.process_folder(run, str(photo.parent))
+        assert error_lines(run) == [text]
+        assert (run.err, run.ok) == (1, 1)
+        assert not [m for _lv, m in run.log.lines if "Moved" in m]
+        assert photo.read_bytes() == b"ORIGINAL"
+
+    def test_legacy_lands_the_staged_file(self, tools, photo, tmp_path, monkeypatch):
+        """The same run with the real move: the file lands and is counted as moved."""
+        monkeypatch.chdir(photo.parent)
+        stg = tmp_path / "stg"
+        run = compress_run("-OutputDir", "outz", "-StagingDir", str(stg), "-ForceSequential")
+        assert cz.run_legacy(run) == 0
+        out = photo.parent / "outz"
+        assert (out / self.NAME).read_bytes() == b"COMPRESSED" and os.listdir(stg) == []
+        assert ("INFO", f"  -> Moved 1 file(s) -> {out}") in run.log.lines
+        assert (run.err, run.ok) == (0, 1) and photo.read_bytes() == b"ORIGINAL"
+
+    def test_modes_land_the_staged_file(self, tools, photo, tmp_path):
+        stg = tmp_path / "stg"
+        run = compress_run("-Mode", "1", "-InputDir", str(photo.parent), "-StagingDir", str(stg),
+                           "-ForceSequential")
+        assert cz.run_modes(run, {"Mode", "InputDir", "StagingDir", "ForceSequential"}) == 0
+        out = photo.parent / "ZIP"
+        assert (out / self.NAME).read_bytes() == b"COMPRESSED" and os.listdir(stg) == []
+        assert ("INFO", f"  -> Moved 1 file(s) -> {out}") in run.log.lines
+        assert (run.err, run.ok) == (0, 1) and photo.read_bytes() == b"ORIGINAL"
+
+    def test_copy_exif_lands_the_staged_file_and_keeps_the_date(self, tools, photo, tmp_path):
+        """In place the staged ZIP takes the TIFF's name, and the TIFF's write time: the
+        EXIF-only path keeps it too."""
+        photo.with_suffix(".jpg").write_bytes(b"JPEG")
+        old = 1_200_000_000_000_000_000
+        os.utime(photo, ns=(old, old))
+        stg = tmp_path / "stg [x]"
+        run = exif_run("-CompressZip", "-StagingDir", str(stg), "-Workers", "1")
+        cx.process_folder(run, str(photo.parent))
+        assert photo.read_bytes() == b"COMPRESSED" and os.listdir(stg) == []
+        assert os.stat(photo).st_mtime_ns == old
+        assert ("INFO", f"  -> Moved 1 file(s) -> {photo.parent}") in run.log.lines
+        assert (run.err, run.ok) == (0, 1)
+
+
+# ---------------------------------------------------------------------------
 # tiff_workflow_common: the gates fail closed
 # ---------------------------------------------------------------------------
 
