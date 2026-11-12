@@ -222,6 +222,49 @@ def _ask_yes_no(question, default: bool, style: str = "") -> bool:
     return _yes(input(f"{_plain(question)} [{'Y/n' if default else 'y/N'}]: "), default)
 
 
+def _table(columns: List[Dict], rows: List[list], panel: Optional[Dict] = None, **table_kw) -> None:
+    """A table from one description, for both screens. `columns`: dicts with "name" and
+    add_column's keywords (style, justify, width); a cell -- and a title -- is a text or a
+    (text, style) pair; `table_kw` go to Rich's Table, `panel` (Panel's keywords) puts it in
+    a panel. The plain screen prints the title and the columns aligned, two spaces apart."""
+    def text(x):
+        return Text(x[0], style=x[1] or None) if isinstance(x, tuple) else Text(x)
+
+    if RICH_AVAILABLE and console:
+        kw = dict(table_kw)
+        if "title" in kw:
+            kw["title"] = text(kw["title"])
+        table = Table(**kw)
+        for c in columns:
+            c = dict(c)
+            table.add_column(c.pop("name", ""), **c)
+        for row in rows:
+            table.add_row(*(text(x) for x in row))
+        if panel:
+            pk = dict(panel)
+            if "title" in pk:
+                pk["title"] = text(pk["title"])
+            console.print(Panel(table, **pk))
+        else:
+            console.print(table)
+        return
+    title = table_kw.get("title") or (panel or {}).get("title")
+    if title:
+        print(_plain([title]))
+    grid = ([[c.get("name", "") for c in columns]] if table_kw.get("show_header", True) else [])
+    grid += [[_plain([x]) for x in row] for row in rows]
+    if not grid:
+        return
+    widths = [max(len(r[i]) for r in grid) for i in range(len(columns))]
+    for r in grid:
+        cells = []
+        for i, cell in enumerate(r):
+            how = columns[i].get("justify", "left")
+            cells.append(cell.rjust(widths[i]) if how == "right" else
+                         cell.center(widths[i]) if how == "center" else cell.ljust(widths[i]))
+        print(" " + "  ".join(cells).rstrip())
+
+
 # --- Paths ---------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -3297,11 +3340,8 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
         shown = {"padded": "PADDED", "real": "real 16-bit"}.get(r.status, r.detail)
         progress = f"[{done}/{total}]"
         where = _display_path(r.path, roots)
-        if RICH_AVAILABLE and console:
-            color = {"padded": "yellow", "real": "dim"}.get(r.status, "red")
-            console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(where)}")
-        else:
-            print(f"  {progress} {shown} - {where}")
+        color = {"padded": "yellow", "real": "dim"}.get(r.status, "red")
+        _say([f"  {progress} ", (shown, color), f" {where}"])
         if on_result is not None:
             on_result(r)
 
@@ -3372,59 +3412,26 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     tiff_files = _diagnose_targets([folder], scope, skip_names)
 
     if not tiff_files:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No TIFF files found.[/yellow]")
-        else:
-            print("No TIFF files found.")
+        _say("No TIFF files found.", "yellow")
         return True
 
-    workers = cfg.config.last_workers or cfg.config.default_workers
-    if RICH_AVAILABLE and console:
-        workers_input = Prompt.ask("\n[cyan]Workers[/cyan]", default=str(workers))
-        if workers_input:
-            try:
-                workers = int(workers_input)
-            except ValueError:
-                console.print(f"[yellow]Invalid workers value '{workers_input}', using default {workers}[/yellow]")
-    else:
-        resp = input(f"\nWorkers [{workers}]: ").strip()
-        if resp:
-            try:
-                workers = int(resp)
-            except ValueError:
-                print(f"Invalid workers value '{resp}', using default {workers}")
-
-    workers = clamp_workers(workers, cfg.config.default_workers)
+    # the Workers answer read as everywhere else (_read_workers): it had a copy of its own
+    workers = _read_workers(_ask("\nWorkers", str(cfg.config.last_workers or cfg.config.default_workers)), cfg)
     # Remember the choice like the other workflows do
     cfg.config.last_workers = workers
     cfg.save_config()
 
     temp_dir = _ask_temp_dir()
 
-    compress_tmp = "none"
-    if RICH_AVAILABLE and console:
-        console.print("\n[cyan]Compress temp TIFFs during comparison?[/cyan]")
-        console.print("  [1] No      (uncompressed, fast)")
-        console.print("  [2] LZW     (8-bit LZW, balanced)")
-        console.print("  [3] ZIP     (8+16 bit Deflate, slower)")
-        compress_choice = Prompt.ask("Choice", choices=["1", "2", "3"], default="1")
-        compress_map = {"1": "none", "2": "lzw", "3": "zip"}
-        compress_tmp = compress_map.get(compress_choice, "none")
-    else:
-        print("\nCompress temp TIFFs during comparison?")
-        print("  1: No (uncompressed, fast)")
-        print("  2: LZW (8-bit LZW, balanced)")
-        print("  3: ZIP (8+16 bit Deflate, slower)")
-        resp = input("[1]: ").strip() or "1"
-        compress_map = {"1": "none", "2": "lzw", "3": "zip"}
-        compress_tmp = compress_map.get(resp, "none")
+    _say("\nCompress temp TIFFs during comparison?", "cyan")
+    _say("  [1] No      (uncompressed, fast)")
+    _say("  [2] LZW     (8-bit LZW, balanced)")
+    _say("  [3] ZIP     (8+16 bit Deflate, slower)")
+    compress_tmp = {"1": "none", "2": "lzw", "3": "zip"}[
+        _ask("Choice", "1", style="", choices=["1", "2", "3"])]
 
-    convert_q = ("Repeat/preset: also convert the padded files it finds? (pixel-verified, "
-                 "originals kept in OLD_PADDED)")
-    if RICH_AVAILABLE and console:
-        convert_padded = Confirm.ask(f"\n[cyan]{escape(convert_q)}[/cyan]", default=False)
-    else:
-        convert_padded = _yes(input(f"\n{convert_q} [y/N]: "), False)
+    convert_padded = _ask_yes_no("\nRepeat/preset: also convert the padded files it finds? "
+                                 "(pixel-verified, originals kept in OLD_PADDED)", False, "cyan")
 
     settings = {"roots": [os.path.abspath(str(folder))], "scope": scope, "skip_names": skip_names,
                 "workers": workers, "temp_dir": str(temp_dir) if temp_dir else None,
@@ -3449,49 +3456,26 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     other_count = statuses.count("other")
     error_count = statuses.count("error")
 
-    if RICH_AVAILABLE and console:
-        console.print("\n[bold]Results:[/bold]")
-        summary_table = Table(box=BOX_SIMPLE)
-        summary_table.add_column("Type", style="cyan")
-        summary_table.add_column("Count", style="green")
-        summary_table.add_row("Real 16-bit", str(real_count))
-        if padded_count > 0:
-            summary_table.add_row("[yellow]Padded 8-bit (stretched)[/yellow]", str(padded_count))
-        else:
-            summary_table.add_row("Padded 8-bit", "0")
-        if other_count > 0:
-            summary_table.add_row("[magenta]Other bit depth[/magenta]", str(other_count))
-        if error_count > 0:
-            summary_table.add_row("[red]Errors/Failed[/red]", str(error_count))
-        console.print(summary_table)
+    _say("\nResults:", "bold")
+    rows = [["Real 16-bit", str(real_count)],
+            [("Padded 8-bit (stretched)", "yellow"), str(padded_count)] if padded_count
+            else ["Padded 8-bit", "0"]]
+    if other_count > 0:
+        rows.append([("Other bit depth", "magenta"), str(other_count)])
+    if error_count > 0:
+        rows.append([("Errors/Failed", "red"), str(error_count)])
+    _table([{"name": "Type", "style": "cyan"}, {"name": "Count", "style": "green"}], rows,
+           box=BOX_SIMPLE)
 
-        if DEBUG_TIMING and total_start is not None:
-            elapsed = time.time() - total_start
-            console.print(f"\n[dim][DEBUG] Total time: {elapsed:.2f}s[/dim]")
+    if DEBUG_TIMING and total_start is not None:
+        _say(f"\n[DEBUG] Total time: {time.time() - total_start:.2f}s", "dim")
 
-        if padded_count > 0:
-            console.print(f"\n[yellow]Warning: {padded_count} file(s) are padded 8-bit (converted from 8-bit to 16-bit without adding real data).[/yellow]")
-
-            if Confirm.ask("\n[cyan]Compress padded files to 8-bit ZIP?[/cyan]", default=False):
-                console.print(f"[cyan]Compressing {len(padded_files)} file(s)...[/cyan]")
-                _compress_padded_files(padded_files, temp_dir, workers, cfg)
-    else:
-        print("\nResults:")
-        print(f"  Real 16-bit: {real_count}")
-        print(f"  Padded 8-bit: {padded_count}")
-        if other_count > 0:
-            print(f"  Other bit depth: {other_count}")
-        if error_count > 0:
-            print(f"  Errors/Failed: {error_count}")
-        if DEBUG_TIMING and total_start is not None:
-            elapsed = time.time() - total_start
-            print(f"\n[DEBUG] Total time: {elapsed:.2f}s")
-        if padded_count > 0:
-            print(f"\nWarning: {padded_count} file(s) are padded 8-bit (converted from 8-bit to 16-bit without adding real data).")
-            resp = input("\nCompress padded files to 8-bit ZIP? [y/N]: ").strip().lower()
-            if _yes(resp, False):
-                print(f"Compressing {len(padded_files)} file(s)...")
-                _compress_padded_files(padded_files, temp_dir, workers, cfg)
+    if padded_count > 0:
+        _say(f"\nWarning: {padded_count} file(s) are padded 8-bit (converted from 8-bit to 16-bit "
+             f"without adding real data).", "yellow")
+        if _ask_yes_no("\nCompress padded files to 8-bit ZIP?", False, "cyan"):
+            _say(f"Compressing {len(padded_files)} file(s)...", "cyan")
+            _compress_padded_files(padded_files, temp_dir, workers, cfg)
 
     return True
 
@@ -4344,79 +4328,45 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
         if status in _FAILED_STATUSES:
             failed.append((final_dst, status + (f": {error_msg}" if error_msg else "")))
 
-        where = f"{parent.name}{os.sep}{name}"
-        if RICH_AVAILABLE and console:
-            console.print(f"  [{i+1}/{len(padded_files)}] {escape(where)}")
-        else:
-            print(f"  [{i+1}/{len(padded_files)}] {where}")
+        _say(f"  [{i+1}/{len(padded_files)}] {parent.name}{os.sep}{name}")
 
         if status == "magick_not_found":
-            if RICH_AVAILABLE and console:
-                console.print("    [red]FAILED: magick not found[/red]")
-            else:
-                print("    FAILED: magick not found")
+            _say("    FAILED: magick not found", "red")
         elif status == "error":
-            if RICH_AVAILABLE and console:
-                console.print(f"    [red]FAILED: {escape(str(error_msg))}[/red]")
-            else:
-                print(f"    FAILED: {error_msg}")
+            _say(f"    FAILED: {error_msg}", "red")
         elif status == "magick_error":
-            if RICH_AVAILABLE and console:
-                console.print("    [red]FAILED: magick error[/red]")
-            else:
-                print("    FAILED: magick error")
+            _say("    FAILED: magick error", "red")
         elif status == "missing":
-            if RICH_AVAILABLE and console:
-                console.print("    [red]FAILED: output missing[/red]")
-            else:
-                print("    FAILED: output missing")
+            _say("    FAILED: output missing", "red")
         elif status in ("multi_page_refused", "page_layout_unreadable"):
             reason = ("multi-page TIFF with non-thumbnail pages (scanner IR / layers): the "
                       "diagnosis only looked at page 0, so converting the whole file could "
                       "down-convert pages that were never checked"
                       if status == "multi_page_refused"
                       else "page layout unreadable")
-            if RICH_AVAILABLE and console:
-                console.print(f"    [yellow]SKIPPED: {escape(reason)} -- original preserved[/yellow]")
-            else:
-                print(f"    SKIPPED: {reason} -- original preserved")
+            _say(f"    SKIPPED: {reason} -- original preserved", "yellow")
         elif status == "subfile_restore_failed":
             # audit round 16: _restore_subfile_types said the markers could not be
             # restored, so the rewrite's metadata is not trustworthy -- degraded, not OK.
-            msg = "WARN: could not restore per-page SubfileType markers -- original preserved"
-            if RICH_AVAILABLE and console:
-                console.print(f"    [yellow]{escape(msg)}[/yellow]")
-            else:
-                print(f"    {msg}")
+            _say("    WARN: could not restore per-page SubfileType markers -- original preserved",
+                 "yellow")
         elif status == "pixel_mismatch":
-            msg = ("SKIPPED: the 8-bit version is not pixel-identical -- this file holds "
-                   "real 16-bit data; original preserved")
-            if RICH_AVAILABLE and console:
-                console.print(f"    [yellow]{escape(msg)}[/yellow]")
-            else:
-                print(f"    {msg}")
+            _say("    SKIPPED: the 8-bit version is not pixel-identical -- this file holds "
+                 "real 16-bit data; original preserved", "yellow")
         elif status in ("integrity_error", "dimension_mismatch",
                         "dimension_unreadable", "page_count_mismatch",
                         "pixel_compare_failed", "layout_unreadable", "layout_changed"):
-            if RICH_AVAILABLE and console:
-                console.print(f"    [red]FAILED: {status}[/red]")
-            else:
-                print(f"    FAILED: {status}")
+            _say(f"    FAILED: {status}", "red")
         elif status == "ok":
             if not exif_ok:
                 # Do NOT overwrite original if EXIF was lost
-                if RICH_AVAILABLE and console:
-                    console.print("    [red]FAILED: EXIF copy or History entry failed — original preserved[/red]")
-                else:
-                    print("    FAILED: EXIF copy or History entry failed — original preserved")
+                _say("    FAILED: EXIF copy or History entry failed — original preserved", "red")
                 failed.append((final_dst, "EXIF copy or History entry failed"))
                 tmp8.unlink(missing_ok=True)
                 return
 
-            if RICH_AVAILABLE and console:
-                console.print(f"    [green]OK[/green] {_format_size(size_orig)} -> {_format_size(size_zip)} ({ratio:.1f}% smaller, EXIF preserved)")
-            else:
-                print(f"    OK {_format_size(size_orig)} -> {_format_size(size_zip)} ({ratio:.1f}% smaller, EXIF preserved)")
+            _say(["    ", ("OK", "green"), f" {_format_size(size_orig)} -> {_format_size(size_zip)} "
+                  f"({ratio:.1f}% smaller, EXIF preserved)"])
 
             if size_zip < size_orig:
                 # Back up the original to OLD_PADDED/ and replace it (lossy 16 -> 8-bit).
@@ -4435,34 +4385,22 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                             v += 1
                         backup_path = backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}"
                 except Exception as e:
-                    if RICH_AVAILABLE and console:
-                        console.print(f"    [red]FAILED: backup to OLD_PADDED failed ({escape(str(e))}) — original preserved[/red]")
-                    else:
-                        print(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved")
+                    _say(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved", "red")
                     failed.append((final_dst, f"backup to OLD_PADDED failed ({e})"))
                     tmp8.unlink(missing_ok=True)
                     return
                 err, note = _land_padded_conversion(tmp8, final_dst, backup_path)
                 if err:
-                    if RICH_AVAILABLE and console:
-                        console.print(f"    [red]FAILED: {escape(err)}[/red]")
-                    else:
-                        print(f"    FAILED: {err}")
+                    _say(f"    FAILED: {err}", "red")
                     failed.append((final_dst, err))
                     tmp8.unlink(missing_ok=True)
                     return
                 if note:
                     _say(f"    {note}", "yellow")
                 converted += 1
-                if RICH_AVAILABLE and console:
-                    console.print(f"    [dim]Original backed up: OLD_PADDED/{escape(backup_path.name)}[/dim]")
-                else:
-                    print(f"    Original backed up: OLD_PADDED/{backup_path.name}")
+                _say(f"    Original backed up: OLD_PADDED/{backup_path.name}", "dim")
             else:
-                if RICH_AVAILABLE and console:
-                    console.print("    [dim]SKIPPED (ZIP larger than original)[/dim]")
-                else:
-                    print("    SKIPPED (ZIP larger than original)")
+                _say("    SKIPPED (ZIP larger than original)", "dim")
                 tmp8.unlink(missing_ok=True)
 
 

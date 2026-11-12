@@ -68,6 +68,28 @@ def test_say_and_error_print_the_same_words(monkeypatch, capsys, screen):
     assert lines[2] == ("Folder not found: [x]" if screen == "rich" else "ERROR: Folder not found: [x]")
 
 
+@pytest.mark.parametrize("screen", ["plain", "rich"])
+def test_one_table_description_for_both_screens(monkeypatch, capsys, screen):
+    """A table is described once; each screen draws it, with the same title, header and
+    cells (the plain screen used to print its own lists, which drifted: no "(stretched)")."""
+    out = io.StringIO()
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", screen == "rich")
+    monkeypatch.setattr(ct, "console", _console(out))
+    ct._table([{"name": "Type", "style": "cyan"}, {"name": "Count", "style": "green", "justify": "right"}],
+              [["Real 16-bit", "12"], [("Padded 8-bit (stretched)", "yellow"), "3"], [NAMES[1], "0"]],
+              title=("Results [x]", "bold"))
+    text = out.getvalue() if screen == "rich" else capsys.readouterr().out
+    import re                         # Rich draws its box with U+2500..U+257F: words only
+    lines = [ln for ln in (re.sub("[─-╿]", " ", ln).strip() for ln in text.splitlines()) if ln]
+    words = [ln.split() for ln in lines]
+    assert words[0] == ["Results", "[x]"] and words[1] == ["Type", "Count"], lines
+    assert words[2:] == [["Real", "16-bit", "12"], ["Padded", "8-bit", "(stretched)", "3"],
+                         ["[bold]x[/bold]", "0"]], lines
+    if screen == "plain":     # the columns line up, the right-justified one to the right
+        rows = [ln for ln in text.splitlines()[1:] if ln.strip()]
+        assert len({ln.index(ln.split()[-1]) + len(ln.split()[-1]) for ln in rows}) == 1, rows
+
+
 def test_plain_questions(monkeypatch, capsys):
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
     asked = []
