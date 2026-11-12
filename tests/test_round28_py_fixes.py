@@ -691,3 +691,33 @@ def test_basic_params_read_the_same_on_both_screens(monkeypatch, rich, workers, 
     wf = {"origin": "free_compress", "dest": "zip"}
     assert ct.step_basic_params(cfg, wf) is True
     assert (wf["workers"], wf["staging"]) == (want_workers, want_staging), wf
+
+
+
+@requires_cli
+def test_the_padded_markers_go_back_before_the_pixel_gate(tmp_path, monkeypatch):
+    """v3.1 phase 6 (W-O11, the owner's choice): the page markers were written onto the 8-bit
+    file AFTER the last pixel gate, and nothing read the file again. They go back first now,
+    so the gate sees the bytes that land. W-O10: their exiftool calls scale the timeout."""
+    from test_regression_classes import make_multipage_tiff
+    src = make_multipage_tiff(tmp_path / "p.tif", [0, 1], padded=True)
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    order = []
+    real_restore, real_pixels = ct._restore_subfile_types, ct._padded_pixels_status
+    timeouts = []
+    real_exif = ct._run_exiftool
+
+    def exif(args, timeout, text=False):
+        timeouts.append(timeout)
+        return real_exif(args, timeout, text=text)
+    monkeypatch.setattr(ct, "_restore_subfile_types",
+                        lambda a, b: order.append("markers") or real_restore(a, b))
+    monkeypatch.setattr(ct, "_padded_pixels_status",
+                        lambda a, b: order.append("pixels") or real_pixels(a, b))
+    monkeypatch.setattr(ct, "_run_exiftool", exif)
+    monkeypatch.setattr(ct, "_TIMEOUT_LOAD", 3)
+    res = ct._process_single_padded(src, staging)
+    assert res[2] == "ok", res
+    assert order == ["markers", "pixels"], order
+    assert timeouts and all(t > 30 for t in timeouts), timeouts

@@ -3764,7 +3764,7 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     try:
         r = _run_exiftool(
             ["-a", "-G1", "-s", "-s", "-n", "-SubfileType", str(src_path)],
-            30, text=True,
+            _work_timeout(30, src_path), text=True,
         )
         if r.returncode != 0:
             return False
@@ -3784,7 +3784,7 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     try:
         r = _run_exiftool(
             ["-q", "-q", "-overwrite_original"] + tags + [str(dst_path)],
-            30,
+            _work_timeout(30, dst_path),
         )
         return r.returncode == 0
     except Exception:
@@ -4104,6 +4104,15 @@ def _process_single_padded(tiff_path, staging):
                 status = "layout_changed"
                 return (name, parent, status, None, None, None, False, None, tmp8)
 
+            # The page markers go back BEFORE the pixel gate, so the gate reads the file exactly
+            # as it will land (v3.1 phase 6, W-O11, the owner's choice; the backends do the same
+            # since phase 4). audit round 16: a False return is a refusal (WARN, original kept),
+            # never ignored. After the page-count and layout checks, so an unreadable layout
+            # still surfaces as their own status.
+            if not _restore_subfile_types(tiff_path, tmp8):
+                status = "subfile_restore_failed"
+                return (name, parent, status, None, None, None, False, None, tmp8)
+
             # The 8-bit rewrite must hold exactly the pixels of the original. Nothing above
             # looks at pixels: the verdict that called the file "padded" may be a cached one
             # (DIAGNOSE_CACHE), and a file that is really 16-bit must never be replaced by
@@ -4115,15 +4124,6 @@ def _process_single_padded(tiff_path, staging):
         except Exception as e:
             status = "integrity_error"
             return (name, parent, status, None, None, None, False, str(e), tmp8)
-
-        # audit round 16: _restore_subfile_types' False return was IGNORED -- the file
-        # was replaced as if the markers had been restored. A failed restore means the
-        # rewrite's metadata cannot be trusted, so the file is degraded (WARN, original
-        # preserved), not processed as OK. Runs after the integrity gate so an unreadable
-        # page layout still surfaces as the gate's own status.
-        if not _restore_subfile_types(tiff_path, tmp8):
-            status = "subfile_restore_failed"
-            return (name, parent, status, None, None, None, False, None, tmp8)
 
         size_orig = tiff_path.stat().st_size
         size_zip = tmp8.stat().st_size
