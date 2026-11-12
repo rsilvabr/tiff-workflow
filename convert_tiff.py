@@ -1161,9 +1161,10 @@ def _magick_spec(path) -> str:
     in which the literal file wins. If the alias cannot be made, a backslash-escaped name
     is returned instead: magick cannot open it, so the caller's gate fails CLOSED rather
     than comparing the wrong file. The '[n]' selectors are appended by CALLERS after this
-    returns and are never touched. OUTPUT specs are never aliased (magick would write the
-    alias, not the real name): outputs use generated bracket-free names instead (see
-    _process_single_padded).
+    returns and are never touched. OUTPUT specs never come here: an output does not exist
+    yet, so no alias can be made and the escape made magick write elsewhere -- with a '[ ]'
+    in the temp folder every Diagnose and padded file failed (v3.1 phase 6, W-O2). An output
+    goes through tw.magick_path_spec ('%' only); magick writes a '[ ]' folder literally.
     """
     s = str(path)
     if "[" in s or "]" in s:
@@ -2971,7 +2972,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             # RGB+IR) made the whole-file compare return garbage RMSE (~27%) even for
             # pixel-identical data, so padded files were misclassified as real 16-bit.
             result = _run_captured(
-                ["magick", f"{_magick_spec(tiff_path)}[0]", "-depth", "8"] + (compress_8.split() if compress_8 else []) + [_magick_spec(tmp8)],
+                ["magick", f"{_magick_spec(tiff_path)}[0]", "-depth", "8"] + (compress_8.split() if compress_8 else []) + [tw.magick_path_spec(tmp8)],
                 _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
@@ -2982,7 +2983,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
 
         try:
             result = _run_captured(
-                ["magick", f"{_magick_spec(tmp8)}[0]", "-depth", "16"] + (compress_16.split() if compress_16 else []) + [_magick_spec(tmp16)],
+                ["magick", f"{_magick_spec(tmp8)}[0]", "-depth", "16"] + (compress_16.split() if compress_16 else []) + [tw.magick_path_spec(tmp16)],
                 _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
@@ -3917,7 +3918,7 @@ def _process_single_padded(tiff_path, staging):
         try:
             result = _run_captured(
                 ["magick", str(tiff_path), "-depth", "8"] + type_args
-                + ["-compress", "zip", _magick_spec(tmp8)],
+                + ["-compress", "zip", tw.magick_path_spec(tmp8)],
                 _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
