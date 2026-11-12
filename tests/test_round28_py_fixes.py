@@ -600,3 +600,16 @@ def test_the_wizard_keeps_a_mapped_drive_letter(tmp_path, monkeypatch):
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
     assert ct.step_folder(cfg) == folder
     assert cfg.config.last_input_dir == str(folder)
+
+
+
+def test_autofind_has_one_order(tmp_path):
+    """v3.1 phase 6 (W-O13): the first run listed the sessions by folder name, a preset re-ran
+    AutoFind and sorted by full path: the -InputDir order changed between the two. One order:
+    the folder name, then the path."""
+    root = tmp_path / "伊豆沼 [x]"
+    for rel in ("b/S5pro 01", "a/S5pro 02", "c/s5PRO 01"):
+        (root / rel).mkdir(parents=True)
+        (root / rel / "x.tif").write_bytes(b"TIFF")
+    got = [p.relative_to(root).as_posix() for p in ct.find_folders_by_pattern(root, ["S5pro"])]
+    assert got == ["b/S5pro 01", "c/s5PRO 01", "a/S5pro 02"], got

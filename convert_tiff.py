@@ -698,7 +698,10 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
                     else:
                         results[path] = len(tiffs)
                 break
-    return dict(sorted(results.items(), key=lambda x: x[0].name))
+    # ONE order, the one the screen shows: folder name, then the full path for two folders
+    # of one name (v3.1 phase 6, W-O13: the first run sorted by name, a preset re-sorted by
+    # path, and the -InputDir order of the two differed).
+    return dict(sorted(results.items(), key=lambda x: (x[0].name.lower(), str(x[0]).lower())))
 
 
 def truncate_path(p: Path, max_len: int = 50) -> str:
@@ -6167,7 +6170,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
             if not root.is_dir():
                 _say(f"AutoFind root is gone: {root}", "red")
                 return 1
-            folders = sorted(find_folders_by_pattern(root, af["patterns"]))
+            folders = list(find_folders_by_pattern(root, af["patterns"]))     # its own order
             if not folders:
                 _say(f"AutoFind: no matching folders under {root} -- nothing to do.",
                      "yellow")
