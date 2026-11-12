@@ -276,6 +276,19 @@ def test_T3_float_and_path_options(monkeypatch, ui):
     assert argv[argv.index("--srgb-profile") + 1] == "D:\\profiles\\写真 [x].icc"
 
 
+def test_T3_the_screen_names_each_option_as_it_is_written(monkeypatch, capsys):
+    """v3.1 phase 8: --magick-timeout, as the command line writes it (the screen built the
+    name by hand: -MagickTimeout until v3.0.0, and -magick_timeout after T7 -- found by the
+    wizard transcripts)."""
+    asked = _script_plain(monkeypatch, ["y", "1", "0", "0"])
+    REAL_ADVANCED(_cfg(), {"origin": "free_compress", "mode": 1})
+    out = capsys.readouterr().out
+    assert "(--magick-timeout) = " in out and "(--worker-memory-fraction) = " in out, out
+    assert any(a.startswith("New value for --magick-timeout (") for a in asked), asked
+    assert "Not changed: --magick-timeout must be " in out
+    assert "-magick_timeout" not in out and "-MagickTimeout" not in out
+
+
 @pytest.mark.parametrize("ui", UIS)
 def test_T3_dash_takes_an_edit_back(monkeypatch, ui):
     wf = {"origin": "free_compress", "mode": 1}

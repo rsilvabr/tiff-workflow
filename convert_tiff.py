@@ -1745,7 +1745,7 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
         _say("Advanced options (only the ones you change are passed to the script):")
         for n, (backend, opt) in enumerate(rows, 1):
             value, where = _advanced_current(cfg, workflow, backend, opt)
-            _say(f"  {n}. [{backend}] {opt.label} (-{opt.param}) = "
+            _say(f"  {n}. [{backend}] {opt.label} ({tw.cli_name(opt.param)}) = "
                      f"{_advanced_shown(value, opt)}  ({where})")
             _say(f"       {opt.help}")
         pick = _ask("Number to change (0 = done)", "0")
@@ -1756,8 +1756,8 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
             continue
         backend, opt = rows[int(pick) - 1]
         expected = _overlay_value(opt.value_spec, object())[1]
-        text = _ask(f"New value for -{opt.param} ({expected}; '-' = leave it to the "
-                        f"script; empty = no change)", "")
+        text = _ask(f"New value for {tw.cli_name(opt.param)} ({expected}; '-' = leave it to "
+                        f"the script; empty = no change)", "")
         if text == "":
             continue
         adv = workflow.get("advanced")
@@ -1776,7 +1776,7 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
             continue
         ok, checked = _overlay_value(opt.value_spec, parsed)
         if not ok:
-            _say(f"Not changed: -{opt.param} must be {checked}.")
+            _say(f"Not changed: {tw.cli_name(opt.param)} must be {checked}.")
             continue
         if not isinstance(adv, dict):
             adv = workflow["advanced"] = {}
@@ -5920,6 +5920,12 @@ def _overlay_menu_rows(section: str, script: Optional[str]):
     return [(n, s, defaults.get(n), helps.get(n, "")) for n, s in _backend_overlay_specs(script).items()]
 
 
+def _v31_name(name: str) -> str:
+    """The name a backend setting of v3.0.0 has since v3.1: ZipSubfolderName ->
+    zip_subfolder_name (T7). Anything else comes back lower-cased, matching nothing."""
+    return re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", name).lower()
+
+
 def _overlay_json_value(spec: str, parsed, checked):
     """What the file stores: the JSON value the user meant (an intstr is a JSON int; a path
     left empty is null), normalised the way the scripts read it."""
@@ -5958,6 +5964,14 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
                     f"file: {file_part} | {spec}")
             if help_text:
                 _say(f"        {help_text}")
+        # A name the scripts do not take is ignored by them with a warning at every run; say
+        # it here too -- above all the names of v3.0.0 (T7), which look like settings.
+        known = {r[0] for r in rows}
+        stray = [k for k in sect if k not in known]
+        if stray:
+            _warn("In the file but not a setting of this script, so ignored: " + "; ".join(
+                f"{k} (written {_v31_name(k)} since v3.1: change it here and the old name goes)"
+                if _v31_name(k) in known else k for k in stray))
         pick = _ask("Number to change (0 = back)", "0")
         if pick in ("", "0"):
             return
@@ -5970,10 +5984,12 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
                        f"empty = no change)", "")
         if text == "":
             continue
+        # the same setting under its name of v3.0.0 goes with any change of it
+        old_names = [k for k in sect if k != name and _v31_name(k) == name]
         if text == "-":
-            if name not in sect:
+            if name not in sect and not old_names:
                 continue
-            new_sect = {k: v for k, v in sect.items() if k != name}
+            new_sect = {k: v for k, v in sect.items() if k != name and k not in old_names}
             stored = None
         else:
             try:
@@ -5986,7 +6002,7 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
                 _say(f"Not changed: {name} must be {checked}.")
                 continue
             stored = _overlay_json_value(spec, parsed, checked)
-            new_sect = dict(sect)
+            new_sect = {k: v for k, v in sect.items() if k not in old_names}
             new_sect[name] = stored
         if new_sect:
             data[section] = new_sect

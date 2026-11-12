@@ -597,6 +597,25 @@ def test_T11_keeps_unknown_sections_keys_and_the_order(tmp_path, monkeypatch):
     assert _folder_files(ov) == ["settings.json"]
 
 
+def test_T11_a_name_of_v3_0_0_is_said_and_goes_with_a_change(tmp_path, monkeypatch):
+    """T7: a file written for v3.0.0 holds MagickTimeout; v3.1 takes magick_timeout and the
+    scripts ignore the old name. The screen says so (it showed `file: -` and nothing else),
+    and setting the value here writes the new name and drops the old one; '-' drops it too.
+    A name nobody knows stays, and is said."""
+    start = {"compress_tiff_zip": {"MagickTimeout": 180, "FutureSetting": 7, "cap_workers": 2}}
+    row = str(_row("compress_tiff_zip", "magick_timeout"))
+    ov, said = _go(monkeypatch, tmp_path, [str(_section_no("compress_tiff_zip")), row, "120", "0",
+                                           "0"], content=start)
+    text = "\n".join(t for kind, t in said if kind == "say")
+    assert "MagickTimeout (written magick_timeout since v3.1" in text and "FutureSetting" in text
+    assert "cap_workers (written" not in text
+    assert json.loads(ov.read_text(encoding="utf-8")) == {
+        "compress_tiff_zip": {"FutureSetting": 7, "cap_workers": 2, "magick_timeout": 120}}
+    ov, _ = _go(monkeypatch, tmp_path, [str(_section_no("compress_tiff_zip")), row, "-", "0", "0"],
+                content={"compress_tiff_zip": {"MagickTimeout": 180}, "keep": {"x": 1}})
+    assert json.loads(ov.read_text(encoding="utf-8")) == {"keep": {"x": 1}}
+
+
 def test_T11_dash_removes_a_key_and_an_empty_section_goes_with_it(tmp_path, monkeypatch):
     ov, _ = _go(monkeypatch, tmp_path, [
         str(_section_no("compress_tiff_zip")), str(_row("compress_tiff_zip", "cap_workers")), "-", "0", "0"],
