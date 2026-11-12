@@ -71,7 +71,6 @@ import hashlib
 import io
 import json
 import locale
-import math
 import os
 import platform
 import re
@@ -93,8 +92,7 @@ try:
     from rich.panel import Panel
     from rich.table import Table
     from rich.box import SIMPLE as BOX_SIMPLE
-    from rich.prompt import Prompt, IntPrompt, Confirm
-    from rich.progress import Progress, TextColumn, BarColumn, TaskProgressColumn
+    from rich.prompt import Prompt, Confirm
     RICH_AVAILABLE = True
     console = Console(force_terminal=True)
 except ImportError:
@@ -319,9 +317,7 @@ class ToolConfig:
     last_input_dir: Optional[str] = None
     last_workers: Optional[int] = None
     last_staging: Optional[str] = None
-    last_pattern: Optional[str] = None
     last_mode: Optional[int] = None
-    last_origin: Optional[str] = None
     # Per-machine default for -ExcludeFolders (';'-separated folder NAMES).
     # Lives in the local config, never hardcoded: a fresh install defaults to
     # empty so nobody silently skips folders they did not choose to skip.
@@ -1666,7 +1662,6 @@ def step_advanced_options(cfg: ToolConfig, workflow: Dict) -> bool:
 def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
     """Show summary and confirm."""
     origin = workflow.get("origin", "?")
-    dest = workflow.get("dest", "?")
     mode = workflow.get("mode", "?")
     dry = "Yes" if workflow.get("dry_run") else "No"
     folders_count = len(workflow.get("folders", []))
@@ -2182,9 +2177,6 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
 
     `stdin` is passed through to Popen when not None (the unattended preset
     path closes it with DEVNULL, so no prompt can wait on the console)."""
-    import time
-    import sys
-    import threading
 
     original_cmd = list(cmd)
     cmd, _spill_path = _spill_long_input_dir(cmd)
@@ -2752,7 +2744,6 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     - If dimensions differ, returns False immediately
     - If RMSE > 0, images differ
     """
-    import subprocess
 
     def get_dimensions(path):
         try:
@@ -2936,7 +2927,6 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
     Method: Convert to 8-bit and back to 16-bit. If RMSE=0, it's padded 8-bit.
     Uses temp_dir for temporary files if provided.
     """
-    import subprocess
 
     work_dir = temp_dir if temp_dir else Path(tempfile.gettempdir())
 
@@ -3011,7 +3001,6 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
         t3 = time.time() if DEBUG_TIMING else None
 
         if DEBUG_TIMING and t3 is not None:
-            import os
             sz8 = os.path.getsize(tmp8) if tmp8.exists() else 0
             sz16 = os.path.getsize(tmp16) if tmp16.exists() else 0
             print(f"[DEBUG] {tiff_path.name} | 8bit:{(t1-t0):.2f}s({sz8//1024}KB) 16bit:{(t2-t1):.2f}s({sz16//1024}KB) compare:{(t3-t2):.2f}s")
@@ -3021,7 +3010,6 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
         if result.returncode not in (0, 1):
             return False, 0.0, f"ERROR: compare failed (exit={result.returncode}): {output}"
 
-        import re
         output = _strip_magick_noise(output).strip()
         match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
         if not match:
@@ -3901,7 +3889,6 @@ def _process_single_padded(tiff_path, staging):
     # (_magick_spec below), and no '[' escape exists on Windows -- a bracket in `name`
     # would make magick write a different file than the one we verify and move.
     tmp8 = staging / f"tmp8_{unique_id}_{name.replace('[', '(').replace(']', ')')}"
-    final_dst = parent / name
     status = None
 
     # _is_real_16bit judges page [0] only, but the conversion below rewrites the WHOLE file.
@@ -5071,62 +5058,6 @@ def pick_manifest() -> Optional[str]:
     return str(shown[idx])
 
 
-def view_manifest(manifest_path) -> None:
-    """View manifest contents in a table."""
-    if not Path(manifest_path).exists():
-        return
-
-    entries = []
-    stream = _open_manifest_for_read(manifest_path)
-    if stream is None:
-        _manifest_error(
-            f"Manifest is not UTF-8: {manifest_path}\n"
-            f"Excel re-saved it in the system ANSI codepage. Re-open it and use "
-            f"'Save As' -> 'CSV UTF-8 (comma delimited)', or re-generate it.")
-        return
-    with stream as f:
-        reader = csv.reader(f)
-        first_row = next(reader, None)
-        rows = []
-        if first_row is not None:
-            if _is_manifest_header_row(first_row):
-                rows = list(reader)
-            else:
-                rows = [first_row] + list(reader)
-        for row in rows:
-            if row and not (len(row) == 1 and row[0].strip().startswith('#')):
-                source = row[0].strip()
-                dest = row[1].strip() if len(row) > 1 else source
-                mode = row[2].strip() if len(row) > 2 else "?"
-                if not source.startswith('#'):
-                    entries.append((source, dest, mode))
-
-    if not entries:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]Manifest is empty.[/yellow]")
-        else:
-            print("Manifest is empty.")
-        return
-
-    if RICH_AVAILABLE and console:
-        table = Table(show_header=True, header_style="bold cyan")
-        table.add_column("#", justify="right", style="dim")
-        table.add_column("Source", style="red")
-        table.add_column("Destination", style="green")
-        table.add_column("Mode", style="magenta")
-        for i, (src, dst, mode) in enumerate(entries, 1):
-            table.add_row(str(i), truncate_path(Path(src)), truncate_path(Path(dst)), mode)
-        console.print(Panel(table, title=f"[bold]Manifest[/bold] -- {escape(str(manifest_path))}", border_style="blue"))
-        console.print(f"[dim]Total: {len(entries)} entry(ies)[/dim]")
-    else:
-        print(f"\n=== Manifest: {manifest_path} ===")
-        print(f"Total: {len(entries)} entry(ies)\n")
-        for i, (src, dst, mode) in enumerate(entries, 1):
-            print(f"  {i}. {src}")
-            print(f"     -> {dst} (mode {mode})")
-            print()
-
-
 def confirm_manifest_entries(manifest_path: str, entries: List[Tuple]) -> bool:
     """Preview the entries and ask for a go-ahead."""
     if RICH_AVAILABLE and console:
@@ -5832,7 +5763,6 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
         return False
 
     cfg.config.last_workers = workflow["workers"]
-    cfg.config.last_pattern = ";".join(patterns)
     cfg.save_config()
 
     def run_and_prompt(cmd_list, folders):
@@ -6392,7 +6322,6 @@ _CONVERT_SETTING_HELP = {
 def _convert_tiff_script_values() -> Dict[str, object]:
     """The value each overlay-able convert_tiff.py setting has WRITTEN in this file (the live
     module value may already be the overlay's)."""
-    import ast
     try:
         text = Path(__file__).read_text(encoding="utf-8")
     except OSError:
