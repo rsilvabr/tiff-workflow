@@ -92,6 +92,7 @@ class FakeTools:
         m.setattr(tw, "tiff_has_only_subfile_pages", self._only_subfile)
         m.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: False)
         m.setattr(tw, "tiff_sample_layout", self._layout)
+        m.setattr(tw, "tiff_facts", self._facts)
         m.setattr(tw, "tiff_sample_layout_kept", self._layout_kept)
         m.setattr(tw, "associated_alpha_rewritable", lambda p, pages, t=30: self.alpha_ok)
         m.setattr(tw, "backup_tiff_metadata", self._backup)
@@ -114,6 +115,10 @@ class FakeTools:
     def _only_subfile(self, path, count, allowed=("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE"), timeout=30):
         self.allowed_seen.append(tuple(allowed))
         return self.only_subfile
+
+    def _facts(self, path):
+        self.events.append("facts")
+        return tw.TiffFacts(self.comp, None if self.layout is None else list(self.layout), {})
 
     def _layout(self, path):
         if self.layout is None:
@@ -160,7 +165,7 @@ class FakeTools:
         self.exif_calls.append([str(a) for a in args])
         return self.exif_result
 
-    def _subfile(self, src, dst, timeout=30):
+    def _subfile(self, src, dst, timeout=30, types=None):
         self.events.append("subfile")
         return self.subfile_restore
 
@@ -843,6 +848,15 @@ class TestCopyExif:
         assert r.line.startswith("ERROR (exiftool EXIF check)")
         assert len(tools.exif_calls) == 1
 
+    def test_no_compression_tag_is_not_uncompressed(self, tools, photo):
+        """v3.1 phase 4: tiff_facts read the file but IFD0 has no compression: refused as
+        before (the ZIP step never rewrites a file whose compression it cannot name)."""
+        tools.comp = ""
+        r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
+                            str(photo.parent), str(photo.parent), 1.0)
+        assert r.line == f"ERROR (exiftool check) | {photo.name} | cannot detect compression", r.line
+        assert tools.magick_calls == []
+
     def test_a_nonzero_exit_of_the_exif_copy_is_an_error(self, tools, photo):
         tools.exif_result = (1, "")
         r = cx.process_pair(exif_run(), pair(photo, photo.with_suffix(".jpg")),
@@ -928,7 +942,7 @@ class TestCopyExif:
         elif failing == "jpeg_container":
             tools.meta = "fail"
         elif failing == "compression":
-            monkeypatch.setattr(tw, "ifd0_compression", tool_fails)
+            monkeypatch.setattr(tw, "tiff_facts", tool_fails)
         elif failing == "layout":
             tools.layout = None
         elif failing == "magick_rc":
@@ -953,7 +967,7 @@ class TestCopyExif:
         assert photo.read_bytes() == b"ORIGINAL"
         assert sorted(os.listdir(photo.parent)) == [photo.name]
 
-    @pytest.mark.parametrize("step", ["exiftool", "ifd0_compression", "tiff_sample_layout", "magick_run",
+    @pytest.mark.parametrize("step", ["exiftool", "tiff_facts", "magick_run",
                                       "tiff_sample_layout_kept", "pixel_identical",
                                       "restore_all_metadata", "restore_tiff_subfile_types"])
     def test_with_outputdir_an_unexpected_exception_leaves_nothing_either(
@@ -1900,6 +1914,29 @@ class TestGatesFailClosed:
                 "[IFD0]  ExtraSamples: 0\n[IFD0]  BitsPerSample: 16 16 16 16\n"
                 "[IFD1]  PhotometricInterpretation: 1\n")
         assert tw.tiff_sample_layout("x") == ["rgb/4/16,16,16,16/", "gray/1/1/"]
+
+    def test_tiff_facts(self, monkeypatch):
+        """v3.1 phase 4: one read of the source. A layout it cannot vouch for is pages=None
+        (the caller refuses the rewrite) without losing the compression; exiftool failing
+        raises."""
+        def says(rc, text):
+            monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (rc, text)))
+        says(0, "[IFD0] Compression: Adobe Deflate\n[IFD0] SamplesPerPixel: 3\n"
+                "[IFD0] PhotometricInterpretation: 2\n[IFD0] BitsPerSample: 8 8 8\n"
+                "[IFD1] PhotometricInterpretation: 2\n[IFD0] SubfileType: 0\n[IFD1] SubfileType: 1\n")
+        assert tw.tiff_facts("x") == tw.TiffFacts("Adobe Deflate", ["rgb/3/8,8,8/", "rgb/1/1/"], {0: 0, 1: 1})
+        says(0, "[IFD0] Compression: LZW\n[IFD0] SamplesPerPixel: 3\n")
+        assert tw.tiff_facts("x") == tw.TiffFacts("LZW", None, {}), "no photometric: no layout"
+        says(0, "[IFD0] PhotometricInterpretation: 1\n")
+        assert tw.tiff_facts("x").compression == "", "no compression tag: empty, the caller refuses"
+        says(1, "[IFD0] Compression: LZW\n")
+        with pytest.raises(tw.ToolError):
+            tw.tiff_facts("x")
+        calls = []
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: calls.append(args) or (0, "")))
+        tw.tiff_facts("E:\\伊豆沼 [x]\\a 50%.tif")
+        assert len(calls) == 1 and calls[0][-1] == "E:\\伊豆沼 [x]\\a 50%.tif"
+        assert "-n" not in calls[0] and "-IFD0:Compression" in calls[0] and "-SubfileType#" in calls[0]
 
     def test_ifd0_compression(self, monkeypatch):
         """v3.1: the value, or ToolError -- never an empty value that reads as "not

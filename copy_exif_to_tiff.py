@@ -228,18 +228,18 @@ def _jpeg_copy_args(source, tag_source, icc_tag, target):
     return tags
 
 
-def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy, own):
+def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, drop_copy, own):
     """The ZIP half of process_pair: write `tiff_target` as ZIP to the staged file
     `write_dst` and prove it. Returns None when the staged file may be registered for the
     move, else the ERROR result line -- by then the staged file is gone, and so is the copy
-    in -OutputDir (`drop_copy`). `own`: see process_pair."""
+    in -OutputDir (`drop_copy`). `facts`: tiff_target's tw.tiff_facts. `own`: see
+    process_pair."""
     own.append(write_dst)       # a staged name carries this run's id: this pair's, half written too
     # magick turned a neutral RGB TIFF into a 1-channel gray one with the RGB profile still
     # in it, and the pixel gate below cannot see that (audit round 28). The source layout
     # picks the -type that keeps it and is the reference for the layout gate after the write.
-    try:
-        src_pages = tw.tiff_sample_layout(tiff_target)
-    except tw.ToolError:
+    src_pages = facts.pages
+    if src_pages is None:
         drop_copy()
         return f"ERROR (sample layout unreadable) | {name}"
     type_args = tw.magick_keep_type_args(src_pages)
@@ -288,7 +288,7 @@ def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_co
     if not restore_ok:
         drop_staged()
         return f"ERROR (exiftool metadata restore failed - original untouched) | {name}"
-    if not tw.restore_tiff_subfile_types(tiff_target, write_dst, timeout):
+    if not tw.restore_tiff_subfile_types(tiff_target, write_dst, timeout, facts.subfile_types):
         drop_staged()
         return f"ERROR (subfiletype restore failed - original untouched) | {name}"
     return None
@@ -432,9 +432,14 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
         copy_note = f" -> {final_dir}" if tiff_copied else ""
         return PairResult(f"{ok_prefix} | {name} <= {jpeg_name}{copy_note}{heur_suffix}{raw_suffix}")
 
+    # One exiftool read: the compression here, the layout and the page markers for the ZIP
+    # step (v3.1 phase 4).
     try:
-        comp = tw.ifd0_compression(tiff_target)
+        facts = tw.tiff_facts(tiff_target)
     except tw.ToolError:
+        facts = None
+    comp = facts.compression if facts else ""
+    if not comp:
         drop_copy()
         return PairResult(f"ERROR (exiftool check) | {name} | cannot detect compression")
     if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
@@ -453,7 +458,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
 
     # The staged file is registered for the move ONLY after every gate has passed: a staged
     # ZIP whose metadata restore failed was once moved ON TOP of the EXIF-bearing original.
-    error = _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy, own)
+    error = _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, drop_copy, own)
     if error:
         return PairResult(error)
 

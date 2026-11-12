@@ -671,10 +671,14 @@ def _compress_job(run, t, load, own):
     # magick turned a neutral RGB file into a 1-channel gray one and every pixel gate said
     # OK (audit round 28). The source layout picks the -type that keeps it and is the
     # reference for the gate after the write.
+    # One exiftool read of the source: its layout and its page markers (v3.1 phase 4).
     try:
-        src_pages = tw.tiff_sample_layout(src)
+        facts = tw.tiff_facts(src)
     except tw.ToolError:
+        facts = None
+    if facts is None or facts.pages is None:
         return res(f"ERROR (sample layout unreadable) | {name}", fd=True)
+    src_pages = facts.pages
     layout_pages = [src_pages[0]] if generate_thumb else list(src_pages)
     type_args = tw.magick_keep_type_args(layout_pages)
     if not tw.associated_alpha_rewritable(src, layout_pages, timeout):
@@ -757,7 +761,7 @@ def _compress_job(run, t, load, own):
     tw.remove_quietly(meta_backup)
 
     if not generate_thumb:
-        if not tw.restore_tiff_subfile_types(src, write_dst, timeout):
+        if not tw.restore_tiff_subfile_types(src, write_dst, timeout, facts.subfile_types):
             subfile_restore_failed = True
 
     # xmpMM:History: this rewrite, in its own exiftool call. Before the gates, so they check

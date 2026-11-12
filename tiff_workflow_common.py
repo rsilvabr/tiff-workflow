@@ -35,7 +35,7 @@ import threading
 import uuid
 from datetime import datetime
 from enum import Enum
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 # The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
 # requires the same value in convert_tiff.py's TOOLKIT_VERSION.
@@ -1187,6 +1187,11 @@ def _read_subfile_types(path):
         out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SubfileType", path])
     except ToolError:
         return None
+    return _parse_subfile_types(out)
+
+
+def _parse_subfile_types(out):
+    """{ifd index: numeric SubfileType} of the IFDs whose line exiftool printed."""
     types = {}
     for line in out.split("\n"):
         m = _SUBFILE_LINE.match(line)
@@ -1195,18 +1200,20 @@ def _read_subfile_types(path):
     return types
 
 
-def restore_tiff_subfile_types(src, dst, timeout=30):
+def restore_tiff_subfile_types(src, dst, timeout=30, types=None):
     """Re-apply the source's per-page NewSubfileType markers to a TIFF magick just wrote.
     ImageMagick rewrites every page and does not keep the tag: a REDUCEDIMAGE thumbnail
     comes back as PAGE, and an IR MASK page as what viewers take for a regular image. A page
     that had no marker gets whatever magick stamped on it cleared. True when nothing needed
-    restoring or every marker was written."""
+    restoring or every marker was written. `types`: the source's markers as tiff_facts read
+    them (None: read them here)."""
     pc = tiff_page_count(src, timeout)
     if not pc.ok:
         return False
     if pc.count <= 1:
         return True
-    types = _read_subfile_types(src)
+    if types is None:
+        types = _read_subfile_types(src)
     if types is None:
         return False
     tags = []
@@ -1303,13 +1310,56 @@ def tiff_sample_layout(path):
     written as a ONE-channel grayscale TIFF with the RGB ICC profile still embedded, and
     the pixel gates decode both through magick, where gray and neutral RGB are equal (audit
     round 28). FAIL-CLOSED: any read or parse failure raises ToolError."""
+    return _parse_layout(_read_tags(path, "the sample layout"), path)
+
+
+#: what tiff_facts and tiff_sample_layout read: the layout tags as numbers (`#`), the
+#: compression as the text the SKIP lines print.
+_FACT_TAGS = ["-IFD0:Compression", "-SamplesPerPixel#", "-PhotometricInterpretation#",
+              "-ExtraSamples#", "-BitsPerSample#", "-SubfileType#"]
+_COMPRESSION_LINE = re.compile(r"^\[IFD0\]\s+Compression:\s*(.*?)\s*$")
+
+
+def _read_tags(path, what):
+    """The _FACT_TAGS of every IFD of `path` (exiftool -a -G1 -s -s); ToolError when
+    exiftool fails."""
     try:
-        out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SamplesPerPixel",
-                        "-PhotometricInterpretation", "-ExtraSamples", "-BitsPerSample", path])
+        return exiftool(["-a", "-G1", "-s", "-s"] + _FACT_TAGS + [path])
     except ToolError:
         raise
     except Exception as e:
-        raise ToolError(f"cannot read the sample layout of {path}: {e}") from e
+        raise ToolError(f"cannot read {what} of {path}: {e}") from e
+
+
+class TiffFacts(NamedTuple):
+    compression: str        # IFD0:Compression as text; "" when IFD0 has none
+    pages: Optional[list]   # tiff_sample_layout's answer; None when it cannot vouch for one
+    subfile_types: dict     # {ifd: SubfileType} of the IFDs that carry the tag
+
+
+def tiff_facts(path):
+    """What a rewrite needs to know of its source, in ONE exiftool read (v3.1: three reads
+    until then): the IFD0 compression, the sample layout of every page and the per-page
+    SubfileType markers. Raises ToolError when exiftool fails; a layout it cannot vouch for
+    is pages=None, which the caller refuses as before -- a file it never rewrites (already
+    compressed) is not refused for it."""
+    out = _read_tags(path, "the tags")
+    try:
+        pages = _parse_layout(out, path)
+    except ToolError:
+        pages = None
+    comp = ""
+    for line in out.split("\n"):
+        m = _COMPRESSION_LINE.match(line)
+        if m:
+            comp = m.group(1)
+            break
+    return TiffFacts(comp, pages, _parse_subfile_types(out))
+
+
+def _parse_layout(out, path):
+    """tiff_sample_layout's pages from what _read_tags printed; ToolError when the IFDs
+    do not describe a layout this can vouch for."""
     ifds = {}
     for line in out.split("\n"):
         m = _LAYOUT_LINE.match(line)

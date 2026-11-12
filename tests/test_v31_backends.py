@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import tiff_workflow_common as tw  # noqa: E402
 from backends import LANES  # noqa: E402
 from test_regression_classes import (  # noqa: E402
-    make_multipage_tiff, page_count, read_compression, requires_tools, run_ps,
+    make_multipage_tiff, numeric_subfiletypes, page_count, read_compression, requires_tools, run_ps,
 )
 
 HOSTILE = "190815_Film_伊豆沼 [FINAL] 50% x"
@@ -143,3 +143,29 @@ def first_pixel_plain(path, tmp_path):
         return first_pixel(copy)
     finally:
         copy.unlink()
+
+
+@requires_tools
+@pytest.mark.parametrize("lane", LANES)
+def test_copy_exif_zip_keeps_the_page_markers(tmp_path, hostile, lane):
+    """v3.1 phase 4: copy_exif -CompressZip reads the TIFF's page markers in the same exiftool
+    call as its compression and layout, and puts them back on the ZIP: an explicit 0 on the
+    main image and the REDUCEDIMAGE preview."""
+    plain, land = hostile
+    src = make_multipage_tiff(plain / "DSCF0001 (2).tif", [0, 1])
+    jpg = plain / "DSCF0001 (2).jpg"
+    subprocess.run(["magick", "-size", "64x48", "gradient:", "-depth", "8", str(jpg)],
+                   capture_output=True, check=True, timeout=120)
+    subprocess.run(["exiftool", "-q", "-overwrite_original", "-Make=FUJIFILM",
+                    "-Model=FinePix S5Pro", str(jpg)], capture_output=True, check=True, timeout=120)
+    before = numeric_subfiletypes(src)
+    assert before == ["[IFD0] SubfileType: 0", "[IFD1] SubfileType: 1"]
+    tif = land(src)
+    land(jpg)
+    result = run_ps(lane, "copy_exif_to_tiff.py", ["-InputDir", str(tif.parent), "-CompressZip"], tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "OK+ZIP | DSCF0001 (2).tif" in result.stdout, result.stdout
+    probe = tmp_path / "probe.tif"
+    probe.write_bytes(tif.read_bytes())
+    assert read_compression(probe).lower() == "zipzip", "both pages ZIP (magick prints one per page)"
+    assert numeric_subfiletypes(probe) == before
