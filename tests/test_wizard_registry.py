@@ -166,7 +166,7 @@ def test_T2_registry_entries_are_well_formed():
 
 def test_T2_the_options_that_delete_or_overwrite_are_marked_danger():
     danger = {o.param for o in convert_tiff.REGISTRY["compress"] if o.danger}
-    assert danger == {"SafeMode", "Overwrite", "DeleteSource"}
+    assert danger == {"safe_mode", "overwrite", "delete_source"}
 
 
 # --- T3 / T4: the per-run Advanced options screen --------------------------------------------
@@ -233,11 +233,11 @@ def test_T3_answering_no_stores_nothing(monkeypatch, ui):
 @pytest.mark.parametrize("ui", UIS)
 def test_T3_an_edited_value_equal_to_the_default_is_still_emitted(monkeypatch, ui):
     # 1 = MagickTimeout of compress; the script's own default is 30
-    assert convert_tiff._backend_param_defaults("compress_tiff_zip.py")["MagickTimeout"] == 30
+    assert convert_tiff._backend_param_defaults("compress_tiff_zip.py")["magick_timeout"] == 30
     wf = {"origin": "free_compress", "mode": 1}
     ui(monkeypatch, ["y", "1", "30", "0"])
     REAL_ADVANCED(_cfg(), wf)
-    assert wf["advanced"] == {"compress": {"MagickTimeout": 30}}
+    assert wf["advanced"] == {"compress": {"magick_timeout": 30}}
     argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
     assert argv[argv.index("--magick-timeout") + 1] == "30"
 
@@ -269,8 +269,8 @@ def test_T3_float_and_path_options(monkeypatch, ui):
     wf = {"origin": "compress", "mode": 9}
     ui(monkeypatch, ["y", "3", "0.5", "2", "D:\\profiles\\写真 [x].icc", "0"])
     REAL_ADVANCED(_cfg(), wf)
-    assert wf["advanced"] == {"compress": {"WorkerMemoryFraction": 0.5,
-                                           "SrgbProfile": "D:\\profiles\\写真 [x].icc"}}
+    assert wf["advanced"] == {"compress": {"worker_memory_fraction": 0.5,
+                                           "srgb_profile": "D:\\profiles\\写真 [x].icc"}}
     argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
     assert argv[argv.index("--worker-memory-fraction") + 1] == "0.5"
     assert argv[argv.index("--srgb-profile") + 1] == "D:\\profiles\\写真 [x].icc"
@@ -291,8 +291,8 @@ def test_T3_combined_workflow_lists_both_backends_and_keeps_them_apart(monkeypat
     # (MagickTimeout, WorkerMemoryFraction, FailOnWarn)
     ui(monkeypatch, ["y", "4", "77", "6", "yes", "3", "0.25", "0"])
     REAL_ADVANCED(_cfg(), wf)
-    assert wf["advanced"] == {"copy_exif": {"MagickTimeout": 77, "FailOnWarn": True},
-                              "compress": {"WorkerMemoryFraction": 0.25}}
+    assert wf["advanced"] == {"copy_exif": {"magick_timeout": 77, "fail_on_warn": True},
+                              "compress": {"worker_memory_fraction": 0.25}}
     exif = convert_tiff.build_copy_exif_command(wf, [Path(HOSTILE)])
     comp = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
     assert exif[exif.index("--magick-timeout") + 1] == "77" and "--fail-on-warn" in exif
@@ -307,7 +307,7 @@ def test_T3_copy_exif_workflow_never_offers_compress_options(monkeypatch, ui):
     # rows are copy_exif's: 1 MagickTimeout, 2 WorkerMemoryFraction, 3 FailOnWarn; 4 does not exist
     ui(monkeypatch, ["y", "4", "3", "no", "1", "45", "0"])
     REAL_ADVANCED(_cfg(), wf)
-    assert wf["advanced"] == {"copy_exif": {"FailOnWarn": False, "MagickTimeout": 45}}
+    assert wf["advanced"] == {"copy_exif": {"fail_on_warn": False, "magick_timeout": 45}}
     argv = convert_tiff.build_copy_exif_command(wf, [Path(HOSTILE)])
     assert "--fail-on-warn" not in argv            # off is the switch's default
     assert argv[argv.index("--magick-timeout") + 1] == "45"
@@ -347,8 +347,8 @@ def test_T3_the_screen_comes_right_after_the_basic_params(monkeypatch):
 
 def test_T3_a_hand_edited_value_that_fails_its_spec_is_dropped_not_passed():
     wf = {"origin": "free_compress", "mode": 1,
-          "advanced": {"compress": {"MagickTimeout": "abc", "WorkerMemoryFraction": 7,
-                                    "SrgbProfile": 5}}}
+          "advanced": {"compress": {"magick_timeout": "abc", "worker_memory_fraction": 7,
+                                    "srgb_profile": 5}}}
     argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
     for p in ("--magick-timeout", "--worker-memory-fraction", "--srgb-profile"):
         assert p not in argv
@@ -359,8 +359,8 @@ def test_T3_a_hand_edited_value_that_fails_its_spec_is_dropped_not_passed():
 
 def test_T4_a_saved_workflow_with_advanced_rebuilds_the_same_argv(tmp_path, monkeypatch):
     wf = {"origin": "both", "mode": 9, "workers": 4, "dry_run": False, "safe_mode": True,
-          "advanced": {"compress": {"MagickTimeout": 30, "WorkerMemoryFraction": 0.5},
-                       "copy_exif": {"FailOnWarn": True, "MagickTimeout": 90}}}
+          "advanced": {"compress": {"magick_timeout": 30, "worker_memory_fraction": 0.5},
+                       "copy_exif": {"fail_on_warn": True, "magick_timeout": 90}}}
     folders = [Path(HOSTILE)]
     expect_c = convert_tiff.build_compress_command(wf, folders)
     expect_e = convert_tiff.build_copy_exif_command(wf, folders)

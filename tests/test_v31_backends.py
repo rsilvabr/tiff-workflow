@@ -105,7 +105,7 @@ def first_pixel(path):
 
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
-@pytest.mark.parametrize("extra", [["--overwrite"], ["--duplicate-action", "Overwrite", "--overwrite"]],
+@pytest.mark.parametrize("extra", [["--overwrite"], ["--duplicate-action", "overwrite", "--overwrite"]],
                          ids=["overwrite", "duplicates-overwrite"])
 def test_mode2_never_replaces_a_photo_with_another_one(tmp_path, lane, extra):
     """Mode 2 without --output-dir flattens into the input folder itself. With --overwrite the

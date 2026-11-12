@@ -73,12 +73,14 @@ def _values(p):
 
 
 def _names(p, params):
-    """The ways v3.0.0 let a user name `p`: exact, other case, the shortest unambiguous prefix."""
-    names = [p.name, p.name.lower(), p.name.upper()]
-    for n in range(1, len(p.name) + 1):
+    """The ways v3.0.0 let a user name `p`: exact, other case, the shortest unambiguous prefix
+    -- of the name it had then (ThumbSize; thumb_size since v3.1, T7)."""
+    old = tw._legacy_name(p.name)
+    names = [old, old.lower(), old.upper()]
+    for n in range(1, len(old) + 1):
         try:
-            if tw._resolve_param(p.name[:n], params) is p:
-                names.append(p.name[:n])
+            if tw._resolve_param(old[:n], params) is p:
+                names.append(old[:n])
                 break
         except tw.UsageError:
             pass
@@ -105,20 +107,44 @@ def test_every_parameter_has_a_clean_long_name(backend):
     names = [tw.cli_name(p.name) for p in params]
     assert len(set(names)) == len(names)
     for p, n in zip(params, names):
+        assert re.fullmatch(r"[a-z0-9]+(_[a-z0-9]+)*", p.name), p.name    # T7: snake_case
         assert re.fullmatch(r"--[a-z0-9]+(-[a-z0-9]+)*", n), n
-        assert n[2:].replace("-", "") == p.name.lower()
+        assert n[2:].replace("-", "_") == p.name
 
 
-def test_long_names_split_at_each_word():
-    assert tw.cli_name("SafeMode") == "--safe-mode"
-    assert tw.cli_name("InputDirFile") == "--input-dir-file"
-    assert tw.cli_name("SkipIfTiffHasExif") == "--skip-if-tiff-has-exif"
-    assert tw.cli_name("IccPolicy") == "--icc-policy"
-    assert tw.cli_name("Size") == "--size"
-    assert tw.cli_name("ICCPolicy") == "--icc-policy"        # an acronym stays one word
-    assert tw.cli_switch("SafeMode", False) == "--no-safe-mode"
-    assert tw.cli_value("ExcludeFolders", "-old") == ["--exclude-folders=-old"]
-    assert tw.cli_value("Workers", 4) == ["--workers", "4"]
+def test_long_names_and_the_names_of_v3_0_0():
+    assert tw.cli_name("safe_mode") == "--safe-mode"
+    assert tw.cli_name("input_dir_file") == "--input-dir-file"
+    assert tw.cli_name("skip_if_tiff_has_exif") == "--skip-if-tiff-has-exif"
+    assert tw.cli_name("size") == "--size"
+    assert tw.cli_switch("safe_mode", False) == "--no-safe-mode"
+    assert tw.cli_value("exclude_folders", "-old") == ["--exclude-folders=-old"]
+    assert tw.cli_value("workers", 4) == ["--workers", "4"]
+    assert tw._legacy_name("skip_lzw_as_compressed") == "SkipLzwAsCompressed"
+    assert tw._legacy_name("icc_policy") == "IccPolicy"
+    assert tw._legacy_name("size") == "Size"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_every_name_of_v3_0_0_is_known(backend):
+    """The names the old reader matches are the names of v3.0.0's tables, every one (they are
+    in the golden lines and in users' .bat files); a name of then that does not come back
+    from its v3.1 name could not be translated."""
+    v300 = {
+        "compress": "Mode InputDir OutputDir ZipSuffix ZipSubfolderName ExportMarker "
+                    "ExportZipSubfolder ExportTiffSubfolder Workers CapWorkers DryRun SafeMode "
+                    "SkipLzwAsCompressed Overwrite DeleteSource ForceParallel ForceSequential "
+                    "StagingDir DuplicateAction MagickTimeout ExcludeFolders GenerateThumbnail "
+                    "ThumbSize ThumbQuality ThumbFormat ThumbPage SkipCompressedWithThumb "
+                    "SrgbProfile WorkerMemoryFraction InputDirFile RestoreStranded",
+        "copy-exif": "InputDir Workers DryRun SkipIfTiffHasExif SkipLzwAsCompressed SafeMode "
+                     "IccPolicy CompressZip OutputDir StagingDir Overwrite AutoFind "
+                     "FolderPattern MagickTimeout FailOnWarn ExcludeFolders "
+                     "WorkerMemoryFraction InputDirFile",
+        "thumbnails": "InputDir Size OutputDir Remove DryRun Recursive Workers Page Quality "
+                      "Format SrgbProfile ExcludeFolders",
+    }[backend].split()
+    assert [tw._legacy_name(p.name) for p in _params(backend)] == v300
 
 
 # --- the translation binds the same --------------------------------------------------------
@@ -155,13 +181,14 @@ def test_every_parameter_in_one_line_binds_the_same(backend):
     params = _params(backend)
     old = []
     for p in params:
-        if p.name == "InputDirFile":            # one of -InputDir / -InputDirFile is enough
+        if p.name == "input_dir_file":            # one of -InputDir / -InputDirFile is enough
             continue
         v = HOSTILE if p.kind == "str" and _accepted(p, HOSTILE) else _values(p)[-1]
-        old += [f"-{p.name}:{v}"] if p.kind == "switch" else [f"-{p.name}", v]
+        name = tw._legacy_name(p.name)
+        old += [f"-{name}:{v}"] if p.kind == "switch" else [f"-{name}", v]
     new = legacy_args.translate(old, params)
     assert _new(new, params) == _old(old, params)
-    assert _old(old, params)[1] == {p.name for p in params} - {"InputDirFile"}
+    assert _old(old, params)[1] == {p.name for p in params} - {"input_dir_file"}
 
 
 def test_the_last_of_a_repeated_parameter_wins_in_both():
@@ -169,7 +196,7 @@ def test_the_last_of_a_repeated_parameter_wins_in_both():
     old = ["-Mode", "1", "-mode:2", "-SafeMode:$false", "-Saf", "1", "-DryRun", "-DryRun:0"]
     values, bound = _new(legacy_args.translate(old, params), params)
     assert (values, bound) == _old(old, params)
-    assert values["Mode"] == 2 and values["SafeMode"] is True and values["DryRun"] is False
+    assert values["mode"] == 2 and values["safe_mode"] is True and values["dry_run"] is False
 
 
 @pytest.mark.parametrize("old", [
@@ -191,6 +218,16 @@ def test_what_v3_0_0_refused_is_refused(old):
         legacy_args.translate(old, _params("compress"))
 
 
+def test_a_refusal_names_the_parameter_the_way_the_line_did():
+    for old, said in ((["-Workers", "65"], "-Workers must be from 1 to 64, got 65"),
+                      (["-ThumbSize", "x"], "-ThumbSize needs a whole number, got 'x'"),
+                      (["-DryRun:maybe"], "-DryRun is a switch: -DryRun or -DryRun:$false"),
+                      (["-Inp", "x"], "-Inp is ambiguous: -InputDir, -InputDirFile")):
+        with pytest.raises(tw.UsageError) as e:
+            legacy_args.translate(old, _params("compress"))
+        assert str(e.value) == said
+
+
 # --- the old reader itself: what the translation stands on -----------------------------------
 
 def test_the_old_reader_binds_the_way_powershell_did():
@@ -198,20 +235,20 @@ def test_the_old_reader_binds_the_way_powershell_did():
     opt, bound = _old(["-mode", "9", "-InputDir", r"E:\a b", "-SafeMode:$false", "-DryRun",
                        "-Overwrite:$false", "-workers", "3", "-SkipLzwAsCompressed:$true",
                        "-SrgbProfile", ""], _params("compress"))
-    assert opt["Mode"] == 9 and opt["InputDir"] == r"E:\a b" and opt["Workers"] == 3
-    assert opt["SafeMode"] is False and opt["DryRun"] is True and opt["Overwrite"] is False
-    assert opt["SkipLzwAsCompressed"] is True and opt["SrgbProfile"] == ""
-    assert bound == {"Mode", "InputDir", "SafeMode", "DryRun", "Overwrite", "Workers",
-                     "SkipLzwAsCompressed", "SrgbProfile"}
-    assert opt["ZipSubfolderName"] == "ZIP" and opt["DeleteSource"] is False
+    assert opt["mode"] == 9 and opt["input_dir"] == r"E:\a b" and opt["workers"] == 3
+    assert opt["safe_mode"] is False and opt["dry_run"] is True and opt["overwrite"] is False
+    assert opt["skip_lzw_as_compressed"] is True and opt["srgb_profile"] == ""
+    assert bound == {"mode", "input_dir", "safe_mode", "dry_run", "overwrite", "workers",
+                     "skip_lzw_as_compressed", "srgb_profile"}
+    assert opt["zip_subfolder_name"] == "ZIP" and opt["delete_source"] is False
 
 
 def test_the_old_reader_takes_prefixes_and_values():
     opt, _ = _old(["-DeleteS", "-Mo", "8", "-Mode:8", "-SafeMode", "$true", "-DuplicateAction",
                    "skip", "-OutputDir", "-weird name"], _params("compress"))
-    assert opt["DeleteSource"] is True and opt["Mode"] == 8
-    assert opt["DuplicateAction"] == "Skip", "a choice is matched without case"
-    assert opt["OutputDir"] == "-weird name"
+    assert opt["delete_source"] is True and opt["mode"] == 8
+    assert opt["duplicate_action"] == "Skip", "a choice is matched without case"
+    assert opt["output_dir"] == "-weird name"
 
 
 # --- the command-line tool -----------------------------------------------------------------

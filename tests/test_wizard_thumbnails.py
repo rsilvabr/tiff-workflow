@@ -104,9 +104,9 @@ ENTER = [""] * 8
 
 def test_enter_everywhere_runs_the_backend_with_its_own_defaults(wiz, folder):
     assert wiz.run(folder, *ENTER) is True
-    assert wiz.argv() == ["--input-dir", str(folder), "--size", default("Size"),
-                          "--quality", default("Quality"), "--format", default("Format"),
-                          "--page", default("Page"), "--workers", "8"]
+    assert wiz.argv() == ["--input-dir", str(folder), "--size", default("size"),
+                          "--quality", default("quality"), "--format", default("format"),
+                          "--page", default("page"), "--workers", "8"]
     assert len(wiz.asked) == 9, wiz.asked
     assert "Running: " in wiz.text
 
@@ -115,7 +115,7 @@ def test_the_run_is_journalled_for_repeat_last(wiz, folder):
     wiz.run(folder, *ENTER)
     c = wiz.cfg.config
     assert c.last_run_kind == "thumbnails"
-    assert c.last_run_label.startswith(f"Thumbnails: {default('Size')}px {default('Format')} under ")
+    assert c.last_run_label.startswith(f"Thumbnails: {default('size')}px {default('format')} under ")
     assert c.last_run_commands == [ct._journal_line(wiz.ran[0])]
     assert c.last_run_commands[0][0] == "thumbnails"
     assert c.last_input_dir == str(folder)
@@ -224,7 +224,7 @@ def test_the_last_folder_is_the_default(wiz, folder):
 def test_a_size_out_of_range_falls_back_to_the_backends_default(wiz, folder, answer):
     wiz.run(folder, "", answer, "", "", "", "", "", "")
     argv = wiz.argv()
-    assert argv[argv.index("--size") + 1] == default("Size")
+    assert argv[argv.index("--size") + 1] == default("size")
     if answer != "abc":
         assert f"Size {answer} out of range (32-4096)" in wiz.text
 
@@ -240,7 +240,7 @@ def test_a_size_in_range_is_taken(wiz, folder, answer):
 def test_a_bad_quality_falls_back_to_the_backends_default(wiz, folder, answer):
     wiz.run(folder, "", "", answer, "", "", "", "", "")
     argv = wiz.argv()
-    assert argv[argv.index("--quality") + 1] == default("Quality")
+    assert argv[argv.index("--quality") + 1] == default("quality")
     assert f"Invalid quality '{answer}'" in wiz.text
 
 

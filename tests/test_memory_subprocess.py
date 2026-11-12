@@ -333,7 +333,7 @@ def test_one_worker_accepts_the_memory_fraction(tmp_path):
         f"without: {without.returncode}\n{without.stdout}\n{without.stderr}\n"
         f"with: {with_param.returncode}\n{with_param.stdout}\n{with_param.stderr}")
     assert without.returncode == 0, without.stdout
-    assert "WorkerMemoryFraction" in ct._backend_param_defaults("copy_exif_to_tiff.py")
+    assert "worker_memory_fraction" in ct._backend_param_defaults("copy_exif_to_tiff.py")
 
 
 # ---------------------------------------------------------------------------

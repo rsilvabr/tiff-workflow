@@ -57,7 +57,7 @@ def test_todays_journal_round_trips():
     assert line == ["compress"] + ARGS
     step = convert_tiff._journal_step(line)
     assert step.script == "compress_tiff_zip.py" and step.args == ARGS
-    assert step.values["Mode"] == 9 and step.values["SafeMode"] is False
+    assert step.values["mode"] == 9 and step.values["safe_mode"] is False
     assert convert_tiff._backend_command(step.script, step.args) == cmd
 
 
@@ -124,10 +124,10 @@ def test_the_option_changed_is_the_one_the_backend_binds():
     """AutoFind and the long-line spill replace --input-dir: the last one given, in either
     form, never --input-dir-file."""
     at = convert_tiff._option_at
-    assert at(["--input-dir", "a", "--mode", "9", "--input-dir=b"], "InputDir") == (4, 1, "b")
-    assert at(["--input-dir=a", "--input-dir", "b"], "InputDir") == (1, 2, "b")
-    assert at(["--input-dir-file", "x", "--input-dir"], "InputDir") is None
-    assert at(["--mode", "9"], "InputDir") is None
+    assert at(["--input-dir", "a", "--mode", "9", "--input-dir=b"], "input_dir") == (4, 1, "b")
+    assert at(["--input-dir=a", "--input-dir", "b"], "input_dir") == (1, 2, "b")
+    assert at(["--input-dir-file", "x", "--input-dir"], "input_dir") is None
+    assert at(["--mode", "9"], "input_dir") is None
 
 
 def test_autofind_replaces_the_folders_the_backend_reads(tmp_path, monkeypatch):
@@ -142,7 +142,7 @@ def test_autofind_replaces_the_folders_the_backend_reads(tmp_path, monkeypatch):
              {"root": str(tmp_path), "patterns": ["S5pro"]}}
     assert convert_tiff._redo_autofind(entry, [step]) is None
     values, _ = convert_tiff.tw.parse_args(step.args, convert_tiff._backend_tables(step.script)[0])
-    assert values["InputDir"] == ";".join(str(f) for f in found)
+    assert values["input_dir"] == ";".join(str(f) for f in found)
 
 
 def _repeat(monkeypatch, commands):

@@ -220,7 +220,7 @@ IN_PLACE = ("--mode", "2")
 
 def compress_run(*argv):
     opt, bound = tw.parse_args(list(argv), cz.PARAMS)
-    assert "Mode" in bound, "a compress run has a mode: run_main refuses one without"
+    assert "mode" in bound, "a compress run has a mode: run_main refuses one without"
     return cz.Run(opt, NoLog(), [])
 
 
@@ -1271,7 +1271,7 @@ class TestStagedMoveFailures:
         monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
         run = compress_run("--mode", "1", "--input-dir", str(photo.parent),
                            "--staging-dir", str(tmp_path / "stg"), "--force-sequential")
-        assert cz.run_modes(run, {"Mode", "InputDir", "StagingDir", "ForceSequential"}) == 1
+        assert cz.run_modes(run, {"mode", "input_dir", "staging_dir", "force_sequential"}) == 1
         assert error_lines(run) == [text]
         assert (run.err, run.ok) == (1, 1)
         assert not [m for _lv, m in run.log.lines if "Moved" in m]
@@ -1296,7 +1296,7 @@ class TestStagedMoveFailures:
         stg = tmp_path / "stg"
         run = compress_run("--mode", "1", "--input-dir", str(photo.parent), "--staging-dir", str(stg),
                            "--force-sequential")
-        assert cz.run_modes(run, {"Mode", "InputDir", "StagingDir", "ForceSequential"}) == 0
+        assert cz.run_modes(run, {"mode", "input_dir", "staging_dir", "force_sequential"}) == 0
         out = photo.parent / "ZIP"
         assert (out / self.NAME).read_bytes() == b"COMPRESSED" and os.listdir(stg) == []
         assert ("INFO", f"  -> Moved 1 file(s) -> {out}") in run.log.lines
@@ -1410,9 +1410,9 @@ class TestPlan:
         run.parallel = True
         monkeypatch.setattr(tw, "available_memory_bytes", lambda: memory_for * 1000)
         monkeypatch.setattr(tw, "max_image_pixels", lambda paths, chunk_size=400: 1000 / 75)
-        run.opt["WorkerMemoryFraction"] = 1.0
+        run.opt["worker_memory_fraction"] = 1.0
         assert cz.effective_workers(run, ["a.tif"], tw.COMPARE_BYTES_PER_PIXEL) == runs
-        assert said(run, "Workers capped to 2 (CapWorkers limit)")
+        assert said(run, "Workers capped to 2 (--cap-workers)")
         lines = said(run, "Workers reduced")
         assert bool(lines) == reduced
         if reduced:
@@ -2525,7 +2525,7 @@ class TestCommandLine:
             with pytest.raises(tw.UsageError):
                 tw.parse_args(bad, gt.PARAMS)
         opt, _ = tw.parse_args(["--page", "all", "--quality", "100"], gt.PARAMS)
-        assert opt["Page"] == "all" and opt["Quality"] == "100"
+        assert opt["page"] == "all" and opt["quality"] == "100"
 
     def test_binding(self):
         opt, bound = tw.parse_args(["--mode", "9", "--input-dir", r"E:\写真 [x] 50%",
@@ -2533,13 +2533,13 @@ class TestCommandLine:
                                     "3", "--skip-lzw-as-compressed", "--srgb-profile", "",
                                     "--output-dir=-weird name", "--duplicate-action", "skip"],
                                    cz.PARAMS)
-        assert opt["Mode"] == 9 and opt["InputDir"] == r"E:\写真 [x] 50%" and opt["Workers"] == 3
-        assert opt["SafeMode"] is False and opt["DryRun"] is True and opt["Overwrite"] is False
-        assert opt["SkipLzwAsCompressed"] is True and opt["SrgbProfile"] == ""
-        assert opt["OutputDir"] == "-weird name" and opt["DuplicateAction"] == "Skip"
-        assert bound == {"Mode", "InputDir", "SafeMode", "DryRun", "Overwrite", "Workers",
-                         "SkipLzwAsCompressed", "SrgbProfile", "OutputDir", "DuplicateAction"}
-        assert opt["ZipSubfolderName"] == "ZIP" and opt["DeleteSource"] is False
+        assert opt["mode"] == 9 and opt["input_dir"] == r"E:\写真 [x] 50%" and opt["workers"] == 3
+        assert opt["safe_mode"] is False and opt["dry_run"] is True and opt["overwrite"] is False
+        assert opt["skip_lzw_as_compressed"] is True and opt["srgb_profile"] == ""
+        assert opt["output_dir"] == "-weird name" and opt["duplicate_action"] == "Skip"
+        assert bound == {"mode", "input_dir", "safe_mode", "dry_run", "overwrite", "workers",
+                         "skip_lzw_as_compressed", "srgb_profile", "output_dir", "duplicate_action"}
+        assert opt["zip_subfolder_name"] == "ZIP" and opt["delete_source"] is False
         assert tw.parse_args([], cz.PARAMS) == ({p.name: p.default for p in cz.PARAMS}, set())
 
     @pytest.mark.parametrize("argv", [
@@ -2836,7 +2836,7 @@ class TestSourceRules:
         for fn in [n for n in ast.walk(_tree("compress_tiff_zip.py")) if isinstance(n, ast.FunctionDef)]:
             for node in ast.walk(fn):
                 if (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
-                        and node.slice.value == "StagingDir"):
+                        and node.slice.value == "staging_dir"):
                     readers.add(fn.name)
         assert readers == {"__init__"}, readers
 

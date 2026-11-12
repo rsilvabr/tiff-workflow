@@ -419,9 +419,9 @@ def test_move_old_backups_keeps_a_v2_in_old_tiffs(tmp_path):
 
 
 @pytest.mark.parametrize("body", [
-    {"compress_tiff_zip": {"CapWorkers": 2, "capworkers": 3}},
+    {"compress_tiff_zip": {"cap_workers": 2, "CAP_WORKERS": 3}},
     {"compress_tiff_zip": {"": 1}},
-    {"compress_tiff_zip": {"CapWorkers": 2}, "COMPRESS_TIFF_ZIP": {}},
+    {"compress_tiff_zip": {"cap_workers": 2}, "COMPRESS_TIFF_ZIP": {}},
 ])
 def test_overlay_refuses_case_duplicate_or_empty_keys(tmp_path, body):
     f = tmp_path / ".tiff_workflow_settings.json"
@@ -432,8 +432,8 @@ def test_overlay_refuses_case_duplicate_or_empty_keys(tmp_path, body):
 
 def test_overlay_exact_duplicate_still_reads(tmp_path):
     f = tmp_path / ".tiff_workflow_settings.json"
-    f.write_text('{"compress_tiff_zip": {"CapWorkers": 2, "CapWorkers": 3}}', encoding="utf-8")
-    assert ct._settings_overlay_section(f, "compress_tiff_zip") == {"CapWorkers": 3}
+    f.write_text('{"compress_tiff_zip": {"cap_workers": 2, "cap_workers": 3}}', encoding="utf-8")
+    assert ct._settings_overlay_section(f, "compress_tiff_zip") == {"cap_workers": 3}
 
 
 # --- #14: AutoFind and ';' ------------------------------------------------------------
@@ -466,7 +466,7 @@ def test_step_folder_returns_an_absolute_path(tmp_path, monkeypatch):
 
 
 def test_srgb_profile_auto_for_this_run_is_passed():
-    wf = {"mode": 1, "workers": 1, "advanced": {"compress": {"SrgbProfile": ""}}}
+    wf = {"mode": 1, "workers": 1, "advanced": {"compress": {"srgb_profile": ""}}}
     argv = ct._emit_all("compress", wf, folders=[Path("C:/x")])
     i = argv.index("--srgb-profile")
     assert argv[i + 1] == "", argv
@@ -476,7 +476,7 @@ def test_srgb_profile_auto_for_this_run_is_passed():
 
 
 def test_manifest_collision_reads_the_backend_folder_names(monkeypatch):
-    names = {"ZipSuffix": "_ARC", "ZipSubfolderName": "ARC"}
+    names = {"zip_suffix": "_ARC", "zip_subfolder_name": "ARC"}
     real = ct._backend_default
     monkeypatch.setattr(ct, "_backend_default",
                         lambda s, p: names[p] if p in names else real(s, p))

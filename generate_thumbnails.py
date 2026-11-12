@@ -24,29 +24,29 @@ from tiff_workflow_common import P  # noqa: E402
 # The defaults are the settings of this script: edit them here, or leave the file alone
 # and put them in .tiff_workflow_settings.json (the names in OVERLAY_SPECS).
 PARAMS = (
-    P("InputDir", "str", "."),
-    P("Size", "int", 256),
-    P("OutputDir", "str", ""),
-    P("Remove", "switch"),
-    P("DryRun", "switch"),
-    P("Recursive", "switch"),
-    P("Workers", "int", 4, lo=1, hi=64),
-    P("Page", "str", "0", pattern=r"^(all|\d+)$"),
-    P("Quality", "str", "85", pattern=r"^(100|[1-9][0-9]?)$"),
-    P("Format", "str", "jpg"),
-    P("SrgbProfile", "str", "", help='ICC profile used to convert wide-gamut sources; "" = auto-detect'),
-    P("ExcludeFolders", "str", "", help="';'-separated folder NAMES to skip during discovery"),
+    P("input_dir", "str", "."),
+    P("size", "int", 256),
+    P("output_dir", "str", ""),
+    P("remove", "switch"),
+    P("dry_run", "switch"),
+    P("recursive", "switch"),
+    P("workers", "int", 4, lo=1, hi=64),
+    P("page", "str", "0", pattern=r"^(all|\d+)$"),
+    P("quality", "str", "85", pattern=r"^(100|[1-9][0-9]?)$"),
+    P("format", "str", "jpg"),
+    P("srgb_profile", "str", "", help='ICC profile used to convert wide-gamut sources; "" = auto-detect'),
+    P("exclude_folders", "str", "", help="';'-separated folder NAMES to skip during discovery"),
 )
 
 # Settings overlay (.tiff_workflow_settings.json): the ONLY names it can change in this script,
-# each with the type/range it must have. Never a safety or per-run setting (InputDir,
-# OutputDir, Workers, DryRun, Remove, ...): tests/test_settings_overlay.py pins that.
+# each with the type/range it must have. Never a safety or per-run setting (input_dir,
+# output_dir, workers, dry_run, remove, ...): tests/test_settings_overlay.py pins that.
 # OVERLAY-SPECS-BEGIN
 OVERLAY_SPECS = {
-    "Size": "int:1:",
-    "Quality": "intstr:1:100",
-    "Format": "name",
-    "SrgbProfile": "path?",
+    "size": "int:1:",
+    "quality": "intstr:1:100",
+    "format": "name",
+    "srgb_profile": "path?",
 }
 # OVERLAY-SPECS-END
 
@@ -55,11 +55,11 @@ FORMATS = ("jpg", "jpeg", "png", "tif", "tiff")
 
 # Every thumbnail this script can produce, in one pattern:
 #   name_thumb        plain
-#   name_thumb-0      one frame per page (-Page all)
-#   name_thumb_v2     collision rename under -OutputDir
+#   name_thumb-0      one frame per page (--page all)
+#   name_thumb_v2     collision rename under --output-dir
 #   name_thumb_v2-0   both
 # Matching only '_thumb(-\d+)?$' left the _v2 variants out of BOTH the self-exclusion and
-# the -Remove filter, so a renamed .tif thumbnail was rescanned as a source on the next run
+# the --remove filter, so a renamed .tif thumbnail was rescanned as a source on the next run
 # (producing _thumb_v2_thumb) and could never be cleaned up.
 THUMB_NAME_RE = re.compile(r"_thumb(_v\d+)?(-\d+)?$", re.I)
 
@@ -68,7 +68,7 @@ THUMB_NAME_RE = re.compile(r"_thumb(_v\d+)?(-\d+)?$", re.I)
 # exist to process, and `ZIP/` is where modes 1/3/5/6/7 PUT the compressed library.
 TOOL_OUTPUT_NAMES = ("OLD_TIFFs", "OLD_TIFF", "converted_zip")
 
-# The thumbnails made at once, whatever -Workers asks for (it accepts up to 64, as the
+# The thumbnails made at once, whatever --workers asks for (it accepts up to 64, as the
 # other backends do): each one is a magick process that reads a whole TIFF. A run that asks
 # for more says so -- until v3.0.0 the limit was applied without a word.
 MAX_PARALLEL = 16
@@ -133,7 +133,7 @@ def make_thumbnail(src, dest, cfg):
         dest_dir = os.path.dirname(dest)
         os.makedirs(dest_dir, exist_ok=True)
         # A '[n]' suffix turns the input into a filename SPEC, where '%' is expanded; a
-        # plain input (-Page all) is opened literally and must stay unescaped.
+        # plain input (--page all) is opened literally and must stay unescaped.
         if cfg.page == "all":
             source = src
         else:
@@ -169,7 +169,7 @@ def _input_roots(opt):
     """(the --input-dir entries that exist, the ones that do not). A ';' separated list like
     the other backends; a bad path is an ERROR, not a WARN: a typo used to look identical
     to "folder has no TIFFs" and exited 0."""
-    return tw.resolve_input_dirs(opt["InputDir"].split(";"), allow_files=True)
+    return tw.resolve_input_dirs(opt["input_dir"].split(";"), allow_files=True)
 
 
 def _discover(log, input_roots, recurse, tool_output_names):
@@ -192,8 +192,8 @@ def _discover(log, input_roots, recurse, tool_output_names):
         for f in tw.list_files(root, recurse, unreadable):
             if tw.is_tiff_name(f.name):
                 f.input_root = root
-                # Dedupe: a repeated -InputDir entry (A;A) or a root nested under a
-                # -Recursive root lists the same source twice.
+                # Dedupe: a repeated --input-dir entry (A;A) or a root nested under a
+                # --recursive root lists the same source twice.
                 by_path.setdefault(f.path.lower(), f)
     for d in unreadable:
         log(f"cannot read folder (skipped): {d}", "WARN")
@@ -249,24 +249,24 @@ def run(argv):
         tw.say(f"WARNING: settings overlay: {w}")
 
     # What the command line alone shows (v3.1, T5: exit 2, before a log exists).
-    if opt["Size"] < 32 or opt["Size"] > 4096:
-        tw.say(f"ERROR: thumbnail size {opt['Size']} is not supported (--size): "
+    if opt["size"] < 32 or opt["size"] > 4096:
+        tw.say(f"ERROR: thumbnail size {opt['size']} is not supported (--size): "
                f"it must be from 32 to 4096")
         return tw.EXIT_USAGE
-    if opt["Format"].lower() not in FORMATS:
-        tw.say(f"ERROR: thumbnail format {opt['Format']} is not supported (--format): "
+    if opt["format"].lower() not in FORMATS:
+        tw.say(f"ERROR: thumbnail format {opt['format']} is not supported (--format): "
                f"jpg, png, tif or tiff")
         return tw.EXIT_USAGE
     try:
-        exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])
+        exclude_names = tw.parse_exclude_folders(opt["exclude_folders"])
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
         return tw.EXIT_USAGE
 
     # A relative --output-dir is resolved per file folder here, so only an absolute one can be
     # judged before the run.
-    if os.path.isabs(opt["OutputDir"].strip()) and tw.output_dir_error(opt["OutputDir"]):
-        tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
+    if os.path.isabs(opt["output_dir"].strip()) and tw.output_dir_error(opt["output_dir"]):
+        tw.say(f"ERROR: {tw.output_dir_error(opt['output_dir'])}")
         return 1
 
     log = tw.RunLog(SCRIPT_NAME)
@@ -282,24 +282,24 @@ def run(argv):
         tw.say("Please install the missing tools and try again.")
         return 1
 
-    size = opt["Size"]
-    fmt = opt["Format"]
-    page = opt["Page"]
-    quality = opt["Quality"]
-    output_dir = opt["OutputDir"]
-    dry_run = opt["DryRun"]
-    recurse = opt["Recursive"]
+    size = opt["size"]
+    fmt = opt["format"]
+    page = opt["page"]
+    quality = opt["quality"]
+    output_dir = opt["output_dir"]
+    dry_run = opt["dry_run"]
+    recurse = opt["recursive"]
 
-    srgb = tw.resolve_srgb_profile(opt["SrgbProfile"])
+    srgb = tw.resolve_srgb_profile(opt["srgb_profile"])
     # An overlay path that does not exist must not stop the run: warn and auto-detect. A
-    # -SrgbProfile typed on the command line still fails.
-    if opt["SrgbProfile"] and not srgb and "SrgbProfile" in overlay["applied"]:
-        log(f"WARN: settings overlay: SrgbProfile not found: {opt['SrgbProfile']}; "
+    # --srgb-profile typed on the command line still fails.
+    if opt["srgb_profile"] and not srgb and "srgb_profile" in overlay["applied"]:
+        log(f"WARN: settings overlay: srgb_profile not found: {opt['srgb_profile']}; "
             f"using the auto-detected profile", "WARN")
-        opt["SrgbProfile"] = ""
+        opt["srgb_profile"] = ""
         srgb = tw.resolve_srgb_profile("")
-    if opt["SrgbProfile"] and not srgb:
-        log(f"ERROR: --srgb-profile not found: {opt['SrgbProfile']}", "ERROR")
+    if opt["srgb_profile"] and not srgb:
+        log(f"ERROR: --srgb-profile not found: {opt['srgb_profile']}", "ERROR")
         return 1
     if not srgb:
         log("WARN: no sRGB ICC profile found -- wide-gamut sources (ProPhoto, AdobeRGB) will "
@@ -321,7 +321,7 @@ def run(argv):
         log(f"Log: {log.path}")
         return 1
 
-    if opt["Remove"]:
+    if opt["remove"]:
         return remove_thumbnails(opt, log, c, input_roots, recurse, size)
 
     if c.total == 0:
@@ -336,9 +336,9 @@ def run(argv):
     pairs = _plan(log, files, output_dir, fmt)
     cfg = ThumbSettings(size, quality, fmt, page, dry_run, srgb)
 
-    workers = min(opt["Workers"], MAX_PARALLEL)
-    if opt["Workers"] > MAX_PARALLEL:
-        log(f"Workers: {opt['Workers']} asked, {MAX_PARALLEL} used "
+    workers = min(opt["workers"], MAX_PARALLEL)
+    if opt["workers"] > MAX_PARALLEL:
+        log(f"Workers: {opt['workers']} asked, {MAX_PARALLEL} used "
             f"(generate_thumbnails makes at most {MAX_PARALLEL} thumbnails at once)")
     for pair, result in tw.run_tasks(pairs, lambda p: make_thumbnail(p[0], p[1], cfg), workers):
         line = result if isinstance(result, str) else f"ERROR | {os.path.basename(pair[0])} | {result}"
@@ -360,14 +360,14 @@ def run(argv):
 
 def _search_roots(opt, input_roots, recurse):
     """The folders --remove looks for thumbnails in, each once."""
-    output_dir = opt["OutputDir"]
+    output_dir = opt["output_dir"]
     if output_dir:
         if os.path.isabs(output_dir):
             search_roots = [output_dir]
         else:
-            # Generation resolves a relative -OutputDir per FILE directory, so under
-            # -Recursive the thumbnails sit in <any subfolder>\<OutputDir>, not only
-            # <root>\<OutputDir>. A literal tail match on a segment boundary.
+            # Generation resolves a relative --output-dir per FILE directory, so under
+            # --recursive the thumbnails sit in <any subfolder>\<output_dir>, not only
+            # <root>\<output_dir>. A literal tail match on a segment boundary.
             suffix = output_dir.rstrip("\\/").replace("/", "\\")
             tail = ("\\" + suffix).lower()
             search_roots = []
@@ -441,7 +441,7 @@ def remove_thumbnails(opt, log, c, input_roots, recurse, size):
     for t in thumbs:
         c.counter += 1
         tag = f"[{c.counter}/{c.total}]"
-        if opt["DryRun"]:
+        if opt["dry_run"]:
             c.skip += 1
             log(f"{tag} DRY-RUN (would remove) | {t.name}")
             continue

@@ -36,64 +36,64 @@ from tiff_workflow_common import P  # noqa: E402
 # The defaults are the settings of this script: edit them here, or leave the file alone
 # and put them in .tiff_workflow_settings.json (the names in OVERLAY_SPECS).
 PARAMS = (
-    P("Mode", "int", -1, help="required: 0-9 (the default only means: not given)"),
+    P("mode", "int", -1, help="required: 0-9 (the default only means: not given)"),
 
-    P("InputDir", "str", "."),
+    P("input_dir", "str", "."),
 
     # Output path control
-    P("OutputDir", "str", "", help='"" = in-place (modes 0/8), or flat root (mode 2)'),
-    P("ZipSuffix", "str", "_ZIP", help="Mode 4: folder rename suffix"),
-    P("ZipSubfolderName", "str", "ZIP", help="Mode 1/3: subfolder name"),
-    P("ExportMarker", "str", "_EXPORT", help="Modes 6/7"),
-    P("ExportZipSubfolder", "str", "ZIP", help="Mode 6: subfolder inside _EXPORT"),
-    P("ExportTiffSubfolder", "str", "TIFF", help="Mode 7: TIFF subfolder inside _EXPORT"),
+    P("output_dir", "str", "", help='"" = in-place (modes 0/8), or flat root (mode 2)'),
+    P("zip_suffix", "str", "_ZIP", help="Mode 4: folder rename suffix"),
+    P("zip_subfolder_name", "str", "ZIP", help="Mode 1/3: subfolder name"),
+    P("export_marker", "str", "_EXPORT", help="Modes 6/7"),
+    P("export_zip_subfolder", "str", "ZIP", help="Mode 6: subfolder inside _EXPORT"),
+    P("export_tiff_subfolder", "str", "TIFF", help="Mode 7: TIFF subfolder inside _EXPORT"),
 
     # Behavior
-    P("Workers", "int", 8, lo=1, hi=64),
-    P("CapWorkers", "int", 0, lo=0, hi=64, help="0 = no cap; >0 = clamp parallel workers to this value"),
-    P("DryRun", "switch"),
-    P("SafeMode", "bool", True, help="true = skip multi-page TIFFs"),
-    P("SkipLzwAsCompressed", "bool", False, help="true = treat LZW as already compressed"),
-    P("Overwrite", "switch"),
-    P("DeleteSource", "switch"),
-    P("ForceParallel", "switch", help="accepted for old command lines; parallel is the default"),
-    P("ForceSequential", "switch", help="one file at a time"),
-    P("StagingDir", "str", ""),
-    P("DuplicateAction", "str", "Numbered", choices=("Skip", "Numbered", "Overwrite")),
-    P("MagickTimeout", "int", 30),
-    P("ExcludeFolders", "str", "", help="';'-separated folder NAMES to skip during discovery (any mode)"),
+    P("workers", "int", 8, lo=1, hi=64),
+    P("cap_workers", "int", 0, lo=0, hi=64, help="0 = no cap; >0 = clamp parallel workers to this value"),
+    P("dry_run", "switch"),
+    P("safe_mode", "bool", True, help="true = skip multi-page TIFFs"),
+    P("skip_lzw_as_compressed", "bool", False, help="true = treat LZW as already compressed"),
+    P("overwrite", "switch"),
+    P("delete_source", "switch"),
+    P("force_parallel", "switch", help="accepted for old command lines; parallel is the default"),
+    P("force_sequential", "switch", help="one file at a time"),
+    P("staging_dir", "str", ""),
+    P("duplicate_action", "str", "Numbered", choices=("Skip", "Numbered", "Overwrite")),
+    P("magick_timeout", "int", 30),
+    P("exclude_folders", "str", "", help="';'-separated folder NAMES to skip during discovery (any mode)"),
 
     # Thumbnail generation
-    P("GenerateThumbnail", "switch", help="Generate embedded thumbnail in TIFF"),
-    P("ThumbSize", "int", 256, help="Thumbnail size in pixels"),
-    P("ThumbQuality", "str", "85", help="JPEG quality for thumbnail"),
-    P("ThumbFormat", "str", "jpg", help="Thumbnail format (jpg, png, etc.)"),
-    P("ThumbPage", "int", 1, help="Output page position for the embedded thumbnail; must be >= 1 (after the main image)"),
-    P("SkipCompressedWithThumb", "switch", help="Skip TIFFs that are already compressed AND have thumbnail"),
-    P("SrgbProfile", "str", "", help='ICC profile used to convert wide-gamut sources; "" = auto-detect'),
-    P("WorkerMemoryFraction", "float", 0.8, help="Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap"),
-    P("InputDirFile", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when --input-dir would exceed the command-line limit)"),
-    P("RestoreStranded", "switch", help="Move originals stranded in OLD_TIFFs/ (nothing left in their place) back where they came from"),
+    P("generate_thumbnail", "switch", help="Generate embedded thumbnail in TIFF"),
+    P("thumb_size", "int", 256, help="Thumbnail size in pixels"),
+    P("thumb_quality", "str", "85", help="JPEG quality for thumbnail"),
+    P("thumb_format", "str", "jpg", help="Thumbnail format (jpg, png, etc.)"),
+    P("thumb_page", "int", 1, help="Output page position for the embedded thumbnail; must be >= 1 (after the main image)"),
+    P("skip_compressed_with_thumb", "switch", help="Skip TIFFs that are already compressed AND have thumbnail"),
+    P("srgb_profile", "str", "", help='ICC profile used to convert wide-gamut sources; "" = auto-detect'),
+    P("worker_memory_fraction", "float", 0.8, help="Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap"),
+    P("input_dir_file", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when --input-dir would exceed the command-line limit)"),
+    P("restore_stranded", "switch", help="Move originals stranded in OLD_TIFFs/ (nothing left in their place) back where they came from"),
 )
 
 # Settings overlay (.tiff_workflow_settings.json): the ONLY names it can change in this script,
-# each with the type/range it must have. Never a safety or per-run setting (Mode, InputDir,
-# OutputDir, StagingDir, Workers, DryRun, SafeMode, SkipLzwAsCompressed, Overwrite,
-# DeleteSource, ...): tests/test_settings_overlay.py pins that.
+# each with the type/range it must have. Never a safety or per-run setting (mode, input_dir,
+# output_dir, staging_dir, workers, dry_run, safe_mode, skip_lzw_as_compressed, overwrite,
+# delete_source, ...): tests/test_settings_overlay.py pins that.
 # OVERLAY-SPECS-BEGIN
 OVERLAY_SPECS = {
-    "ZipSuffix": "name",
-    "ZipSubfolderName": "name",
-    "ExportMarker": "name",
-    "ExportZipSubfolder": "name",
-    "ExportTiffSubfolder": "name",
-    "CapWorkers": "int:0:64",
-    "MagickTimeout": "int:1:",
-    "ThumbSize": "int:1:",
-    "ThumbQuality": "intstr:1:100",
-    "ThumbFormat": "name",
-    "SrgbProfile": "path?",
-    "WorkerMemoryFraction": "float:0:2",
+    "zip_suffix": "name",
+    "zip_subfolder_name": "name",
+    "export_marker": "name",
+    "export_zip_subfolder": "name",
+    "export_tiff_subfolder": "name",
+    "cap_workers": "int:0:64",
+    "magick_timeout": "int:1:",
+    "thumb_size": "int:1:",
+    "thumb_quality": "intstr:1:100",
+    "thumb_format": "name",
+    "srgb_profile": "path?",
+    "worker_memory_fraction": "float:0:2",
 }
 # OVERLAY-SPECS-END
 
@@ -112,8 +112,8 @@ _STAGING_DIR_RE = re.compile(
 
 # The overlay names that decide where an output lands (see the "would write over its own
 # source" refusal).
-_OVERLAY_PATH_NAMES = ("ZipSuffix", "ZipSubfolderName", "ExportMarker", "ExportZipSubfolder",
-                       "ExportTiffSubfolder")
+_OVERLAY_PATH_NAMES = ("zip_suffix", "zip_subfolder_name", "export_marker", "export_zip_subfolder",
+                       "export_tiff_subfolder")
 
 MAX_PATH_CHARS = 259     # Windows refuses longer paths and magick.exe is not long-path aware
 TEMP_SIBLING_CHARS = 26  # ".<8 hex>_<12 hex>.tif"
@@ -129,11 +129,11 @@ class Run:
         self.run_id = tw.new_run_id()
         self.srgb_profile = None
         self.exclude_names = []
-        self.parallel = not opt["ForceSequential"]
-        # The staging folder of this run: -StagingDir, or mode 8's own folder
+        self.parallel = not opt["force_sequential"]
+        # The staging folder of this run: --staging-dir, or mode 8's own folder
         # (_default_mode8_staging). Every step reads it HERE: the plan writing into one
         # folder and the move looking in another skipped every file without a word.
-        self.staging = opt["StagingDir"]
+        self.staging = opt["staging_dir"]
         self.counter = self.total = 0
         self.ok = self.skip = self.multi = self.warn = self.err = self.dry = 0
         self.stranded = self.restored = 0
@@ -211,7 +211,7 @@ def report_stranded(run, input_roots):
     log = run.log
     seen = set()
     for root in input_roots:
-        stranded = find_stranded_originals(root, opt["Mode"] != 0, TOOL_OUTPUT_NAMES,
+        stranded = find_stranded_originals(root, opt["mode"] != 0, TOOL_OUTPUT_NAMES,
                                            run.exclude_names)
         # One target claimed by two backups (an original and its timestamped namesake):
         # which one is the original cannot be told from the names, so neither is moved.
@@ -225,13 +225,13 @@ def report_stranded(run, input_roots):
             run.stranded += 1
             run.warn += 1
             log(f"STRANDED (original in OLD_TIFFs, nothing in its place) | {s['backup']}", "WARN")
-            if not opt["RestoreStranded"]:
+            if not opt["restore_stranded"]:
                 continue
             if len(by_target[s["target"].lower()]) > 1:
                 log(f"  not restored: more than one backup claims {s['target']} -- move the "
                     f"right one by hand", "WARN")
                 continue
-            if opt["DryRun"]:
+            if opt["dry_run"]:
                 log(f"  DRY: would restore to {s['target']}")
                 continue
             if os.path.isfile(tw.long_path(s["target"])):
@@ -248,7 +248,7 @@ def report_stranded(run, input_roots):
             except OSError as e:
                 run.error(f"  RESTORE FAILED | {s['backup']}: {e}")
     if run.stranded > 0:
-        if opt["RestoreStranded"] and not opt["DryRun"]:
+        if opt["restore_stranded"] and not opt["dry_run"]:
             log(f"STRANDED: {run.stranded} original(s) found in OLD_TIFFs with nothing in their "
                 f"place, {run.restored} restored", "WARN")
         else:
@@ -332,10 +332,10 @@ def discover(run, mode, root, unreadable):
              if tw.is_tiff_name(f.name)]
     if mode == 6:
         # the marker RELATIVE to the scan root, same contract as the folder exclusion
-        files = [f for f in files if tw.path_excluded(f.dir, root, [opt["ExportMarker"]])]
+        files = [f for f in files if tw.path_excluded(f.dir, root, [opt["export_marker"]])]
     elif mode == 7:
-        marker = opt["ExportMarker"].lower()
-        sub = opt["ExportTiffSubfolder"].lower()
+        marker = opt["export_marker"].lower()
+        sub = opt["export_tiff_subfolder"].lower()
 
         def below_marker(f):
             parts = tw.segments_below(f.dir, root)
@@ -361,7 +361,7 @@ class Job:
     final_dst: str
     name: str
     comp: str = ""                      # IFD0 compression when the plan already read it
-    safe_checked: bool = False          # the plan already ran the SafeMode page check
+    safe_checked: bool = False          # the plan already ran the safe_mode page check
     keep_dir: Optional[str] = None      # modes 0/9: where the original is archived
     src_length: int = 0                 # modes 0/9: the original as it was when planned
     src_mtime_ns: int = 0
@@ -402,7 +402,7 @@ def _write_with_thumbnail(run, src, write_dst, type_args, name):
     # The main image is always page 0; the thumbnail is appended after it. '[0]' makes
     # the input a filename SPEC, so '%' is escaped there and in every output path.
     main_page = f"{tw.magick_path_spec(src)}[0]"
-    thumb_ext = (opt["ThumbFormat"] or "jpg").lower()
+    thumb_ext = (opt["thumb_format"] or "jpg").lower()
     temp_tiff = tw.temp_file_path(".tif")
     thumb_temp = tw.temp_file_path("." + thumb_ext)
     try:
@@ -411,9 +411,9 @@ def _write_with_thumbnail(run, src, write_dst, type_args, name):
                           + [tw.magick_path_spec(temp_tiff)])
         except tw.ToolError as e:
             return ThumbWrite(error=f"ERROR (magick compress) | {name} | {tw.one_line(e.output)}")
-        thumb_cmd = ["-quiet", main_page] + tw.thumbnail_magick_args(run.srgb_profile, opt["ThumbSize"])
+        thumb_cmd = ["-quiet", main_page] + tw.thumbnail_magick_args(run.srgb_profile, opt["thumb_size"])
         if thumb_ext == "jpg":
-            thumb_cmd += ["-quality", str(opt["ThumbQuality"])]
+            thumb_cmd += ["-quality", str(opt["thumb_quality"])]
         thumb_cmd.append(f"{thumb_ext}:{tw.magick_path_spec(thumb_temp)}")
         try:
             tw.magick_run(thumb_cmd)
@@ -475,13 +475,13 @@ def _compress_job(run, t, load, own):
     """process_job's work. `own`: the files of this job that exist only while it works, in
     the order they were made (process_job removes them when this raises)."""
     opt = run.opt
-    mode = opt["Mode"]
+    mode = opt["mode"]
     src = t.src
     write_dst = t.write_dst
     final_dst = t.final_dst
     name = os.path.basename(src)
-    timeout = opt["MagickTimeout"]
-    generate_thumb = opt["GenerateThumbnail"]
+    timeout = opt["magick_timeout"]
+    generate_thumb = opt["generate_thumbnail"]
 
     def res(line, fd=False, **extra):
         return JobResult(result=line, name=name, src=src,
@@ -494,8 +494,8 @@ def _compress_job(run, t, load, own):
         except tw.ToolError:
             return res(f"ERROR (exiftool check) | {name} | cannot detect compression")
     # The SKIP decision runs for pre-probed files too.
-    if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
-        if opt["SkipCompressedWithThumb"]:
+    if tw.is_compressed(comp, opt["skip_lzw_as_compressed"]):
+        if opt["skip_compressed_with_thumb"]:
             # Only skip when a thumbnail is already embedded; otherwise reprocess
             if tw.tiff_has_thumbnail_page(src, timeout):
                 return res(f"SKIP (compressed+thumb) | {name}")
@@ -505,10 +505,10 @@ def _compress_job(run, t, load, own):
             note = " [no thumbnail added: pass --skip-compressed-with-thumb]" if generate_thumb else ""
             return res(f"SKIP ({comp}) | {name}{note}")
 
-    if os.path.exists(final_dst) and not opt["Overwrite"] and not tw.same_path(final_dst, src):
+    if os.path.exists(final_dst) and not opt["overwrite"] and not tw.same_path(final_dst, src):
         return res(f"SKIP (exists) | {name}")
 
-    if opt["SafeMode"] and not t.safe_checked:
+    if opt["safe_mode"] and not t.safe_checked:
         pc = tw.tiff_page_count(src, timeout)
         if not pc.ok:
             return res(tw.page_count_error_line(pc, name))
@@ -517,7 +517,7 @@ def _compress_job(run, t, load, own):
             return res(f"MULTI ({pc.count} pages - skipped) | {name}", multi=src)
         # only thumbnails: go on
 
-    # -GenerateThumbnail rebuilds the file from page 0 only, so every other source page is
+    # --generate-thumbnail rebuilds the file from page 0 only, so every other source page is
     # dropped. Refuse when that would lose a real page. Before the dry-run return on
     # purpose: a dry run reports the refusal instead of promising an OK.
     thumb_note = ""
@@ -528,7 +528,7 @@ def _compress_job(run, t, load, own):
         if ts.reason == "thumb-replaced":
             thumb_note = " [thumb replaced]"
 
-    if opt["DryRun"]:
+    if opt["dry_run"]:
         return res(f"DRY ({comp} -> ZIP){thumb_note} | {name}", fd=True)
 
     # magick turned a neutral RGB file into a 1-channel gray one and every pixel gate said
@@ -559,7 +559,7 @@ def _compress_job(run, t, load, own):
 
     # An in-place write would destroy the only copy of the image if magick died mid-write:
     # compress to a temp sibling, then replace the original with one same-volume rename,
-    # after the gates below. In every mode: mode 2 with -OutputDir on the input root and
+    # after the gates below. In every mode: mode 2 with --output-dir on the input root and
     # mode 5 for a file already inside ZIP/ resolve final_dst == src too.
     in_place_final = None
     if tw.same_path(write_dst, src):
@@ -568,7 +568,7 @@ def _compress_job(run, t, load, own):
         run.temp_files.add(write_dst)
     # A temp sibling or a staged file carries this run's id: it is this job's from here on,
     # also half written. So is an output written straight to a destination where nothing
-    # is yet. A destination that exists (-Overwrite) is the output of an EARLIER run until
+    # is yet. A destination that exists (--overwrite) is the output of an EARLIER run until
     # magick has written it: it becomes this job's only after the write, below.
     if not tw.same_path(write_dst, final_dst) or not os.path.exists(write_dst):
         own.append(write_dst)
@@ -635,7 +635,7 @@ def _compress_job(run, t, load, own):
         if not pc_dst.ok or (pc_src.ok and pc_dst.count < pc_src.count):
             # The output is this run's own file wherever it was written: a temp sibling,
             # the destination of a copy mode, or a staged file -- which until v3.0.0 stayed
-            # in -StagingDir, refused and never moved.
+            # in --staging-dir, refused and never moved.
             tw.remove_quietly(write_dst)
             detail = (f"output page count unreadable ({pc_dst.error})" if not pc_dst.ok
                       else f"{pc_src.count} -> {pc_dst.count} pages")
@@ -649,8 +649,8 @@ def _compress_job(run, t, load, own):
         return tw.pixel_identical(src, dst, timeout, load)
 
     # This output REPLACES the original when it is written in place (temp sibling) -- and
-    # also when it is staged (-StagingDir) for a destination that is the source itself
-    # (mode 2 with -OutputDir on the input root, mode 5 inside ZIP/). Modes 0/9 keep the
+    # also when it is staged (--staging-dir) for a destination that is the source itself
+    # (mode 2 with --output-dir on the input root, mode 5 inside ZIP/). Modes 0/9 keep the
     # original in OLD_TIFFs/ and mode 8 has its own gate below.
     replaces_source = bool(in_place_final) or (
         1 <= mode <= 7 and tw.same_path(final_dst, src))
@@ -687,7 +687,7 @@ def _compress_job(run, t, load, own):
         if ok8:
             ok8 = pixels_match(verify)
         if ok8:
-            can_delete = bool(opt["DeleteSource"])
+            can_delete = bool(opt["delete_source"])
         else:
             integrity_failed = True
     elif mode in (0, 9):
@@ -725,15 +725,15 @@ def effective_workers(run, paths, bytes_per_pixel):
     opt = run.opt
     if not run.parallel:
         return 1
-    workers = opt["Workers"]
-    if opt["CapWorkers"] > 0:
-        if workers > opt["CapWorkers"]:
-            run.log(f"Workers capped to {opt['CapWorkers']} (CapWorkers limit)")
-        workers = min(workers, opt["CapWorkers"])
-    if not opt["DryRun"]:
+    workers = opt["workers"]
+    if opt["cap_workers"] > 0:
+        if workers > opt["cap_workers"]:
+            run.log(f"Workers capped to {opt['cap_workers']} (--cap-workers)")
+        workers = min(workers, opt["cap_workers"])
+    if not opt["dry_run"]:
         # from the capped value: "reduced from 8 to 4" while 2 run said two wrong things
         workers = tw.memory_capped_workers(
-            workers, paths, bytes_per_pixel, opt["WorkerMemoryFraction"], run.log)
+            workers, paths, bytes_per_pixel, opt["worker_memory_fraction"], run.log)
     return max(1, workers)
 
 
@@ -762,7 +762,7 @@ def _flat_destination(run, plan, f, final_dst, used_names):
         return n.lower() in names or os.path.exists(p)
 
     if dest_name.lower() in names:
-        action = opt["DuplicateAction"]
+        action = opt["duplicate_action"]
         if action == "Skip":
             run.count(f"SKIP (duplicate filename in flat output) | {f.name}")
             return None
@@ -774,7 +774,7 @@ def _flat_destination(run, plan, f, final_dst, used_names):
             log(f"OVERWRITE (duplicate filename in flat output) | {f.name}", "INFO")
         else:
             dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
-    elif opt["DuplicateAction"] == "Numbered" and not opt["Overwrite"] \
+    elif opt["duplicate_action"] == "Numbered" and not opt["overwrite"] \
             and not tw.same_path(final_dst, f.path) and os.path.exists(final_dst):
         # not claimed in this run but already on disk
         dest_name, final_dst = tw.numbered_name(dest_dir, stem, ext, taken)
@@ -786,7 +786,7 @@ def _claimed_destination(run, plan, f, final_dst, claimed):
     """Modes other than 2: where `f` goes once a destination another source already
     claimed is renamed (the note for its result line goes into the plan); None when the
     file is skipped (reported here). `claimed`: destination -> the source that claimed it."""
-    overwrite = run.opt["Overwrite"]
+    overwrite = run.opt["overwrite"]
     # Two sources can claim one destination: modes 4-7 flatten different trees
     # into a shared folder, and photo.tif and photo.tiff both map onto photo.tif.
     key = final_dst.lower()
@@ -813,8 +813,8 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map):
     here). `pre_comp`: its compression from the batch probe ("" when unknown);
     `comp_map`: that probe's result, to tell "not probed" from "probed, nothing read"."""
     opt = run.opt
-    dry = opt["DryRun"]
-    overwrite = opt["Overwrite"]
+    dry = opt["dry_run"]
+    overwrite = opt["overwrite"]
     # Everything that can refuse the file is decided HERE, while planning, so a
     # skipped file is never queued.
     comp = pre_comp
@@ -826,27 +826,27 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map):
     if not comp:
         run.count(f"ERROR (exiftool check) | {f.name} | cannot detect compression")
         return None
-    if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
+    if tw.is_compressed(comp, opt["skip_lzw_as_compressed"]):
         # the same two lines as process_job gives the modes 1-8
-        if opt["SkipCompressedWithThumb"]:
+        if opt["skip_compressed_with_thumb"]:
             # only skip when a thumbnail is already embedded; otherwise reprocess
-            if tw.tiff_has_thumbnail_page(f.path, opt["MagickTimeout"]):
+            if tw.tiff_has_thumbnail_page(f.path, opt["magick_timeout"]):
                 run.count(f"SKIP (compressed+thumb) | {f.name}")
                 return None
         else:
             note = (" [no thumbnail added: pass --skip-compressed-with-thumb]"
-                    if opt["GenerateThumbnail"] else "")
+                    if opt["generate_thumbnail"] else "")
             run.count(f"SKIP ({comp}) | {f.name}{note}")
             return None
 
     safe_checked = False
-    if opt["SafeMode"]:
-        pc = tw.tiff_page_count(f.path, opt["MagickTimeout"])
+    if opt["safe_mode"]:
+        pc = tw.tiff_page_count(f.path, opt["magick_timeout"])
         if not pc.ok:
             run.count(tw.page_count_error_line(pc, f.name))
             return None
         if pc.count > 1 and not tw.tiff_has_only_subfile_pages(
-                f.path, pc.count, tw.THUMBNAIL_PAGE_TYPES, opt["MagickTimeout"]):
+                f.path, pc.count, tw.THUMBNAIL_PAGE_TYPES, opt["magick_timeout"]):
             run.multi_paths.append(f.path)
             run.count(f"MULTI ({pc.count} pages - skipped, original untouched) | {f.name}")
             return None
@@ -861,7 +861,7 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map):
     if not dry:
         # Nothing moves here: the original stays in place until its compressed copy
         # has been written, decoded and put next to it (complete_keep_original).
-        # Without -StagingDir the worker writes a temp sibling of final_dst, never
+        # Without --staging-dir the worker writes a temp sibling of final_dst, never
         # final_dst itself: for a .tif source that IS the original.
         if not run.staging:
             write_dst = tw.new_temp_sibling_path(final_dst, run.run_id)
@@ -908,8 +908,8 @@ def _plan_jobs(run, files, comp_map):
     not queued. Creates the output folders (not in a dry run)."""
     opt = run.opt
     staging = run.staging
-    mode = opt["Mode"]
-    dry = opt["DryRun"]
+    mode = opt["mode"]
+    dry = opt["dry_run"]
     plan = _Plan(jobs=[], collision_notes={})
     used_names = {}        # mode 2: names given out per output folder
     claimed = {}           # other modes: destination -> the source that claimed it
@@ -923,9 +923,9 @@ def _plan_jobs(run, files, comp_map):
             continue
 
         # Modes 1-7 write a COPY elsewhere. A folder name can still make the output resolve
-        # onto the source (ExportZipSubfolder "TIFF" in mode 7, ZipSuffix "_TIFF" in mode
+        # onto the source (export_zip_subfolder "TIFF" in mode 7, zip_suffix "_TIFF" in mode
         # 4), and the original was replaced with no OLD_TIFFs and no question. Modes
-        # 1/3/4/6/7 never mean that; modes 2 (-OutputDir on the input root) and 5 (a file
+        # 1/3/4/6/7 never mean that; modes 2 (--output-dir on the input root) and 5 (a file
         # already inside ZIP\) do when the user asked for it on the command line, but not
         # when the settings overlay set the name.
         if 1 <= mode <= 7 and tw.same_path(final_dst, f.path):
@@ -951,14 +951,14 @@ def _plan_jobs(run, files, comp_map):
         # A copy mode whose destination is ANOTHER source of this run: mode 2 with its output
         # in the input folder (a.tif in the root, a.tif in a subfolder), mode 5 with an
         # uncompressed TIFF living in ZIP\ (sub\x.tif -> ZIP\x.tif), mode 4 with a source in a
-        # folder that ends in the suffix. With -Overwrite that photo was replaced by the other
+        # folder that ends in the suffix. With --overwrite that photo was replaced by the other
         # one, the only copy of it gone, exit code 0 (mode 5 since v3.0.0 at least). Never:
         # the file is refused, and the source it would have replaced is compressed as usual.
-        # (Without -Overwrite nothing is written over it: the worker answers SKIP (exists), or
-        # -DuplicateAction gives another name.) A file whose destination is ITSELF is the
+        # (Without --overwrite nothing is written over it: the worker answers SKIP (exists), or
+        # --duplicate-action gives another name.) A file whose destination is ITSELF is the
         # in-place write, allowed. Modes 0/8/9 write in place and are not copy modes.
         replaces_another = final_dst.lower() in sources and not tw.same_path(final_dst, f.path)
-        if 1 <= mode <= 7 and opt["Overwrite"] and replaces_another:
+        if 1 <= mode <= 7 and opt["overwrite"] and replaces_another:
             hint = "; pass --output-dir" if mode == 2 else ""
             run.count(f"ERROR (mode {mode} would replace another source file of this run - refused"
                       f"{hint}) | {f.name} | {final_dst}")
@@ -1049,7 +1049,7 @@ def _move_staged(run, group_tasks, group_dir, outcome):
     _archive_originals). A staged file whose gate failed is dropped, never moved."""
     log = run.log
     staging = run.staging
-    dry = run.opt["DryRun"]
+    dry = run.opt["dry_run"]
     staging_map = outcome.staging_map
     error_srcs = outcome.error_srcs
     integrity_failed_dst = outcome.integrity_failed_dst
@@ -1092,7 +1092,7 @@ def _archive_originals(run, group_tasks, outcome):
     its original; its leftover is dropped."""
     log = run.log
     staging = run.staging
-    dry = run.opt["DryRun"]
+    dry = run.opt["dry_run"]
     staging_map = outcome.staging_map
     error_srcs = outcome.error_srcs
     integrity_failed_dst = outcome.integrity_failed_dst
@@ -1126,8 +1126,8 @@ def _delete_sources(run, outcome):
     """Mode 8: a .tiff source is deleted only after its .tif landed and decodes there."""
     opt = run.opt
     log = run.log
-    mode = opt["Mode"]
-    dry = opt["DryRun"]
+    mode = opt["mode"]
+    dry = opt["dry_run"]
     results = outcome.results
     if mode == 8 and not dry:
         deleted = 0
@@ -1143,7 +1143,7 @@ def _delete_sources(run, outcome):
                 continue
             # The pixel gate ran on the STAGED file: the file that authorises the delete
             # is checked again where it actually sits.
-            if not tw.zip_integrity(t.final_dst, opt["MagickTimeout"]):
+            if not tw.zip_integrity(t.final_dst, opt["magick_timeout"]):
                 run.error(f"ERROR (final ZIP failed integrity - source preserved) | {src_name}")
                 continue
             try:
@@ -1163,10 +1163,10 @@ def _input_roots(run):
     opt = run.opt
     log = run.log
     # Several input folders separated by ';' (the wizard's AutoFind), or --input-dir-file.
-    entries = opt["InputDir"].split(";")
-    if opt["InputDirFile"]:
+    entries = opt["input_dir"].split(";")
+    if opt["input_dir_file"]:
         try:
-            entries = tw.read_input_dir_file(opt["InputDirFile"])
+            entries = tw.read_input_dir_file(opt["input_dir_file"])
         except tw.UsageError as e:
             log(f"ERROR: {e}", "ERROR")
             return None
@@ -1267,33 +1267,33 @@ def _default_mode8_staging(run, input_roots):
 def run_modes(run, bound):
     opt = run.opt
     log = run.log
-    mode = opt["Mode"]
-    dry = opt["DryRun"]
-    overwrite = opt["Overwrite"]
+    mode = opt["mode"]
+    dry = opt["dry_run"]
+    overwrite = opt["overwrite"]
 
     resolved = _input_roots(run)
     if resolved is None:
         return 1
     input_roots, missing_roots = resolved
 
-    # A RELATIVE -OutputDir is resolved ONCE, against the current folder: re-based on each
+    # A RELATIVE --output-dir is resolved ONCE, against the current folder: re-based on each
     # input root it scattered one flat output across A\out and B\out.
-    if opt["OutputDir"] and not os.path.isabs(opt["OutputDir"]):
-        opt["OutputDir"] = tw.full_path(opt["OutputDir"])
+    if opt["output_dir"] and not os.path.isabs(opt["output_dir"]):
+        opt["output_dir"] = tw.full_path(opt["output_dir"])
 
     # a bad path in a ';' list still yields exit code 1
     run.err += len(missing_roots)
 
     log(f"Log: {log.path}")
     # Mode 8 resolves final_dst == src for a .tif source, so the compressed file is moved ON
-    # TOP of the original whether or not -DeleteSource was passed.
-    if mode == 8 and not opt["DeleteSource"]:
+    # TOP of the original whether or not --delete-source was passed.
+    if mode == 8 and not opt["delete_source"]:
         log("NOTE: mode 8 replaces each original in place (verified pixel-identical first). "
             "--delete-source additionally removes a .tiff source whose output is written as .tif.", "WARN")
-    log(f"Mode: {mode} | Workers: {opt['Workers']} | "
-        f"OutputDir: {opt['OutputDir'] or '(in-place/flat)'} | Staging: {run.staging or 'disabled'} | "
-        f"DryRun: {dry} | SafeMode: {opt['SafeMode']} | SkipLzw: {opt['SkipLzwAsCompressed']} | "
-        f"Overwrite: {overwrite} | DeleteSource: {'ON' if opt['DeleteSource'] else 'OFF'}")
+    log(f"Mode: {mode} | Workers: {opt['workers']} | "
+        f"OutputDir: {opt['output_dir'] or '(in-place/flat)'} | Staging: {run.staging or 'disabled'} | "
+        f"DryRun: {dry} | SafeMode: {opt['safe_mode']} | SkipLzw: {opt['skip_lzw_as_compressed']} | "
+        f"Overwrite: {overwrite} | DeleteSource: {'ON' if opt['delete_source'] else 'OFF'}")
 
     report_stranded(run, input_roots)
 
@@ -1410,24 +1410,24 @@ def run_main(argv, state):
     for w in overlay["warnings"]:
         tw.say(f"WARNING: settings overlay: {w}")
 
-    # There is no default mode: until v3.0.0 a run without -Mode was the "legacy" mode,
+    # There is no default mode: until v3.0.0 a run without --mode was the "legacy" mode,
     # which compressed the CURRENT folder in place. A forgotten --mode must never do that.
-    if "Mode" not in bound:
+    if "mode" not in bound:
         tw.say("ERROR: --mode is required: the modes are 0 to 9")
         tw.say("       Example: python compress_tiff_zip.py --mode 9 --input-dir <folder>")
         return tw.EXIT_USAGE
-    if not 0 <= opt["Mode"] <= 9:
-        tw.say(f"ERROR: --mode {opt['Mode']} does not exist: the modes are 0 to 9")
+    if not 0 <= opt["mode"] <= 9:
+        tw.say(f"ERROR: --mode {opt['mode']} does not exist: the modes are 0 to 9")
         return tw.EXIT_USAGE
-    if opt["InputDirFile"] and "InputDir" in bound:
+    if opt["input_dir_file"] and "input_dir" in bound:
         tw.say("ERROR: pass --input-dir or --input-dir-file, not both")
         return tw.EXIT_USAGE
-    if tw.output_dir_error(opt["OutputDir"]):
-        tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
+    if tw.output_dir_error(opt["output_dir"]):
+        tw.say(f"ERROR: {tw.output_dir_error(opt['output_dir'])}")
         return 1
 
     try:
-        exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])
+        exclude_names = tw.parse_exclude_folders(opt["exclude_folders"])
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
         return tw.EXIT_USAGE
@@ -1435,23 +1435,23 @@ def run_main(argv, state):
     # Only "thumbnail AFTER the main image" is supported: every page classifier of this
     # project treats page 0 as the main image, so a thumbnail-first file would read as
     # multi-page and be refused by every later run.
-    if opt["GenerateThumbnail"] and opt["ThumbPage"] < 1:
-        tw.say(f"ERROR: --thumb-page {opt['ThumbPage']} is not supported: the thumbnail must come AFTER the main image.")
-        tw.say("       Page 0 has to stay the full-resolution image -- SafeMode classifies a")
+    if opt["generate_thumbnail"] and opt["thumb_page"] < 1:
+        tw.say(f"ERROR: --thumb-page {opt['thumb_page']} is not supported: the thumbnail must come AFTER the main image.")
+        tw.say("       Page 0 has to stay the full-resolution image -- safe mode classifies a")
         tw.say("       thumbnail-first file as multi-page, so every later run would skip it.")
         tw.say("       Use --thumb-page 1 (the default).")
         return tw.EXIT_USAGE
 
-    srgb = tw.resolve_srgb_profile(opt["SrgbProfile"])
+    srgb = tw.resolve_srgb_profile(opt["srgb_profile"])
     # A profile path from the settings overlay that does not exist must never stop a run:
-    # warn and auto-detect. A -SrgbProfile typed on the command line still fails.
-    if opt["SrgbProfile"] and not srgb and "SrgbProfile" in overlay["applied"]:
-        tw.say(f"WARNING: settings overlay: SrgbProfile not found: {opt['SrgbProfile']}; "
+    # warn and auto-detect. A --srgb-profile typed on the command line still fails.
+    if opt["srgb_profile"] and not srgb and "srgb_profile" in overlay["applied"]:
+        tw.say(f"WARNING: settings overlay: srgb_profile not found: {opt['srgb_profile']}; "
                f"using the auto-detected profile")
-        opt["SrgbProfile"] = ""
+        opt["srgb_profile"] = ""
         srgb = tw.resolve_srgb_profile("")
-    if opt["SrgbProfile"] and not srgb:
-        tw.say(f"ERROR: --srgb-profile not found: {opt['SrgbProfile']}")
+    if opt["srgb_profile"] and not srgb:
+        tw.say(f"ERROR: --srgb-profile not found: {opt['srgb_profile']}")
         return 1
 
     missing = tw.missing_tools(["exiftool", "magick"])
@@ -1477,15 +1477,15 @@ def run_main(argv, state):
         log(overlay["info"])
     for w in overlay["warnings"]:
         log(f"settings overlay: {w}", "WARN")
-    if opt["GenerateThumbnail"] and not srgb:
+    if opt["generate_thumbnail"] and not srgb:
         log("WARN: no sRGB ICC profile found -- embedded thumbnails from wide-gamut sources "
             "(ProPhoto, AdobeRGB) will have shifted colours. Pass --srgb-profile <path.icc> to fix.", "WARN")
-    # -ThumbPage is accepted for compatibility but only page 1 is implemented.
-    if opt["GenerateThumbnail"] and opt["ThumbPage"] > 1:
-        log(f"WARN: --thumb-page {opt['ThumbPage']} is not implemented -- the thumbnail is always "
+    # --thumb-page is accepted for compatibility but only page 1 is implemented.
+    if opt["generate_thumbnail"] and opt["thumb_page"] > 1:
+        log(f"WARN: --thumb-page {opt['thumb_page']} is not implemented -- the thumbnail is always "
             f"written at page 1 (right after the main image). Ignoring the value.", "WARN")
 
-    note = " [FORCED via --force-sequential]" if opt["ForceSequential"] else ""
+    note = " [FORCED via --force-sequential]" if opt["force_sequential"] else ""
     tw.say(f"{tw.python_label()} ({'PARALLEL' if run.parallel else 'SEQUENTIAL'}){note}")
     return run_modes(run, bound)
 
@@ -1503,7 +1503,7 @@ def cleanup_after_stop(run):
             if not os.path.exists(mv["backup"]):
                 continue
             if mv["final_dst"] and os.path.exists(mv["final_dst"]) and \
-                    tw.zip_integrity(mv["final_dst"], run.opt["MagickTimeout"]):
+                    tw.zip_integrity(mv["final_dst"], run.opt["magick_timeout"]):
                 continue
             if mv["final_dst"]:
                 tw.remove_quietly(mv["final_dst"])

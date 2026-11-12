@@ -308,7 +308,7 @@ import tiff_workflow_common as tw  # noqa: E402
 # editing them (jxl-photo's overlay, same rules). Sections: compress_tiff_zip, copy_exif,
 # generate_thumbnails, convert_tiff. Only the names in a script's OVERLAY_SPECS table (or
 # _OVERLAY_SETTINGS below) are ever taken: nothing that
-# deletes, overwrites or is chosen per run (Mode, SafeMode, DeleteSource, ...). A value that
+# deletes, overwrites or is chosen per run (mode, safe_mode, delete_source, ...). A value that
 # does not pass its spec, an unreadable file, an unknown name: the script's own value stays and
 # a warning says so; it never stops a run. A `-Param` on the command line always beats the file.
 
@@ -508,7 +508,7 @@ class ToolConfig:
     last_workers: Optional[int] = None
     last_staging: Optional[str] = None
     last_mode: Optional[int] = None
-    # Per-machine default for -ExcludeFolders (';'-separated folder NAMES).
+    # Per-machine default for --exclude-folders (';'-separated folder NAMES).
     # Lives in the local config, never hardcoded: a fresh install defaults to
     # empty so nobody silently skips folders they did not choose to skip.
     last_exclude_folders: Optional[str] = None
@@ -861,7 +861,7 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
     # audit round 16: OLD_PADDED (the padded-compress backup folder) was missing here --
     # AutoFind walked into it and reprocessed the backups. _TOOL_OUTPUT_PARTS had it.
     # audit round 17: one list only -- the ZIP/_EXPORT names are read from the backend's
-    # own settings (a literal copy here let an edited -ZipSubfolderName be walked into).
+    # own settings (a literal copy here let an edited --zip-subfolder-name be walked into).
     exclude_names = _TOOL_OUTPUT_PARTS
     for path in root.rglob("*/"):
         if not path.is_dir():
@@ -889,7 +889,7 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
                 break
     # ONE order, the one the screen shows: folder name, then the full path for two folders
     # of one name (v3.1 phase 6, W-O13: the first run sorted by name, a preset re-sorted by
-    # path, and the -InputDir order of the two differed).
+    # path, and the --input-dir order of the two differed).
     return dict(sorted(results.items(), key=lambda x: (x[0].name.lower(), str(x[0]).lower())))
 
 
@@ -911,13 +911,13 @@ def truncate_path(p: Path, max_len: int = 50) -> str:
     return ellipsis + s[-keep:]
 
 
-#: The backends accept -Workers from 1 to 64; anything outside that range is refused
+#: The backends accept --workers from 1 to 64; anything outside that range is refused
 #: when the command line is read and the backend never starts.
 MAX_WORKERS = 64
 
 
 def clamp_workers(value: int, default: Optional[int] = None) -> int:
-    """Keep -Workers inside the range the backends accept. A value that is no number gives
+    """Keep --workers inside the range the backends accept. A value that is no number gives
     `default`, or the config's default_workers (ToolConfig) -- never a second literal."""
     try:
         n = int(value)
@@ -934,22 +934,22 @@ def clamp_workers(value: int, default: Optional[int] = None) -> int:
 #: when the script cannot be read or the parameter is missing -- the source of truth is
 #: the PARAMS table of the script itself (tests pin these to it).
 _BACKEND_PARAM_FALLBACKS = {
-    ("compress_tiff_zip.py", "SafeMode"): True,
-    ("compress_tiff_zip.py", "SkipLzwAsCompressed"): False,
-    ("compress_tiff_zip.py", "CapWorkers"): 0,
-    ("compress_tiff_zip.py", "DuplicateAction"): "Numbered",
-    ("compress_tiff_zip.py", "ThumbSize"): 256,
-    ("compress_tiff_zip.py", "ThumbQuality"): "85",
-    ("compress_tiff_zip.py", "ThumbFormat"): "jpg",
-    ("compress_tiff_zip.py", "ZipSuffix"): "_ZIP",
-    ("compress_tiff_zip.py", "ZipSubfolderName"): "ZIP",
-    ("compress_tiff_zip.py", "ExportZipSubfolder"): "ZIP",
-    ("compress_tiff_zip.py", "ExportMarker"): "_EXPORT",
-    ("copy_exif_to_tiff.py", "SafeMode"): True,
-    ("generate_thumbnails.py", "Size"): 256,
-    ("generate_thumbnails.py", "Quality"): "85",
-    ("generate_thumbnails.py", "Format"): "jpg",
-    ("generate_thumbnails.py", "Page"): "0",
+    ("compress_tiff_zip.py", "safe_mode"): True,
+    ("compress_tiff_zip.py", "skip_lzw_as_compressed"): False,
+    ("compress_tiff_zip.py", "cap_workers"): 0,
+    ("compress_tiff_zip.py", "duplicate_action"): "Numbered",
+    ("compress_tiff_zip.py", "thumb_size"): 256,
+    ("compress_tiff_zip.py", "thumb_quality"): "85",
+    ("compress_tiff_zip.py", "thumb_format"): "jpg",
+    ("compress_tiff_zip.py", "zip_suffix"): "_ZIP",
+    ("compress_tiff_zip.py", "zip_subfolder_name"): "ZIP",
+    ("compress_tiff_zip.py", "export_zip_subfolder"): "ZIP",
+    ("compress_tiff_zip.py", "export_marker"): "_EXPORT",
+    ("copy_exif_to_tiff.py", "safe_mode"): True,
+    ("generate_thumbnails.py", "size"): 256,
+    ("generate_thumbnails.py", "quality"): "85",
+    ("generate_thumbnails.py", "format"): "jpg",
+    ("generate_thumbnails.py", "page"): "0",
 }
 
 
@@ -992,9 +992,9 @@ def _backend_default(script_name: str, param: str):
 def _tool_output_names() -> set:
     """Lower-cased folder names that hold this toolkit's own output (discovery skips
     them below the scan root). The ZIP/_EXPORT names come from compress_tiff_zip.py's
-    own settings: a copy here let an edited -ZipSubfolderName be walked into."""
+    own settings: a copy here let an edited --zip-subfolder-name be walked into."""
     names = {"old_tiffs", "old_padded", "logs", "converted_zip"}
-    for p in ("ZipSubfolderName", "ExportZipSubfolder", "ExportMarker"):
+    for p in ("zip_subfolder_name", "export_zip_subfolder", "export_marker"):
         names.add(str(_backend_default("compress_tiff_zip.py", p)).lower())
     return names
 
@@ -1006,7 +1006,7 @@ _TOOL_OUTPUT_PARTS = _tool_output_names()
 
 def _refresh_tool_output_parts() -> None:
     """Recompute _TOOL_OUTPUT_PARTS (the Script settings menu calls it after a save: a changed
-    ZipSubfolderName / ExportMarker / ExportZipSubfolder must be skipped by discovery too)."""
+    zip_subfolder_name / export_marker / export_zip_subfolder must be skipped by discovery too)."""
     global _TOOL_OUTPUT_PARTS
     _TOOL_OUTPUT_PARTS = _tool_output_names()
 
@@ -1588,7 +1588,7 @@ def step_folder(cfg: "ConfigManager", prompt_text: str = "Input folder") -> Opti
         return None
     cfg.config.last_input_dir = os.path.abspath(str(p))
     # audit round 28: ABSOLUTE, never the text as typed. A relative answer ("photos") went
-    # into the preset journal as -InputDir photos, and --run-preset from another folder --
+    # into the preset journal as --input-dir photos, and --run-preset from another folder --
     # the Task Scheduler starts in System32 -- compressed a different folder. abspath, not
     # resolve(): a mapped or SUBST drive stays the letter the user typed.
     return Path(os.path.abspath(p))
@@ -1599,8 +1599,8 @@ def step_folder(cfg: "ConfigManager", prompt_text: str = "Input folder") -> Opti
 def _supports_cap_workers(workflow: Dict) -> bool:
     """True only for workflows whose backend is compress_tiff_zip.py.
 
-    The Copy EXIF backend has no -CapWorkers parameter (it takes -Workers directly),
-    so asking the question there produced an answer nothing could act on. -ExcludeFolders
+    The Copy EXIF backend has no --cap-workers parameter (it takes --workers directly),
+    so asking the question there produced an answer nothing could act on. --exclude-folders
     is the opposite call: it now exists on all three backends and is emitted for all of them.
     """
     return workflow.get("origin") in ("free_compress", "compress", "both")
@@ -1638,15 +1638,15 @@ def _read_staging(text: str, cfg: "ConfigManager") -> str:
 
 
 def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
-    """Workers, DryRun, Staging -- then the per-run Advanced options screen, here so that no
+    """Workers, Dry-run, Staging -- then the per-run Advanced options screen, here so that no
     workflow can ask the first without the second."""
     # The backend this run will actually launch: each one's PARAMS defaults are the
     # source of the prompt defaults below (audit round 17).
     _ref = "compress_tiff_zip.py" if _supports_cap_workers(workflow) else "copy_exif_to_tiff.py"
-    safe_default = _backend_default(_ref, "SafeMode")
-    skip_default = (_backend_default("compress_tiff_zip.py", "SkipLzwAsCompressed")
+    safe_default = _backend_default(_ref, "safe_mode")
+    skip_default = (_backend_default("compress_tiff_zip.py", "skip_lzw_as_compressed")
                     if _ref == "compress_tiff_zip.py" else False)
-    cap_default = _backend_default("compress_tiff_zip.py", "CapWorkers")
+    cap_default = _backend_default("compress_tiff_zip.py", "cap_workers")
     workflow["workers"] = _read_workers(
         _ask("Workers", str(cfg.config.last_workers or cfg.config.default_workers)), cfg)
     workflow["staging"] = _read_staging(
@@ -1655,12 +1655,12 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
 
     workflow["dry_run"] = _ask_yes_no("Dry-run mode?", False)
 
-    # SafeMode and SkipLzw options
+    # Safe mode and Skip LZW
     workflow["safe_mode"] = _ask_yes_no([("Safe mode?", "cyan"), " (skip multi-page TIFFs)"], safe_default)
     workflow["skip_lzw"] = _ask_yes_no([("Skip LZW as already compressed?", "cyan"),
                                         " (LZW files will be ignored)"], skip_default)
 
-    # -CapWorkers only exists on compress_tiff_zip.py; asking it for a Copy EXIF
+    # --cap-workers only exists on compress_tiff_zip.py; asking it for a Copy EXIF
     # workflow produced an answer that was silently dropped by the command builder.
     if _supports_cap_workers(workflow):
         cap_str = _ask([("Cap workers?", "cyan"), " (0 = no cap)"], str(cap_default), style="")
@@ -1680,7 +1680,7 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
         workflow["exclude_folders"] = excl
         cfg.config.last_exclude_folders = excl
 
-    # The backends work on several files at once; -ForceSequential turns that off.
+    # The backends work on several files at once; --force-sequential turns that off.
     if _ask_yes_no("Force sequential? (override parallelism)", False, "yellow"):
         workflow["force_sequential"] = True
 
@@ -1895,7 +1895,7 @@ def _step_replaces_sources(step: JournalStep) -> bool:
     compress mode 8 (which puts the ZIP over each .tif it read -- the manifest has always
     counted a mode-8 row as deleting). Read from what the backend binds (audit round 28:
     the refusal once looked for one exact spelling, and an edited preset got past it)."""
-    return bool(step.values.get("DeleteSource")) or step.values.get("Mode") == 8
+    return bool(step.values.get("delete_source")) or step.values.get("mode") == 8
 
 
 def _option_at(args: List[str], param: str) -> Optional[Tuple[int, int, str]]:
@@ -2015,128 +2015,128 @@ def _emit_all(backend: str, workflow: Dict, folders: Optional[List[Path]] = None
     return argv
 
 
-_ADV_MAGICK = Opt("MagickTimeout", "advanced.MagickTimeout", "notnone", "performance", "advanced",
+_ADV_MAGICK = Opt("magick_timeout", "advanced.magick_timeout", "notnone", "performance", "advanced",
                   "ImageMagick timeout (seconds)",
                   "How long one magick call may run before it is killed. Raise it for very "
                   "large scans on a slow disk.", value_spec="int:1:")
-_ADV_MEMORY = Opt("WorkerMemoryFraction", "advanced.WorkerMemoryFraction", "notnone",
+_ADV_MEMORY = Opt("worker_memory_fraction", "advanced.worker_memory_fraction", "notnone",
                   "performance", "advanced", "Memory share for the workers (0-2)",
                   "Caps the parallel workers so their ImageMagick processes fit in this share "
                   "of the free memory; 0 = no cap; above 1 trusts the estimate.", value_spec="float:0:2")
 
 REGISTRY: Dict[str, Tuple[Opt, ...]] = {
     "compress": (
-        Opt("Mode", "mode", "notnone", "run", "internal", "Mode", "The compress mode 0-9."),
-        Opt("InputDir", "folders", "input", "run", "asked", "Input folder(s)",
+        Opt("mode", "mode", "notnone", "run", "internal", "Mode", "The compress mode 0-9."),
+        Opt("input_dir", "folders", "input", "run", "asked", "Input folder(s)",
             "Where the TIFFs are; several folders are passed ';'-joined."),
-        # Mode 2 (flat) writes into the input root when -OutputDir is missing, which mixes
+        # Mode 2 (flat) writes into the input root when --output-dir is missing, which mixes
         # the flattened copies with the sources and overwrites root-level TIFFs in place.
-        Opt("OutputDir", "output_dir", "value", "files", "asked", "Output folder",
+        Opt("output_dir", "output_dir", "value", "files", "asked", "Output folder",
             "Where mode 2 (flat) and the export modes write."),
-        Opt("DuplicateAction", "duplicate_action", "value", "files", "asked", "Duplicate action",
+        Opt("duplicate_action", "duplicate_action", "value", "files", "asked", "Duplicate action",
             "What to do when the output file already exists: Skip, Numbered or Overwrite."),
-        Opt("StagingDir", "staging", "value", "performance", "asked", "Staging folder",
+        Opt("staging_dir", "staging", "value", "performance", "asked", "Staging folder",
             "A fast (SSD) folder the work is done in before the result lands."),
-        Opt("Workers", "workers", "workers", "performance", "asked", "Workers",
+        Opt("workers", "workers", "workers", "performance", "asked", "Workers",
             "Parallel workers (1-64)."),
-        Opt("CapWorkers", "cap_workers", "int_notnone", "performance", "asked", "Cap workers",
+        Opt("cap_workers", "cap_workers", "int_notnone", "performance", "asked", "Cap workers",
             "Clamp the parallel workers to this value; 0 = no cap."),
-        Opt("ExcludeFolders", "exclude_folders", "value", "files", "asked", "Exclude folders",
+        Opt("exclude_folders", "exclude_folders", "value", "files", "asked", "Exclude folders",
             "';'-separated folder NAMES to skip during discovery."),
-        Opt("DryRun", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
+        Opt("dry_run", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
         # Passed explicitly whenever the wizard decided it -- even when it equals the
         # default: omitting it let a backend whose own default was edited run with a
         # different value than the summary showed (audit round 17, the jxl-photo #467 class).
-        Opt("SafeMode", "safe_mode", "bool", "safety", "asked", "Safe mode",
+        Opt("safe_mode", "safe_mode", "bool", "safety", "asked", "Safe mode",
             "Skip multi-page TIFFs.", danger=True),
-        Opt("SkipLzwAsCompressed", "skip_lzw", "bool", "files", "asked", "Skip LZW",
+        Opt("skip_lzw_as_compressed", "skip_lzw", "bool", "files", "asked", "Skip LZW",
             "Treat LZW files as already compressed and ignore them."),
-        Opt("Overwrite", "overwrite", "flag", "safety", "internal", "Overwrite",
+        Opt("overwrite", "overwrite", "flag", "safety", "internal", "Overwrite",
             "Replace an existing output.", danger=True),
-        Opt("DeleteSource", "delete_source", "flag", "safety", "asked", "Delete source",
+        Opt("delete_source", "delete_source", "flag", "safety", "asked", "Delete source",
             "Mode 8: delete the source after the output is verified.", danger=True),
-        Opt("ForceParallel", "force_parallel", "true_flag", "performance", "internal",
+        Opt("force_parallel", "force_parallel", "true_flag", "performance", "internal",
             "Force parallel", "Kept for presets saved by v2.x; parallel is the default."),
-        Opt("ForceSequential", "force_sequential", "true_flag", "performance", "asked",
+        Opt("force_sequential", "force_sequential", "true_flag", "performance", "asked",
             "Force sequential", "One file at a time."),
-        Opt("GenerateThumbnail", "generate_thumbnail", "flag", "thumbnail", "asked",
+        Opt("generate_thumbnail", "generate_thumbnail", "flag", "thumbnail", "asked",
             "Generate thumbnail", "Embed an sRGB thumbnail page in the TIFF."),
-        Opt("ThumbSize", "thumb_size", "value", "thumbnail", "asked", "Thumbnail size",
+        Opt("thumb_size", "thumb_size", "value", "thumbnail", "asked", "Thumbnail size",
             "Pixels.", when=_thumb_on),
-        Opt("ThumbQuality", "thumb_quality", "value", "thumbnail", "asked", "Thumbnail quality",
+        Opt("thumb_quality", "thumb_quality", "value", "thumbnail", "asked", "Thumbnail quality",
             "JPEG quality 1-100.", when=_thumb_on),
-        Opt("ThumbFormat", "thumb_format", "value", "thumbnail", "asked", "Thumbnail format",
+        Opt("thumb_format", "thumb_format", "value", "thumbnail", "asked", "Thumbnail format",
             "jpg, png, ...", when=_thumb_on),
-        Opt("ThumbPage", "thumb_page", "value", "thumbnail", "internal", "Thumbnail page",
+        Opt("thumb_page", "thumb_page", "value", "thumbnail", "internal", "Thumbnail page",
             "Page position of the embedded thumbnail (>= 1).", when=_thumb_on),
-        Opt("SkipCompressedWithThumb", "skip_compressed_with_thumb", "flag", "thumbnail",
+        Opt("skip_compressed_with_thumb", "skip_compressed_with_thumb", "flag", "thumbnail",
             "asked", "Skip compressed with thumbnail",
             "Skip TIFFs that are already compressed AND have a thumbnail.", when=_thumb_on),
         # Advanced screen (per run, passed explicitly when edited):
         _ADV_MAGICK,
-        Opt("SrgbProfile", "advanced.SrgbProfile", "value", "thumbnail", "advanced",
+        Opt("srgb_profile", "advanced.srgb_profile", "value", "thumbnail", "advanced",
             "sRGB ICC profile", "ICC file used to convert wide-gamut sources; empty = "
             "auto-detect.", value_spec="path?"),
         _ADV_MEMORY,
         # Settings file only (decision 6: the discovery must know the folder names, so they
         # are not per-run):
-        Opt("ZipSuffix", "", "none", "files", "overlay", "ZIP suffix", "Mode 4 folder suffix."),
-        Opt("ZipSubfolderName", "", "none", "files", "overlay", "ZIP subfolder name",
+        Opt("zip_suffix", "", "none", "files", "overlay", "ZIP suffix", "Mode 4 folder suffix."),
+        Opt("zip_subfolder_name", "", "none", "files", "overlay", "ZIP subfolder name",
             "Modes 1/3 subfolder name."),
-        Opt("ExportMarker", "", "none", "files", "overlay", "Export marker",
+        Opt("export_marker", "", "none", "files", "overlay", "Export marker",
             "Modes 6/7 export folder marker."),
-        Opt("ExportZipSubfolder", "", "none", "files", "overlay", "Export ZIP subfolder",
+        Opt("export_zip_subfolder", "", "none", "files", "overlay", "Export ZIP subfolder",
             "Mode 6 subfolder inside the export folder."),
-        Opt("ExportTiffSubfolder", "", "none", "files", "overlay", "Export TIFF subfolder",
+        Opt("export_tiff_subfolder", "", "none", "files", "overlay", "Export TIFF subfolder",
             "Mode 7 TIFF subfolder inside the export folder."),
     ),
     "copy_exif": (
-        Opt("InputDir", "folders", "input", "run", "asked", "Input folder(s)",
+        Opt("input_dir", "folders", "input", "run", "asked", "Input folder(s)",
             "The Fuji session folders (';'-joined)."),
-        Opt("Workers", "workers", "workers", "performance", "asked", "Workers",
+        Opt("workers", "workers", "workers", "performance", "asked", "Workers",
             "Parallel workers (1-64)."),
-        Opt("StagingDir", "staging", "value", "performance", "asked", "Staging folder",
+        Opt("staging_dir", "staging", "value", "performance", "asked", "Staging folder",
             "A fast (SSD) folder the work is done in before the result lands."),
-        Opt("OutputDir", "output_dir", "value", "files", "asked", "Output folder",
+        Opt("output_dir", "output_dir", "value", "files", "asked", "Output folder",
             "Where the result is written."),
-        Opt("DryRun", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
-        Opt("SkipIfTiffHasExif", "skip_exif", "flag", "files", "internal", "Skip if TIFF has EXIF",
+        Opt("dry_run", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
+        Opt("skip_if_tiff_has_exif", "skip_exif", "flag", "files", "internal", "Skip if TIFF has EXIF",
             "Leave a TIFF that already carries EXIF alone."),
-        Opt("CompressZip", "compress_zip", "flag", "run", "internal", "Compress to ZIP",
+        Opt("compress_zip", "compress_zip", "flag", "run", "internal", "Compress to ZIP",
             "Compress the TIFF in the same pass."),
-        Opt("SafeMode", "safe_mode", "bool", "safety", "asked", "Safe mode",
+        Opt("safe_mode", "safe_mode", "bool", "safety", "asked", "Safe mode",
             "Skip multi-page TIFFs.", danger=True),
-        # -SkipLzwAsCompressed is a switch in the Copy EXIF backend (a bool in
+        # --skip-lzw-as-compressed is a switch in the Copy EXIF backend (a bool in
         # compress_tiff_zip.py): its default is OFF by type, so only "yes" is passed.
-        Opt("SkipLzwAsCompressed", "skip_lzw", "true_bool", "files", "asked", "Skip LZW",
+        Opt("skip_lzw_as_compressed", "skip_lzw", "true_bool", "files", "asked", "Skip LZW",
             "Treat LZW files as already compressed and ignore them."),
-        Opt("Overwrite", "overwrite", "flag", "safety", "internal", "Overwrite",
+        Opt("overwrite", "overwrite", "flag", "safety", "internal", "Overwrite",
             "Replace an existing output.", danger=True),
         # step_basic_params asks this for every workflow. It used to be dropped here, so in
         # workflow 4 the exclusion applied to the Compress step and silently not to the
         # Copy EXIF step of the same run.
-        Opt("ExcludeFolders", "exclude_folders", "value", "files", "asked", "Exclude folders",
+        Opt("exclude_folders", "exclude_folders", "value", "files", "asked", "Exclude folders",
             "';'-separated folder NAMES to skip during discovery."),
         _ADV_MAGICK,
         _ADV_MEMORY,
-        Opt("FailOnWarn", "advanced.FailOnWarn", "flag", "run", "advanced", "Fail on warning",
+        Opt("fail_on_warn", "advanced.fail_on_warn", "flag", "run", "advanced", "Fail on warning",
             "Exit 1 when a file only produced a warning or was missing its JPEG.",
             value_spec="bool"),
     ),
     "thumbnails": (
         # Registered for the coverage test only: run_generate_thumbnails builds its two
         # command lines inline (not through the workflow dict).
-        Opt("InputDir", "", "none", "run", "asked", "Input folder", "Where the TIFFs are."),
-        Opt("Size", "", "none", "thumbnail", "asked", "Size", "Pixels."),
-        Opt("Quality", "", "none", "thumbnail", "asked", "Quality", "JPEG quality 1-100."),
-        Opt("Format", "", "none", "thumbnail", "asked", "Format", "jpg, png, ..."),
-        Opt("Page", "", "none", "thumbnail", "asked", "Page", "0 = first, or all."),
-        Opt("Workers", "", "none", "performance", "asked", "Workers", "Parallel workers."),
-        Opt("OutputDir", "", "none", "files", "asked", "Output folder",
+        Opt("input_dir", "", "none", "run", "asked", "Input folder", "Where the TIFFs are."),
+        Opt("size", "", "none", "thumbnail", "asked", "Size", "Pixels."),
+        Opt("quality", "", "none", "thumbnail", "asked", "Quality", "JPEG quality 1-100."),
+        Opt("format", "", "none", "thumbnail", "asked", "Format", "jpg, png, ..."),
+        Opt("page", "", "none", "thumbnail", "asked", "Page", "0 = first, or all."),
+        Opt("workers", "", "none", "performance", "asked", "Workers", "Parallel workers."),
+        Opt("output_dir", "", "none", "files", "asked", "Output folder",
             "Empty = next to each TIFF."),
-        Opt("ExcludeFolders", "", "none", "files", "asked", "Exclude folders",
+        Opt("exclude_folders", "", "none", "files", "asked", "Exclude folders",
             "';'-separated folder NAMES to skip."),
-        Opt("SrgbProfile", "", "none", "thumbnail", "overlay", "sRGB ICC profile",
+        Opt("srgb_profile", "", "none", "thumbnail", "overlay", "sRGB ICC profile",
             "ICC file used to convert wide-gamut sources; empty = auto-detect."),
     ),
 }
@@ -2144,19 +2144,19 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
 #: Parameters the wizard deliberately never offers: {backend: {param: why}}.
 NOT_OFFERED: Dict[str, Dict[str, str]] = {
     "compress": {
-        "InputDirFile": "run_subprocess spills -InputDir here",
-        "RestoreStranded": "own flow (_offer_restore_stranded and menu option 5)",
+        "input_dir_file": "run_subprocess spills -InputDir here",
+        "restore_stranded": "own flow (_offer_restore_stranded and menu option 5)",
     },
     "copy_exif": {
-        "InputDirFile": "run_subprocess spills -InputDir here",
-        "AutoFind": "the wizard runs its own AutoFind",
-        "FolderPattern": "the wizard runs its own AutoFind",
-        "IccPolicy": "no documented values; the backend only captures it",
+        "input_dir_file": "run_subprocess spills -InputDir here",
+        "auto_find": "the wizard runs its own AutoFind",
+        "folder_pattern": "the wizard runs its own AutoFind",
+        "icc_policy": "no documented values; the backend only captures it",
     },
     "thumbnails": {
-        "Remove": "own flow, the remove branch of run_generate_thumbnails",
-        "Recursive": "asked inline by run_generate_thumbnails, not through the workflow dict",
-        "DryRun": "asked inline by run_generate_thumbnails, not through the workflow dict",
+        "remove": "own flow, the remove branch of run_generate_thumbnails",
+        "recursive": "asked inline by run_generate_thumbnails, not through the workflow dict",
+        "dry_run": "asked inline by run_generate_thumbnails, not through the workflow dict",
     },
 }
 
@@ -2199,7 +2199,7 @@ def _decode_console_line(raw: bytes) -> str:
 
 
 # CreateProcess fails past 32767 characters. A Fuji preset redoes the AutoFind on
-# every run, so its ';'-joined -InputDir grows with every session (round 22).
+# every run, so its ';'-joined --input-dir grows with every session (round 22).
 _CMDLINE_SPILL_CHARS = 24000
 _INPUTDIR_FILE_BACKENDS = ("compress_tiff_zip.py", "copy_exif_to_tiff.py")
 
@@ -2216,7 +2216,7 @@ def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
     if len(cmd) < 2 or Path(cmd[1]).name not in _INPUTDIR_FILE_BACKENDS:
         return cmd, None
     args = cmd[2:]
-    at = _option_at(args, "InputDir")
+    at = _option_at(args, "input_dir")
     if at is None:
         return cmd, None
     i, words, value = at
@@ -2224,7 +2224,7 @@ def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
     fd, list_path = tempfile.mkstemp(prefix="tw_inputdirs_", suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(folders) + "\n")
-    new_args = args[:i] + tw.cli_value("InputDirFile", list_path) + args[i + words:]
+    new_args = args[:i] + tw.cli_value("input_dir_file", list_path) + args[i + words:]
     return cmd[:2] + new_args, list_path
 
 
@@ -2235,7 +2235,7 @@ _STRANDED_LEFT_RE = re.compile(r"STRANDED: (\d+) original\(s\) still in OLD_TIFF
 
 def _with_restore_stranded(cmd: List[str]) -> List[str]:
     """`cmd` plus --restore-stranded."""
-    return list(cmd) + [tw.cli_switch("RestoreStranded", True)]
+    return list(cmd) + [tw.cli_switch("restore_stranded", True)]
 
 
 def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[int]:
@@ -2246,12 +2246,12 @@ def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[in
     run: it says what to do instead."""
     if stranded <= 0 or not any("compress_tiff_zip" in str(c) for c in cmd):
         return None
-    if tw.cli_switch("RestoreStranded", True) in [str(c) for c in cmd]:
+    if tw.cli_switch("restore_stranded", True) in [str(c) for c in cmd]:
         return None
     msg = (f"{stranded} original(s) are in OLD_TIFFs with nothing in their place -- left by an "
            f"interrupted run. They are the only copy of those images.")
     interactive = stdin is None and sys.stdin is not None and sys.stdin.isatty()
-    dry = tw.cli_switch("DryRun", True) in [str(c) for c in cmd]
+    dry = tw.cli_switch("dry_run", True) in [str(c) for c in cmd]
     if not interactive or dry:
         hint = (" Run the same compress again with --restore-stranded (or answer yes to this "
                 "question in an interactive, non-dry run) to put them back.")
@@ -2439,7 +2439,7 @@ def _stranded_backups(root) -> list:
 def _move_compressed_twin_aside(restored: Path) -> int:
     """After Restore put an x.tiff original back: the compressed x.tif that modes 0/9 wrote
     from it sits next to it (a .tiff source is written as .tif). It is moved into the ZIP
-    subfolder of that folder (compress's ZipSubfolderName -- where mode 1 puts compressed
+    subfolder of that folder (compress's zip_subfolder_name -- where mode 1 puts compressed
     copies; every tool skips it as output, none takes it for a backup), never deleted, never
     onto a file there (a taken name is numbered). Returns 1 when moved (v3.1 phase 6,
     W-O17, the owner's choice: the folder used to keep both, without a word). The original
@@ -2447,7 +2447,7 @@ def _move_compressed_twin_aside(restored: Path) -> int:
     twin = restored.with_suffix(".tif")
     if not twin.is_file() or tw.same_path(str(twin), str(restored)):
         return 0
-    zip_dir = restored.parent / str(_backend_default("compress_tiff_zip.py", "ZipSubfolderName"))
+    zip_dir = restored.parent / str(_backend_default("compress_tiff_zip.py", "zip_subfolder_name"))
     target = zip_dir / twin.name
     if target.exists():
         _name, cand = tw.numbered_name(str(zip_dir), twin.stem, twin.suffix,
@@ -2916,7 +2916,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     else:
         strict_ok, strict_detail = False, f"PAGE_COUNT_MISMATCH {old_pages} vs {new_pages}"
 
-    # One difference is EXPECTED and safe: -GenerateThumbnail adds a thumbnail page, or
+    # One difference is EXPECTED and safe: --generate-thumbnail adds a thumbnail page, or
     # replaces the one the source had with a freshly generated one at another size. Judged
     # strictly, every file in a folder compressed with thumbnails came back MISMATCH
     # ("PAGE_COUNT_MISMATCH 1 vs 2", "PIXEL_DIFF page 1"), so the backups could never be
@@ -3573,7 +3573,7 @@ def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
     toolkit writes is tagged (Set-TiffThumbMarkers), so the strict rule still covers the
     case it exists for.
 
-    MASK and PAGE are deliberately NOT accepted, exactly like the backends' SafeMode
+    MASK and PAGE are deliberately NOT accepted, exactly like the backends' safe_mode
     calls: a full-size IR channel is a real page, not a preview.
     """
     try:
@@ -3931,7 +3931,7 @@ def _process_single_padded(tiff_path, staging) -> PaddedResult:
 
         # magick drops the per-page SubfileType markers on rewrite, so a Capture One
         # thumbnail came back stamped PAGE and stopped being recognised as a thumbnail by
-        # SafeMode and -SkipCompressedWithThumb on later runs. The
+        # safe_mode and --skip-compressed-with-thumb on later runs. The
         # backends all restore them; this path was the only one that did not.
         # The restore runs AFTER the integrity gate below: an unreadable page count must
         # surface as page_count_mismatch from the gate, not as a restore failure.
@@ -4503,7 +4503,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     orphans, mismatches = _purge_verify(items, cfg)
     # A file that does not verify is KEPT -- and only that file. One mismatch used to abort
     # the purge for the entire tree, so a single bad conversion (or, before the thumbnail
-    # rule above, any file compressed with -GenerateThumbnail) left the user with no way to
+    # rule above, any file compressed with --generate-thumbnail) left the user with no way to
     # clean up the backups except deleting them by hand, which is exactly what this gate
     # exists to prevent.
     kept = {(k[0], k[1]) for k in orphans + mismatches}
@@ -4750,7 +4750,7 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
         # Excel in pt-BR/de-DE locales saves "CSV" delimited by ';'. Parsed with ','
         # each line collapses into one cell: the header check fails and the whole
         # line becomes a "source" path containing ';' -- which the backend
-        # then SPLITS into two roots (it splits -InputDir on ';'). Detect and refuse.
+        # then SPLITS into two roots (it splits --input-dir on ';'). Detect and refuse.
         if first_row is not None and len(first_row) == 1 and ';' in first_row[0]:
             _error(
                 f"Manifest appears to be ';'-delimited: {manifest_path}\n"
@@ -4796,7 +4796,7 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
                         _error(f"Mode out of range (0-9) in manifest: {entry_mode} (row: {source})")
                         return None
                 # ';' is legal in Windows folder names, but the backend splits
-                # -InputDir on ';', so one entry would arrive as two roots --
+                # --input-dir on ';', so one entry would arrive as two roots --
                 # and in mode 8 the wrong root gets its sources deleted.
                 if ';' in source or ';' in dest:
                     _error(
@@ -4948,8 +4948,8 @@ def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -
     if mode not in (2, 4, 5):
         return None
     opt = {name: str(_backend_default("compress_tiff_zip.py", name))
-           for name in ("ZipSuffix", "ZipSubfolderName")}     # all that modes 2/4/5 read
-    opt["OutputDir"] = dest_cell or ""
+           for name in ("zip_suffix", "zip_subfolder_name")}     # all that modes 2/4/5 read
+    opt["output_dir"] = dest_cell or ""
     found = tw.FoundFile(str(f), f.name, str(f.parent), 0, 0)
     out = tw.resolve_output(found, mode, str(src_root), opt)
     return Path(os.path.dirname(out)) if out else None
@@ -4960,7 +4960,7 @@ def manifest_output_collisions(entries: List[Tuple], exclude_names=()) -> List[T
     same stem -- across different manifest entries OR within a single entry
     (mode 2 flattens recursively, so <src>/a/foto.tif and <src>/b/foto.tif
     share one destination). Within one entry the backend would apply
-    DuplicateAction, but with Skip/Overwrite that means a silently dropped
+    duplicate_action, but with Skip/Overwrite that means a silently dropped
     or overwritten image, so flagging is deliberate.
 
     Only modes 2/4/5 are scanned -- the others write inside each Source's
@@ -4968,7 +4968,7 @@ def manifest_output_collisions(entries: List[Tuple], exclude_names=()) -> List[T
     manifest_source_overlaps).
 
     The walk skips what the backend never reads: the tool folders (OLD_TIFFs, ZIP, ...)
-    and the run's -ExcludeFolders names, at any level below the Source (v3.1 phase 6, W-O3:
+    and the run's --exclude-folders names, at any level below the Source (v3.1 phase 6, W-O3:
     a.tif beside OLD_TIFFs\\a.tif aborted a mode 2 run as a collision).
 
     Returns a list of (file_a, file_b, dest_folder) tuples."""
@@ -5021,8 +5021,8 @@ def build_manifest_entry_cmd(source: str, dest_path: str, mode: int,
     """Build the compress command for a single manifest entry, reusing
     build_compress_command with a per-entry workflow dict.
 
-    The Destination column is only honored by mode 2 (-OutputDir); every
-    other mode computes its own output location. -DeleteSource goes only to
+    The Destination column is only honored by mode 2 (--output-dir); every
+    other mode computes its own output location. --delete-source goes only to
     mode-8 entries, and never in a dry run."""
     entry_wf = dict(workflow)
     entry_wf["mode"] = mode
@@ -5100,7 +5100,7 @@ def _manifest_ready(entries: List[Tuple], workflow: Dict, unattended: bool, dry_
 
     # Mode 8 deletes sources. Gate the whole run with the same confirmation
     # the wizard enforces, ONCE, before anything runs. Without it,
-    # build_manifest_entry_cmd never emits -DeleteSource.
+    # build_manifest_entry_cmd never emits --delete-source.
     if not dry_run and any(m == 8 for _, _, m in entries):
         if unattended:
             # Defensive only: _run_journal refuses a deleting preset before it
@@ -5259,7 +5259,7 @@ def run_manifest_workflow(cfg) -> bool:
 
     # Collision policy for mode-2 (flattened) entries, same as the wizard.
     if any(m == 2 for _, _, m in entries):
-        dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
+        dup_default = _backend_default("compress_tiff_zip.py", "duplicate_action")
         workflow["duplicate_action"] = _ask("Duplicate filenames (mode 2)", dup_default,
                                             choices=["Numbered", "Skip", "Overwrite"])
 
@@ -5334,7 +5334,7 @@ def _ask_flat_output(folder: Path, workflow: Dict) -> bool:
         workflow["output_dir"] = out_dir
 
     # Collision policy for the flattened output
-    dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
+    dup_default = _backend_default("compress_tiff_zip.py", "duplicate_action")
     workflow["duplicate_action"] = _ask("Duplicate filenames", dup_default,
                                         choices=["Numbered", "Skip", "Overwrite"])
     return True
@@ -5344,9 +5344,9 @@ def _ask_thumbnails(workflow: Dict) -> None:
     """The embedded-thumbnail questions. The defaults come from the backend's own PARAMS
     table; "Configure? No" adds no thumb_* keys at all, so the backend runs on its own
     settings (audit round 17 -- the wizard used to force 256/"85"/jpg always)."""
-    thumb_size_default = _backend_default("compress_tiff_zip.py", "ThumbSize")
-    thumb_quality_default = _backend_default("compress_tiff_zip.py", "ThumbQuality")
-    thumb_format_default = _backend_default("compress_tiff_zip.py", "ThumbFormat")
+    thumb_size_default = _backend_default("compress_tiff_zip.py", "thumb_size")
+    thumb_quality_default = _backend_default("compress_tiff_zip.py", "thumb_quality")
+    thumb_format_default = _backend_default("compress_tiff_zip.py", "thumb_format")
     if not _ask_yes_no("Generate embedded thumbnails?", False, "cyan"):
         return
     workflow["generate_thumbnail"] = True
@@ -5354,7 +5354,7 @@ def _ask_thumbnails(workflow: Dict) -> None:
         size_str = _ask("Thumbnail size (px)", str(thumb_size_default))
         workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
         workflow["thumb_quality"] = _ask("JPEG quality", thumb_quality_default)
-        # audit round 16: -ThumbFormat only ever gets one of the formats the backend takes
+        # audit round 16: --thumb-format only ever gets one of the formats the backend takes
         workflow["thumb_format"] = _ask("Format", thumb_format_default, choices=["jpg", "png", "tif"])
     # Option to skip compressed TIFFs with existing thumbnails
     workflow["skip_compressed_with_thumb"] = _ask_yes_no(
@@ -5562,7 +5562,7 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     if not p.is_dir():
         _error(f"Directory does not exist: {input_dir}")
         return False
-    # The backend splits -InputDir on ';' like the other three, so a path containing one
+    # The backend splits --input-dir on ';' like the other three, so a path containing one
     # would silently become two bogus roots. step_folder rejects it for every other workflow.
     if ";" in str(p):
         _error(f"Folder path contains ';' which is not supported: {p}")
@@ -5606,25 +5606,25 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
         if out_dir is None:
             return False
         recursive, dry_run = _ask_recursive_and_dry()
-        cmd = _backend_command("generate_thumbnails.py", tw.cli_value("InputDir", input_dir)
-                               + [tw.cli_switch("Remove", True)])
+        cmd = _backend_command("generate_thumbnails.py", tw.cli_value("input_dir", input_dir)
+                               + [tw.cli_switch("remove", True)])
         if out_dir:
-            cmd += tw.cli_value("OutputDir", out_dir)
+            cmd += tw.cli_value("output_dir", out_dir)
         if recursive:
-            cmd += [tw.cli_switch("Recursive", True)]
+            cmd += [tw.cli_switch("recursive", True)]
         if dry_run:
-            cmd += [tw.cli_switch("DryRun", True)]
+            cmd += [tw.cli_switch("dry_run", True)]
         _save_last_run(cfg, "thumbnails_remove", f"Thumbnails: REMOVE under {truncate_path(p, 60)}",
-                       [[a for a in cmd if a != tw.cli_switch("DryRun", True)]])
+                       [[a for a in cmd if a != tw.cli_switch("dry_run", True)]])
         _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
         return run_subprocess(cmd) == 0
 
     # The four prompt defaults come from generate_thumbnails.py's own PARAMS table
     # (audit round 17): a literal here silently overrode an edited backend setting.
-    size_default = _backend_default("generate_thumbnails.py", "Size")
-    quality_default = _backend_default("generate_thumbnails.py", "Quality")
-    format_default = _backend_default("generate_thumbnails.py", "Format")
-    page_default = _backend_default("generate_thumbnails.py", "Page")
+    size_default = _backend_default("generate_thumbnails.py", "size")
+    quality_default = _backend_default("generate_thumbnails.py", "quality")
+    format_default = _backend_default("generate_thumbnails.py", "format")
+    page_default = _backend_default("generate_thumbnails.py", "page")
 
     # Thumbnail size (backend accepts 32-4096)
     size_str = _ask("Thumbnail size (px, 32-4096)", str(size_default))
@@ -5653,24 +5653,24 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     exclude_folders = _ask_exclude_folders() if recursive else ""
 
     cmd = _backend_command("generate_thumbnails.py",
-                           tw.cli_value("InputDir", input_dir)
-                           + tw.cli_value("Size", size)
-                           + tw.cli_value("Quality", quality_str)
-                           + tw.cli_value("Format", fmt)
-                           + tw.cli_value("Page", page)
-                           + tw.cli_value("Workers", clamp_workers(cfg.config.last_workers
+                           tw.cli_value("input_dir", input_dir)
+                           + tw.cli_value("size", size)
+                           + tw.cli_value("quality", quality_str)
+                           + tw.cli_value("format", fmt)
+                           + tw.cli_value("page", page)
+                           + tw.cli_value("workers", clamp_workers(cfg.config.last_workers
                                                                    or cfg.config.default_workers)))
     if out_dir:
-        cmd += tw.cli_value("OutputDir", out_dir)
+        cmd += tw.cli_value("output_dir", out_dir)
     if exclude_folders:
-        cmd += tw.cli_value("ExcludeFolders", exclude_folders)
+        cmd += tw.cli_value("exclude_folders", exclude_folders)
     if recursive:
-        cmd += [tw.cli_switch("Recursive", True)]
+        cmd += [tw.cli_switch("recursive", True)]
     if dry_run:
-        cmd += [tw.cli_switch("DryRun", True)]
+        cmd += [tw.cli_switch("dry_run", True)]
 
     _save_last_run(cfg, "thumbnails", f"Thumbnails: {size}px {fmt} under {truncate_path(p, 60)}",
-                   [[a for a in cmd if a != tw.cli_switch("DryRun", True)]])
+                   [[a for a in cmd if a != tw.cli_switch("dry_run", True)]])
 
     _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
     return run_subprocess(cmd) == 0
@@ -5767,10 +5767,10 @@ def _redo_autofind(entry: Dict, steps: List[JournalStep]) -> Optional[int]:
         return 0
     folder_str = ";".join(str(f) for f in folders)
     for step in steps:
-        at = _option_at(step.args, "InputDir")
+        at = _option_at(step.args, "input_dir")
         if at is not None:
             i, words, _old = at
-            step.args[i:i + words] = tw.cli_value("InputDir", folder_str)
+            step.args[i:i + words] = tw.cli_value("input_dir", folder_str)
     _say(f"AutoFind: {len(folders)} session(s) under {root}")
     return None
 
@@ -5807,8 +5807,8 @@ def _run_command_journal(entry: Dict, title: str, unattended: bool, dry_run: boo
     deletes = (not dry_run) and any(_step_replaces_sources(s) for s in steps)
     if dry_run:
         for s in steps:
-            if not s.values.get("DryRun"):
-                s.args.append(tw.cli_switch("DryRun", True))
+            if not s.values.get("dry_run"):
+                s.args.append(tw.cli_switch("dry_run", True))
     if unattended and deletes:
         _say("Refused: this preset deletes or replaces source files (--delete-source or "
              "mode 8). That needs a confirmation, which cannot be given unattended -- run "
@@ -6010,7 +6010,7 @@ def script_settings_menu(cfg) -> None:
     """Main menu 6: the scripts' own settings (folder names, timeouts, thumbnail defaults, ...)
     changed in `.tiff_workflow_settings.json` instead of the .py files. Every script
     checks each value again when it starts and never takes a safety or per-run setting from
-    the file (Mode, SafeMode, Overwrite, DeleteSource, Workers, ...)."""
+    the file (mode, safe_mode, overwrite, delete_source, workers, ...)."""
     env = os.environ.get(_SETTINGS_OVERLAY_ENV)
     if env is not None and not env.strip():
         _say(f"The settings overlay is OFF: {_SETTINGS_OVERLAY_ENV} is set and empty. "

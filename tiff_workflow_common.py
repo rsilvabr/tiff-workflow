@@ -62,7 +62,7 @@ LEFTOVER_NAME_RE = re.compile(
 
 TIFF_EXT_RE = re.compile(r"^\.(tif|tiff)$", re.I)
 
-# The page markers that make an extra page a thumbnail, for SafeMode and -GenerateThumbnail.
+# The page markers that make an extra page a thumbnail, for safe_mode and --generate-thumbnail.
 # MASK and PAGE are NOT in it: they are real pages (a scanner's IR channel, a second photo),
 # and with the default list of tiff_has_only_subfile_pages, which has them, an RGB+IR scan
 # was accepted and rewritten (audit round 9).
@@ -131,54 +131,64 @@ _BOOL_WORDS = {"$true": True, "true": True, "1": True,
 _PARAM_TOKEN = re.compile(r"-([A-Za-z][A-Za-z0-9]*)(?::(.*))?", re.S)
 
 
+def _legacy_name(name):
+    """The name a parameter had on the command line of v3.0.0 and the .ps1 backends:
+    thumb_size -> ThumbSize (every name of then is its words capitalised, no acronym)."""
+    return "".join(w.capitalize() for w in name.split("_"))
+
+
 def _resolve_param(word, params):
     low = word.lower()
     for p in params:
-        if p.name.lower() == low:
+        if _legacy_name(p.name).lower() == low:
             return p
-    hits = [p for p in params if p.name.lower().startswith(low)]
+    hits = [p for p in params if _legacy_name(p.name).lower().startswith(low)]
     if len(hits) == 1:
         return hits[0]
     if not hits:
         raise UsageError(f"unknown parameter -{word}")
-    raise UsageError(f"-{word} is ambiguous: " + ", ".join("-" + p.name for p in hits))
+    raise UsageError(f"-{word} is ambiguous: "
+                     + ", ".join("-" + _legacy_name(p.name) for p in hits))
 
 
 def _convert_param(p, raw):
+    """The value `raw` gives `p`: checked against its kind, range, choices (matched without
+    case) and pattern. The UsageError says what is wrong without naming the option -- each
+    reader names it its own way ("argument --workers: must be from 1 to 64, got 65")."""
     if p.kind == "int":
         if not re.fullmatch(r"\s*[+-]?\d+\s*", raw):
-            raise UsageError(f"-{p.name} needs a whole number, got '{raw}'")
+            raise UsageError(f"needs a whole number, got '{raw}'")
         val = int(raw)
     elif p.kind == "float":
         try:
             val = float(raw)
         except ValueError:
-            raise UsageError(f"-{p.name} needs a number, got '{raw}'")
+            raise UsageError(f"needs a number, got '{raw}'")
         if not math.isfinite(val):
-            raise UsageError(f"-{p.name} needs a number, got '{raw}'")
+            raise UsageError(f"needs a number, got '{raw}'")
     elif p.kind == "bool":
         if raw.strip().lower() not in _BOOL_WORDS:
-            raise UsageError(f"-{p.name} needs $true or $false, got '{raw}'")
+            raise UsageError(f"needs $true or $false, got '{raw}'")
         return _BOOL_WORDS[raw.strip().lower()]
     else:
         val = raw
     if p.kind in ("int", "float"):
         if (p.lo is not None and val < p.lo) or (p.hi is not None and val > p.hi):
-            raise UsageError(f"-{p.name} must be from {p.lo} to {p.hi}, got {raw}")
+            raise UsageError(f"must be from {p.lo} to {p.hi}, got {raw}")
     if p.choices:
         for c in p.choices:
             if c.lower() == str(val).lower():
                 return c
-        raise UsageError(f"-{p.name} must be one of {', '.join(p.choices)}, got '{raw}'")
+        raise UsageError(f"must be one of {', '.join(p.choices)}, got '{raw}'")
     if p.pattern and not re.search(p.pattern, str(val)):
-        raise UsageError(f"-{p.name}: '{raw}' is not a valid value")
+        raise UsageError(f"'{raw}' is not a valid value")
     return val
 
 
 def cli_name(name: str) -> str:
-    """The long option of a PARAMS name: SafeMode -> --safe-mode, InputDirFile ->
-    --input-dir-file (v3.1, D3)."""
-    return "--" + re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "-", name).lower()
+    """The long option of a PARAMS name: safe_mode -> --safe-mode, input_dir_file ->
+    --input-dir-file (v3.1, D3; T7: the one name of an option everywhere else)."""
+    return "--" + name.replace("_", "-")
 
 
 def cli_switch(name: str, on: bool) -> str:
@@ -211,7 +221,7 @@ def _arg_type(p):
         try:
             return _convert_param(p, raw)
         except UsageError as e:
-            raise argparse.ArgumentTypeError(re.sub(rf"^-{p.name}:? ", "", str(e)))
+            raise argparse.ArgumentTypeError(str(e))
     convert.__name__ = p.kind
     return convert
 
@@ -266,6 +276,7 @@ def _parse_legacy(argv, params):
         if not m:
             raise UsageError(f"unexpected argument '{tok}' (every value needs its -Parameter)")
         p = _resolve_param(m.group(1), params)
+        old = "-" + _legacy_name(p.name)
         inline = m.group(2)
         if p.kind == "switch":
             if inline is None:
@@ -273,13 +284,13 @@ def _parse_legacy(argv, params):
             elif inline.strip().lower() in _BOOL_WORDS:
                 val = _BOOL_WORDS[inline.strip().lower()]
             else:
-                raise UsageError(f"-{p.name} is a switch: -{p.name} or -{p.name}:$false")
+                raise UsageError(f"{old} is a switch: {old} or {old}:$false")
         else:
             if inline is not None:
                 raw = inline
             else:
                 if i >= len(argv):
-                    raise UsageError(f"-{p.name} needs a value")
+                    raise UsageError(f"{old} needs a value")
                 raw = str(argv[i])
                 if p.kind == "str":
                     m2 = _PARAM_TOKEN.fullmatch(raw)
@@ -290,9 +301,12 @@ def _parse_legacy(argv, params):
                         except UsageError:
                             is_param = False
                         if is_param:
-                            raise UsageError(f"-{p.name} needs a value")
+                            raise UsageError(f"{old} needs a value")
                 i += 1
-            val = _convert_param(p, raw)
+            try:
+                val = _convert_param(p, raw)
+            except UsageError as e:
+                raise UsageError(f"{old} {e}")
         values[p.name] = val
         bound.add(p.name)
     return values, bound
@@ -671,32 +685,32 @@ def path_excluded(directory, root, names):
 def resolve_output(f, mode, input_root, opt):
     """Where compress_tiff_zip writes the compressed copy of `f` (a FoundFile) in `mode`;
     None when the mode has no place for it (reported, never dropped silently). The output is
-    always <stem>.tif. `opt` needs ZipSubfolderName, ZipSuffix, OutputDir, ExportMarker,
-    ExportTiffSubfolder and ExportZipSubfolder. The wizard's manifest collision scan asks
+    always <stem>.tif. `opt` needs zip_subfolder_name, zip_suffix, output_dir, export_marker,
+    export_tiff_subfolder and export_zip_subfolder. The wizard's manifest collision scan asks
     here too: one rule for where a mode writes (v3.1 phase 6, W-O4)."""
     parent = f.dir
     out_name = f.stem + ".tif"
-    # One separator: '/' is legal on Windows, and -InputDir given that way used to defeat
+    # One separator: '/' is legal on Windows, and --input-dir given that way used to defeat
     # the mode 5 prefix compare and collapse the whole tree into <root>\ZIP.
     root_p = input_root.replace("/", "\\").rstrip("\\")
 
     if mode in (0, 8, 9):
         return join_path(parent, out_name)
     if mode in (1, 3):
-        return join_path(join_path(parent, opt["ZipSubfolderName"]), out_name)
+        return join_path(join_path(parent, opt["zip_subfolder_name"]), out_name)
     if mode == 2:
-        return join_path(opt["OutputDir"] or root_p, out_name)
+        return join_path(opt["output_dir"] or root_p, out_name)
     if mode == 4:
         folder = os.path.basename(parent.rstrip("\\/"))
         grandparent = parent_dir(parent)
         if not grandparent or not folder:
             return None
-        suffix = opt["ZipSuffix"]
+        suffix = opt["zip_suffix"]
         if re.search(r"_(TIFF)$", folder, re.I):
             new = re.sub(r"_(TIFF)$", lambda m: suffix, folder, flags=re.I)
         elif folder.lower() == "tiff":
             # A folder named exactly "TIFF" has no stem: the suffix rule made it "_ZIP".
-            new = opt["ZipSubfolderName"]
+            new = opt["zip_subfolder_name"]
         elif re.search(r"^(.+)(TIFF)$", folder, re.I):
             new = re.sub(r"(TIFF)$", lambda m: suffix, folder, flags=re.I)
         else:
@@ -709,14 +723,14 @@ def resolve_output(f, mode, input_root, opt):
         # boundary: "C:\data" also prefixes "C:\database".
         if not grandparent or segments_below(grandparent, root_p) is None:
             grandparent = root_p
-        return join_path(join_path(grandparent, opt["ZipSubfolderName"]), out_name)
+        return join_path(join_path(grandparent, opt["zip_subfolder_name"]), out_name)
     if mode in (6, 7):
         # The marker only counts AT/BELOW the input root: an _EXPORT folder ABOVE the
-        # chosen -InputDir once rebuilt the output outside the selected tree.
+        # chosen --input-dir once rebuilt the output outside the selected tree.
         parts = segments_below(parent, root_p)
         if parts is None:
             return None
-        marker = opt["ExportMarker"].lower()
+        marker = opt["export_marker"].lower()
         export_idx = -1
         tail_from = -1
         for i, seg in enumerate(parts):
@@ -727,7 +741,7 @@ def resolve_output(f, mode, input_root, opt):
                     break
                 continue
             # mode 7: the TIFF subfolder only counts when it sits below the marker
-            if mode == 7 and export_idx >= 0 and seg.lower() == opt["ExportTiffSubfolder"].lower():
+            if mode == 7 and export_idx >= 0 and seg.lower() == opt["export_tiff_subfolder"].lower():
                 tail_from = i + 1
                 break
         if export_idx < 0 or tail_from < 0:
@@ -735,7 +749,7 @@ def resolve_output(f, mode, input_root, opt):
         # Inside the _EXPORT folder the file actually came from (<root>\_EXPORT would
         # merge every job into one folder).
         export_root = join_path(root_p, "\\".join(parts[:export_idx + 1]))
-        new_parent = join_path(export_root, opt["ExportZipSubfolder"])
+        new_parent = join_path(export_root, opt["export_zip_subfolder"])
         rel = [p for p in parts[tail_from:] if p]
         if rel:
             new_parent = join_path(new_parent, "\\".join(rel))
@@ -1883,7 +1897,7 @@ def memory_capped_workers(requested, paths, bytes_per_pixel, fraction, log, quie
             f"{avail / gb:,.1f} GB available | workers {w}")
     if cap < requested:
         log(f"Workers reduced from {requested} to {w}: {requested} ImageMagick processes at "
-            f"~{per / gb:,.1f} GB each would not fit (WorkerMemoryFraction={fraction:g})", "WARN")
+            f"~{per / gb:,.1f} GB each would not fit (worker_memory_fraction={fraction:g})", "WARN")
     return w
 
 

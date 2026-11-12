@@ -483,10 +483,10 @@ def test_overlay_export_name_cannot_make_mode7_overwrite(tmp_path, lane):
     src = color_rgb(root / HOSTILE / "_EXPORT" / "TIFF" / "0014_14 (2).tif")
     orig = src.read_bytes()
     ov = tmp_path / "ov [x].json"
-    ov.write_text(json.dumps({"compress_tiff_zip": {"ExportZipSubfolder": "TIFF"}}), encoding="utf-8")
+    ov.write_text(json.dumps({"compress_tiff_zip": {"export_zip_subfolder": "TIFF"}}), encoding="utf-8")
     r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 7, "--workers", 1], tmp_path,
                  env=env_off(TIFFWORKFLOW_SETTINGS=str(ov)))
-    assert "ExportZipSubfolder" in out
+    assert "export_zip_subfolder" in out
     assert r.returncode == 1, out[-3000:]
     assert "would write over its own source" in out, out[-3000:]
     assert src.read_bytes() == orig

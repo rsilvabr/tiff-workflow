@@ -75,24 +75,24 @@ def test_an_unreadable_script_gives_the_fallbacks(tmp_path, monkeypatch):
     monkeypatch.setattr(ct, "SCRIPT_DIR", tmp_path)
     ct._backend_tables.cache_clear()
     try:
-        (tmp_path / "compress_tiff_zip.py").write_text("PARAMS = (P('ThumbSize', 'int', 512),\n", encoding="utf-8")
+        (tmp_path / "compress_tiff_zip.py").write_text("PARAMS = (P('thumb_size', 'int', 512),\n", encoding="utf-8")
         assert ct._backend_tables("compress_tiff_zip.py") == ((), ()), "a syntax error is not a table"
-        assert ct._backend_default("compress_tiff_zip.py", "ThumbSize") == 256
-        assert ct._backend_default("generate_thumbnails.py", "Format") == "jpg", "a missing file"
+        assert ct._backend_default("compress_tiff_zip.py", "thumb_size") == 256
+        assert ct._backend_default("generate_thumbnails.py", "format") == "jpg", "a missing file"
     finally:
         ct._backend_tables.cache_clear()
 
 
 def test_backend_default_follows_an_edit(scripts_copy):
     """T2: an edited default is what the wizard reads; a wrong-typed edit falls back."""
-    _edit_default(scripts_copy / "compress_tiff_zip.py", "ThumbSize", "512")
-    _edit_default(scripts_copy / "compress_tiff_zip.py", "ZipSubfolderName", '"ZIPPED"')
-    assert ct._backend_default("compress_tiff_zip.py", "ThumbSize") == 512
-    assert ct._backend_default("compress_tiff_zip.py", "ZipSubfolderName") == "ZIPPED"
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "thumb_size", "512")
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "zip_subfolder_name", '"ZIPPED"')
+    assert ct._backend_default("compress_tiff_zip.py", "thumb_size") == 512
+    assert ct._backend_default("compress_tiff_zip.py", "zip_subfolder_name") == "ZIPPED"
 
-    _edit_default(scripts_copy / "compress_tiff_zip.py", "ThumbSize", '"abc"')
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "thumb_size", '"abc"')
     ct._backend_tables.cache_clear()  # re-read the edited file
-    assert ct._backend_default("compress_tiff_zip.py", "ThumbSize") == 256
+    assert ct._backend_default("compress_tiff_zip.py", "thumb_size") == 256
 
 
 def test_builders_pass_safe_mode_and_lzw_explicitly(tmp_path):
@@ -120,7 +120,7 @@ def test_builders_pass_safe_mode_and_lzw_explicitly(tmp_path):
 
 def test_tool_output_names_follow_the_backend(scripts_copy):
     """T4: an edited -ZipSubfolderName is skipped by discovery too."""
-    _edit_default(scripts_copy / "compress_tiff_zip.py", "ZipSubfolderName", '"ZIPPED"')
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "zip_subfolder_name", '"ZIPPED"')
     names = ct._tool_output_names()
     assert "zipped" in names
 
@@ -180,8 +180,8 @@ def test_edited_safe_mode_default_is_overridden_by_the_answer(tmp_path, scripts_
         pytest.skip("ImageMagick (magick) and exiftool required")
     from test_regression_classes import make_multipage_tiff
 
-    _edit_default(scripts_copy / "compress_tiff_zip.py", "SafeMode", "False")
-    assert ct._backend_default("compress_tiff_zip.py", "SafeMode") is False
+    _edit_default(scripts_copy / "compress_tiff_zip.py", "safe_mode", "False")
+    assert ct._backend_default("compress_tiff_zip.py", "safe_mode") is False
 
     in_dir = tmp_path / "in"
     in_dir.mkdir()

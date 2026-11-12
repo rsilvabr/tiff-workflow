@@ -28,34 +28,34 @@ from tiff_workflow_common import P  # noqa: E402
 # The defaults are the settings of this script: edit them here, or leave the file alone
 # and put them in .tiff_workflow_settings.json (the names in OVERLAY_SPECS).
 PARAMS = (
-    P("InputDir", "str", ""),
-    P("Workers", "int", 16, lo=1, hi=64),
-    P("DryRun", "switch"),
-    P("SkipIfTiffHasExif", "switch"),
-    P("SkipLzwAsCompressed", "switch"),
-    P("SafeMode", "bool", True),
-    P("IccPolicy", "str", "never"),
-    P("CompressZip", "switch"),
-    P("OutputDir", "str", ""),
-    P("StagingDir", "str", ""),
-    P("Overwrite", "switch"),
-    P("AutoFind", "switch"),
-    P("FolderPattern", "str", "S5pro"),
-    P("MagickTimeout", "int", 30),
-    P("FailOnWarn", "switch"),
-    P("ExcludeFolders", "str", "", help="';'-separated folder NAMES to skip during discovery"),
-    P("WorkerMemoryFraction", "float", 0.8, help="Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap"),
-    P("InputDirFile", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when --input-dir would exceed the command-line limit)"),
+    P("input_dir", "str", ""),
+    P("workers", "int", 16, lo=1, hi=64),
+    P("dry_run", "switch"),
+    P("skip_if_tiff_has_exif", "switch"),
+    P("skip_lzw_as_compressed", "switch"),
+    P("safe_mode", "bool", True),
+    P("icc_policy", "str", "never"),
+    P("compress_zip", "switch"),
+    P("output_dir", "str", ""),
+    P("staging_dir", "str", ""),
+    P("overwrite", "switch"),
+    P("auto_find", "switch"),
+    P("folder_pattern", "str", "S5pro"),
+    P("magick_timeout", "int", 30),
+    P("fail_on_warn", "switch"),
+    P("exclude_folders", "str", "", help="';'-separated folder NAMES to skip during discovery"),
+    P("worker_memory_fraction", "float", 0.8, help="Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap"),
+    P("input_dir_file", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when --input-dir would exceed the command-line limit)"),
 )
 
 # Settings overlay (.tiff_workflow_settings.json): the ONLY names it can change in this script,
-# each with the type/range it must have. Never a safety or per-run setting (InputDir,
-# OutputDir, StagingDir, Workers, DryRun, SafeMode, SkipLzwAsCompressed, Overwrite, ...):
+# each with the type/range it must have. Never a safety or per-run setting (input_dir,
+# output_dir, staging_dir, workers, dry_run, safe_mode, skip_lzw_as_compressed, overwrite, ...):
 # tests/test_settings_overlay.py pins that.
 # OVERLAY-SPECS-BEGIN
 OVERLAY_SPECS = {
-    "MagickTimeout": "int:1:",
-    "WorkerMemoryFraction": "float:0:2",
+    "magick_timeout": "int:1:",
+    "worker_memory_fraction": "float:0:2",
 }
 # OVERLAY-SPECS-END
 
@@ -79,7 +79,7 @@ class Run:
         self.ok = self.skip = self.zip_skip = self.miss = 0
         self.err = self.warn = self.multi = 0
         self.multi_paths = []
-        # Destinations already claimed in this run (only used with -OutputDir, where every
+        # Destinations already claimed in this run (only used with --output-dir, where every
         # session writes into the same folder). Shared across folders on purpose.
         self.claimed_dest = {}
         self._dir_listing = {}
@@ -334,7 +334,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     raw_suffix = " [EXIF from RAW]" if p.source == "RAF" else ""
     jpeg_name = os.path.basename(p.jpeg)
 
-    if opt["SkipIfTiffHasExif"]:
+    if opt["skip_if_tiff_has_exif"]:
         # Camera EXIF only (the Exif IFD): -EXIF:all includes IFD0 -- the size and
         # resolution every TIFF has -- and skipped every TIFF (round 23).
         try:
@@ -345,13 +345,13 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
         if any(ln.strip() for ln in out.split("\n")):
             return PairResult(f"SKIP (already has EXIF) | {name}")
 
-    if opt["DryRun"]:
-        zip_info = " + ZIP" if opt["CompressZip"] else ""
+    if opt["dry_run"]:
+        zip_info = " + ZIP" if opt["compress_zip"] else ""
         return PairResult(f"DRY (EXIF{zip_info}) | {name} <= {jpeg_name}{raw_suffix}")
 
-    timeout = opt["MagickTimeout"] if opt["MagickTimeout"] > 0 else 30
+    timeout = opt["magick_timeout"] if opt["magick_timeout"] > 0 else 30
 
-    if opt["SafeMode"]:
+    if opt["safe_mode"]:
         pc = tw.tiff_page_count(tiff, timeout)
         if not pc.ok:
             return PairResult(tw.page_count_error_line(pc, name, "output"))
@@ -361,7 +361,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
             if not tw.tiff_has_only_subfile_pages(tiff, pc.count, tw.THUMBNAIL_PAGE_TYPES, timeout):
                 return PairResult(f"MULTI ({pc.count} IFDs -- skipped) | {name}", multi=tiff)
 
-    icc_policy = opt["IccPolicy"].lower()
+    icc_policy = opt["icc_policy"].lower()
     tiff_has_icc = False
     if icc_policy in ("preserve_tiff", "always"):
         try:
@@ -373,7 +373,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     # A RAF does not describe the colour space of the exported TIFF.
     icc_tag = "-ICC_Profile" if (copy_icc and p.source != "RAF") else ""
 
-    # With -OutputDir (another folder than the source's) the TIFF is copied there first:
+    # With --output-dir (another folder than the source's) the TIFF is copied there first:
     # the original is never written to.
     tiff_target = tiff
     tiff_copied = False
@@ -381,7 +381,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     src_dir = tw.full_path(os.path.dirname(tiff)).rstrip("\\/")
     if final_dir and final_dir.lower() != src_dir.lower():
         dest_tiff = tw.join_path(final_dir, p.dest_name)
-        if not os.path.exists(dest_tiff) or opt["Overwrite"]:
+        if not os.path.exists(dest_tiff) or opt["overwrite"]:
             try:
                 os.makedirs(final_dir, exist_ok=True)
                 if os.path.isfile(dest_tiff) and tw.is_read_only(dest_tiff):
@@ -391,7 +391,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
                 tiff_copied = True
                 own.append(dest_tiff)
             except OSError as e:
-                # A partial copy must not stay behind: a later run without -Overwrite would
+                # A partial copy must not stay behind: a later run without --overwrite would
                 # skip it as "exists in OutputDir" and the truncated TIFF persists
                 tw.remove_quietly(dest_tiff)
                 return PairResult(f"ERROR (copy to OutputDir failed) | {name}: {e}")
@@ -430,7 +430,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
         drop_copy()
         return PairResult(f"ERROR (exiftool EXIF) | {name}")
 
-    if not opt["CompressZip"]:
+    if not opt["compress_zip"]:
         copy_note = f" -> {final_dir}" if tiff_copied else ""
         return PairResult(f"{ok_prefix} | {name} <= {jpeg_name}{copy_note}{heur_suffix}{raw_suffix}")
 
@@ -444,7 +444,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     if not comp:
         drop_copy()
         return PairResult(f"ERROR (exiftool check) | {name} | cannot detect compression")
-    if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
+    if tw.is_compressed(comp, opt["skip_lzw_as_compressed"]):
         head = (f"WARN (heuristic JPEG match, already {comp} -- ZIP skipped)" if heur
                 else f"OK+SKIP-ZIP ({comp})")
         return PairResult(f"{head} | {name}{heur_suffix}{raw_suffix}")
@@ -454,7 +454,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     write_dst = tw.join_path(write_dir, staging_name)
     final_dst = tw.join_path(final_dir, p.dest_name)
 
-    if os.path.exists(final_dst) and not opt["Overwrite"] and not tw.same_path(final_dst, tiff) \
+    if os.path.exists(final_dst) and not opt["overwrite"] and not tw.same_path(final_dst, tiff) \
             and not tiff_copied:
         return PairResult(f"OK+SKIP-ZIP (exists) | {name}{raw_suffix}")
 
@@ -475,7 +475,7 @@ def _dest_name(run, tif, final_dir):
     With --output-dir every session writes into the SAME folder, so two sessions holding
     DSC_0001.tif used to overwrite/skip each other. Later claimants get _v2, _v3, ..."""
     dest_name = tif.name
-    if run.opt["OutputDir"] and final_dir.lower() != tif.dir.lower():
+    if run.opt["output_dir"] and final_dir.lower() != tif.dir.lower():
         d_key = tw.join_path(final_dir, dest_name).lower()
         if d_key in run.claimed_dest and run.claimed_dest[d_key].lower() != tif.path.lower():
             dest_name, cand_path = tw.numbered_name(
@@ -492,7 +492,7 @@ def _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir
     registered: an unprefixed file of the same name in the staging folder belongs to
     somebody else."""
     opt = run.opt
-    if not (opt["CompressZip"] and not opt["DryRun"]):
+    if not (opt["compress_zip"] and not opt["dry_run"]):
         return
     moved = 0
     for tif in group_files:
@@ -510,7 +510,7 @@ def _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir
             orig_mtime = os.stat(tif.path).st_mtime_ns
         except OSError:
             pass
-        # Never a copy straight onto the photo's name (a -StagingDir on another drive):
+        # Never a copy straight onto the photo's name (a --staging-dir on another drive):
         # copied next to it, then swapped with one rename.
         failure = tw.land_staged_file(stage_path, dest_path, run.run_id)
         if failure is None:
@@ -565,22 +565,22 @@ def process_folder(run, root):
     for key in sorted(groups):
         group_files = groups[key]
         group_dir = group_files[0].dir
-        if len(groups) > 1 or len(group_files) > 1 or opt["AutoFind"]:
+        if len(groups) > 1 or len(group_files) > 1 or opt["auto_find"]:
             log("")
             log(f"-- Group: {group_dir} ({len(group_files)} file(s))")
 
-        final_dir = opt["OutputDir"] or group_dir
-        write_dir = opt["StagingDir"] if (opt["StagingDir"] and not opt["DryRun"]) else final_dir
+        final_dir = opt["output_dir"] or group_dir
+        write_dir = opt["staging_dir"] if (opt["staging_dir"] and not opt["dry_run"]) else final_dir
 
-        # With no -StagingDir the staged ZIP is written INTO the source folder: register
+        # With no --staging-dir the staged ZIP is written INTO the source folder: register
         # whatever folder this run stages into, so an interrupt can clean it.
-        if not opt["DryRun"]:
+        if not opt["dry_run"]:
             if write_dir not in run.cleanup_dirs:
                 run.cleanup_dirs.append(write_dir)
-            if opt["CompressZip"] and opt["StagingDir"]:
-                os.makedirs(opt["StagingDir"], exist_ok=True)
-            if opt["CompressZip"] and opt["OutputDir"]:
-                os.makedirs(opt["OutputDir"], exist_ok=True)
+            if opt["compress_zip"] and opt["staging_dir"]:
+                os.makedirs(opt["staging_dir"], exist_ok=True)
+            if opt["compress_zip"] and opt["output_dir"]:
+                os.makedirs(opt["output_dir"], exist_ok=True)
 
         dest_names = {}
         pairs = []
@@ -595,12 +595,12 @@ def process_folder(run, root):
                 kind=match.kind if match else None,
                 source=match.source if match else None))
 
-        # The cap is about how many ImageMagick processes run at once; -DryRun starts none.
-        workers = opt["Workers"]
-        if not opt["DryRun"]:
+        # The cap is about how many ImageMagick processes run at once; --dry-run starts none.
+        workers = opt["workers"]
+        if not opt["dry_run"]:
             workers = tw.memory_capped_workers(workers, [p.tiff for p in pairs],
                                                tw.COMPARE_BYTES_PER_PIXEL,
-                                               opt["WorkerMemoryFraction"], log, quiet=True)
+                                               opt["worker_memory_fraction"], log, quiet=True)
         load = float(max(1, min(workers, len(pairs))))   # workers running at once share the disk
 
         staging_map = {}
@@ -626,14 +626,14 @@ def _input_dirs(opt, log):
     A bad path used to fall through to "No TIFFs found" and exit 0, and convert_tiff.py
     gates Step 2 of the combined workflow on this exit code."""
     entries = []
-    if opt["InputDirFile"]:
+    if opt["input_dir_file"]:
         try:
-            entries = tw.read_input_dir_file(opt["InputDirFile"])
+            entries = tw.read_input_dir_file(opt["input_dir_file"])
         except tw.UsageError as e:
             log(f"ERROR: {e}", "ERROR")
             return None
-    elif opt["InputDir"]:
-        entries = opt["InputDir"].split(";")
+    elif opt["input_dir"]:
+        entries = opt["input_dir"].split(";")
 
     if not entries:
         return [os.getcwd()], []
@@ -682,7 +682,7 @@ def run_main(argv, state):
     for w in overlay["warnings"]:
         tw.say(f"WARNING: settings overlay: {w}")
 
-    if opt["InputDirFile"] and opt["InputDir"]:
+    if opt["input_dir_file"] and opt["input_dir"]:
         tw.say("ERROR: pass --input-dir or --input-dir-file, not both")
         return tw.EXIT_USAGE
 
@@ -690,16 +690,16 @@ def run_main(argv, state):
     # without descending, so inside a folder there is nothing to exclude: the names apply
     # to the folders --auto-find finds (v3.1; until v3.0.0 the flag did nothing here).
     try:
-        exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])
+        exclude_names = tw.parse_exclude_folders(opt["exclude_folders"])
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
         return tw.EXIT_USAGE
 
-    if tw.output_dir_error(opt["OutputDir"]):
-        tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
+    if tw.output_dir_error(opt["output_dir"]):
+        tw.say(f"ERROR: {tw.output_dir_error(opt['output_dir'])}")
         return 1
 
-    need = ["exiftool"] + (["magick"] if (opt["SafeMode"] or opt["CompressZip"]) else [])
+    need = ["exiftool"] + (["magick"] if (opt["safe_mode"] or opt["compress_zip"]) else [])
     missing = tw.missing_tools(need)
     if missing:
         tw.say(f"ERROR: Required tools not found in PATH: {', '.join(missing)}")
@@ -707,7 +707,7 @@ def run_main(argv, state):
         return 1
     # Only the ZIP step writes through exiftool_commands; the EXIF copy alone works with an
     # older exiftool as before.
-    problem = tw.exiftool_status_problem() if opt["CompressZip"] else None
+    problem = tw.exiftool_status_problem() if opt["compress_zip"] else None
     if problem:
         tw.say(f"ERROR: {problem}")
         return 1
@@ -716,13 +716,13 @@ def run_main(argv, state):
     run = Run(opt, log)
     run.exclude_names = exclude_names
     state["run"] = run
-    if opt["StagingDir"].strip():
-        run.cleanup_dirs.append(opt["StagingDir"])
+    if opt["staging_dir"].strip():
+        run.cleanup_dirs.append(opt["staging_dir"])
 
-    if opt["OutputDir"].strip():
-        opt["OutputDir"] = tw.full_path(opt["OutputDir"].rstrip("\\/"))
+    if opt["output_dir"].strip():
+        opt["output_dir"] = tw.full_path(opt["output_dir"].rstrip("\\/"))
     else:
-        opt["OutputDir"] = ""
+        opt["output_dir"] = ""
 
     # Before the banner: an unusable --input-dir-file is the first line of the log.
     resolved = _input_dirs(opt, log)
@@ -746,14 +746,14 @@ def run_main(argv, state):
         log(f"Log: {log.path}")
         return 1
 
-    log(f"Workers: {opt['Workers']} | CompressZip: {opt['CompressZip']} | "
-        f"SkipIfTiffHasExif: {opt['SkipIfTiffHasExif']} | "
-        f"OutputDir: {opt['OutputDir'] or '(overwrite in place)'} | "
-        f"Staging: {opt['StagingDir'] or 'disabled'} | DryRun: {opt['DryRun']}")
+    log(f"Workers: {opt['workers']} | CompressZip: {opt['compress_zip']} | "
+        f"SkipIfTiffHasExif: {opt['skip_if_tiff_has_exif']} | "
+        f"OutputDir: {opt['output_dir'] or '(overwrite in place)'} | "
+        f"Staging: {opt['staging_dir'] or 'disabled'} | DryRun: {opt['dry_run']}")
 
     for root in input_dirs:
-        if opt["AutoFind"]:
-            pattern = opt["FolderPattern"]
+        if opt["auto_find"]:
+            pattern = opt["folder_pattern"]
             log(f"AutoFind mode | Pattern: '{pattern}' | Root: {root}")
             matching, left_out = _autofind_folders(root, pattern, run.exclude_names)
             if left_out:
@@ -775,7 +775,7 @@ def run_main(argv, state):
 
     _log_summary(run)
 
-    if run.err > 0 or (opt["FailOnWarn"] and (run.warn + run.miss) > 0):
+    if run.err > 0 or (opt["fail_on_warn"] and (run.warn + run.miss) > 0):
         return 1
     return 0
 
