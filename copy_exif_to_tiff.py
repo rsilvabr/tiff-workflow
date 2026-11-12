@@ -86,29 +86,24 @@ class Run:
 
     def count(self, line):
         self.counter += 1
-        level = "INFO"
-        # OK+SKIP-ZIP: the EXIF WAS written, only the ZIP step was skipped (already
-        # compressed / output exists) -- an OK, not a skip (audit round 21).
-        if line.startswith("OK+SKIP-ZIP"):
+        kind = tw.result_kind(line)
+        if kind is tw.Kind.OK:
             self.ok += 1
-            self.zip_skip += 1
-        elif line.startswith("OK"):
-            self.ok += 1
-        elif line.startswith("SKIP"):
+            # OK+SKIP-ZIP: the EXIF WAS written, only the ZIP step was skipped (already
+            # compressed / output exists) -- an OK, not a skip (audit round 21).
+            if line.startswith("OK+SKIP-ZIP"):
+                self.zip_skip += 1
+        elif kind is tw.Kind.SKIP:
             self.skip += 1
-        elif line.startswith("MISS"):
+        elif kind is tw.Kind.MISS:
             self.miss += 1
-            level = "WARN"
-        elif line.startswith("ERROR"):
+        elif kind is tw.Kind.ERROR:
             self.err += 1
-            level = "ERROR"
-        elif line.startswith("WARN"):
+        elif kind is tw.Kind.WARN:
             self.warn += 1
-            level = "WARN"
-        elif line.startswith("MULTI"):
+        elif kind is tw.Kind.MULTI:
             self.multi += 1
-            level = "WARN"
-        self.log(f"[{self.counter}/{self.total}] {line}", level)
+        self.log(f"[{self.counter}/{self.total}] {line}", kind.level)
 
     def error(self, text):
         """Count an error and log it, in one step: an error that is logged but not

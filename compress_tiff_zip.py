@@ -147,24 +147,21 @@ class Run:
     def count(self, line):
         """Log one result line with its [n/total] prefix and count it."""
         self.counter += 1
-        level = "INFO"
-        if line.startswith("OK"):
+        kind = tw.result_kind(line)
+        if kind is tw.Kind.OK:
             self.ok += 1
-        elif line.startswith("SKIP"):
+        elif kind is tw.Kind.SKIP:
             self.skip += 1
-        elif line.startswith("MULTI"):
+        elif kind is tw.Kind.MULTI:
             self.multi += 1
-            level = "WARN"
-        elif line.startswith("ERROR"):
+        elif kind is tw.Kind.ERROR:
             self.err += 1
-            level = "ERROR"
-        elif line.startswith("WARN"):
+        elif kind is tw.Kind.WARN:
             self.warn += 1
-            level = "WARN"
-        elif line.startswith("DRY"):
+        elif kind is tw.Kind.DRY:
             # counted on its own -- nothing was written
             self.dry += 1
-        self.log(f"[{self.counter}/{self.total}] {line}", level)
+        self.log(f"[{self.counter}/{self.total}] {line}", kind.level)
 
     def error(self, text):
         """Count an error and log it, in one step: an error that is logged but not
@@ -1168,7 +1165,7 @@ def _run_group(run, group_tasks, workers, collision_notes):
         if r.multi:
             run.multi_paths.append(r.multi)
         text = r.result
-        if text.startswith("ERROR"):
+        if tw.result_kind(text) is tw.Kind.ERROR:
             error_srcs.add(t.src.lower())
         if r.integrity_failed:
             integrity_failed_dst.add(key_dst)

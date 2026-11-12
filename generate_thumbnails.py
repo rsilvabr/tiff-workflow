@@ -340,15 +340,14 @@ def run(argv):
     for pair, result in tw.run_tasks(pairs, lambda p: make_thumbnail(p[0], p[1], cfg), workers):
         line = result if isinstance(result, str) else f"ERROR | {os.path.basename(pair[0])} | {result}"
         c.counter += 1
-        level = "INFO"
-        if line.startswith("OK"):
+        kind = tw.result_kind(line)
+        if kind is tw.Kind.OK:
             c.ok += 1
-        elif line.startswith("SKIP"):
+        elif kind is tw.Kind.SKIP:
             c.skip += 1
-        elif line.startswith("ERROR"):
+        elif kind is tw.Kind.ERROR:
             c.err += 1
-            level = "ERROR"
-        log(f"[{c.counter}/{c.total}] {line}", level)
+        log(f"[{c.counter}/{c.total}] {line}", kind.level)
 
     log("")
     log(f"Done: {c.ok} OK | {c.skip} skipped | {c.err} errors | {c.counter}/{c.total} processed")

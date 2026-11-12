@@ -34,6 +34,7 @@ import tempfile
 import threading
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import NamedTuple
 
 # The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
@@ -414,6 +415,42 @@ class RunLog:
                     fh.write(line + os.linesep)
             except OSError:
                 pass
+
+
+class Kind(Enum):
+    """The kind of a per-file result line: its first word, as printed ("OK | ...",
+    "ERROR (magick) | ...", "OK+ZIP | ...", "DRY-RUN | ..."). The three backends tally
+    their lines by it (result_kind); tests/test_backend_invariants.py checks that every
+    result line the backends write starts with one."""
+    OK = "OK"
+    SKIP = "SKIP"
+    MULTI = "MULTI"
+    MISS = "MISS"
+    WARN = "WARN"
+    DRY = "DRY"
+    ERROR = "ERROR"
+
+    @property
+    def level(self):
+        """The log level of a line of this kind."""
+        if self is Kind.ERROR:
+            return "ERROR"
+        if self in (Kind.WARN, Kind.MULTI, Kind.MISS):
+            return "WARN"
+        return "INFO"
+
+
+_KIND_WORD = re.compile(r"[A-Z]+")
+
+
+def result_kind(line):
+    """The Kind of a result line. A line whose first word is no Kind is an ERROR: a
+    misspelt kind must end the run with exit 1, not pass uncounted."""
+    m = _KIND_WORD.match(line)
+    try:
+        return Kind(m.group(0)) if m else Kind.ERROR
+    except ValueError:
+        return Kind.ERROR
 
 
 def python_label():

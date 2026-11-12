@@ -2050,6 +2050,49 @@ class TestGatesFailClosed:
         assert len(calls) == n + 2, "nothing is written when the source cannot be read"
 
 
+class TestResultKinds:
+    """v3.1 (B3): one parser of the result lines, tw.result_kind, for the three tallies."""
+
+    def test_the_first_word_is_the_kind(self):
+        K = tw.Kind
+        cases = {"OK (Uncompressed -> ZIP) | a.tif": K.OK, "OK+ZIP | a.tif": K.OK,
+                 "OK+SKIP-ZIP (exists) | a.tif": K.OK, "SKIP (exists) | a.tif": K.SKIP,
+                 "MULTI (3 pages - skipped) | a.tif": K.MULTI, "MISS | a.tif | no JPEG": K.MISS,
+                 "WARN (heuristic JPEG match) | a.tif": K.WARN, "DRY (EXIF) | a.tif": K.DRY,
+                 "DRY-RUN | a.tif -> a_thumb.jpg": K.DRY, "ERROR (magick) | a.tif | x": K.ERROR,
+                 "ERROR | a.tif | x": K.ERROR}
+        for line, kind in cases.items():
+            assert tw.result_kind(line) is kind, line
+        for line in ("EROR (magick) | a.tif", "Ok | a.tif", "OKAY | a.tif", "", "| a.tif"):
+            assert tw.result_kind(line) is K.ERROR, f"{line!r}: a misspelt kind is an error"
+        assert [k.level for k in K] == ["INFO", "INFO", "WARN", "WARN", "WARN", "INFO", "ERROR"]
+
+    def test_compress_tally(self):
+        run = compress_run("-Mode", "1")
+        run.total = 8
+        for line in ("OK (LZW -> ZIP) | a.tif", "SKIP (exists) | b.tif", "MULTI (2 pages) | c.tif",
+                     "ERROR (magick) | d.tif | x", "WARN (exiftool failed, ZIP ok) | e.tif",
+                     "DRY (LZW -> ZIP) | f.tif", "EROR (typo) | g.tif", "OK (LZW -> ZIP) | h.tif"):
+            run.count(line)
+        assert (run.ok, run.skip, run.multi, run.err, run.warn, run.dry) == (2, 1, 1, 2, 1, 1)
+        assert [lv for lv, _ in run.log.lines] == [
+            "INFO", "INFO", "WARN", "ERROR", "WARN", "INFO", "ERROR", "INFO"]
+        assert run.log.lines[0][1] == "[1/8] OK (LZW -> ZIP) | a.tif"
+
+    def test_copy_exif_tally(self):
+        run = exif_run()
+        run.total = 8
+        for line in ("OK | a.tif <= a.jpg", "OK+SKIP-ZIP (Adobe Deflate) | b.tif",
+                     "OK+ZIP | c.tif", "SKIP (already has EXIF) | d.tif", "MISS | e.tif | none",
+                     "ERROR (exiftool EXIF) | f.tif", "WARN (heuristic JPEG match) | g.tif",
+                     "MULTI (3 IFDs -- skipped) | h.tif"):
+            run.count(line)
+        assert (run.ok, run.zip_skip, run.skip, run.miss, run.err, run.warn, run.multi) == \
+            (3, 1, 1, 1, 1, 1, 1)
+        assert [lv for lv, _ in run.log.lines] == [
+            "INFO", "INFO", "INFO", "INFO", "WARN", "ERROR", "WARN", "WARN"]
+
+
 # ---------------------------------------------------------------------------
 # tiff_workflow_common: paths, moves, the command line
 # ---------------------------------------------------------------------------
