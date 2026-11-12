@@ -1986,6 +1986,21 @@ class TestGatesFailClosed:
         monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (1, printed)))
         assert tw.get_compression_map([a]) == {}
 
+    def test_one_reader_of_the_free_memory(self, monkeypatch):
+        """v3.1 phase 5: the backends' worker cap and the wizard's memory budget read the
+        same two numbers (tw.memory_readings)."""
+        import convert_tiff as ct
+        phys, commit = tw.memory_readings()
+        assert phys and commit and phys > 0 and commit > 0, "this machine's memory reads"
+        if tw.IS_WINDOWS:
+            assert tw.available_memory_bytes() == min(phys, commit)
+        monkeypatch.setattr(tw, "memory_readings", lambda: (7 * 2**30, 5 * 2**30))
+        assert (ct._available_physical_bytes(), ct._available_commit_bytes()) == (7 * 2**30, 5 * 2**30)
+        monkeypatch.setattr(tw, "memory_readings", lambda: (None, None))
+        assert ct._available_memory_bytes() == (None, None)
+        if tw.IS_WINDOWS:
+            assert tw.available_memory_bytes() is None
+
     def test_magick_run(self, monkeypatch):
         """v3.1: what magick printed, or ToolError carrying it and the exit code."""
         answers = []

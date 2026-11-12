@@ -910,62 +910,16 @@ def _run_exiftool(args, timeout, text=False):
 
 # Memory helpers copied from jxl-photo's jxl_recompressor.py (v2.9.0); keep in step.
 
-def _windows_memory_status():
-    """GlobalMemoryStatusEx as (ullAvailPhys, ullAvailPageFile), or None."""
-    import ctypes
-
-    class _MemoryStatusEx(ctypes.Structure):
-        _fields_ = [("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
-
-    st = _MemoryStatusEx()
-    st.dwLength = ctypes.sizeof(_MemoryStatusEx)
-    if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-        return None
-    return int(st.ullAvailPhys), int(st.ullAvailPageFile)
-
-
-def _linux_mem_available():
-    """/proc/meminfo MemAvailable in bytes, or None."""
-    with open("/proc/meminfo", encoding="ascii") as f:
-        for line in f:
-            if line.startswith("MemAvailable:"):
-                return int(line.split()[1]) * 1024
-    return None
-
-
 def _available_commit_bytes():
-    """Memory the system can still commit, in bytes, or None if unknown.
-    Windows: ullAvailPageFile (RAM + pagefile not yet committed -- the limit
-    WinError 1455 reports). Linux: MemAvailable."""
-    try:
-        if sys.platform == "win32":
-            st = _windows_memory_status()
-            return st[1] if st else None
-        return _linux_mem_available()
-    except Exception:
-        return None
+    """Memory the system can still commit, in bytes, or None if unknown
+    (tw.memory_readings)."""
+    return tw.memory_readings()[1]
 
 
 def _available_physical_bytes():
-    """Physical RAM still available (free + standby cache), in bytes, or None
-    if unknown. Windows: ullAvailPhys. Linux: MemAvailable (no commit limit by
-    default there, so both readings are the same)."""
-    try:
-        if sys.platform == "win32":
-            st = _windows_memory_status()
-            return st[0] if st else None
-        return _linux_mem_available()
-    except Exception:
-        return None
-
+    """Physical RAM still available (free + standby cache), in bytes, or None if unknown
+    (tw.memory_readings)."""
+    return tw.memory_readings()[0]
 
 _MEMORY_LIMITS = ("both", "commit", "physical")
 # How the cap's log and warning name the budget it used.

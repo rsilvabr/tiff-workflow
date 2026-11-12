@@ -1518,9 +1518,12 @@ def get_compression_map(paths, chunk_size=400):
 
 # --- Memory ---------------------------------------------------------
 
-def available_memory_bytes():
-    """The smaller of the memory the system can still commit and the physical RAM still
-    available, in bytes; None when it cannot be read."""
+def memory_readings():
+    """(physical RAM still available, memory the system can still commit), in bytes; an
+    entry is None when it cannot be read. Windows: ullAvailPhys and ullAvailPageFile of
+    GlobalMemoryStatusEx (RAM + pagefile not yet committed -- the limit WinError 1455
+    reports). Elsewhere both are /proc/meminfo MemAvailable (no commit limit by default).
+    The wizard's memory budget reads them too."""
     if IS_WINDOWS:
         class _MemoryStatusEx(ctypes.Structure):
             _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
@@ -1534,22 +1537,30 @@ def available_memory_bytes():
             st = _MemoryStatusEx()
             st.dwLength = ctypes.sizeof(st)
             if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
-                return None
-            commit, phys = st.ullAvailPageFile, st.ullAvailPhys
-            if commit <= 0 or phys <= 0:
-                return None
-            return min(commit, phys)
+                return None, None
+            return int(st.ullAvailPhys), int(st.ullAvailPageFile)
         except Exception:
-            return None
+            return None, None
     try:
         with open("/proc/meminfo", "r", encoding="ascii", errors="replace") as fh:
             for line in fh:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
+                    v = int(line.split()[1]) * 1024
+                    return v, v
     except (OSError, ValueError, IndexError):
         pass
-    return None
+    return None, None
 
+
+def available_memory_bytes():
+    """The smaller of the memory the system can still commit and the physical RAM still
+    available, in bytes; None when it cannot be read."""
+    phys, commit = memory_readings()
+    if not IS_WINDOWS:
+        return phys
+    if phys is None or commit is None or commit <= 0 or phys <= 0:
+        return None
+    return min(commit, phys)
 
 def max_image_pixels(paths, chunk_size=400):
     """Largest IFD0 width*height among the files, read by exiftool in chunks. A file
