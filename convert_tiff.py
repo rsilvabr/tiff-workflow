@@ -216,10 +216,10 @@ def _ask(question, default: Optional[str] = None, style: str = "cyan",
     prompt = f"{shown}: " if default is None else f"{shown} [{default}]: "
     while True:
         answer = input(prompt).strip()
-        if not answer:
-            return default or ""
+        if not answer and default is not None:
+            return default            # unchecked against the choices, as Rich does
         if choices is None or answer in choices:
-            return answer
+            return answer             # Enter without a default: "" -- unless there are choices
         print("Please select one of the available options")
 
 
@@ -234,13 +234,20 @@ def _table(columns: List[Dict], rows: List[list], panel: Optional[Dict] = None, 
     """A table from one description, for both screens. `columns`: dicts with "name" and
     add_column's keywords (style, justify, width); a cell -- and a title -- is a text or a
     (text, style) pair; `table_kw` go to Rich's Table, `panel` (Panel's keywords) puts it in
-    a panel. The plain screen prints the title and the columns aligned, two spaces apart."""
+    a panel. The plain screen prints the title and the columns aligned, two spaces apart.
+    A title given as plain text stays Rich markup -- the wizard's own titles, no user text --
+    so a Table title keeps Rich's own title style."""
     def text(x):
-        return Text(x[0], style=x[1] or None) if isinstance(x, tuple) else Text(x)
+        if isinstance(x, tuple):
+            return Text(str(x[0]), style=x[1] or None)
+        return Text("" if x is None else str(x))
+
+    def cell(x):
+        return str(x[0]) if isinstance(x, tuple) else ("" if x is None else str(x))
 
     if RICH_AVAILABLE and console:
         kw = dict(table_kw)
-        if "title" in kw:
+        if isinstance(kw.get("title"), tuple):
             kw["title"] = text(kw["title"])
         table = Table(**kw)
         for c in columns:
@@ -250,17 +257,18 @@ def _table(columns: List[Dict], rows: List[list], panel: Optional[Dict] = None, 
             table.add_row(*(text(x) for x in row))
         if panel:
             pk = dict(panel)
-            if "title" in pk:
+            if isinstance(pk.get("title"), tuple):
                 pk["title"] = text(pk["title"])
             console.print(Panel(table, **pk))
         else:
             console.print(table)
         return
-    title = table_kw.get("title") or (panel or {}).get("title")
-    if title:
-        print(_plain([title]))
+    if panel and panel.get("title"):
+        print(f"--- {cell(panel['title'])} ---")
+    if table_kw.get("title"):
+        print(cell(table_kw["title"]))
     grid = ([[c.get("name", "") for c in columns]] if table_kw.get("show_header", True) else [])
-    grid += [[_plain([x]) for x in row] for row in rows]
+    grid += [[cell(x) for x in row] for row in rows]
     if not grid:
         return
     widths = [max(len(r[i]) for r in grid) for i in range(len(columns))]
@@ -271,6 +279,16 @@ def _table(columns: List[Dict], rows: List[list], panel: Optional[Dict] = None, 
             cells.append(cell.rjust(widths[i]) if how == "right" else
                          cell.center(widths[i]) if how == "center" else cell.ljust(widths[i]))
         print(" " + "  ".join(cells).rstrip())
+
+
+def _panel(text, title: str, style: str = "") -> None:
+    """`text` (a text or a list of parts) in a framed panel titled `title`; on the plain
+    screen the title over the text."""
+    if RICH_AVAILABLE and console:
+        console.print(Panel(_highlighted(_rich_text(text)), title=title, border_style=style or "none"))
+    else:
+        print(f"--- {title} ---")
+        print(_plain(text))
 
 
 # --- Paths ---------------------------------------------------------
@@ -818,20 +836,15 @@ def check_dependencies(cfg) -> List[Tuple[str, bool, str]]:
 def show_environment_panel(cfg) -> None:
     """Print the dependency status panel shown at startup (jxl_photo style)."""
     checks = check_dependencies(cfg)
-    if RICH_AVAILABLE and console:
-        parts = []
-        for name, ok, _ in checks:
-            mark = "[green][[OK]][/green]" if ok else "[red][[!!]][/red]"
-            parts.append(f"{mark} {name}")
-        console.print(Panel(" | ".join(parts), title="TIFF Workflow Environment", border_style="cyan"))
-        for name, ok, detail in checks:
-            if not ok:
-                console.print(f"[yellow]  {name}: {escape(detail)}[/yellow]")
-    else:
-        print("--- Environment ---")
-        for name, ok, detail in checks:
-            mark = "[OK]" if ok else "[!!]"
-            print(f"  {mark} {name}: {detail}")
+    parts = []
+    for name, ok, _ in checks:
+        if parts:
+            parts.append(" | ")
+        parts += [("[OK]", "green") if ok else ("[!!]", "red"), f" {name}"]
+    _panel(parts, "TIFF Workflow Environment", "cyan")
+    for name, ok, detail in checks:
+        if not ok:
+            _say(f"  {name}: {detail}", "yellow")
 
 
 # --- Helpers ------------------------------------------------------
@@ -1805,19 +1818,6 @@ def _advanced_shown(value, opt: "Opt") -> str:
     return str(value)
 
 
-def _ui_say(text: str) -> None:
-    if RICH_AVAILABLE and console:
-        console.print(escape(text))
-    else:
-        print(text)
-
-
-def _ui_ask(prompt: str, default: str = "") -> str:
-    if RICH_AVAILABLE and console:
-        return Prompt.ask(f"[cyan]{escape(prompt)}[/cyan]", default=default).strip()
-    return input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
-
-
 def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
     """Per-run Advanced options: the backend parameters no other step asks (timeouts, memory
     share, ...). Default No -- then nothing is stored and the run is exactly what it was. Only
@@ -1836,21 +1836,21 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
     if not wanted:
         return True
     while True:
-        _ui_say("Advanced options (only the ones you change are passed to the script):")
+        _say("Advanced options (only the ones you change are passed to the script):")
         for n, (backend, opt) in enumerate(rows, 1):
             value, where = _advanced_current(cfg, workflow, backend, opt)
-            _ui_say(f"  {n}. [{backend}] {opt.label} (-{opt.param}) = "
+            _say(f"  {n}. [{backend}] {opt.label} (-{opt.param}) = "
                      f"{_advanced_shown(value, opt)}  ({where})")
-            _ui_say(f"       {opt.help}")
-        pick = _ui_ask("Number to change (0 = done)", "0")
+            _say(f"       {opt.help}")
+        pick = _ask("Number to change (0 = done)", "0")
         if pick in ("", "0"):
             return True
         if not pick.isdigit() or not 1 <= int(pick) <= len(rows):
-            _ui_say(f"No option {pick!r}.")
+            _say(f"No option {pick!r}.")
             continue
         backend, opt = rows[int(pick) - 1]
         expected = _overlay_value(opt.value_spec, object())[1]
-        text = _ui_ask(f"New value for -{opt.param} ({expected}; '-' = leave it to the "
+        text = _ask(f"New value for -{opt.param} ({expected}; '-' = leave it to the "
                         f"script; empty = no change)", "")
         if text == "":
             continue
@@ -1866,11 +1866,11 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
         try:
             parsed = _parse_setting_text(opt.value_spec, text)
         except ValueError as e:
-            _ui_say(f"Not changed: {e}.")
+            _say(f"Not changed: {e}.")
             continue
         ok, checked = _overlay_value(opt.value_spec, parsed)
         if not ok:
-            _ui_say(f"Not changed: -{opt.param} must be {checked}.")
+            _say(f"Not changed: -{opt.param} must be {checked}.")
             continue
         if not isinstance(adv, dict):
             adv = workflow["advanced"] = {}
@@ -2412,10 +2412,7 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
         try:
             process = subprocess.Popen(cmd, **popen_kwargs)
         except (FileNotFoundError, OSError) as e:
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]ERROR: Failed to start process: {e}[/red]")
-            else:
-                print(f"ERROR: Failed to start process: {e}")
+            _say(f"ERROR: Failed to start process: {e}", "red")
             return -1
         output_queue = []
         queue_lock = threading.Lock()
@@ -2463,19 +2460,10 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
                 m = _STRANDED_LEFT_RE.search(line)
                 if m:
                     stranded_left[0] = int(m.group(1))
-                if RICH_AVAILABLE and console:
-                    if " OK " in line or "+ZIP" in line:
-                        console.print(f"  [green]{escape(line)}[/green]")
-                    elif " | ERROR |" in line or " ERROR " in line:
-                        console.print(f"  [red]{escape(line)}[/red]")
-                    elif " | WARN |" in line or "WARNING" in line:
-                        console.print(f"  [yellow]{escape(line)}[/yellow]")
-                    elif "DRY" in line:
-                        console.print(f"  [blue]{escape(line)}[/blue]")
-                    else:
-                        console.print(f"  {escape(line)}")
-                else:
-                    print(f"  {line}")
+                _say(["  ", (line, "green" if " OK " in line or "+ZIP" in line else
+                                 "red" if " | ERROR |" in line or " ERROR " in line else
+                                 "yellow" if " | WARN |" in line or "WARNING" in line else
+                                 "blue" if "DRY" in line else "")])
 
         try:
             while True:
@@ -2487,26 +2475,17 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
 
                 if timeout is not None and time.time() - start_time > timeout:
                     _kill_tree()
-                    if RICH_AVAILABLE and console:
-                        console.print(f"[red]ERROR: Process timed out after {timeout}s[/red]")
-                    else:
-                        print(f"ERROR: Process timed out after {timeout}s")
+                    _say(f"ERROR: Process timed out after {timeout}s", "red")
                     return -1
 
                 time.sleep(0.05)
         except KeyboardInterrupt:
             _kill_tree()
-            if RICH_AVAILABLE and console:
-                console.print("[yellow]Interrupted by user.[/yellow]")
-            else:
-                print("Interrupted by user.")
+            _say("Interrupted by user.", "yellow")
             return -1
         except Exception as e:
             _kill_tree()
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]ERROR: {e}[/red]")
-            else:
-                print(f"ERROR: {e}")
+            _say(f"ERROR: {e}", "red")
             return -1
 
         try:
@@ -2521,10 +2500,7 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
             return -1
 
         if process.returncode != 0:
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]WARNING: Process exited with code {process.returncode}[/red]")
-            else:
-                print(f"WARNING: Process exited with code {process.returncode}")
+            _say(f"WARNING: Process exited with code {process.returncode}", "red")
         restored_rc = _offer_restore_stranded(original_cmd, stranded_left[0], stdin)
         return process.returncode if restored_rc is None else restored_rc
     finally:
@@ -3360,10 +3336,7 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
 
 def _ask_line(prompt_text: str, default: str) -> str:
     """One free-text answer; '-' (the shown default when empty) means none."""
-    if RICH_AVAILABLE and console:
-        value = Prompt.ask(f"[cyan]{prompt_text}[/cyan]", default=default or "-").strip()
-    else:
-        value = input(f"{prompt_text} [{default or '-'}]: ").strip() or (default or "-")
+    value = _ask(prompt_text, default or "-")
     return "" if value in ("-", "none") else value
 
 
@@ -3632,11 +3605,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         _say("--dry-run: nothing checked.", "yellow")
         return 0
     if not unattended:
-        if RICH_AVAILABLE and console:
-            go = Confirm.ask("Run it now?", default=False)
-        else:
-            go = _yes(input("Run it now? [y/N]: "), False)
-        if not go:
+        if not _ask_yes_no("Run it now?", False):
             _say("Cancelled.", "dim")
             return 1
 
@@ -4740,32 +4709,12 @@ WORKFLOW_OPTIONS = [
 def show_menu() -> Optional[str]:
     """Show workflow submenu (option 1 of the main menu), return choice or "0" for back."""
     valid = [k for k, _, _ in WORKFLOW_OPTIONS] + ["0"]
-    if RICH_AVAILABLE and console:
-        console.print()
-        table = Table(title="New Workflow -- select type", box=BOX_SIMPLE, header_style="bold cyan")
-        table.add_column("#", justify="center", style="cyan", width=4)
-        table.add_column("Workflow", style="green")
-        table.add_column("Description", style="dim")
-        for key, name, desc in WORKFLOW_OPTIONS:
-            table.add_row(key, name, desc)
-        table.add_row("0", "Back", "Return to main menu")
-        console.print(table)
-        choice = Prompt.ask("\n[cyan]Select workflow[/cyan]", choices=valid)
-    else:
-        print("\n============================================")
-        print("  New Workflow -- select type")
-        print("============================================")
-        for key, name, desc in WORKFLOW_OPTIONS:
-            print(f"  [{key}] {name:<16} -- {desc}")
-        print("  [0] Back             -- return to main menu")
-        print("============================================")
-        while True:
-            choice = input("Select: ").strip()
-            if choice in valid:
-                break
-            print(f"Invalid choice. Valid options: {', '.join(valid)}")
-
-    return choice
+    _say("")
+    _table([{"name": "#", "justify": "center", "style": "cyan", "width": 4},
+            {"name": "Workflow", "style": "green"}, {"name": "Description", "style": "dim"}],
+           [[key, name, desc] for key, name, desc in WORKFLOW_OPTIONS] + [["0", "Back", "Return to main menu"]],
+           title="New Workflow -- select type", box=BOX_SIMPLE, header_style="bold cyan")
+    return _ask("\nSelect workflow", choices=valid)
 
 
 def show_main_menu(cfg) -> str:
@@ -4803,28 +4752,12 @@ def show_main_menu(cfg) -> str:
                         True))
     options.append(("0", "Exit", True))
 
-    if RICH_AVAILABLE and console:
-        table = Table(show_header=False, box=None)
-        table.add_column("Key", style="bold cyan")
-        table.add_column("Option")
-        table.add_column("Status", justify="center")
-        for key, desc, available in options:
-            status_str = "" if available else "[dim](unavailable)[/dim]"
-            table.add_row(key, desc, status_str)
-        console.print(Panel(table, title=f"Main Menu -- {TOOLKIT_NAME} {TOOLKIT_VERSION}",
-                            border_style="green"))
-        return Prompt.ask("Select option", choices=[o[0] for o in options if o[2]])
-
-    print(f"\n--- Main Menu -- {TOOLKIT_NAME} {TOOLKIT_VERSION} ---")
-    for key, desc, available in options:
-        status_str = "" if available else " [UNAVAILABLE]"
-        print(f"[{key}] {desc}{status_str}")
-    valid_choices = [o[0] for o in options if o[2]]
-    while True:
-        choice = input("\nSelect option: ").strip()
-        if choice in valid_choices:
-            return choice
-        print(f"Invalid choice. Valid options: {', '.join(valid_choices)}")
+    _table([{"name": "Key", "style": "bold cyan"}, {"name": "Option"},
+            {"name": "Status", "justify": "center"}],
+           [[key, desc, "" if available else ("(unavailable)", "dim")] for key, desc, available in options],
+           panel={"title": f"Main Menu -- {TOOLKIT_NAME} {TOOLKIT_VERSION}", "border_style": "green"},
+           show_header=False, box=None)
+    return _ask("Select option", style="", choices=[o[0] for o in options if o[2]])
 
 
 # --- Manifest System -------------------------------------------------
@@ -5974,23 +5907,13 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
                  "menu, or pass --dry-run.", "red")
             return 1
         if not unattended:
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[bold cyan]{escape(title)}[/bold cyan]: "
-                              f"{escape(Path(manifest_path).name)}")
-                console.print(f"  {len(entries)} entry(ies)")
-                if any(m == 8 for _, _, m in entries):
-                    console.print("[red]WARNING: manifest contains mode-8 entries (DELETES sources).[/red]")
-                if not Confirm.ask("Run it now?", default=False):
-                    console.print("[dim]Cancelled.[/dim]")
-                    return 1
-            else:
-                print(f"\n--- {title}: {Path(manifest_path).name} ---")
-                print(f"  {len(entries)} entry(ies)")
-                if any(m == 8 for _, _, m in entries):
-                    print("WARNING: manifest contains mode-8 entries (DELETES sources).")
-                if not _yes(input("Run it now? [y/N]: "), False):
-                    print("Cancelled.")
-                    return 1
+            _say(["\n", (title, "bold cyan"), f": {Path(manifest_path).name}"])
+            _say(f"  {len(entries)} entry(ies)")
+            if any(m == 8 for _, _, m in entries):
+                _say("WARNING: manifest contains mode-8 entries (DELETES sources).", "red")
+            if not _ask_yes_no("Run it now?", False):
+                _say("Cancelled.", "dim")
+                return 1
         ok = execute_manifest_workflow(cfg, entries, workflow, unattended=unattended)
         return 0 if ok else 1
 
@@ -6056,43 +5979,24 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
 
     run_cmds = [_rebuild_journaled_command(p) for p in parts_list]
 
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[bold cyan]{escape(title)}[/bold cyan]")
-        console.print(f"  {escape(entry.get('label') or '')}")
-        console.print(f"  [dim]saved {entry.get('time')}[/dim]")
-        for c in run_cmds:
-            console.print(f"\n[dim]{escape(' '.join(c))}[/dim]")
-        if dry_run:
-            console.print("[yellow]Note: --dry-run requested -- this is a simulation (-DryRun).[/yellow]")
-        else:
-            console.print("[yellow]Note: dry-run is never inherited -- this runs for real.[/yellow]")
-        if deletes:
-            console.print("[red]WARNING: this workflow DELETES or REPLACES source files (-DeleteSource / mode 8).[/red]")
-        if not unattended and not Confirm.ask("Run it now?", default=False):
-            console.print("[dim]Cancelled.[/dim]")
-            return 1
+    _say(f"\n{title}", "bold cyan")
+    _say(f"  {entry.get('label') or ''}")
+    _say(["  ", (f"saved {entry.get('time')}", "dim")])
+    for c in run_cmds:
+        _say(f"\n{' '.join(c)}", "dim")
+    if dry_run:
+        _say("Note: --dry-run requested -- this is a simulation (-DryRun).", "yellow")
     else:
-        print(f"\n--- {title} ---")
-        print(f"  {entry.get('label') or ''}")
-        print(f"  saved {entry.get('time')}")
-        for c in run_cmds:
-            print(f"\n  {' '.join(c)}")
-        if dry_run:
-            print("Note: --dry-run requested -- this is a simulation (-DryRun).")
-        else:
-            print("Note: dry-run is never inherited -- this runs for real.")
-        if deletes:
-            print("WARNING: this workflow DELETES or REPLACES source files (-DeleteSource / mode 8).")
-        if not unattended and not _yes(input("Run it now? [y/N]: "), False):
-            print("Cancelled.")
-            return 1
+        _say("Note: dry-run is never inherited -- this runs for real.", "yellow")
+    if deletes:
+        _say("WARNING: this workflow DELETES or REPLACES source files (-DeleteSource / mode 8).", "red")
+    if not unattended and not _ask_yes_no("Run it now?", False):
+        _say("Cancelled.", "dim")
+        return 1
 
     for i, c in enumerate(run_cmds):
         if len(run_cmds) > 1:
-            if RICH_AVAILABLE and console:
-                console.print(f"\n[cyan]=== Step {i + 1}/{len(run_cmds)} ===[/cyan]")
-            else:
-                print(f"\n=== Step {i + 1}/{len(run_cmds)} ===")
+            _say(f"\n=== Step {i + 1}/{len(run_cmds)} ===", "cyan")
         result = run_subprocess(c, stdin=subprocess.DEVNULL) if unattended else run_subprocess(c)
         if result != 0:
             _say(f"Step {i + 1} failed (exit {result}). Remaining steps skipped.", "red")
@@ -6201,7 +6105,7 @@ def _overlay_json_value(spec: str, parsed, checked):
 def _edit_overlay_section(path: Path, section: str, label: str, script: Optional[str]) -> None:
     rows = _overlay_menu_rows(section, script)
     if not rows:
-        _ui_say(f"No setting of {label} can be changed from the settings file "
+        _say(f"No setting of {label} can be changed from the settings file "
                 f"(its OVERLAY-SPECS block could not be read).")
         return
     while True:
@@ -6209,11 +6113,11 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
         if not problem and data.get(section) is not None and not isinstance(data.get(section), dict):
             problem = f"the '{section}' entry is not an object"
         if problem:
-            _ui_say(f"{path} cannot be read ({problem}). Fix or delete it first; nothing was "
+            _say(f"{path} cannot be read ({problem}). Fix or delete it first; nothing was "
                     f"written, and the scripts ignore it meanwhile.")
             return
         sect = data.get(section) or {}
-        _ui_say(f"{label} -- its settings ('script' = the value written in the script, "
+        _say(f"{label} -- its settings ('script' = the value written in the script, "
                 f"'file' = this settings file):")
         for n, (name, spec, script_value, help_text) in enumerate(rows, 1):
             if name in sect:
@@ -6221,19 +6125,19 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
                 file_part = json.dumps(sect[name], ensure_ascii=False) + ("" if ok else "  (REFUSED: the scripts keep their own value)")
             else:
                 file_part = "-"
-            _ui_say(f"  {n:>2}. {name} = script: {json.dumps(script_value, ensure_ascii=False)} | "
+            _say(f"  {n:>2}. {name} = script: {json.dumps(script_value, ensure_ascii=False)} | "
                     f"file: {file_part} | {spec}")
             if help_text:
-                _ui_say(f"        {help_text}")
-        pick = _ui_ask("Number to change (0 = back)", "0")
+                _say(f"        {help_text}")
+        pick = _ask("Number to change (0 = back)", "0")
         if pick in ("", "0"):
             return
         if not pick.isdigit() or not 1 <= int(pick) <= len(rows):
-            _ui_say(f"No setting {pick!r}.")
+            _say(f"No setting {pick!r}.")
             continue
         name, spec, script_value, help_text = rows[int(pick) - 1]
         expected = _overlay_value(spec, object())[1]
-        text = _ui_ask(f"New value for {name} ({expected}; '-' = back to the script's value; "
+        text = _ask(f"New value for {name} ({expected}; '-' = back to the script's value; "
                        f"empty = no change)", "")
         if text == "":
             continue
@@ -6246,11 +6150,11 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
             try:
                 parsed = _parse_setting_text(spec, text)
             except ValueError as e:
-                _ui_say(f"Not changed: {e}.")
+                _say(f"Not changed: {e}.")
                 continue
             ok, checked = _overlay_value(spec, parsed)
             if not ok:
-                _ui_say(f"Not changed: {name} must be {checked}.")
+                _say(f"Not changed: {name} must be {checked}.")
                 continue
             stored = _overlay_json_value(spec, parsed, checked)
             new_sect = dict(sect)
@@ -6262,14 +6166,14 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
         try:
             _write_json_file(path, data, ".tiff_workflow_settings_", ensure_ascii=False)
         except OSError as e:
-            _ui_say(f"Could not write {path}: {e}")
+            _say(f"Could not write {path}: {e}")
             return
-        _ui_say(f"{name}: " + ("back to the script's value" if text == "-"
+        _say(f"{name}: " + ("back to the script's value" if text == "-"
                                else f"{json.dumps(stored, ensure_ascii=False)} (settings file)"))
         # discovery skips this toolkit's own folders: a changed folder name counts at once
         _refresh_tool_output_parts()
         if section == "convert_tiff":
-            _ui_say("This wizard's own settings apply the next time the wizard starts.")
+            _say("This wizard's own settings apply the next time the wizard starts.")
 
 
 def script_settings_menu(cfg) -> None:
@@ -6279,28 +6183,28 @@ def script_settings_menu(cfg) -> None:
     the file (Mode, SafeMode, Overwrite, DeleteSource, Workers, ...)."""
     env = os.environ.get(_SETTINGS_OVERLAY_ENV)
     if env is not None and not env.strip():
-        _ui_say(f"The settings overlay is OFF: {_SETTINGS_OVERLAY_ENV} is set and empty. "
+        _say(f"The settings overlay is OFF: {_SETTINGS_OVERLAY_ENV} is set and empty. "
                 f"Unset it to use a settings file.")
         return
     path = _settings_overlay_path()
     data, problem = _read_overlay_data(path)
     if problem:
-        _ui_say(f"{path} cannot be read ({problem}). Fix or delete it first; nothing was "
+        _say(f"{path} cannot be read ({problem}). Fix or delete it first; nothing was "
                 f"written, and the scripts ignore it meanwhile.")
         return
-    _ui_say("Script settings -- the scripts' own defaults, without editing them.")
-    _ui_say(f"File: {path}" + ("" if path.is_file() else "  (does not exist yet; the first change creates it)"))
-    _ui_say("A change applies to the next run of that script. A value typed on a command line, "
+    _say("Script settings -- the scripts' own defaults, without editing them.")
+    _say(f"File: {path}" + ("" if path.is_file() else "  (does not exist yet; the first change creates it)"))
+    _say("A change applies to the next run of that script. A value typed on a command line, "
             "and everything this wizard asks per run, still wins. Deletion, overwriting, safe "
             "mode and the other safety settings are never taken from this file.")
     while True:
         for n, (_section, label, _script) in enumerate(_OVERLAY_MENU, 1):
-            _ui_say(f"  {n}. {label}")
-        pick = _ui_ask("Which script's settings (0 = back)", "0")
+            _say(f"  {n}. {label}")
+        pick = _ask("Which script's settings (0 = back)", "0")
         if pick in ("", "0"):
             return
         if not pick.isdigit() or not 1 <= int(pick) <= len(_OVERLAY_MENU):
-            _ui_say(f"No entry {pick!r}.")
+            _say(f"No entry {pick!r}.")
             continue
         section, label, script = _OVERLAY_MENU[int(pick) - 1]
         _edit_overlay_section(path, section, label, script)
@@ -6316,34 +6220,18 @@ def presets_menu(cfg) -> None:
         presets = dict(cfg.config.presets or {})
         names = sorted(presets)
 
-        if RICH_AVAILABLE and console:
-            if names:
-                table = Table(show_header=True, header_style="bold cyan", box=BOX_SIMPLE)
-                table.add_column("#", justify="right", style="dim")
-                table.add_column("Name", style="bold")
-                table.add_column("Workflow")
-                table.add_column("Saved", style="dim")
-                for i, name in enumerate(names, 1):
-                    table.add_row(str(i), name, presets[name].get("label", ""),
-                                  presets[name].get("saved_at", ""))
-                console.print(Panel(table, title="[bold]Presets[/bold]", border_style="green"))
-            else:
-                console.print("\n[dim]No presets saved yet.[/dim]")
-            console.print("[bold]\\[number][/bold] run  "
-                          "[bold]\\[S][/bold] save last workflow as preset  "
-                          "[bold]\\[D][/bold] delete  [bold]\\[B][/bold] back")
-            choice = Prompt.ask("Presets").strip()
+        if names:
+            _table([{"name": "#", "justify": "right", "style": "dim"}, {"name": "Name", "style": "bold"},
+                    {"name": "Workflow"}, {"name": "Saved", "style": "dim"}],
+                   [[str(i), name, presets[name].get("label", ""), presets[name].get("saved_at", "")]
+                    for i, name in enumerate(names, 1)],
+                   panel={"title": ("Presets", "bold"), "border_style": "green"},
+                   show_header=True, header_style="bold cyan", box=BOX_SIMPLE)
         else:
-            print("\n--- Presets ---")
-            if names:
-                for i, name in enumerate(names, 1):
-                    print(f"  {i}. {name}")
-                    print(f"     {presets[name].get('label', '')}  "
-                          f"(saved {presets[name].get('saved_at', '')})")
-            else:
-                print("  (none saved yet)")
-            print("[number] run | [S] save last workflow as preset | [D] delete | [B] back")
-            choice = input("Presets: ").strip()
+            _say("\nNo presets saved yet.", "dim")
+        _say([("[number]", "bold"), " run  ", ("[S]", "bold"), " save last workflow as preset  ",
+              ("[D]", "bold"), " delete  ", ("[B]", "bold"), " back"])
+        choice = _ask("Presets", style="")
 
         upper = choice.upper()
         if not choice or upper == "B":
@@ -6354,23 +6242,14 @@ def presets_menu(cfg) -> None:
             if not _journal_runnable(snapshot):
                 _say("Nothing to save yet: run a workflow first.", "yellow")
                 continue
-            if RICH_AVAILABLE and console:
-                console.print(f"[dim]{escape(snapshot.get('label') or '')}[/dim]")
-                raw_name = Prompt.ask("Preset name")
-            else:
-                print(f"  {snapshot.get('label') or ''}")
-                raw_name = input("Preset name: ")
+            _say(snapshot.get("label") or "", "dim")
+            raw_name = _ask("Preset name", style="")
             name = _clean_preset_name(raw_name)
             if not name:
                 _say("Invalid name (empty, too long, or contains control characters).", "red")
                 continue
-            if name in presets:
-                if RICH_AVAILABLE and console:
-                    overwrite = Confirm.ask("Replace it?", default=False)
-                else:
-                    overwrite = _yes(input("Replace it? [y/N]: "), False)
-                if not overwrite:
-                    continue
+            if name in presets and not _ask_yes_no("Replace it?", False):
+                continue
             presets[name] = {**snapshot, "saved_at": time.strftime("%Y-%m-%d %H:%M")}
             cfg.config.presets = presets
             cfg.save_config()
@@ -6380,19 +6259,12 @@ def presets_menu(cfg) -> None:
         if upper == "D":
             if not names:
                 continue
-            if RICH_AVAILABLE and console:
-                target = Prompt.ask("Delete which number?").strip()
-            else:
-                target = input("Delete which number?: ").strip()
+            target = _ask("Delete which number?", style="")
             if not target.isdigit() or not 1 <= int(target) <= len(names):
                 _say("No preset with that number.", "red")
                 continue
             name = names[int(target) - 1]
-            if RICH_AVAILABLE and console:
-                sure = Confirm.ask(f"Delete preset '{escape(name)}'?", default=False)
-            else:
-                sure = _yes(input(f"Delete preset '{name}'? [y/N]: "), False)
-            if sure:
+            if _ask_yes_no(f"Delete preset '{name}'?", False):
                 del presets[name]
                 cfg.config.presets = presets
                 cfg.save_config()

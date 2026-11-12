@@ -112,6 +112,9 @@ def test_plain_questions(monkeypatch, capsys):
     assert ct._ask("Duplicate filenames", "Numbered", choices=["Numbered", "Skip", "Overwrite"]) == "Skip"
     assert asked[-2:] == ["Duplicate filenames (Numbered/Skip/Overwrite) [Numbered]: "] * 2
     assert "Please select one of the available options" in capsys.readouterr().out
+    answer("", "4")                                   # choices, no default: Enter is asked again
+    assert ct._ask("Select option", style="", choices=["1", "4", "0"]) == "4"
+    assert asked[-2:] == ["Select option (1/4/0): "] * 2
 
 
 def test_rich_questions_get_the_text_and_the_default(monkeypatch):
