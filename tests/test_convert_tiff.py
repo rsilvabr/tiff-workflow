@@ -980,6 +980,52 @@ class TestPurgeVerdict:
         assert v == (old / "a.tif", tmp_path / "a.tif", convert_tiff._MISSING_PARENT)
 
 
+class TestPhase7SweepGaps:
+    """What the phase 7 mutation sweep found untested: each test fails with its mutation."""
+
+    def test_a_saved_journal_stops_at_the_first_failed_step(self, monkeypatch):
+        """Sweep S5: Repeat last / a preset of workflow 4 ran compress after a failed Copy
+        EXIF -- the gate AGENTS.md says the wizard relies on, untested on this path."""
+        ran = []
+        rcs = iter([1, 0])
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        monkeypatch.setattr(convert_tiff, "run_subprocess", lambda cmd, **k: ran.append(cmd) or next(rcs))
+        assert convert_tiff._run_journal_steps([["copy"], ["zip"]], unattended=True) == 1
+        assert ran == [["copy"]], "the second step ran after the first failed"
+
+    def test_a_zip_that_is_not_smaller_is_not_landed(self, tmp_path, monkeypatch):
+        """Sweep S7: an "ok" conversion whose ZIP is not smaller than the original keeps the
+        original in its place, makes no OLD_PADDED backup and drops the staged file."""
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        folder = tmp_path / "伊豆沼 [FINAL] 50%"
+        folder.mkdir()
+        (folder / "p 1.tif").write_bytes(b"ORIGINAL")
+        tmp8 = tmp_path / "tmp8_p 1.tif"
+        tmp8.write_bytes(b"EIGHTBIT")
+        failed = []
+        for size_zip in (1000, 1001):
+            tmp8.write_bytes(b"EIGHTBIT")
+            r = convert_tiff.PaddedResult("p 1.tif", folder, "ok", 1000, size_zip, 0.0, True, None, tmp8)
+            assert convert_tiff._finalize_padded(1, 1, r, failed) is False
+            assert (folder / "p 1.tif").read_bytes() == b"ORIGINAL"
+            assert not (folder / "OLD_PADDED").exists() and not tmp8.exists()
+        assert failed == [], "a bigger ZIP is a refusal, not a failure"
+
+    @pytest.mark.parametrize("answer, want", [("999", convert_tiff.MAX_WORKERS), ("-5", 0), ("4", 4)])
+    def test_the_cap_of_workers_stays_in_the_backends_range(self, monkeypatch, answer, want):
+        """Sweep S10: -CapWorkers outside 0..MAX_WORKERS would stop compress_tiff_zip.py at
+        its parameter check."""
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        monkeypatch.setattr(convert_tiff, "step_advanced_options", lambda cfg, wf: True)
+        # workers, staging, dry-run, safe, skip-lzw, CAP, exclude, force-sequential
+        answers = iter(["", "", "", "", "", answer, "", ""])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
+        wf = {"origin": "free_compress", "dest": "zip"}
+        convert_tiff.step_basic_params(cfg, wf)
+        assert wf["cap_workers"] == want
+
+
 class TestWorkflow4TwoSteps:
     """Workflow 4 (Copy EXIF, then compress): compress runs only when Copy EXIF exited 0 --
     it would ZIP TIFFs whose metadata never landed. v3.1 phase 7 (W7) wrote the two passes

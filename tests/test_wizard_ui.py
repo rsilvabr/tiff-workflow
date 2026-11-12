@@ -90,6 +90,14 @@ def test_one_table_description_for_both_screens(monkeypatch, capsys, screen):
         assert len({ln.index(ln.split()[-1]) + len(ln.split()[-1]) for ln in rows}) == 1, rows
 
 
+def test_a_table_without_a_header_prints_none(monkeypatch, capsys):
+    """Sweep S3 (v3.1 phase 7): the main menu and the summary are tables without a header;
+    the plain screen must not print the column names over them."""
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    ct._table([{"name": "Key"}, {"name": "Option"}], [["1", "New workflow"]], show_header=False)
+    assert capsys.readouterr().out.split() == ["1", "New", "workflow"]
+
+
 def test_only_the_screen_layer_knows_about_rich():
     """v3.1 phase 7 (T4): 154 `if RICH_AVAILABLE` forks said most things twice, and the two
     halves drifted apart (a yes/no word read two ways, user text unescaped on one side). Only
