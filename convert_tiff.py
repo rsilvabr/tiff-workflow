@@ -1238,7 +1238,7 @@ def _safe_move(src: Path, dst: Path) -> None:
 
 # --- AutoFind: Pattern Selection ----------------------------------
 
-def step_pattern(cfg: ToolConfig) -> Optional[str]:
+def step_pattern(cfg: "ConfigManager") -> Optional[List[str]]:
     """Choose AutoFind pattern (S5, S3, Both, Custom)."""
     if RICH_AVAILABLE and console:
         console.print("\n[bold cyan]Auto-Find Pattern[/bold cyan]")
@@ -1275,7 +1275,7 @@ def step_pattern(cfg: ToolConfig) -> Optional[str]:
 
 # --- AutoFind: Scan and Preview ------------------------------------
 
-def step_autofind(cfg: ToolConfig, patterns: List[str], root: Path) -> Optional[List[Path]]:
+def step_autofind(cfg: "ConfigManager", patterns: List[str], root: Path) -> Optional[List[Path]]:
     """Scan folders matching pattern, let user confirm."""
     if RICH_AVAILABLE and console:
         console.print(f"\n[cyan]Scanning for folders matching:[/cyan] {escape(', '.join(patterns))}")
@@ -1351,7 +1351,7 @@ MODE_DESCS = {
 }
 
 
-def step_mode(cfg: ToolConfig) -> Optional[int]:
+def step_mode(cfg: "ConfigManager") -> Optional[int]:
     """Select mode 0-9 for Free Compress."""
     if RICH_AVAILABLE and console:
         console.print("\n[bold cyan]Step 2: Organization Mode (Free Compress)[/bold cyan]")
@@ -1383,7 +1383,7 @@ def step_mode(cfg: ToolConfig) -> Optional[int]:
 
 # --- Folder Selection ----------------------------------------------
 
-def step_folder(cfg: ToolConfig, prompt_text: str = "Input folder") -> Optional[Path]:
+def step_folder(cfg: "ConfigManager", prompt_text: str = "Input folder") -> Optional[Path]:
     """Choose input folder."""
     default = cfg.config.last_input_dir or str(Path.cwd())
     if RICH_AVAILABLE and console:
@@ -1433,7 +1433,7 @@ def _supports_cap_workers(workflow: Dict) -> bool:
     return workflow.get("origin") in ("free_compress", "compress", "both")
 
 
-def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
+def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
     """Workers, DryRun, Staging -- then the per-run Advanced options screen, here so that no
     workflow can ask the first without the second."""
     # The backend this run will actually launch: each one's PARAMS defaults are the
@@ -1557,11 +1557,11 @@ def _advanced_backends(workflow: Dict) -> List[str]:
     return backends
 
 
-def _backend_script(cfg: ToolConfig, backend: str) -> str:
+def _backend_script(cfg: "ConfigManager", backend: str) -> str:
     return "compress_tiff_zip.py" if backend == "compress" else "copy_exif_to_tiff.py"
 
 
-def _advanced_current(cfg: ToolConfig, workflow: Dict, backend: str, opt: "Opt"):
+def _advanced_current(cfg: "ConfigManager", workflow: Dict, backend: str, opt: "Opt"):
     """(value, where) an Advanced option has right now: what this run edited, else what the
     settings file gives the backend, else the script's own default."""
     mine = _advanced_value(workflow, backend, opt.param)
@@ -1595,7 +1595,7 @@ def _ui_ask(prompt: str, default: str = "") -> str:
     return input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
 
 
-def step_advanced_options(cfg: ToolConfig, workflow: Dict) -> bool:
+def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
     """Per-run Advanced options: the backend parameters no other step asks (timeouts, memory
     share, ...). Default No -- then nothing is stored and the run is exactly what it was. Only
     an option the user EDITS is stored, in workflow["advanced"][backend][param], and it is then
@@ -1659,7 +1659,7 @@ def step_advanced_options(cfg: ToolConfig, workflow: Dict) -> bool:
 
 # --- Summary Panel ------------------------------------------------
 
-def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
+def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
     """Show summary and confirm."""
     origin = workflow.get("origin", "?")
     mode = workflow.get("mode", "?")
@@ -2392,7 +2392,7 @@ def _stranded_backups(old_dirs) -> list:
     return out
 
 
-def run_undo_old_tiffs(cfg: ToolConfig) -> bool:
+def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     """Move TIFFs from OLD_TIFFs/ back to parent folder -- all of them, or (round 26) only
     the stranded ones: originals with nothing left in their place."""
     folder = step_folder(cfg, "Root folder to scan for OLD_TIFFs")
@@ -3208,7 +3208,7 @@ def _ask_line(prompt_text: str, default: str) -> str:
     return "" if value in ("-", "none") else value
 
 
-def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
+def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     """
     Workflow 7: Diagnose 16-bit TIFFs.
     Check if TIFFs marked as 16-bit are real 16-bit data or padded 8-bit.
@@ -4169,7 +4169,7 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
     return None, "(no hard link on this drive: the original was renamed into OLD_PADDED/)"
 
 
-def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg: ToolConfig):
+def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg: "ConfigManager"):
     """
     Compress padded 8-bit TIFFs to 8-bit ZIP.
     Converts 16-bit to 8-bit then ZIP compresses. Preserves EXIF via exiftool.
@@ -4378,7 +4378,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     return {"converted": converted, "failed": failed}
 
 
-def run_purge_old_tiffs(cfg: ToolConfig) -> bool:
+def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     """
     Verify and delete OLD_TIFFs/ folders.
     Compares each file in OLD_TIFFs with the equivalent in the parent folder
@@ -5517,7 +5517,7 @@ def run_manifest_workflow(cfg) -> bool:
 
 # --- Workflow Runners -----------------------------------------------
 
-def run_free_compress(cfg: ToolConfig) -> bool:
+def run_free_compress(cfg: "ConfigManager") -> bool:
     """Workflow 1: Free compress with modes 0-9."""
     workflow = {
         "origin": "free_compress",
@@ -5717,7 +5717,7 @@ def run_free_compress(cfg: ToolConfig) -> bool:
     return True
 
 
-def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
+def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
     """
     Shared implementation for Copy EXIF (2), Compress ZIP (3), Both (4).
     workflow_type: "copy_exif" | "compress" | "both"
@@ -5904,7 +5904,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
         return True
 
 
-def run_generate_thumbnails(cfg: ToolConfig) -> bool:
+def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     """Workflow 8: Generate sRGB thumbnails from TIFFs."""
     script = SCRIPT_DIR / "generate_thumbnails.py"
     if not script.exists():
