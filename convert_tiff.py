@@ -2326,18 +2326,10 @@ def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[in
     if not interactive or dry:
         hint = (" Run the same compress again with -RestoreStranded (or answer yes to this "
                 "question in an interactive, non-dry run) to put them back.")
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{escape(msg + hint)}[/yellow]")
-        else:
-            print(msg + hint)
+        _say(msg + hint, "yellow")
         return None
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[yellow]{escape(msg)}[/yellow]")
-        yes = Confirm.ask("Put them back and compress them now?", default=True)
-    else:
-        print("\n" + msg)
-        yes = _yes(input("Put them back and compress them now? [Y/n]: "), True)
-    if not yes:
+    _say(f"\n{msg}", "yellow")
+    if not _ask_yes_no("Put them back and compress them now?", True):
         return None
     return run_subprocess(_with_restore_stranded(cmd), stdin=stdin)
 
@@ -2517,17 +2509,11 @@ def _restore_stranded_only(stranded) -> bool:
             except Exception as e:  # one unmovable file must not stop the rest
                 failed += 1
                 line = f"  FAILED: {f.name} -- {e}"
-        if RICH_AVAILABLE and console:
-            colour = "green" if line.startswith("  RESTORED") else ("red" if line.startswith("  FAILED") else "yellow")
-            console.print(f"[{colour}]{escape(line)}[/{colour}]")
-        else:
-            print(line)
+        _say(line, "green" if line.startswith("  RESTORED") else
+             ("red" if line.startswith("  FAILED") else "yellow"))
     summary = f"Done. Restored {moved} stranded original(s)" + \
               (f", kept {kept}" if kept else "") + (f", FAILED {failed}" if failed else "") + "."
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[{'green' if not failed else 'red'}]{escape(summary)}[/]")
-    else:
-        print("\n" + summary)
+    _say(f"\n{summary}", "red" if failed else "green")
     return failed == 0
 
 
@@ -2588,10 +2574,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     old_dirs = sorted([d for d in folder.rglob("*") if d.is_dir() and d.name.lower() in names
                        and not tw.path_excluded(str(d.parent), str(folder), _BACKUP_DIR_NAMES)])
     if not old_dirs:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No OLD_TIFFs folders found.[/yellow]")
-        else:
-            print("No OLD_TIFFs folders found.")
+        _say("No OLD_TIFFs folders found.", "yellow")
         return True
 
     # Count only what the move loop below will actually touch: counting every file made the
@@ -2603,14 +2586,9 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     counts = {od: len(_restorable(od)) for od in old_dirs}
     total_files = sum(counts.values())
 
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[cyan]Found {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} TIFF(s)[/cyan]")
-        for od in old_dirs:
-            console.print(f"  {counts[od]:>4} TIFFs: {escape(str(od))}")
-    else:
-        print(f"\nFound {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} TIFF(s):")
-        for od in old_dirs:
-            print(f"  {counts[od]:>4} TIFFs: {od}")
+    _say(f"\nFound {len(old_dirs)} OLD_TIFFs folder(s) with {total_files} TIFF(s)", "cyan")
+    for od in old_dirs:
+        _say(f"  {counts[od]:>4} TIFFs: {od}")
 
     # Round 26: the usual reason to come here is an interrupted mode 0/9 run. Restoring
     # EVERYTHING also brings back the originals of files that were compressed fine (and,
@@ -2620,32 +2598,16 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     if stranded:
         msg = (f"{len(stranded)} of them have NOTHING in their place (left by an interrupted "
                f"run): restore only those?")
-        if RICH_AVAILABLE and console:
-            only = Confirm.ask(f"\n[yellow]{escape(msg)}[/yellow]", default=True)
-        else:
-            only = _yes(input(f"\n{msg} [Y/n]: "), True)
-        if only:
+        if _ask_yes_no(f"\n{msg}", True, "yellow"):
             return _restore_stranded_only(stranded)
 
-    if RICH_AVAILABLE and console:
-        overwrite = Confirm.ask("\n[yellow]Overwrite existing files in parent folder?[/yellow]", default=False)
-        if not overwrite:
-            console.print("[dim]Will skip files that already exist in parent folder.[/dim]")
-    else:
-        resp = input("\nOverwrite existing files in parent folder? [y/N]: ").strip().lower()
-        overwrite = _yes(resp, False)
-        if not overwrite:
-            print("Will skip files that already exist in parent folder.")
+    overwrite = _ask_yes_no("\nOverwrite existing files in parent folder?", False, "yellow")
+    if not overwrite:
+        _say("Will skip files that already exist in parent folder.", "dim")
 
-    if RICH_AVAILABLE and console:
-        if not Confirm.ask("\n[yellow]Move all files back to parent folder?[/yellow]", default=True):
-            console.print("[dim]Cancelled.[/dim]")
-            return False
-    else:
-        resp = input("\nMove all files back to parent folder? [Y/n]: ").strip().lower()
-        if not _yes(resp, True):
-            print("Cancelled.")
-            return False
+    if not _ask_yes_no("\nMove all files back to parent folder?", True, "yellow"):
+        _say("Cancelled.", "dim")
+        return False
 
     # Move files
     moved = 0
@@ -2666,16 +2628,10 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
             _safe_move(src, dest)
         except Exception as e:
             failed += 1
-            if RICH_AVAILABLE and console:
-                console.print(f"  [red]FAILED: {escape(src.name)} -- {escape(str(e))}[/red]")
-            else:
-                print(f"  FAILED: {src.name} -- {e}")
+            _say(f"  FAILED: {src.name} -- {e}", "red")
             return False
         moved += 1
-        if RICH_AVAILABLE and console:
-            console.print(f"  [green]{label}: {escape(src.name)}[/green]")
-        else:
-            print(f"  {label}: {src.name}")
+        _say(f"  {label}: {src.name}", "green")
         return True
 
     for od in old_dirs:
@@ -2695,10 +2651,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
                     _try_move(f, dest, "OVERWRITE")
                 else:
                     skipped += 1
-                    if RICH_AVAILABLE and console:
-                        console.print(f"  [yellow]SKIP (exists): {escape(f.name)}[/yellow]")
-                    else:
-                        print(f"  SKIP (exists): {f.name}")
+                    _say(f"  SKIP (exists): {f.name}", "yellow")
             else:
                 if _try_move(f, dest, "MOVED") and f.suffix.lower() == ".tiff":
                     aside += _move_compressed_twin_aside(dest)
@@ -2711,23 +2664,12 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
                     continue
                 Path(od).rmdir()
             except OSError as e:
-                if RICH_AVAILABLE and console:
-                    console.print(f"  [yellow]Could not remove {escape(str(od))}: {escape(str(e))}[/yellow]")
-                else:
-                    print(f"  Could not remove {od}: {e}")
+                _say(f"  Could not remove {od}: {e}", "yellow")
                 continue
-            if RICH_AVAILABLE and console:
-                console.print(f"  [green]Removed: {escape(str(od))}[/green]")
-            else:
-                print(f"  Removed: {od}")
+            _say(f"  Removed: {od}", "green")
 
-    if RICH_AVAILABLE and console:
-        if Confirm.ask("\n[cyan]Delete empty OLD_TIFFs folders?[/cyan]", default=False):
-            _remove_empty_dirs()
-    else:
-        resp = input("\nDelete empty OLD_TIFFs folders? [y/N]: ").strip().lower()
-        if _yes(resp, False):
-            _remove_empty_dirs()
+    if _ask_yes_no("\nDelete empty OLD_TIFFs folders?", False, "cyan"):
+        _remove_empty_dirs()
 
     parts = [f"Moved {moved} file(s)"]
     if skipped > 0:
@@ -2735,10 +2677,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     if failed > 0:
         parts.append(f"FAILED {failed}")
     summary = "Done. " + ", ".join(parts) + "."
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[{'red' if failed else 'green'}]{escape(summary)}[/{'red' if failed else 'green'}]")
-    else:
-        print(f"\n{summary}")
+    _say(f"\n{summary}", "red" if failed else "green")
 
     return failed == 0
 
@@ -4562,10 +4501,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     # Find all OLD_TIFFs folders recursively (case-insensitive for Unix)
     old_dirs = sorted([d for d in folder.rglob("*") if d.is_dir() and d.name.lower() == "old_tiffs"])
     if not old_dirs:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No OLD_TIFFs folders found.[/yellow]")
-        else:
-            print("No OLD_TIFFs folders found.")
+        _say("No OLD_TIFFs folders found.", "yellow")
         return True
 
     # Collect all files in OLD_TIFFs with their parent-equivalent paths
@@ -4582,10 +4518,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
             items.append((f, new_file, old_size))
 
     if not items:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No files found in OLD_TIFFs folders.[/yellow]")
-        else:
-            print("No files found in OLD_TIFFs folders.")
+        _say("No files found in OLD_TIFFs folders.", "yellow")
         return True
 
     # A backup whose parent counterpart is simply ABSENT is not a mismatch: there is nothing
@@ -4647,14 +4580,9 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     # line showed the to-delete sum, so it read as if the kept backups were not there).
     total_in_old = sum(s for _, _, s in items)
 
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[cyan]OLD_TIFFs review -- {len(items)} file(s) in {len(old_dirs)} folder(s)[/cyan]")
-        console.print(f"[dim]Total size in OLD_TIFFs: {_format_size(total_in_old)}[/dim]\n")
-        console.print("[bold]File comparison (OLD_TIFFs vs parent):[/bold]")
-    else:
-        print(f"\nOLD_TIFFs review -- {len(items)} file(s) in {len(old_dirs)} folder(s)")
-        print(f"Total size in OLD_TIFFs: {_format_size(total_in_old)}\n")
-        print("File comparison (OLD_TIFFs vs parent):")
+    _say(f"\nOLD_TIFFs review -- {len(items)} file(s) in {len(old_dirs)} folder(s)", "cyan")
+    _say(f"Total size in OLD_TIFFs: {_format_size(total_in_old)}\n", "dim")
+    _say("File comparison (OLD_TIFFs vs parent):", "bold")
 
     mismatch_set = {(m[0], m[1]) for m in mismatches}
     mismatch_detail = {(m[0], m[1]): m[2] for m in mismatches}
@@ -4669,73 +4597,45 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
             size_info = f"{_format_size(old_size)} (parent missing)"
         detail = ""
         if is_mismatch:
-            status = "[red]MISMATCH[/red]"
+            status = ("MISMATCH", "red")
             detail = "  <- " + mismatch_detail.get((old_file, new_file), "")
         elif is_orphan:
-            status = "[yellow]KEPT[/yellow]"
+            status = ("KEPT", "yellow")
             detail = "  <- no counterpart in the parent folder, nothing to verify against"
         else:
-            status = "OK"
-        if RICH_AVAILABLE and console:
-            console.print(f"  [{status}] {escape(str(old_file.relative_to(folder)))}  {size_info}{escape(detail)}")
-        else:
-            status_str = (status.replace("[red]", "").replace("[/red]", "")
-                                .replace("[yellow]", "").replace("[/yellow]", ""))
-            print(f"  [{status_str}] {old_file.relative_to(folder)}  {size_info}{detail}")
+            status = ("OK", "")
+        _say(["  [", status, f"] {old_file.relative_to(folder)}  {size_info}{detail}"])
 
     if mismatches:
         head = (f"{len(mismatches)} file(s) did not verify against their parent copy and will "
                 f"be KEPT (nothing below is deleted for them):")
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[red]{escape(head)}[/red]")
-            for old_file, new_file, reason in mismatches:
-                console.print(f"  [red]! {escape(str(old_file.relative_to(folder)))}: {escape(reason)}[/red]")
-        else:
-            print(f"\n{head}")
-            for old_file, new_file, reason in mismatches:
-                print(f"  ! {old_file.relative_to(folder)}: {reason}")
+        _say(f"\n{head}", "red")
+        for old_file, new_file, reason in mismatches:
+            _say(f"  ! {old_file.relative_to(folder)}: {reason}", "red")
 
     if orphans:
         note = (f"{len(orphans)} file(s) have no counterpart in the parent folder and will be "
                 f"KEPT (a mode 0/9 backup is renamed when one of that name already exists, and "
                 f"a .tiff source produces a .tif output, so the names need not line up).")
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[yellow]{escape(note)}[/yellow]")
-            for old_file, _new_file, _reason in orphans:
-                console.print(f"  [yellow]= {escape(str(old_file.relative_to(folder)))}[/yellow]")
-        else:
-            print(f"\n{note}")
-            for old_file, _new_file, _reason in orphans:
-                print(f"  = {old_file.relative_to(folder)}")
+        _say(f"\n{note}", "yellow")
+        for old_file, _new_file, _reason in orphans:
+            _say(f"  = {old_file.relative_to(folder)}", "yellow")
 
     if not deletable:
-        msg = "Nothing can be purged: no OLD_TIFFs file has a verified copy in its parent folder."
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[yellow]{escape(msg)}[/yellow]")
-        else:
-            print(f"\n{msg}")
+        _say("\nNothing can be purged: no OLD_TIFFs file has a verified copy in its parent folder.",
+             "yellow")
         return not mismatches
 
     # Summary
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[green]{len(deletable)} of {len(items)} file(s) verified OK.[/green]")
-        console.print(f"[dim]Total to delete: {_format_size(total_old_size)}[/dim]")
-    else:
-        print(f"\n{len(deletable)} of {len(items)} file(s) verified OK.")
-        print(f"Total to delete: {_format_size(total_old_size)}")
+    _say(f"\n{len(deletable)} of {len(items)} file(s) verified OK.", "green")
+    _say(f"Total to delete: {_format_size(total_old_size)}", "dim")
 
     # Confirm
-    if RICH_AVAILABLE and console:
-        if not Confirm.ask("\n[red]Delete ALL OLD_TIFFs content? THIS CANNOT BE UNDONE.[/red]", default=False):
-            console.print("[dim]Cancelled.[/dim]")
-            return False
-        # Time confirmation (like mode 8)
-        time_str = Prompt.ask("[red]Type current time (HH:MM) to confirm deletion[/red]").strip()
-    else:
-        if not _yes(input("\nDelete ALL OLD_TIFFs content? THIS CANNOT BE UNDONE. [y/N]: "), False):
-            print("Cancelled.")
-            return False
-        time_str = input("Type current time (HH:MM) to confirm: ").strip()
+    if not _ask_yes_no("\nDelete ALL OLD_TIFFs content? THIS CANNOT BE UNDONE.", False, "red"):
+        _say("Cancelled.", "dim")
+        return False
+    # Time confirmation (like mode 8)
+    time_str = _ask("Type current time (HH:MM) to confirm deletion", style="red")
 
     # Delete files
     try:
@@ -4749,20 +4649,11 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         diff = abs(time_min - current_min)
         diff = min(diff, 1440 - diff)  # Handle midnight wraparound
         if diff > 1:
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]Time mismatch: expected {current_time}, got {time_str}.[/red]")
-            else:
-                print(f"Time mismatch: expected {current_time}, got {time_str}.")
-            if RICH_AVAILABLE and console:
-                console.print("[dim]Cancelled.[/dim]")
-            else:
-                print("Cancelled.")
+            _error(f"Time mismatch: expected {current_time}, got {time_str}.")
+            _say("Cancelled.", "dim")
             return False
     except Exception as e:
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]Error validating time: {e}[/red]")
-        else:
-            print(f"Error validating time: {e}")
+        _error(f"Error validating time: {e}")
         return False
 
     # `deletable`, never `items`: an orphaned backup is the only copy of that image left,
@@ -4776,45 +4667,28 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         if (_size_and_time(old_file), _size_and_time(new_file)) != checked_as[(old_file, new_file)] \
                 or _size_and_time(new_file) is None:
             changed.append(old_file)
-            line = f"  KEPT (changed since it was checked): {old_file.relative_to(folder)}"
-            if RICH_AVAILABLE and console:
-                console.print(f"  [yellow]{escape(line.strip())}[/yellow]")
-            else:
-                print(line)
+            _say(f"  KEPT (changed since it was checked): {old_file.relative_to(folder)}", "yellow")
             continue
         try:
             old_file.unlink()
             deleted += 1
-            if RICH_AVAILABLE and console:
-                console.print(f"  [green]DELETED: {escape(str(old_file.relative_to(folder)))}[/green]")
-            else:
-                print(f"  DELETED: {old_file.relative_to(folder)}")
+            _say(f"  DELETED: {old_file.relative_to(folder)}", "green")
         except Exception as e:
-            if RICH_AVAILABLE and console:
-                console.print(f"  [red]ERROR deleting {escape(old_file.name)}: {escape(str(e))}[/red]")
-            else:
-                print(f"  ERROR deleting {old_file.name}: {e}")
+            _say(f"  ERROR deleting {old_file.name}: {e}", "red")
 
     # Try to remove empty directories
     for od in sorted(old_dirs, key=lambda p: len(p.parts), reverse=True):
         try:
             if od.exists() and not any(od.iterdir()):
                 od.rmdir()
-                if RICH_AVAILABLE and console:
-                    console.print(f"  [green]Removed folder: {escape(str(od.relative_to(folder)))}[/green]")
-                else:
-                    print(f"  Removed folder: {od.relative_to(folder)}")
+                _say(f"  Removed folder: {od.relative_to(folder)}", "green")
         except Exception:
             pass
 
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[green]Done. Deleted {deleted} file(s).[/green]")
-        if changed:
-            console.print(f"[yellow]{len(changed)} kept: they changed after the check -- run Delete OLD_TIFFs again to check them anew.[/yellow]")
-    else:
-        print(f"\nDone. Deleted {deleted} file(s).")
-        if changed:
-            print(f"{len(changed)} kept: they changed after the check -- run Delete OLD_TIFFs again to check them anew.")
+    _say(f"\nDone. Deleted {deleted} file(s).", "green")
+    if changed:
+        _say(f"{len(changed)} kept: they changed after the check -- run Delete OLD_TIFFs again to "
+             "check them anew.", "yellow")
 
     # False when something did not verify: those backups were deliberately kept, and the
     # caller should not read the run as "everything checked out".
