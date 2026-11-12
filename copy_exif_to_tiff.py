@@ -340,9 +340,10 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     if opt["SkipIfTiffHasExif"]:
         # Camera EXIF only (the Exif IFD): -EXIF:all includes IFD0 -- the size and
         # resolution every TIFF has -- and skipped every TIFF (round 23).
-        rc, out = tw.exiftool(["-q", "-q", "-G1", "-s", "-ExifIFD:all", tiff])
-        # Fail-closed: an unreadable TIFF must not be overwritten by the copy below
-        if rc != 0:
+        try:
+            out = tw.exiftool(["-q", "-q", "-G1", "-s", "-ExifIFD:all", tiff])
+        except tw.ToolError:
+            # Fail-closed: an unreadable TIFF must not be overwritten by the copy below
             return PairResult(f"ERROR (exiftool EXIF check) | {name} | cannot inspect TIFF, not overwriting")
         if any(ln.strip() for ln in out.split("\n")):
             return PairResult(f"SKIP (already has EXIF) | {name}")
@@ -366,8 +367,11 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     icc_policy = opt["IccPolicy"].lower()
     tiff_has_icc = False
     if icc_policy in ("preserve_tiff", "always"):
-        _rc, out = tw.exiftool(["-s", "-s", "-s", "-ICC_Profile:all", tiff])
-        tiff_has_icc = bool(out.strip())
+        try:
+            out = tw.exiftool(["-s", "-s", "-s", "-ICC_Profile:all", tiff], check=False)
+            tiff_has_icc = bool(out.strip())
+        except tw.ToolError:
+            tiff_has_icc = True     # not started: never replace a profile nobody could see
     copy_icc = icc_policy == "always" or (icc_policy == "preserve_tiff" and not tiff_has_icc)
     # A RAF does not describe the colour space of the exported TIFF.
     icc_tag = "-ICC_Profile" if (copy_icc and p.source != "RAF") else ""
@@ -417,11 +421,15 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
 
     # ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
     # exiftool gives when the tagsfromfile source could not be opened -- it still exits 0.
-    rc, out = tw.exiftool(["-q", "-overwrite_original", "-P"] + tags, merge_stderr=True)
+    try:
+        out = tw.exiftool(["-q", "-overwrite_original", "-P"] + tags, merge_stderr=True)
+        copied = True
+    except tw.ToolError:
+        out, copied = "", False
     tw.remove_quietly(jpeg_meta)
     # Only "Error opening file" is fatal: the SOURCE was never read. A JPEG that carries
     # nothing writable reports differently and stays non-fatal.
-    if rc != 0 or re.search("Error opening file", out, re.I):
+    if not copied or re.search("Error opening file", out, re.I):
         drop_copy()
         return PairResult(f"ERROR (exiftool EXIF) | {name}")
 

@@ -38,6 +38,17 @@ RGB = ["rgb/3/8,8,8/"]
 # A stand-in for the tools
 # ---------------------------------------------------------------------------
 
+def fake_exiftool(answer):
+    """An exiftool double with the real one's contract: `answer(args)` gives (exit code,
+    text); a non-zero exit raises ToolError unless the caller passed check=False."""
+    def exiftool(args, merge_stderr=False, check=True):
+        rc, text = answer(list(args))
+        if rc != 0 and check:
+            raise tw.ToolError(f"exiftool exit {rc}", text, rc)
+        return text
+    return exiftool
+
+
 def tool_fails(*args, **kwargs):
     """A tool call that fails: what the five tool helpers raise instead of answering."""
     raise tw.ToolError("fake tool failure", "boom", 1)
@@ -85,7 +96,7 @@ class FakeTools:
         m.setattr(tw, "associated_alpha_rewritable", lambda p, pages, t=30: self.alpha_ok)
         m.setattr(tw, "backup_tiff_metadata", self._backup)
         m.setattr(tw, "magick_run", self._magick_run)
-        m.setattr(tw, "exiftool", self._exiftool)
+        m.setattr(tw, "exiftool", fake_exiftool(self._exiftool))
         m.setattr(tw, "restore_tiff_subfile_types", self._subfile)
         m.setattr(tw, "set_tiff_thumb_markers", lambda s, d: self.thumb_markers)
         m.setattr(tw, "add_tiff_history_entry", self._history)
@@ -144,7 +155,7 @@ class FakeTools:
             raise tw.ToolError(f"magick exit {rc}", "magick: boom", rc)
         return ""
 
-    def _exiftool(self, args, merge_stderr=False):
+    def _exiftool(self, args):
         self.events.append("exif")
         self.exif_calls.append([str(a) for a in args])
         return self.exif_result
@@ -832,6 +843,12 @@ class TestCopyExif:
         assert r.line.startswith("ERROR (exiftool EXIF check)")
         assert len(tools.exif_calls) == 1
 
+    def test_a_nonzero_exit_of_the_exif_copy_is_an_error(self, tools, photo):
+        tools.exif_result = (1, "")
+        r = cx.process_pair(exif_run(), pair(photo, photo.with_suffix(".jpg")),
+                            str(photo.parent), str(photo.parent), 1.0)
+        assert r.line == f"ERROR (exiftool EXIF) | {photo.name}", r.line
+
     def test_safe_mode_passes_the_restricted_list(self, tools, photo):
         tools.pages = 3
         tools.only_subfile = False
@@ -859,12 +876,12 @@ class TestCopyExif:
     def test_a_failed_metadata_restore_never_registers_the_staged_file(self, tools, photo, monkeypatch):
         calls = []
 
-        def exiftool(args, merge_stderr=False):
+        def exiftool(args):
             calls.append(list(args))
             if "-all:all" in args:
                 return 0, "Warning: Error opening file"
             return 0, ""
-        monkeypatch.setattr(tw, "exiftool", exiftool)
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(exiftool))
         r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith("ERROR (exiftool metadata restore failed - original untouched)")
@@ -921,8 +938,8 @@ class TestCopyExif:
             monkeypatch.setattr(tw, "backup_tiff_metadata",
                                 lambda s, d: tool_fails() if answers.pop(0) == "fail" else None)
         elif failing == "restore":
-            monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: (
-                (0, "Warning: Error opening file") if "-all:all" in args else (0, "")))
+            monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (
+                (0, "Warning: Error opening file") if "-all:all" in args else (0, ""))))
         else:
             setattr(tools, failing, False)
         out, r = self._to_outputdir(photo, tmp_path, "-CompressZip")
@@ -1865,7 +1882,7 @@ class TestGatesFailClosed:
 
     def test_sample_layout(self, monkeypatch):
         def says(rc, text):
-            monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: (rc, text))
+            monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (rc, text)))
         def refused(why):
             with pytest.raises(tw.ToolError):
                 tw.tiff_sample_layout("x")
@@ -1877,7 +1894,7 @@ class TestGatesFailClosed:
         refused("no IFD0")
         says(0, "[IFD0] PhotometricInterpretation: 2\n[IFD2] PhotometricInterpretation: 2\n")
         refused("a gap in the IFD numbering")
-        monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: 1 / 0)
+        monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False, check=True: 1 / 0)
         refused("an exception of the call itself")
         says(0, "[IFD0]  SamplesPerPixel: 4\n[IFD0]  PhotometricInterpretation: 2\n"
                 "[IFD0]  ExtraSamples: 0\n[IFD0]  BitsPerSample: 16 16 16 16\n"
@@ -1888,7 +1905,7 @@ class TestGatesFailClosed:
         """v3.1: the value, or ToolError -- never an empty value that reads as "not
         compressed"."""
         def says(rc, text):
-            monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: (rc, text))
+            monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (rc, text)))
         says(0, "Adobe Deflate\n")
         assert tw.ifd0_compression("x") == "Adobe Deflate"
         says(1, "Uncompressed\n")
@@ -1898,6 +1915,25 @@ class TestGatesFailClosed:
         says(0, "\n")
         with pytest.raises(tw.ToolError):
             tw.ifd0_compression("x")
+
+    def test_the_batch_reads(self, monkeypatch):
+        """One exiftool call per chunk of files. max_image_pixels uses what a batch printed
+        even when exiftool exits 1 (one file of it unreadable); a file it did not report
+        counts as the largest size. get_compression_map drops a failed chunk: its files are
+        then probed one by one."""
+        a, b = "E:\\伊豆沼 [x]\\a 50%.tif", "E:\\伊豆沼 [x]\\b (2).tif"
+        printed = "E:/伊豆沼 [x]\ta 50%.tif\t4000\t3000\n"
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (1, printed)))
+        assert tw.max_image_pixels([a]) == 12_000_000
+        assert tw.max_image_pixels([a, b]) == tw.UNKNOWN_IMAGE_PIXELS
+        monkeypatch.setattr(tw, "exiftool", tool_fails)
+        assert tw.max_image_pixels([a]) == tw.UNKNOWN_IMAGE_PIXELS, "exiftool not started"
+
+        printed = "E:/伊豆沼 [x]\ta 50%.tif\tAdobe Deflate\n"
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (0, printed)))
+        assert tw.get_compression_map([a]) == {a.lower(): "Adobe Deflate"}
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(lambda args: (1, printed)))
+        assert tw.get_compression_map([a]) == {}
 
     def test_magick_run(self, monkeypatch):
         """v3.1: what magick printed, or ToolError carrying it and the exit code."""
@@ -1954,12 +1990,12 @@ class TestGatesFailClosed:
         calls = []
         made = {}
 
-        def exiftool(args, merge_stderr=False):
+        def exiftool(args):
             calls.append(list(args))
             if made.get("write"):
                 Path(args[args.index("-o") + 1]).write_bytes(b"MIE")
             return made.get("rc", 0), ""
-        monkeypatch.setattr(tw, "exiftool", exiftool)
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(exiftool))
         assert tw.backup_tiff_metadata("a.tif", "b.tif") is None
         assert calls == [], "no container needed: nothing runs"
         with pytest.raises(tw.ToolError):
@@ -1983,17 +2019,35 @@ class TestGatesFailClosed:
         monkeypatch.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(True, 3, ""))
         calls = []
 
-        def exiftool(args, merge_stderr=False):
+        def exiftool(args):
             calls.append(list(args))
             if "-SubfileType" in args:
                 return 0, "[IFD0]  SubfileType: 0\n[IFD2]  SubfileType: 4\n"
             return 0, ""
-        monkeypatch.setattr(tw, "exiftool", exiftool)
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(exiftool))
         assert tw.restore_tiff_subfile_types("a", "b") is True
         write = calls[-1]
         assert "-IFD0:SubfileType#=0" in write, "an explicit 0 is kept, not deleted (round 11)"
         assert "-IFD1:SubfileType=" in write, "a page without the tag gets magick's stamp cleared"
         assert "-IFD2:SubfileType#=4" in write
+        exits = {"read": 0, "write": 1}
+
+        def exiftool_exits(args):
+            calls.append(list(args))
+            if "-SubfileType" in args:
+                return exits["read"], "[IFD0]  SubfileType: 0\n"
+            return exits["write"], "Error: cannot write"
+        monkeypatch.setattr(tw, "exiftool", fake_exiftool(exiftool_exits))
+        assert tw.restore_tiff_subfile_types("a", "b") is False, "the write exited 1"
+        assert tw.set_tiff_thumb_markers("a", "b") is False, "the write exited 1"
+        exits["write"] = 0
+        assert tw.set_tiff_thumb_markers("a", "b") is True
+        assert calls[-1][-3:] == ["-IFD0:SubfileType#=0", "-IFD1:SubfileType#=1", "b"]
+        exits["read"] = 1
+        n = len(calls)
+        assert tw.restore_tiff_subfile_types("a", "b") is False, "the source's markers unreadable"
+        assert tw.set_tiff_thumb_markers("a", "b") is False, "the source's markers unreadable"
+        assert len(calls) == n + 2, "nothing is written when the source cannot be read"
 
 
 # ---------------------------------------------------------------------------
@@ -2319,12 +2373,27 @@ class TestCommandLine:
 
         def run_captured(cmd, timeout=None, input=None):
             seen["cmd"], seen["input"] = cmd, input
-            return 0, "ok\r\n".encode(), b"warn"
+            return seen.get("rc", 0), "ok\r\n".encode(), b"warn"
         monkeypatch.setattr(tw, "run_captured", run_captured)
-        rc, out = tw.exiftool(["-s", "G:\\伊豆沼 [FINAL]\\a 50%.tif"], merge_stderr=True)
-        assert (rc, out) == (0, "ok\nwarn")
+        out = tw.exiftool(["-s", "G:\\伊豆沼 [FINAL]\\a 50%.tif"], merge_stderr=True)
+        assert out == "ok\nwarn"
         assert seen["cmd"][1:] == ["-@", "-"]
         assert seen["input"].decode("utf-8") == "-charset\nfilename=utf8\n-s\nG:\\伊豆沼 [FINAL]\\a 50%.tif\n"
+        assert tw.exiftool(["-s", "x.tif"]) == "ok\n", "stderr only when asked for"
+        seen["rc"] = 1
+        with pytest.raises(tw.ToolError) as e:
+            tw.exiftool(["-s", "x.tif"], merge_stderr=True)
+        assert (e.value.exit_code, e.value.output) == (1, "ok\nwarn")
+        assert tw.exiftool(["-s", "x.tif"], check=False) == "ok\n", \
+            "a batch read keeps what one unreadable file did not spoil"
+
+        def not_started(cmd, timeout=None, input=None):
+            raise FileNotFoundError(2, "no exiftool")
+        monkeypatch.setattr(tw, "run_captured", not_started)
+        for check in (True, False):
+            with pytest.raises(tw.ToolError) as e:
+                tw.exiftool(["-s", "x.tif"], check=check)
+            assert e.value.exit_code == -1 and "no exiftool" in e.value.output
 
     def test_thumbnail_goes_through_the_profile_before_strip(self):
         """Round 9: -colorspace alone reinterprets a ProPhoto file's numbers as sRGB."""

@@ -791,22 +791,27 @@ def magick_run(args):
     return text
 
 
-def exiftool(args, merge_stderr=False):
+def exiftool(args, merge_stderr=False, check=True):
     """exiftool with its arguments in a UTF-8 argfile read on STDIN (`-@ -`), one argument
-    per line, `-charset filename=utf8` first: (exit code, output text). exiftool reads its
-    command line in the ANSI code page -- a name outside it could not be opened, and neither
-    could an argfile whose own path was outside it (audit round 27). `merge_stderr` adds
-    stderr to the output, for the callers whose fail-closed 'Error opening file' check reads
-    both. exit code -1: exiftool could not be started."""
+    per line, `-charset filename=utf8` first: its output text. exiftool reads its command
+    line in the ANSI code page -- a name outside it could not be opened, and neither could
+    an argfile whose own path was outside it (audit round 27). `merge_stderr` adds stderr
+    to the output, for the callers whose fail-closed 'Error opening file' check reads both.
+
+    Raises ToolError when exiftool cannot be started (exit_code -1) and, with `check`, when
+    it exits non-zero (the output in the exception). `check=False` is for a batch read
+    whose output is used even when one file of the batch could not be read."""
     data = ("\n".join(["-charset", "filename=utf8"] + [str(a) for a in args]) + "\n").encode("utf-8")
     try:
         rc, out, err = run_captured([find_tool("exiftool") or "exiftool", "-@", "-"], input=data)
     except OSError as e:
-        return -1, str(e)
+        raise ToolError(f"exiftool could not be started: {e}", str(e), -1) from e
     text = _text(out)
     if merge_stderr:
         text += _text(err)
-    return rc, text
+    if check and rc != 0:
+        raise ToolError(f"exiftool exit {rc}", text, rc)
+    return text
 
 
 def magick_path_spec(path):
@@ -1003,17 +1008,17 @@ def backup_tiff_metadata(src, write_dst):
     if "%" in meta:
         raise ToolError(f"no metadata container: the temp folder has a '%' in its name ({meta})")
     try:
-        rc, out = exiftool(["-q", "-q", "-all:all",
-                            "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-o", meta, src])
+        out = exiftool(["-q", "-q", "-all:all",
+                        "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-o", meta, src])
+    except ToolError:
+        # a failed dump can leave a PARTIAL container behind
+        remove_quietly(meta)
+        raise
     except Exception as e:
         remove_quietly(meta)
         raise ToolError(f"no metadata container for {src}: {e}") from e
-    if rc != 0:
-        # a failed dump can leave a PARTIAL container behind
-        remove_quietly(meta)
-        raise ToolError(f"no metadata container for {src}", out, rc)
     if not os.path.exists(meta):
-        raise ToolError(f"exiftool wrote no metadata container for {src}", out, rc)
+        raise ToolError(f"exiftool wrote no metadata container for {src}", out, 0)
     return meta
 
 
@@ -1027,10 +1032,13 @@ def restore_all_metadata(tag_source, dst):
     A tag-less source legitimately reports "No writable tags set".
     IPTC:CodedCharacterSet is not part of -all:all: without it UTF-8 IPTC text was written
     back as Latin, every Japanese keyword a '?' (audit round 28)."""
-    rc, out = exiftool(["-q", "-overwrite_original", "-tagsfromfile", tag_source, "-all:all",
+    try:
+        out = exiftool(["-q", "-overwrite_original", "-tagsfromfile", tag_source, "-all:all",
                         "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe", dst],
                        merge_stderr=True)
-    return rc == 0 and not re.search("Error opening file", out, re.I)
+    except ToolError:
+        return False
+    return not re.search("Error opening file", out, re.I)
 
 
 def tiff_has_only_subfile_pages(path, page_count, allowed=("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE"),
@@ -1084,8 +1092,9 @@ def _read_subfile_types(path):
     """{ifd index: numeric SubfileType} of the IFDs that HAVE the tag, or None on failure.
     Read with exiftool: magick's `%[tiff:subfiletype]` is empty both when the tag is absent
     and when it is 0, and every scanner TIFF carries an explicit 0."""
-    rc, out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SubfileType", path])
-    if rc != 0:
+    try:
+        out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SubfileType", path])
+    except ToolError:
         return None
     types = {}
     for line in out.split("\n"):
@@ -1117,8 +1126,11 @@ def restore_tiff_subfile_types(src, dst, timeout=30):
             tags.append(f"-IFD{i}:SubfileType=")
     if not tags:
         return True
-    rc, _out = exiftool(["-q", "-q", "-overwrite_original"] + tags + [dst], merge_stderr=True)
-    return rc == 0
+    try:
+        exiftool(["-q", "-q", "-overwrite_original"] + tags + [dst], merge_stderr=True)
+    except ToolError:
+        return False
+    return True
 
 
 def set_tiff_thumb_markers(src, dst):
@@ -1129,9 +1141,12 @@ def set_tiff_thumb_markers(src, dst):
     if types is None:
         return False
     main_tag = f"-IFD0:SubfileType#={types[0]}" if 0 in types else "-IFD0:SubfileType="
-    rc, _out = exiftool(["-q", "-q", "-overwrite_original", main_tag, "-IFD1:SubfileType#=1", dst],
-                        merge_stderr=True)
-    return rc == 0
+    try:
+        exiftool(["-q", "-q", "-overwrite_original", main_tag, "-IFD1:SubfileType#=1", dst],
+                 merge_stderr=True)
+    except ToolError:
+        return False
+    return True
 
 
 def history_agent():
@@ -1150,8 +1165,8 @@ def add_tiff_history_entry(path, agent, parameters):
         when = now.strftime("%Y-%m-%dT%H:%M:%S") + (off[:3] + ":" + off[3:5] if off else "")
         assign = (f"-XMP-xmpMM:History+={{Action=converted,When={when},"
                   f"SoftwareAgent={agent},Parameters={parameters}}}")
-        rc, out = exiftool(["-q", "-overwrite_original", assign, path], merge_stderr=True)
-        return rc == 0 and not re.search("error", out, re.I)
+        out = exiftool(["-q", "-overwrite_original", assign, path], merge_stderr=True)
+        return not re.search("error", out, re.I)
     except Exception:
         return False
 
@@ -1198,12 +1213,12 @@ def tiff_sample_layout(path):
     the pixel gates decode both through magick, where gray and neutral RGB are equal (audit
     round 28). FAIL-CLOSED: any read or parse failure raises ToolError."""
     try:
-        rc, out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SamplesPerPixel",
-                            "-PhotometricInterpretation", "-ExtraSamples", "-BitsPerSample", path])
+        out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SamplesPerPixel",
+                        "-PhotometricInterpretation", "-ExtraSamples", "-BitsPerSample", path])
+    except ToolError:
+        raise
     except Exception as e:
         raise ToolError(f"cannot read the sample layout of {path}: {e}") from e
-    if rc != 0:
-        raise ToolError(f"cannot read the sample layout of {path}", out, rc)
     ifds = {}
     for line in out.split("\n"):
         m = _LAYOUT_LINE.match(line)
@@ -1214,7 +1229,7 @@ def tiff_sample_layout(path):
     while i in ifds:
         t = ifds[i]
         if "PhotometricInterpretation" not in t:
-            raise ToolError(f"IFD{i} of {path} has no PhotometricInterpretation", out, rc)
+            raise ToolError(f"IFD{i} of {path} has no PhotometricInterpretation", out, 0)
         ph = t["PhotometricInterpretation"].strip()
         cls = "p" + ph
         if ph in ("0", "1"):
@@ -1230,7 +1245,7 @@ def tiff_sample_layout(path):
         i += 1
     # a gap in the IFD numbering (or no IFD0 at all) is not a layout this can vouch for
     if not pages or len(pages) != len(ifds):
-        raise ToolError(f"the IFDs of {path} are not numbered 0..n", out, rc)
+        raise ToolError(f"the IFDs of {path} are not numbered 0..n", out, 0)
     return pages
 
 
@@ -1309,10 +1324,10 @@ def ifd0_compression(path):
     image is IFD0: plain -Compression prints one line per IFD, and a file whose thumbnail
     page was the compressed one was skipped as already compressed. Raises ToolError when
     exiftool fails or prints nothing."""
-    rc, out = exiftool(["-s", "-s", "-s", "-IFD0:Compression", path])
+    out = exiftool(["-s", "-s", "-s", "-IFD0:Compression", path])
     lines = [ln for ln in out.split("\n") if ln.strip()]
-    if rc != 0 or not lines:
-        raise ToolError(f"cannot read IFD0:Compression of {path}", out, rc)
+    if not lines:
+        raise ToolError(f"cannot read IFD0:Compression of {path}", out, 0)
     return lines[0].strip()
 
 
@@ -1328,8 +1343,9 @@ def get_compression_map(paths, chunk_size=400):
     result = {}
     for off in range(0, len(paths), chunk_size):
         chunk = paths[off:off + chunk_size]
-        rc, out = exiftool(["-T", "-Directory", "-FileName", "-IFD0:Compression"] + chunk)
-        if rc != 0:
+        try:
+            out = exiftool(["-T", "-Directory", "-FileName", "-IFD0:Compression"] + chunk)
+        except ToolError:
             continue
         for line in out.split("\n"):
             cols = line.split("\t", 2)
@@ -1384,8 +1400,11 @@ def max_image_pixels(paths, chunk_size=400):
     for off in range(0, len(paths), chunk_size):
         chunk = paths[off:off + chunk_size]
         seen = {}
-        rc, out = exiftool(["-T", "-n", "-Directory", "-FileName",
-                            "-IFD0:ImageWidth", "-IFD0:ImageHeight"] + chunk)
+        try:
+            out = exiftool(["-T", "-n", "-Directory", "-FileName",
+                            "-IFD0:ImageWidth", "-IFD0:ImageHeight"] + chunk, check=False)
+        except ToolError:
+            out = ""            # not started: every size of the chunk is unknown
         for line in out.split("\n"):
             cols = line.split("\t")
             if len(cols) < 4:
