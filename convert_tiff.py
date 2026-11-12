@@ -115,6 +115,7 @@ try:
     from rich.markup import escape
     from rich.panel import Panel
     from rich.table import Table
+    from rich.text import Text
     from rich.box import SIMPLE as BOX_SIMPLE
     from rich.prompt import Prompt, InvalidResponse
     from rich.prompt import Confirm as _RichConfirm
@@ -136,6 +137,87 @@ try:
 except ImportError:
     RICH_AVAILABLE = False
     console = None
+
+
+# --- One screen (v3.1 phase 7, T4) ----------------------------------------------
+# What the wizard shows and asks goes through these functions; only they know whether Rich is
+# there (154 `if RICH_AVAILABLE` forks said most things twice, and the two halves drifted
+# apart). A text is given plain -- or as a list of parts, each a text or a (text, style)
+# pair. On the Rich screen it becomes a Text, in which Rich reads no markup: a folder named
+# "[bold]", "[/b]" or "G:\" shows as it is, with nothing to escape.
+
+def _plain(text) -> str:
+    """`text` (a text or a list of parts) as the plain screen prints it."""
+    if isinstance(text, str):
+        return text
+    return "".join(p[0] if isinstance(p, tuple) else p for p in text)
+
+
+def _rich_text(text, style: str = ""):
+    """`text` (a text or a list of parts) as a Rich Text, in `style`; a part's own style wins
+    over `style`, as an inner markup tag did."""
+    out = Text()
+    for p in ([text] if isinstance(text, str) else text):
+        if isinstance(p, tuple):
+            out.append(p[0], style=p[1] or None)
+        else:
+            out.append(p)
+    if style:
+        out.stylize_before(style)
+    return out
+
+
+def _highlighted(t):
+    """`t` over the console's highlighting -- what console.print does to a string (numbers,
+    paths, ...), so the screen keeps its colours."""
+    highlighter = getattr(console, "highlighter", None)
+    if highlighter is None:
+        return t
+    out = highlighter(t.plain)
+    out.copy_styles(t)
+    return out
+
+
+def _say(text, style: str = "") -> None:
+    """Show `text` (a text or a list of parts), in `style` on the Rich screen."""
+    if RICH_AVAILABLE and console:
+        console.print(_highlighted(_rich_text(text, style)))
+    else:
+        print(_plain(text))
+
+
+def _error(text) -> None:
+    """An error: red on the Rich screen, `ERROR: ` in front on the plain one."""
+    if RICH_AVAILABLE and console:
+        console.print(_highlighted(_rich_text(text, "red")))
+    else:
+        print(f"ERROR: {_plain(text)}")
+
+
+def _ask(question, default: Optional[str] = None, style: str = "cyan",
+         choices: Optional[List[str]] = None) -> str:
+    """A question answered with a line of text, stripped. Enter gives `default` (shown
+    after the question; None = nothing shown, Enter gives ""). With `choices`, an answer
+    that is not one of them is asked again, on both screens."""
+    if RICH_AVAILABLE and console:
+        kw = {} if default is None else {"default": default}
+        if choices is not None:
+            kw["choices"] = choices
+        return Prompt.ask(_rich_text(question, style), **kw).strip()
+    shown = _plain(question) + (f" ({'/'.join(choices)})" if choices else "")
+    prompt = f"{shown} [{default}]: " if default else f"{shown}: "
+    while True:
+        answer = input(prompt).strip() or (default or "")
+        if choices is None or answer in choices:
+            return answer
+        print("Please select one of the available options")
+
+
+def _ask_yes_no(question, default: bool, style: str = "") -> bool:
+    """A yes/no question; the words are _yes's on both screens."""
+    if RICH_AVAILABLE and console:
+        return Confirm.ask(_rich_text(question, style), default=default)
+    return _yes(input(f"{_plain(question)} [{'Y/n' if default else 'y/N'}]: "), default)
 
 
 # --- Paths ---------------------------------------------------------
@@ -960,14 +1042,6 @@ def _available_memory_bytes():
 # Peak private memory of one ImageMagick process, in bytes per pixel of the image's
 # main page, measured on an 84 MP 16-bit scan (ImageMagick 7.1.2 Q16-HDRI; plan
 # AI_tools/261010_Claude_plan_memory-subprocess.md), +~10% margin.
-
-
-def _say(msg: str, style: str = "") -> None:
-    """One line on the console, Rich-styled when available."""
-    if RICH_AVAILABLE and console:
-        console.print(f"[{style}]{escape(msg)}[/{style}]" if style else escape(msg))
-    else:
-        print(msg)
 
 
 def _max_image_pixels(paths) -> int:
