@@ -1179,7 +1179,7 @@ _LAYOUT_LINE = re.compile(
 
 
 def tiff_sample_layout(path):
-    """(ok, pages): the sample layout of every page of a TIFF, read with exiftool, one
+    """The sample layout of every page of a TIFF, read with exiftool, one
     "<class>/<spp>/<bits>/<alpha>" per IFD in page order. class: gray (Photometric 0/1),
     rgb (2, and 6 = YCbCr, which decodes to RGB), else "p<n>". alpha: the ExtraSamples
     values that are alpha (1 associated, 2 unassociated); 0 (a scanner's IR channel) and an
@@ -1189,14 +1189,14 @@ def tiff_sample_layout(path):
     tags: an RGB file whose every pixel has R=G=B (black-and-white film scanned in RGB) was
     written as a ONE-channel grayscale TIFF with the RGB ICC profile still embedded, and
     the pixel gates decode both through magick, where gray and neutral RGB are equal (audit
-    round 28). FAIL-CLOSED: any read or parse failure is (False, [])."""
+    round 28). FAIL-CLOSED: any read or parse failure raises ToolError."""
     try:
         rc, out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SamplesPerPixel",
                             "-PhotometricInterpretation", "-ExtraSamples", "-BitsPerSample", path])
-    except Exception:
-        return False, []
+    except Exception as e:
+        raise ToolError(f"cannot read the sample layout of {path}: {e}") from e
     if rc != 0:
-        return False, []
+        raise ToolError(f"cannot read the sample layout of {path}", out, rc)
     ifds = {}
     for line in out.split("\n"):
         m = _LAYOUT_LINE.match(line)
@@ -1207,7 +1207,7 @@ def tiff_sample_layout(path):
     while i in ifds:
         t = ifds[i]
         if "PhotometricInterpretation" not in t:
-            return False, []
+            raise ToolError(f"IFD{i} of {path} has no PhotometricInterpretation", out, rc)
         ph = t["PhotometricInterpretation"].strip()
         cls = "p" + ph
         if ph in ("0", "1"):
@@ -1223,8 +1223,8 @@ def tiff_sample_layout(path):
         i += 1
     # a gap in the IFD numbering (or no IFD0 at all) is not a layout this can vouch for
     if not pages or len(pages) != len(ifds):
-        return False, []
-    return True, pages
+        raise ToolError(f"the IFDs of {path} are not numbered 0..n", out, rc)
+    return pages
 
 
 def magick_keep_type_args(pages):
@@ -1286,8 +1286,9 @@ def tiff_sample_layout_kept(src_pages, dst, main_page_only=False):
     page layout on purpose). Anything unreadable fails CLOSED."""
     if not src_pages:
         return False
-    ok, pages = tiff_sample_layout(dst)
-    if not ok:
+    try:
+        pages = tiff_sample_layout(dst)
+    except ToolError:
         return False
     if main_page_only:
         return pages[0] == src_pages[0]

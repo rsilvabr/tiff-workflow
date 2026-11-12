@@ -55,7 +55,7 @@ class FakeTools:
         self.comp = "Uncompressed"
         self.pages = 1
         self.only_subfile = True
-        self.layout = (True, list(RGB))
+        self.layout = list(RGB)       # None = unreadable (ToolError)
         self.layout_kept = True
         self.alpha_ok = True
         self.meta = "auto"            # "auto" = what backup_tiff_metadata would decide
@@ -79,7 +79,7 @@ class FakeTools:
         m.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(True, self.pages, ""))
         m.setattr(tw, "tiff_has_only_subfile_pages", self._only_subfile)
         m.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: False)
-        m.setattr(tw, "tiff_sample_layout", lambda p: self.layout)
+        m.setattr(tw, "tiff_sample_layout", self._layout)
         m.setattr(tw, "tiff_sample_layout_kept", self._layout_kept)
         m.setattr(tw, "associated_alpha_rewritable", lambda p, pages, t=30: self.alpha_ok)
         m.setattr(tw, "backup_tiff_metadata", self._backup)
@@ -102,6 +102,11 @@ class FakeTools:
     def _only_subfile(self, path, count, allowed=("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE"), timeout=30):
         self.allowed_seen.append(tuple(allowed))
         return self.only_subfile
+
+    def _layout(self, path):
+        if self.layout is None:
+            tool_fails()
+        return self.layout
 
     def _layout_kept(self, pages, dst, main_page_only=False):
         self.events.append("layout")
@@ -324,9 +329,9 @@ class TestMagickArguments:
         assert photo.read_bytes() == b"ORIGINAL"
 
     def test_unreadable_layout_and_non_opaque_associated_alpha_are_refused(self, tools, photo):
-        tools.layout = (False, [])
+        tools.layout = None
         assert job(compress_run(*IN_PLACE), photo).result.startswith("ERROR (sample layout unreadable)")
-        tools.layout = (True, ["rgb/4/8,8,8,8/1"])
+        tools.layout = ["rgb/4/8,8,8,8/1"]
         tools.alpha_ok = False
         assert "associated alpha that is not opaque" in job(compress_run(*IN_PLACE), photo).result
         assert tools.magick_calls == []
@@ -903,7 +908,7 @@ class TestCopyExif:
         elif failing == "compression":
             monkeypatch.setattr(tw, "ifd0_compression", tool_fails)
         elif failing == "layout":
-            tools.layout = (False, [])
+            tools.layout = None
         elif failing == "magick_rc":
             tools.magick_rc = 1
         elif failing == "tiff_container":
@@ -1853,18 +1858,23 @@ class TestGatesFailClosed:
     def test_sample_layout(self, monkeypatch):
         def says(rc, text):
             monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: (rc, text))
+        def refused(why):
+            with pytest.raises(tw.ToolError):
+                tw.tiff_sample_layout("x")
         says(1, "[IFD0] PhotometricInterpretation: 2\n")
-        assert tw.tiff_sample_layout("x") == (False, [])
+        refused("exit 1")
         says(0, "[IFD0] SamplesPerPixel: 3\n")
-        assert tw.tiff_sample_layout("x") == (False, []), "no photometric = unknown layout"
+        refused("no photometric = unknown layout")
         says(0, "[IFD1] PhotometricInterpretation: 2\n")
-        assert tw.tiff_sample_layout("x") == (False, []), "no IFD0"
+        refused("no IFD0")
         says(0, "[IFD0] PhotometricInterpretation: 2\n[IFD2] PhotometricInterpretation: 2\n")
-        assert tw.tiff_sample_layout("x") == (False, []), "a gap in the IFD numbering"
+        refused("a gap in the IFD numbering")
+        monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: 1 / 0)
+        refused("an exception of the call itself")
         says(0, "[IFD0]  SamplesPerPixel: 4\n[IFD0]  PhotometricInterpretation: 2\n"
                 "[IFD0]  ExtraSamples: 0\n[IFD0]  BitsPerSample: 16 16 16 16\n"
                 "[IFD1]  PhotometricInterpretation: 1\n")
-        assert tw.tiff_sample_layout("x") == (True, ["rgb/4/16,16,16,16/", "gray/1/1/"])
+        assert tw.tiff_sample_layout("x") == ["rgb/4/16,16,16,16/", "gray/1/1/"]
 
     def test_ifd0_compression(self, monkeypatch):
         """v3.1: the value, or ToolError -- never an empty value that reads as "not
@@ -1892,11 +1902,11 @@ class TestGatesFailClosed:
         assert tw.magick_keep_type_args([]) == []
 
     def test_layout_kept(self, monkeypatch):
-        monkeypatch.setattr(tw, "tiff_sample_layout", lambda p: (False, []))
+        monkeypatch.setattr(tw, "tiff_sample_layout", tool_fails)
         assert tw.tiff_sample_layout_kept(RGB, "x") is False
-        monkeypatch.setattr(tw, "tiff_sample_layout", lambda p: (True, ["gray/1/8/"]))
+        monkeypatch.setattr(tw, "tiff_sample_layout", lambda p: ["gray/1/8/"])
         assert tw.tiff_sample_layout_kept(RGB, "x") is False
-        monkeypatch.setattr(tw, "tiff_sample_layout", lambda p: (True, RGB + ["rgb/3/8,8,8/"]))
+        monkeypatch.setattr(tw, "tiff_sample_layout", lambda p: RGB + ["rgb/3/8,8,8/"])
         assert tw.tiff_sample_layout_kept(RGB, "x") is False, "one page more is not the same file"
         assert tw.tiff_sample_layout_kept(RGB, "x", main_page_only=True) is True
         assert tw.tiff_sample_layout_kept([], "x") is False

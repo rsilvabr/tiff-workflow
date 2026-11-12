@@ -242,8 +242,9 @@ def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_co
     # magick turned a neutral RGB TIFF into a 1-channel gray one with the RGB profile still
     # in it, and the pixel gate below cannot see that (audit round 28). The source layout
     # picks the -type that keeps it and is the reference for the layout gate after the write.
-    layout_ok, src_pages = tw.tiff_sample_layout(tiff_target)
-    if not layout_ok:
+    try:
+        src_pages = tw.tiff_sample_layout(tiff_target)
+    except tw.ToolError:
         drop_copy()
         return f"ERROR (sample layout unreadable) | {name}"
     type_args = tw.magick_keep_type_args(src_pages)

@@ -664,8 +664,9 @@ def _compress_job(run, t, load, own):
     # magick turned a neutral RGB file into a 1-channel gray one and every pixel gate said
     # OK (audit round 28). The source layout picks the -type that keeps it and is the
     # reference for the gate after the write.
-    layout_ok, src_pages = tw.tiff_sample_layout(src)
-    if not layout_ok:
+    try:
+        src_pages = tw.tiff_sample_layout(src)
+    except tw.ToolError:
         return res(f"ERROR (sample layout unreadable) | {name}", fd=True)
     layout_pages = [src_pages[0]] if generate_thumb else list(src_pages)
     type_args = tw.magick_keep_type_args(layout_pages)
