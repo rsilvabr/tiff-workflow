@@ -2438,6 +2438,35 @@ class TestCommandLine:
                 tw.exiftool(["-s", "x.tif"], check=check)
             assert e.value.exit_code == -1 and "no exiftool" in e.value.output
 
+    def test_exiftool_commands_in_one_process(self, monkeypatch):
+        """v3.1 phase 4: several commands, one exiftool; each command's status and output are
+        read between its own markers, and a marker without a number is a failure."""
+        seen = {}
+
+        def run_captured(cmd, timeout=None, input=None):
+            lines = input.decode("utf-8").split("\n")
+            seen["cmd"], seen["lines"] = cmd, lines
+            tag = lines[lines.index("-echo3") + 1].split(" ")[0]
+            out = f"a\n{tag} 0 0}}\nb\n{tag} 1 1}}\n{tag} 2 }}\n"
+            err = f"{tag} 0 0}}\nWarning: Error opening file - x\n{tag} 1 1}}\n"
+            return 1, out.encode(), err.encode()
+        monkeypatch.setattr(tw, "run_captured", run_captured)
+        res = tw.exiftool_commands([["-s", "G:\\伊豆沼 [x]\\a 50%.tif"], ["-q", "b.tif"], ["c.tif"]])
+        assert seen["cmd"][1:] == ["-@", "-"]
+        lines = seen["lines"]
+        assert lines.count("-execute") == 2 and lines.count("-charset") == 3
+        assert lines[2:4] == ["-s", "G:\\伊豆沼 [x]\\a 50%.tif"]
+        assert res[0] == tw.ExifResult(0, "a\n")
+        assert res[1] == tw.ExifResult(1, "b\nWarning: Error opening file - x\n"), \
+            "the warning is the second command's, not the first's"
+        assert res[2].status == -1, "a marker without a number is a failure"
+
+        def not_started(cmd, timeout=None, input=None):
+            raise FileNotFoundError(2, "no exiftool")
+        monkeypatch.setattr(tw, "run_captured", not_started)
+        with pytest.raises(tw.ToolError):
+            tw.exiftool_commands([["a.tif"]])
+
     def test_thumbnail_goes_through_the_profile_before_strip(self):
         """Round 9: -colorspace alone reinterprets a ProPhoto file's numbers as sRGB."""
         args = tw.thumbnail_magick_args(r"C:\p.icc", 256)

@@ -838,17 +838,71 @@ def exiftool(args, merge_stderr=False, check=True):
     Raises ToolError when exiftool cannot be started (exit_code -1) and, with `check`, when
     it exits non-zero (the output in the exception). `check=False` is for a batch read
     whose output is used even when one file of the batch could not be read."""
-    data = ("\n".join(["-charset", "filename=utf8"] + [str(a) for a in args]) + "\n").encode("utf-8")
-    try:
-        rc, out, err = run_captured([find_tool("exiftool") or "exiftool", "-@", "-"], input=data)
-    except OSError as e:
-        raise ToolError(f"exiftool could not be started: {e}", str(e), -1) from e
+    rc, out, err = _exiftool_process(["-charset", "filename=utf8"] + [str(a) for a in args])
     text = _text(out)
     if merge_stderr:
         text += _text(err)
     if check and rc != 0:
         raise ToolError(f"exiftool exit {rc}", text, rc)
     return text
+
+
+def _exiftool_process(arg_lines):
+    """One exiftool process, its arguments on stdin (`-@ -`, UTF-8, one per line): (exit
+    code, stdout bytes, stderr bytes). Raises ToolError when it cannot be started."""
+    data = ("\n".join(arg_lines) + "\n").encode("utf-8")
+    try:
+        return run_captured([find_tool("exiftool") or "exiftool", "-@", "-"], input=data)
+    except OSError as e:
+        raise ToolError(f"exiftool could not be started: {e}", str(e), -1) from e
+
+
+class ExifResult(NamedTuple):
+    status: int        # the command's own exit status; -1 when it could not be read
+    output: str        # what the command printed, stdout then stderr
+
+
+def exiftool_commands(commands):
+    """Several exiftool commands in ONE process (`-execute`), each with its own exit status
+    and output: [ExifResult] in command order. Starting exiftool costs ~0.15 s; a file's
+    writes after a conversion are three commands that used to start it three times.
+
+    Each command ends with `-echo3`/`-echo4` markers carrying `${status}` (exiftool 12.15 or
+    later), on stdout and on stderr: what a command printed is what came before its marker
+    and after the previous one, so the 'Error opening file' of one command is never read as
+    another's. FAIL-CLOSED: a marker that is missing, or carries no number, gives status -1.
+    Raises ToolError when exiftool cannot be started."""
+    tag = "{tw" + uuid.uuid4().hex[:12]
+    lines = []
+    for i, cmd in enumerate(commands):
+        if i:
+            lines.append("-execute")
+        marker = f"{tag} {i} " + "${status}}"
+        lines += (["-charset", "filename=utf8"] + [str(a) for a in cmd]
+                  + ["-echo3", marker, "-echo4", marker])
+    _rc, out, err = _exiftool_process(lines)
+    streams = [_split_by_marker(_text(out), tag, len(commands)),
+               _split_by_marker(_text(err), tag, len(commands))]
+    results = []
+    for i in range(len(commands)):
+        (s_out, t_out), (s_err, t_err) = streams[0][i], streams[1][i]
+        status = s_out if s_out == s_err else -1
+        results.append(ExifResult(status, t_out + t_err))
+    return results
+
+
+def _split_by_marker(text, tag, n):
+    """[(status, text)] of `n` commands from one stream of exiftool_commands."""
+    parts = [(-1, "") for _ in range(n)]
+    pending = []
+    for line in text.split("\n"):
+        m = re.fullmatch(re.escape(tag) + r" (\d+) (-?\d+)\}", line.strip())
+        if m and int(m.group(1)) < n:
+            parts[int(m.group(1))] = (int(m.group(2)), "".join(pending))
+            pending = []
+        else:
+            pending.append(line + "\n")
+    return parts
 
 
 def magick_path_spec(path):

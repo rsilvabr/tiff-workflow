@@ -225,3 +225,32 @@ def test_python_exiftool_calls_survive_a_non_ansi_tempdir(tmp_path, monkeypatch)
     assert sig["icc"] == reference["icc"]
     px = convert_tiff._image_pixels([src])
     assert list(px.values()) == [64 * 48], px
+
+
+# --- v3.1 phase 4: several commands in one exiftool (real) --------------------------------------
+
+@needs_tools
+def test_commands_in_one_process_keep_their_own_status_and_output(tmp_path):
+    """tw.exiftool_commands on a hostile path: a failing command does not spoil the next one,
+    its warning stays its own, and the writes of the earlier commands are on disk when a
+    later command reads the file."""
+    sys.path.insert(0, str(REPO))
+    import tiff_workflow_common as tw
+    src = tmp_path / HOSTILE / "src.tif"
+    tiff(src, seed=1)
+    exif_stdin(src, "-q", "-overwrite_original", "-XMP-dc:Title=伊豆沼")
+    dst = src.parent / "dst 50%off (2).tif"
+    tiff(src.parent / "plain.tif", seed=2)
+    (src.parent / "plain.tif").rename(dst)
+    res = tw.exiftool_commands([
+        ["-q", "-overwrite_original", "-tagsfromfile", str(src.parent / "nothing here.tif"),
+         "-all:all", str(dst)],
+        ["-q", "-overwrite_original", "-tagsfromfile", str(src), "-XMP-dc:Title", str(dst)],
+        ["-q", "-q", "-overwrite_original", "-IFD0:SubfileType#=0", str(dst)],
+        ["-s", "-s", "-s", "-XMP-dc:Title", str(dst)],
+    ])
+    assert res[0].status != 0 and "does not exist" in res[0].output
+    assert res[1].status == 0 and "does not exist" not in res[1].output
+    assert res[2].status == 0
+    assert res[3] == tw.ExifResult(0, "伊豆沼\n")
+    assert exif_stdin(dst, "-s", "-s", "-s", "-IFD0:SubfileType", "-n") == "0"
