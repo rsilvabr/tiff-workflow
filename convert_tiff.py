@@ -2427,6 +2427,35 @@ def _stranded_backups(root) -> list:
     return [(Path(x["backup"]), Path(x["target"])) for x in found]
 
 
+def _move_compressed_twin_aside(restored: Path) -> int:
+    """After Restore put an x.tiff original back: the compressed x.tif that modes 0/9 wrote
+    from it sits next to it (a .tiff source is written as .tif). It is moved into the ZIP
+    subfolder of that folder (compress's ZipSubfolderName -- where mode 1 puts compressed
+    copies; every tool skips it as output, none takes it for a backup), never deleted, never
+    onto a file there (a taken name is numbered). Returns 1 when moved (v3.1 phase 6,
+    W-O17, the owner's choice: the folder used to keep both, without a word). The original
+    is back BEFORE this runs: a move that fails leaves both side by side, said."""
+    twin = restored.with_suffix(".tif")
+    if not twin.is_file() or tw.same_path(str(twin), str(restored)):
+        return 0
+    zip_dir = restored.parent / str(_backend_default("compress_tiff_zip.py", "ZipSubfolderName"))
+    target = zip_dir / twin.name
+    if target.exists():
+        _name, cand = tw.numbered_name(str(zip_dir), twin.stem, twin.suffix,
+                                       lambda n, p: os.path.exists(p))
+        target = Path(cand)
+    try:
+        zip_dir.mkdir(exist_ok=True)
+        _safe_move(twin, target)
+    except Exception as e:
+        _say(f"  KEPT BESIDE IT ({e}): {twin.name} -- the "
+             f"compressed copy of {restored.name} could not be moved to {zip_dir.name}", "yellow")
+        return 0
+    _say(f"  MOVED ASIDE: {twin.name} -> {zip_dir.name}{os.sep}{target.name} "
+         f"(the compressed copy of the restored {restored.name})", "dim")
+    return 1
+
+
 def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     """Move TIFFs from OLD_TIFFs/ back to parent folder -- all of them, or (round 26) only
     the stranded ones: originals with nothing left in their place."""
@@ -2504,6 +2533,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     moved = 0
     skipped = 0
     failed = 0
+    aside = 0
 
     def _try_move(src: Path, dest: Path, label: str) -> bool:
         """
@@ -2552,7 +2582,8 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
                     else:
                         print(f"  SKIP (exists): {f.name}")
             else:
-                _try_move(f, dest, "MOVED")
+                if _try_move(f, dest, "MOVED") and f.suffix.lower() == ".tiff":
+                    aside += _move_compressed_twin_aside(dest)
 
     # Ask to delete empty OLD_TIFFs folders
     def _remove_empty_dirs():

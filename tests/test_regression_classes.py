@@ -945,6 +945,61 @@ class TestUndoOldTiffsResilience:
         assert result is True
         assert (tmp_path / "photo.tif").read_bytes() == b"data"
 
+    def test_a_restored_tiff_takes_its_place_and_the_compressed_copy_moves_aside(self, tmp_path,
+                                                                                 monkeypatch, capsys):
+        """v3.1 phase 6 (W-O17, the owner's choice): modes 0/9 write x.tif from an x.tiff; the
+        restore put x.tiff back NEXT TO x.tif, without a word. The original goes back first,
+        then the compressed copy moves into the ZIP subfolder -- never onto a file there."""
+        cam = tmp_path / "伊豆沼 [FINAL] 50%"
+        old = cam / "OLD_TIFFs"
+        old.mkdir(parents=True)
+        (old / "x 50%.tiff").write_bytes(b"ORIGINAL X")
+        (cam / "x 50%.tif").write_bytes(b"COMPRESSED X")
+        (old / "y.tiff").write_bytes(b"ORIGINAL Y")
+        (cam / "y.tif").write_bytes(b"COMPRESSED Y")
+        (cam / "ZIP").mkdir()
+        (cam / "ZIP" / "y.tif").write_bytes(b"AN EARLIER MODE 1 COPY")
+        (old / "z.tif").write_bytes(b"ORIGINAL Z")             # a .tif original: nothing to move
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: cam)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        it = iter(["n", "n", "y", "n"])       # not stranded-only, no overwrite, move, keep dirs
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+
+        assert convert_tiff.run_undo_old_tiffs(SimpleNamespace(config=ToolConfig())) is True
+        assert (cam / "x 50%.tiff").read_bytes() == b"ORIGINAL X"
+        assert (cam / "ZIP" / "x 50%.tif").read_bytes() == b"COMPRESSED X"
+        assert (cam / "y.tiff").read_bytes() == b"ORIGINAL Y"
+        assert (cam / "ZIP" / "y_v2.tif").read_bytes() == b"COMPRESSED Y"
+        assert (cam / "ZIP" / "y.tif").read_bytes() == b"AN EARLIER MODE 1 COPY"
+        assert (cam / "z.tif").read_bytes() == b"ORIGINAL Z"
+        assert not (cam / "x 50%.tif").exists() and not (cam / "y.tif").exists()
+        assert "MOVED ASIDE: x 50%.tif -> ZIP" in capsys.readouterr().out
+
+    def test_a_failed_restore_never_moves_the_compressed_copy_away(self, tmp_path, monkeypatch):
+        """W-O17: the irreversible step comes last. When x.tiff cannot go back, x.tif stays
+        where it is -- the folder never ends with neither."""
+        cam = tmp_path / "伊豆沼 [x]"
+        old = cam / "OLD_TIFFs"
+        old.mkdir(parents=True)
+        (old / "x.tiff").write_bytes(b"ORIGINAL X")
+        (cam / "x.tif").write_bytes(b"COMPRESSED X")
+        real_move = convert_tiff._safe_move
+
+        def move(src, dst):
+            if Path(src).suffix.lower() == ".tiff":
+                raise OSError("locked")
+            return real_move(src, dst)
+        monkeypatch.setattr(convert_tiff, "_safe_move", move)
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: cam)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        asked = []
+        it = iter(["n", "y", "n"])            # nothing stranded: no overwrite, move, keep dirs
+        monkeypatch.setattr("builtins.input", lambda p="", *a, **k: asked.append(p) or next(it))
+        assert convert_tiff.run_undo_old_tiffs(SimpleNamespace(config=ToolConfig())) is False
+        assert any("Move all files back" in p for p in asked), asked      # it really tried
+        assert (cam / "x.tif").read_bytes() == b"COMPRESSED X" and (old / "x.tiff").exists()
+        assert not (cam / "ZIP").exists()
+
     def test_stranded_only_is_offered_first_and_restores_just_those(self, tmp_path, monkeypatch):
         """Round 26: a backup whose original is in place stays in OLD_TIFFs/."""
         old = tmp_path / "OLD_TIFFs"
