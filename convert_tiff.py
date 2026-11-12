@@ -197,17 +197,19 @@ def _error(text) -> None:
 def _ask(question, default: Optional[str] = None, style: str = "cyan",
          choices: Optional[List[str]] = None) -> str:
     """A question answered with a line of text, stripped. Enter gives `default` (shown
-    after the question; None = nothing shown, Enter gives ""). With `choices`, an answer
-    that is not one of them is asked again, on both screens."""
+    after the question, also when empty; None = nothing shown, Enter gives ""). With
+    `choices`, an answer that is not one of them is asked again, on both screens."""
     if RICH_AVAILABLE and console:
         kw = {} if default is None else {"default": default}
         if choices is not None:
             kw["choices"] = choices
         return Prompt.ask(_rich_text(question, style), **kw).strip()
     shown = _plain(question) + (f" ({'/'.join(choices)})" if choices else "")
-    prompt = f"{shown} [{default}]: " if default else f"{shown}: "
+    prompt = f"{shown}: " if default is None else f"{shown} [{default}]: "
     while True:
-        answer = input(prompt).strip() or (default or "")
+        answer = input(prompt).strip()
+        if not answer:
+            return default or ""
         if choices is None or answer in choices:
             return answer
         print("Please select one of the available options")
@@ -6084,34 +6086,20 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     """Workflow 8: Generate sRGB thumbnails from TIFFs."""
     script = SCRIPT_DIR / "generate_thumbnails.py"
     if not script.exists():
-        if RICH_AVAILABLE and console:
-            console.print("[red]generate_thumbnails.py not found.[/red]")
-        else:
-            print("ERROR: generate_thumbnails.py not found.")
+        _error("generate_thumbnails.py not found.")
         return False
-    
+
     # Input directory
-    if RICH_AVAILABLE and console:
-        input_dir = Prompt.ask("[cyan]Input directory[/cyan]", default=str(cfg.config.last_input_dir or "."))
-    else:
-        input_dir = input(f"Input directory [{cfg.config.last_input_dir or '.'}]: ").strip() or (cfg.config.last_input_dir or ".")
+    input_dir = _ask("Input directory", str(cfg.config.last_input_dir or "."))
     input_dir = (input_dir or "").strip().strip('"').strip("'")
     p = Path(input_dir)
     if not p.is_dir():
-        msg = f"Directory does not exist: {input_dir}"
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]{escape(msg)}[/red]")
-        else:
-            print(msg)
+        _error(f"Directory does not exist: {input_dir}")
         return False
     # The backend splits -InputDir on ';' like the other three, so a path containing one
     # would silently become two bogus roots. step_folder rejects it for every other workflow.
     if ";" in str(p):
-        msg = f"Folder path contains ';' which is not supported: {p}"
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]{escape(msg)}[/red]")
-        else:
-            print(f"ERROR: {msg}")
+        _error(f"Folder path contains ';' which is not supported: {p}")
         return False
     cfg.config.last_input_dir = os.path.abspath(str(p))
     cfg.save_config()
@@ -6120,36 +6108,19 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     input_dir = os.path.abspath(p)
 
     # Remove mode: skip the generation questions entirely
-    if RICH_AVAILABLE and console:
-        remove_mode = Confirm.ask("[yellow]Remove existing thumbnails instead of creating them?[/yellow]", default=False)
-    else:
-        remove_mode = _yes(input("Remove existing thumbnails instead of creating them? [y/N]: "), False)
+    remove_mode = _ask_yes_no("Remove existing thumbnails instead of creating them?", False, "yellow")
 
     # Recursive / dry-run apply to both modes
     def _ask_recursive_and_dry():
-        if RICH_AVAILABLE and console:
-            return (
-                Confirm.ask("[cyan]Recursive?[/cyan]", default=False),
-                Confirm.ask("[cyan]Dry-run?[/cyan]", default=False),
-            )
-        return (
-            _yes(input("Recursive? [y/N]: "), False),
-            _yes(input("Dry-run? [y/N]: "), False),
-        )
+        return (_ask_yes_no("Recursive?", False, "cyan"), _ask_yes_no("Dry-run?", False, "cyan"))
 
     def _ask_exclude_folders():
         """Same question the compress/Copy EXIF workflows ask. The backend used to carry a
         hardcoded, silent exclusion list instead (ZIP and _EXPORT included, which are exactly
         where the compressed library and the export trees live)."""
         default = cfg.config.last_exclude_folders or ""
-        if RICH_AVAILABLE and console:
-            value = Prompt.ask(
-                "[cyan]Exclude folders?[/cyan] (';'-separated folder names, '-' = none)",
-                default=default or "-").strip()
-        else:
-            value = input(f"Exclude folders? (';'-separated names, '-' = none) [{default or '-'}]: ").strip()
-            if value == "":
-                value = default
+        value = _ask([("Exclude folders?", "cyan"), " (';'-separated folder names, '-' = none)"],
+                     default or "-", style="")
         if value in ("-", "", "none"):
             cfg.config.last_exclude_folders = None
             return ""
@@ -6157,17 +6128,10 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
         return value
 
     def _ask_output_dir():
-        if RICH_AVAILABLE and console:
-            value = Prompt.ask("[cyan]Output folder (empty = next to each TIFF)[/cyan]", default="").strip()
-        else:
-            value = input("Output folder (empty = next to each TIFF) []: ").strip()
+        value = _ask("Output folder (empty = next to each TIFF)", "")
         value = value.strip('"').strip("'")
         if ";" in value:
-            msg = f"Output path contains ';' which is not supported: {value}"
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]{escape(msg)}[/red]")
-            else:
-                print(f"ERROR: {msg}")
+            _error(f"Output path contains ';' which is not supported: {value}")
             return None
         return value
 
@@ -6185,10 +6149,7 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
             cmd += ["-DryRun"]
         _save_last_run(cfg, "thumbnails_remove", f"Thumbnails: REMOVE under {truncate_path(p, 60)}",
                        [[a for a in cmd if a != "-DryRun"]])
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[dim]Running: {escape(' '.join(cmd))}[/dim]\n")
-        else:
-            print(f"\nRunning: {' '.join(cmd)}\n")
+        _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
         return run_subprocess(cmd) == 0
 
     # The four prompt defaults come from generate_thumbnails.py's own PARAMS table
@@ -6199,52 +6160,24 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     page_default = _backend_default("generate_thumbnails.py", "Page")
 
     # Thumbnail size (backend accepts 32-4096)
-    if RICH_AVAILABLE and console:
-        size_str = Prompt.ask("[cyan]Thumbnail size (px, 32-4096)[/cyan]", default=str(size_default))
-    else:
-        size_str = input(f"Thumbnail size (px, 32-4096) [{size_default}]: ").strip() or str(size_default)
+    size_str = _ask("Thumbnail size (px, 32-4096)", str(size_default))
     try:
         size = int(size_str)
     except ValueError:
         size = size_default
     if not (32 <= size <= 4096):
-        msg = f"Size {size} out of range (32-4096), using {size_default}."
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{msg}[/yellow]")
-        else:
-            print(msg)
+        _say(f"Size {size} out of range (32-4096), using {size_default}.", "yellow")
         size = size_default
 
     # Quality: the backend validates 1-100 and refuses to start otherwise
-    if RICH_AVAILABLE and console:
-        quality_str = Prompt.ask("[cyan]JPEG quality (1-100)[/cyan]", default=quality_default)
-    else:
-        quality_str = input(f"JPEG quality (1-100) [{quality_default}]: ").strip() or quality_default
+    quality_str = _ask("JPEG quality (1-100)", quality_default)
     if not (quality_str.isdigit() and 1 <= int(quality_str) <= 100):
-        msg = f"Invalid quality '{quality_str}' (must be 1-100), using {quality_default}."
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{escape(msg)}[/yellow]")
-        else:
-            print(msg)
+        _say(f"Invalid quality '{quality_str}' (must be 1-100), using {quality_default}.", "yellow")
         quality_str = quality_default
 
-    # Format
-    if RICH_AVAILABLE and console:
-        fmt = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default=format_default)
-    else:
-        fmt = input(f"Format (jpg/png/tif) [{format_default}]: ").strip().lower() or format_default
-        if fmt not in ("jpg", "jpeg", "png", "tif", "tiff"):
-            print(f"Invalid format '{fmt}', using {format_default}.")
-            fmt = format_default
-
-    # Page: 0 (first) or all
-    if RICH_AVAILABLE and console:
-        page = Prompt.ask("[cyan]Page[/cyan]", choices=["0", "all"], default=page_default)
-    else:
-        page = input(f"Page (0=first, all) [{page_default}]: ").strip().lower() or page_default
-        if page != "all" and not page.isdigit():
-            print(f"Invalid page '{page}', using {page_default}.")
-            page = page_default
+    # Format and page: what the backend offers, asked again until it is one of them
+    fmt = _ask("Format", format_default, choices=["jpg", "png", "tif"])
+    page = _ask("Page", page_default, choices=["0", "all"])
 
     out_dir = _ask_output_dir()
     if out_dir is None:
@@ -6272,11 +6205,7 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     _save_last_run(cfg, "thumbnails", f"Thumbnails: {size}px {fmt} under {truncate_path(p, 60)}",
                    [[a for a in cmd if a != "-DryRun"]])
 
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[dim]Running: {escape(' '.join(cmd))}[/dim]\n")
-    else:
-        print(f"\nRunning: {' '.join(cmd)}\n")
-
+    _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
     return run_subprocess(cmd) == 0
 
 # --- Main ---------------------------------------------------------

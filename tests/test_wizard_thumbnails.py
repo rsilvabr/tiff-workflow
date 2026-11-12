@@ -255,36 +255,25 @@ def test_the_workers_come_from_the_config_and_are_clamped(wiz, folder):
     assert argv[argv.index("-Workers") + 1] == str(ct.clamp_workers(500)) != "500"
 
 
-# --- where the two screens differ today (v3.0.0); phase 6 of v3.1 gives them one behaviour ---
+# --- one behaviour on both screens (v3.1 phase 7, T4; v3.0.0 differed here) -------------
 
-def test_a_format_that_is_not_offered(wiz, folder):
-    """Plain text: a message and the default. Rich: the question again, until a valid one."""
-    if wiz.screen == "plain":
-        wiz.run(folder, "", "", "", "gif", "", "", "", "")
-        assert "Invalid format 'gif'" in wiz.text
-        fmt = default("Format")
-    else:
-        wiz.run(folder, "", "", "", "gif", "tif", "", "", "", "")
-        fmt = "tif"
+def test_a_format_that_is_not_offered_is_asked_again(wiz, folder):
+    """The plain screen said "Invalid format" and took the default; Rich asked again. Both
+    ask again now."""
+    wiz.run(folder, "", "", "", "gif", "tif", "", "", "", "")
     argv = wiz.argv()
-    assert argv[argv.index("-Format") + 1] == fmt
+    assert argv[argv.index("-Format") + 1] == "tif"
 
 
-def test_a_page_that_is_not_offered(wiz, folder):
-    """Plain text takes any number; Rich offers 0 and all, and asks again."""
-    if wiz.screen == "plain":
-        wiz.run(folder, "", "", "", "", "7", "", "", "")
-        page = "7"
-    else:
-        wiz.run(folder, "", "", "", "", "7", "all", "", "", "")
-        page = "all"
+def test_a_page_that_is_not_offered_is_asked_again(wiz, folder):
+    """The plain screen took any number; Rich offered 0 and all. Both offer 0 and all."""
+    wiz.run(folder, "", "", "", "", "7", "all", "", "", "")
     argv = wiz.argv()
-    assert argv[argv.index("-Page") + 1] == page
+    assert argv[argv.index("-Page") + 1] == "all"
 
 
-def test_the_plain_screen_takes_the_long_format_names(wiz, folder):
-    if wiz.screen != "plain":
-        pytest.skip("Rich offers jpg / png / tif only")
-    wiz.run(folder, "", "", "", "JPEG", "", "", "", "")
+def test_a_long_format_name_is_asked_again(wiz, folder):
+    """The plain screen took JPEG and passed -Format jpeg; both offer jpg / png / tif."""
+    wiz.run(folder, "", "", "", "JPEG", "png", "", "", "", "")
     argv = wiz.argv()
-    assert argv[argv.index("-Format") + 1] == "jpeg"
+    assert argv[argv.index("-Format") + 1] == "png"
