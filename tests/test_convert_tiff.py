@@ -117,34 +117,34 @@ class TestBuildCompressCommand:
         cmd = build_compress_command(workflow, folders=[tmp_path])
         assert cmd[0] == sys.executable
         assert cmd[1].endswith("compress_tiff_zip.py")
-        assert "-Mode" in cmd
+        assert "--mode" in cmd
         assert "0" in cmd
 
     def test_single_folder(self, tmp_path):
         workflow = {}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-InputDir" in cmd
+        assert "--input-dir" in cmd
 
     def test_workers(self, tmp_path):
         workflow = {"workers": 8}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-Workers" in cmd
+        assert "--workers" in cmd
         assert "8" in cmd
 
     def test_dry_run_flag(self, tmp_path):
         workflow = {"dry_run": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-DryRun" in cmd
+        assert "--dry-run" in cmd
 
     def test_safe_mode_false(self, tmp_path):
         workflow = {"safe_mode": False}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-SafeMode:$false" in cmd
+        assert "--no-safe-mode" in cmd
 
     def test_cap_workers(self, tmp_path):
         workflow = {"cap_workers": 4}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-CapWorkers" in cmd
+        assert "--cap-workers" in cmd
         assert "4" in cmd
 
     def test_cap_workers_zero_passed_explicitly(self, tmp_path):
@@ -152,49 +152,49 @@ class TestBuildCompressCommand:
         the shipped default -- omitting it let an edited $CapWorkers win over the answer."""
         workflow = {"cap_workers": 0}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-CapWorkers" in cmd
-        assert cmd[cmd.index("-CapWorkers") + 1] == "0"
+        assert "--cap-workers" in cmd
+        assert cmd[cmd.index("--cap-workers") + 1] == "0"
 
     def test_exclude_folders(self, tmp_path):
         workflow = {"exclude_folders": "_EXPORT;temp"}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-ExcludeFolders" in cmd
+        assert "--exclude-folders" in cmd
         assert "_EXPORT;temp" in cmd
 
     def test_exclude_folders_empty_omitted(self, tmp_path):
         workflow = {"exclude_folders": ""}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-ExcludeFolders" not in cmd
+        assert "--exclude-folders" not in cmd
 
     def test_skip_lzw(self, tmp_path):
         workflow = {"skip_lzw": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-SkipLzwAsCompressed:$true" in cmd
+        assert "--skip-lzw-as-compressed" in cmd
 
     def test_delete_source(self, tmp_path):
         workflow = {"delete_source": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-DeleteSource" in cmd
+        assert "--delete-source" in cmd
 
     def test_overwrite(self, tmp_path):
         workflow = {"overwrite": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-Overwrite" in cmd
+        assert "--overwrite" in cmd
 
     def test_force_parallel(self, tmp_path):
         workflow = {"force_parallel": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-ForceParallel" in cmd
+        assert "--force-parallel" in cmd
 
     def test_force_sequential(self, tmp_path):
         workflow = {"force_sequential": True}
         cmd = build_compress_command(workflow, folders=[tmp_path])
-        assert "-ForceSequential" in cmd
+        assert "--force-sequential" in cmd
 
     def test_no_folders(self):
         workflow = {}
         cmd = build_compress_command(workflow, folders=None)
-        assert "-InputDir" not in cmd
+        assert "--input-dir" not in cmd
 
 
 class TestBuildCopyExifCommand:
@@ -208,33 +208,33 @@ class TestBuildCopyExifCommand:
     def test_workers(self, tmp_path):
         workflow = {"workers": 4}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path])
-        assert "-Workers" in cmd
+        assert "--workers" in cmd
         assert "4" in cmd
 
     def test_dry_run(self, tmp_path):
         workflow = {"dry_run": True}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path])
-        assert "-DryRun" in cmd
+        assert "--dry-run" in cmd
 
     def test_skip_exif(self, tmp_path):
         workflow = {"skip_exif": True}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path])
-        assert "-SkipIfTiffHasExif" in cmd
+        assert "--skip-if-tiff-has-exif" in cmd
 
     def test_compress_zip(self, tmp_path):
         workflow = {"compress_zip": True}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path])
-        assert "-CompressZip" in cmd
+        assert "--compress-zip" in cmd
 
     def test_overwrite(self, tmp_path):
         workflow = {"overwrite": True}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path])
-        assert "-Overwrite" in cmd
+        assert "--overwrite" in cmd
 
     def test_compress_zip_false_not_added(self, tmp_path):
         workflow = {"compress_zip": False}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path])
-        assert "-CompressZip" not in cmd
+        assert "--compress-zip" not in cmd
 
 
 @pytest.mark.skipif(not MAGICK_AVAILABLE, reason="ImageMagick (magick) not on PATH")
@@ -858,7 +858,7 @@ class TestThumbFormatPlainTextFallback:
         assert "Please select one of the available options" in capsys.readouterr().out
         assert captured, "the backend command was never built"
         cmd = captured[0]
-        assert cmd[cmd.index("-ThumbFormat") + 1] == "png"
+        assert cmd[cmd.index("--thumb-format") + 1] == "png"
 
 
 class TestWorkTimeout:
@@ -1076,7 +1076,7 @@ class TestWorkflow4TwoSteps:
         cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
         assert convert_tiff._run_exif_or_compress(cfg, "both") is False
         assert len(ran) == 3, "compress ran after the real Copy EXIF failed"
-        assert "-DryRun" in ran[0] and "-DryRun" in ran[1] and "-DryRun" not in ran[2]
+        assert "--dry-run" in ran[0] and "--dry-run" in ran[1] and "--dry-run" not in ran[2]
         assert "copy_exif_to_tiff.py" in " ".join(map(str, ran[2]))
 
 

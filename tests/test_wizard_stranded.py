@@ -13,8 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import convert_tiff as ct  # noqa: E402
 
 HOSTILE = "伊豆沼_夏 [FINAL] 5% off"
-COMPRESS = [sys.executable, "C:\\x\\compress_tiff_zip.py", "-Mode", "8",
-            "-InputDir", "G:\\2025"]
+COMPRESS = [sys.executable, "C:\\x\\compress_tiff_zip.py", "--mode", "8",
+            "--input-dir", "G:\\2025"]
 
 
 def put(p: Path, data=b"II*\0"):
@@ -46,7 +46,7 @@ def test_run_subprocess_reads_the_count_from_real_output(monkeypatch):
 
 def test_restore_flag_is_one_more_argument():
     out = ct._with_restore_stranded(COMPRESS)
-    assert out == COMPRESS + ["-RestoreStranded"] and out is not COMPRESS
+    assert out == COMPRESS + ["--restore-stranded"] and out is not COMPRESS
 
 
 def test_no_offer_without_stranded_files_or_for_other_backends(monkeypatch):
@@ -55,7 +55,7 @@ def test_no_offer_without_stranded_files_or_for_other_backends(monkeypatch):
     assert ct._offer_restore_stranded(COMPRESS, 0, None) is None
     other = [sys.executable, "C:\\x\\copy_exif_to_tiff.py"]
     assert ct._offer_restore_stranded(other, 5, None) is None
-    assert ct._offer_restore_stranded(COMPRESS + ["-RestoreStranded"], 5, None) is None
+    assert ct._offer_restore_stranded(COMPRESS + ["--restore-stranded"], 5, None) is None
     assert called == []
 
 
@@ -64,9 +64,9 @@ def test_unattended_and_dry_runs_only_get_a_hint(monkeypatch, capsys):
     monkeypatch.setattr(ct, "run_subprocess", lambda *a, **k: called.append(a) or 0)
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
     assert ct._offer_restore_stranded(COMPRESS, 2, subprocess.DEVNULL) is None   # a preset
-    assert ct._offer_restore_stranded(COMPRESS + ["-DryRun"], 2, None) is None
+    assert ct._offer_restore_stranded(COMPRESS + ["--dry-run"], 2, None) is None
     out = capsys.readouterr().out
-    assert out.count("-RestoreStranded") >= 2
+    assert out.count("--restore-stranded") >= 2
     assert called == []
 
 
@@ -79,7 +79,7 @@ def test_an_interactive_yes_reruns_with_the_flag(monkeypatch):
     else:
         monkeypatch.setattr("builtins.input", lambda *a: "y")
     assert ct._offer_restore_stranded(COMPRESS, 2, None) == 0
-    assert called == [COMPRESS + ["-RestoreStranded"]]
+    assert called == [COMPRESS + ["--restore-stranded"]]
 
 
 def test_stranded_backups_use_the_compress_rule(tmp_path):

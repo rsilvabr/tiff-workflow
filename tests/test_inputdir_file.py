@@ -22,7 +22,7 @@ from test_regression_classes import (
 
 _BACKEND_CASES = []
 for _lane in LANES:
-    _BACKEND_CASES.append((_lane, "compress_tiff_zip.py", ["-Mode", "1"]))
+    _BACKEND_CASES.append((_lane, "compress_tiff_zip.py", ["--mode", "1"]))
     _BACKEND_CASES.append((_lane, "copy_exif_to_tiff.py", []))
 
 
@@ -46,7 +46,7 @@ def test_backend_reads_the_list_file(lane, script, extra, tmp_path):
     list_file.write_text(f"{plain}\n{jp}\n", encoding="utf-8", newline="\n")
 
     result = run_ps(lane, script,
-                    ["-InputDirFile", str(list_file), "-DryRun", "-Workers", "1"] + extra,
+                    ["--input-dir-file", str(list_file), "--dry-run", "--workers", "1"] + extra,
                     tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "a.tif" in result.stdout
@@ -56,8 +56,8 @@ def test_backend_reads_the_list_file(lane, script, extra, tmp_path):
 @pytest.mark.parametrize("lane", LANES)
 def test_both_inputdir_and_file_is_refused(lane, tmp_path):
     result = run_ps(lane, "compress_tiff_zip.py",
-                    ["-Mode", "1", "-InputDir", str(tmp_path), "-InputDirFile",
-                     str(tmp_path / "dirs.txt"), "-DryRun"],
+                    ["--mode", "1", "--input-dir", str(tmp_path), "--input-dir-file",
+                     str(tmp_path / "dirs.txt"), "--dry-run"],
                     tmp_path)
     assert result.returncode == 1
     assert "not both" in result.stdout
@@ -66,15 +66,15 @@ def test_both_inputdir_and_file_is_refused(lane, tmp_path):
 @pytest.mark.parametrize("lane", LANES)
 def test_missing_or_empty_list_file_is_refused(lane, tmp_path):
     missing = run_ps(lane, "compress_tiff_zip.py",
-                     ["-Mode", "1", "-InputDirFile", str(tmp_path / "nope.txt"),
-                      "-DryRun"],
+                     ["--mode", "1", "--input-dir-file", str(tmp_path / "nope.txt"),
+                      "--dry-run"],
                      tmp_path)
     assert missing.returncode == 1
 
     empty_file = tmp_path / "empty.txt"
     empty_file.write_text("", encoding="utf-8", newline="\n")
     empty = run_ps(lane, "compress_tiff_zip.py",
-                   ["-Mode", "1", "-InputDirFile", str(empty_file), "-DryRun"],
+                   ["--mode", "1", "--input-dir-file", str(empty_file), "--dry-run"],
                    tmp_path)
     assert empty.returncode == 1
 
@@ -99,9 +99,9 @@ def test_spill_rewrites_only_long_commands(tmp_path):
     out, spill = convert_tiff._spill_long_input_dir(long_cmd)
     try:
         assert spill is not None
-        assert "-InputDirFile" in out
-        assert "-InputDir" not in out
-        assert out[out.index("-InputDirFile") + 1] == spill
+        assert "--input-dir-file" in out
+        assert "--input-dir" not in out
+        assert out[out.index("--input-dir-file") + 1] == spill
         assert Path(spill).read_text(encoding="utf-8").splitlines() == expected
     finally:
         if spill:
@@ -109,22 +109,20 @@ def test_spill_rewrites_only_long_commands(tmp_path):
 
     # generate_thumbnails.py has no -InputDirFile: its command line is left alone
     thumb_cmd = convert_tiff._backend_command(
-        "generate_thumbnails.py", ["-InputDir", "C:\\fixtures" + "\\x" * 15000, "-DryRun"])
+        "generate_thumbnails.py", ["--input-dir", "C:\\fixtures" + "\\x" * 15000, "--dry-run"])
     out, spill = convert_tiff._spill_long_input_dir(thumb_cmd)
     assert out == thumb_cmd
     assert spill is None
 
-    # a preset: rebuilt from its [script, *args]
-    base_args = ["-Mode", "1", "-InputDir", ";".join(expected), "-DryRun"]
-    rebuilt = convert_tiff._rebuild_journaled_command(
-        ["D:\\saved elsewhere\\compress_tiff_zip.py"] + base_args)
+    # a preset: its saved step [compress, *args], run with this copy's backend
+    base_args = ["--mode", "1", "--input-dir", ";".join(expected), "--dry-run"]
+    step = convert_tiff._journal_step(["compress"] + base_args)
+    rebuilt = convert_tiff._backend_command(step.script, step.args)
     out, spill = convert_tiff._spill_long_input_dir(rebuilt)
     try:
         assert spill is not None
         assert out[:2] == rebuilt[:2]
-        parts = convert_tiff._journal_parts(out)
-        assert "-InputDirFile" in parts
-        assert "-InputDir" not in parts
+        assert out[2:] == ["--mode", "1", "--input-dir-file", spill, "--dry-run"]
     finally:
         if spill:
             os.unlink(spill)

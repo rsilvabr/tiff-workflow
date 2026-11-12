@@ -47,8 +47,10 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   `parse_args` binds the way PowerShell did (`-Name value`, `-Name:value`,
   `-Switch`, `-Switch:$false`, names without case, unambiguous prefixes) and
   refuses everything else with exit 1. `tests/test_wizard_registry.py` replays
-  the golden PowerShell command lines; `tests/test_powershell_journals.py` the
-  journal forms.
+  the golden PowerShell command lines (in v3.1's form, through
+  `tools/legacy_args.py`); `tests/test_journal_lines.py` the journal forms.
+  (v3.1 phase 8 replaces this command line with `--kebab-case`; this rule is
+  rewritten when the phase ends.)
 - **One copy of everything.** A helper two backends need goes in
   `tiff_workflow_common.py`, never into both. Since v3.1 the wizard imports
   that module too (never a backend), and reads the overlay with its functions;

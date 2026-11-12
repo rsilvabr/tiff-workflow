@@ -1423,8 +1423,8 @@ class TestCopyExifExcludeFolders:
         cmd = convert_tiff.build_copy_exif_command(
             {"origin": "copy_exif", "exclude_folders": "_EXPORT;temp"},
             folders=[Path("C:/x")])
-        assert "-ExcludeFolders" in cmd
-        assert cmd[cmd.index("-ExcludeFolders") + 1] == "_EXPORT;temp"
+        assert "--exclude-folders" in cmd
+        assert cmd[cmd.index("--exclude-folders") + 1] == "_EXPORT;temp"
 
     def test_cap_workers_not_asked_where_unsupported(self):
         assert convert_tiff._supports_cap_workers({"origin": "free_compress"})

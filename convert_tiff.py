@@ -513,8 +513,8 @@ class ToolConfig:
     # empty so nobody silently skips folders they did not choose to skip.
     last_exclude_folders: Optional[str] = None
     # Journal of the last executed workflow (for "Repeat last workflow").
-    # Stores the fully built command lines -- repeating re-runs their script and
-    # arguments (under this Python and with the backend next to this wizard),
+    # Stores each command line as [subcommand, *args] (_journal_line) -- repeating
+    # runs those arguments under this Python with the backend next to this wizard,
     # so no wizard state has to be reconstructed. Dry-run is never stored.
     last_run_kind: Optional[str] = None
     last_run_label: Optional[str] = None
@@ -802,6 +802,10 @@ BACKEND_SCRIPTS = [
 ]
 #: ...and the module the three of them import.
 BACKEND_SHARED = "tiff_workflow_common.py"
+#: The name of each backend in a journal (v3.1, T8): [subcommand, *args]. The Windows
+#: program takes the same three names.
+SUBCOMMANDS = {"compress": "compress_tiff_zip.py", "copy-exif": "copy_exif_to_tiff.py",
+               "thumbnails": "generate_thumbnails.py"}
 
 def _probe_version(cmd: List[str], timeout: int = 10) -> Optional[str]:
     """Run a version probe, return the first non-empty output line or None."""
@@ -1817,9 +1821,9 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
     rows.append(["Staging:", str(workflow.get("staging") or "disabled")])
     rows.append(["Dry-run:", dry])
     if workflow.get("force_parallel"):
-        rows.append([("Parallelism:", "yellow"), "FORCED ON (-ForceParallel)"])
+        rows.append([("Parallelism:", "yellow"), "FORCED ON (--force-parallel)"])
     elif workflow.get("force_sequential"):
-        rows.append([("Parallelism:", "yellow"), "FORCED OFF (-ForceSequential)"])
+        rows.append([("Parallelism:", "yellow"), "FORCED OFF (--force-sequential)"])
 
     if origin == "free_compress" and mode == 8:
         rows.append([("Delete source:", "red"), "ON -- originals will be DELETED"])
@@ -1843,72 +1847,69 @@ def _backend_command(script_name: str, args: List[str]) -> List[str]:
     return [sys.executable, str(SCRIPT_DIR / script_name)] + [str(a) for a in args]
 
 
-def _parts_replace_sources(parts: List[str]) -> bool:
-    """True when a journaled command line deletes or replaces its source files: it binds
-    -DeleteSource, or runs compress mode 8 (which puts the ZIP over each .tif it read --
-    the manifest path has always counted a mode-8 row as deleting).
-
-    audit round 28: the refusal used to look for the exact word "-DeleteSource", so an
-    edited preset with -deletesource, the abbreviation -DeleteS (the backends bind any
-    unambiguous prefix) or -DeleteSource:$true passed, and mode 8 without the switch was
-    not noticed at all. Read the way the backends bind: case-insensitive, any prefix of at
-    least two letters ("-D" alone is ambiguous with -DryRun), an explicit :$false is off.
-    Fail closed: an unreadable -Mode value next to the name counts as mode 8."""
-    for i, a in enumerate(parts):
-        m = re.fullmatch(r"-([A-Za-z]+)(?::(.*))?", str(a))
-        if not m:
-            continue
-        name, inline = m.group(1).lower(), m.group(2)
-        if len(name) >= 2 and "deletesource".startswith(name):
-            if inline is None or inline.strip().lower() not in ("$false", "false", "0"):
-                return True
-        if len(name) >= 2 and "mode".startswith(name):
-            value = inline if inline is not None else (str(parts[i + 1]) if i + 1 < len(parts) else "")
-            value = value.strip().strip("'\"")
-            if not value.isdigit() or int(value) == 8:
-                return True
-    return False
+def _journal_line(cmd: List[str]) -> List[str]:
+    """A backend command line as a journal keeps it: [subcommand, *args] (v3.1, T8).
+    Neither the Python nor the folder is kept: a repeat runs the backend next to the wizard
+    that repeats it (round 24: a preset saved from another copy ran that copy's backend).
+    Anything but a command line of _backend_command is a programming error."""
+    script = Path(str(cmd[1])).name if len(cmd) > 1 else ""
+    for sub, name in SUBCOMMANDS.items():
+        if name == script:
+            return [sub] + [str(a) for a in cmd[2:]]
+    raise ValueError(f"not a backend command line: {cmd!r}")
 
 
-def _journal_parts(cmd: List[str]) -> Optional[List[str]]:
-    """Reduce a journalled command line to [script, *args].
+@dataclass
+class JournalStep:
+    """One saved step, as the backend will read it."""
+    script: str                 # the backend's file name, next to this wizard
+    args: List[str]
+    values: Dict[str, object]   # what the backend binds `args` to (tw.parse_args)
 
-    A journalled command has to survive the program around it changing between the run and
-    the repeat (another Python, the wizard moved to another folder), so only the backend's
-    file name and the arguments are read: `[<python>, <folder>/<backend>.py, *args]`.
 
-    Returns None when the shape is not that one, so the caller can refuse instead of
-    running something it does not understand. A preset saved by the PowerShell edition
-    (up to v2.9.1: `pwsh -File <script>.ps1 args`, `powershell -Command "..."`) is such a
-    shape since v3.1: it has to be saved again from the menu."""
-    if not cmd:
+def _journal_step(line) -> Optional[JournalStep]:
+    """The step a journal line [subcommand, *args] runs; None when it is not one this
+    version runs -- never a guess, and the caller refuses the whole journal:
+    - another shape: what v3.0.0 saved ([<python>, <folder>/<backend>.py, -Name value]) and
+      the PowerShell edition before it (pwsh -File <script>.ps1, powershell -Command);
+    - an argument the backend would refuse, read by the backend's own table and reader;
+    - a backend whose table cannot be read."""
+    if not isinstance(line, list) or not line or line[0] not in SUBCOMMANDS:
         return None
-    cmd = [str(a) for a in cmd]
-    if len(cmd) >= 2 and Path(cmd[1]).name in BACKEND_SCRIPTS:
-        return cmd[1:]
-    return None
+    script = SUBCOMMANDS[line[0]]
+    args = [str(a) for a in line[1:]]
+    params = _backend_tables(script)[0]
+    # The backends read the old form (-Name value) until the end of v3.1 phase 8; a journal
+    # in it is v3.0.0's and is refused here already.
+    if not params or any(tw._LEGACY_TOKEN.match(a) for a in args):
+        return None
+    try:
+        values, _given = tw.parse_args(args, params)
+    except tw.UsageError:
+        return None
+    return JournalStep(script, args, values)
 
 
-def _journaled_script_path(parts: List[str]) -> Path:
-    """The backend a journalled command will actually run.
-
-    Every backend is the one next to this wizard, whatever folder the journal recorded
-    (round 24): a preset saved from another copy -- an older version, the program in
-    another folder, a folder since deleted -- ran that copy's backend, or failed with
-    "Backend script no longer exists", while the wizard planned with its own settings.
-    `parts` comes from _journal_parts, which lets nothing but a backend's name through;
-    anything else here is a programming error and raises -- it is never a path handed to
-    Python."""
-    name = Path(parts[0]).name
-    if name not in BACKEND_SCRIPTS:
-        raise ValueError(f"not a backend script: {name}")
-    return SCRIPT_DIR / name
+def _step_replaces_sources(step: JournalStep) -> bool:
+    """True when a saved step deletes or replaces its source files: --delete-source, or
+    compress mode 8 (which puts the ZIP over each .tif it read -- the manifest has always
+    counted a mode-8 row as deleting). Read from what the backend binds (audit round 28:
+    the refusal once looked for one exact spelling, and an edited preset got past it)."""
+    return bool(step.values.get("DeleteSource")) or step.values.get("Mode") == 8
 
 
-def _rebuild_journaled_command(parts: List[str]) -> List[str]:
-    """Turn a [script, *args] back into a command line for this Python and the backend
-    next to this wizard."""
-    return _backend_command(_journaled_script_path(parts).name, list(parts[1:]))
+def _option_at(args: List[str], param: str) -> Optional[Tuple[int, int, str]]:
+    """Where the option `param` is in `args`, as (index, words, value): `--input-dir X` is
+    two words, `--input-dir=X` one. The last one, which is the one a backend binds; None
+    when there is none."""
+    name = tw.cli_name(param)
+    found = None
+    for i, a in enumerate(args):
+        if a == name and i + 1 < len(args):
+            found = (i, 2, args[i + 1])
+        elif a.startswith(name + "="):
+            found = (i, 1, a[len(name) + 1:])
+    return found
 
 
 # --- Option Registry -----------------------------------------------
@@ -1951,36 +1952,36 @@ def _emit_opt(opt: Opt, workflow: Dict, folders: Optional[List[Path]] = None,
               backend: str = "") -> List[str]:
     """The argv words `opt` contributes for `workflow`, [] when it contributes none.
 
-    kind: input (-InputDir from `folders`: none / one / ';'-joined) | value (when truthy) |
+    kind: input (--input-dir from `folders`: none / one / ';'-joined) | value (when truthy) |
     notnone | int_notnone | workers (clamped to the backend's range, when truthy) | flag
-    (a switch, when truthy) | true_flag (when == True) | bool (-P:$true / -P:$false, when the
-    value is a bool: passed even when it equals the default, audit round 17) | true_bool
-    (-P:$true, when truthy) | none (overlay-only or internal: nothing).
+    (--x, when truthy) | true_flag (when == True) | bool (--x / --no-x, when the value is a
+    bool: passed even when it equals the default, audit round 17) | true_bool (--x, when
+    truthy) | none (overlay-only or internal: nothing).
 
     An "advanced.<param>" value lives in workflow["advanced"][backend]; it is checked against
     its value_spec again here and DROPPED when it does not pass (a preset edited by hand must
     not put garbage on a command line: the script's own value then applies)."""
     if opt.when is not None and not opt.when(workflow):
         return []
-    p = "-" + opt.param
+    p = opt.param
     kind = opt.kind
     if kind == "none":
         return []
     if kind == "input":
         if folders and len(folders) == 1:
-            return [p, str(folders[0])]
+            return tw.cli_value(p, folders[0])
         if folders and len(folders) > 1:
             # Pass as semicolon-separated list, the script handles each
-            return [p, ";".join(str(f) for f in folders)]
+            return tw.cli_value(p, ";".join(str(f) for f in folders))
         return []
     if opt.key.startswith("advanced."):
         v = _advanced_value(workflow, backend, opt.key[len("advanced."):])
         # audit round 28: an EDITED path? option left empty (stored as "") means "auto-detect
-        # for this run" -- the screen says so -- and must reach the backend as -P "" (bound,
+        # for this run" -- the screen says so -- and must reach the backend as --x "" (bound,
         # so it also beats the settings file). It was dropped (a falsy "value", and "" fails
         # the spec check below), and the backend used the settings file's profile instead.
         if v == "" and opt.value_spec == "path?" and kind == "value":
-            return [p, ""]
+            return tw.cli_value(p, "")
         if v is not None and opt.value_spec:
             ok, v = _overlay_value(opt.value_spec, v)
             if not ok:
@@ -1988,22 +1989,22 @@ def _emit_opt(opt: Opt, workflow: Dict, folders: Optional[List[Path]] = None,
     else:
         v = workflow.get(opt.key)
     if kind == "value":
-        return [p, str(v)] if v else []
+        return tw.cli_value(p, v) if v else []
     if kind == "notnone":
-        return [p, str(v)] if v is not None else []
+        return tw.cli_value(p, v) if v is not None else []
     if kind == "int_notnone":
-        return [p, str(int(v))] if v is not None else []
+        return tw.cli_value(p, int(v)) if v is not None else []
     if kind == "workers":
-        return [p, str(clamp_workers(v))] if v else []
+        return tw.cli_value(p, clamp_workers(v)) if v else []
     if kind == "flag":
-        return [p] if v else []
+        return [tw.cli_switch(p, True)] if v else []
     if kind == "true_flag":
-        return [p] if v == True else []  # noqa: E712 -- 1 == True is the old behaviour
+        return [tw.cli_switch(p, True)] if v == True else []  # noqa: E712 -- 1 == True is the old behaviour
     if kind == "bool":
-        return [p + (":$true" if v else ":$false")] if isinstance(v, bool) else []
+        return [tw.cli_switch(p, v)] if isinstance(v, bool) else []
     if kind == "true_bool":
-        return [p + ":$true"] if v else []
-    raise ValueError(f"unknown option kind {kind!r} for -{opt.param}")
+        return [tw.cli_switch(p, True)] if v else []
+    raise ValueError(f"unknown option kind {kind!r} for {tw.cli_name(opt.param)}")
 
 
 def _emit_all(backend: str, workflow: Dict, folders: Optional[List[Path]] = None) -> List[str]:
@@ -2204,55 +2205,55 @@ _INPUTDIR_FILE_BACKENDS = ("compress_tiff_zip.py", "copy_exif_to_tiff.py")
 
 
 def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
-    """Swap a too-long -InputDir for -InputDirFile <temp file> (one folder per line).
+    """Swap a too-long --input-dir for --input-dir-file <temp file> (one folder per line).
 
     Returns (command, temp path or None). The caller deletes the temp file once the
     process has ended. Commands that are short enough, or that do not run one of
-    _INPUTDIR_FILE_BACKENDS, or that carry no -InputDir, come back unchanged."""
-    if len(subprocess.list2cmdline([str(a) for a in cmd])) <= _CMDLINE_SPILL_CHARS:
+    _INPUTDIR_FILE_BACKENDS, or that carry no --input-dir, come back unchanged."""
+    cmd = [str(a) for a in cmd]
+    if len(subprocess.list2cmdline(cmd)) <= _CMDLINE_SPILL_CHARS:
         return cmd, None
-    parts = _journal_parts([str(a) for a in cmd])
-    if not parts or Path(parts[0]).name not in _INPUTDIR_FILE_BACKENDS:
+    if len(cmd) < 2 or Path(cmd[1]).name not in _INPUTDIR_FILE_BACKENDS:
         return cmd, None
-    if "-InputDir" not in parts:
+    args = cmd[2:]
+    at = _option_at(args, "InputDir")
+    if at is None:
         return cmd, None
-    i = parts.index("-InputDir")
-    if i + 1 >= len(parts):
-        return cmd, None
-    folders = [f for f in parts[i + 1].split(";") if f.strip()]
+    i, words, value = at
+    folders = [f for f in value.split(";") if f.strip()]
     fd, list_path = tempfile.mkstemp(prefix="tw_inputdirs_", suffix=".txt")
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(folders) + "\n")
-    new_parts = parts[:i] + ["-InputDirFile", list_path] + parts[i + 2:]
-    return [str(cmd[0])] + new_parts, list_path
+    new_args = args[:i] + tw.cli_value("InputDirFile", list_path) + args[i + words:]
+    return cmd[:2] + new_args, list_path
 
 
 # compress_tiff_zip.py's end-of-run line when originals are still stranded in OLD_TIFFs/
-# (audit round 25: find_stranded_originals). The wizard offers -RestoreStranded on it.
+# (audit round 25: find_stranded_originals). The wizard offers --restore-stranded on it.
 _STRANDED_LEFT_RE = re.compile(r"STRANDED: (\d+) original\(s\) still in OLD_TIFFs")
 
 
 def _with_restore_stranded(cmd: List[str]) -> List[str]:
-    """`cmd` plus -RestoreStranded."""
-    return list(cmd) + ["-RestoreStranded"]
+    """`cmd` plus --restore-stranded."""
+    return list(cmd) + [tw.cli_switch("RestoreStranded", True)]
 
 
 def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[int]:
     """After a compress run that left originals stranded in OLD_TIFFs/ (nothing in their
-    place: an earlier run was interrupted), offer to run it again with -RestoreStranded,
+    place: an earlier run was interrupted), offer to run it again with --restore-stranded,
     which moves them back and compresses them. Returns that run's exit code, or None when
     nothing was run. Never asks on an unattended run (closed stdin, a preset) or a dry
     run: it says what to do instead."""
     if stranded <= 0 or not any("compress_tiff_zip" in str(c) for c in cmd):
         return None
-    if any("-RestoreStranded" in str(c) for c in cmd):
+    if tw.cli_switch("RestoreStranded", True) in [str(c) for c in cmd]:
         return None
     msg = (f"{stranded} original(s) are in OLD_TIFFs with nothing in their place -- left by an "
            f"interrupted run. They are the only copy of those images.")
     interactive = stdin is None and sys.stdin is not None and sys.stdin.isatty()
-    dry = any(str(c) == "-DryRun" for c in cmd)
+    dry = tw.cli_switch("DryRun", True) in [str(c) for c in cmd]
     if not interactive or dry:
-        hint = (" Run the same compress again with -RestoreStranded (or answer yes to this "
+        hint = (" Run the same compress again with --restore-stranded (or answer yes to this "
                 "question in an interactive, non-dry run) to put them back.")
         _say(msg + hint, "yellow")
         return None
@@ -4549,10 +4550,10 @@ def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]],
                    diagnose: Optional[Dict] = None) -> None:
     """Record the last executed workflow for the 'Repeat last workflow' menu entry.
 
-    Command-driven workflows (1-4, 8) are journaled with their command lines;
-    Diagnose (7) with its settings (`diagnose`, no commands) -- a repeat of it only
-    reports. Restore/Delete OLD_TIFFs (5/6) re-ask their own questions and are not
-    repeatable.
+    Command-driven workflows (1-4, 8) are journaled with their command lines, each as
+    [subcommand, *args] (_journal_line); Diagnose (7) with its settings (`diagnose`, no
+    commands) -- a repeat of it only reports. Restore/Delete OLD_TIFFs (5/6) re-ask their
+    own questions and are not repeatable.
     Commands are stored with dry-run stripped -- a repeat always runs for real.
     Manifest runs store no commands (None): a repeat re-reads the CSV through
     the loader guards instead of replaying command lines.
@@ -4563,7 +4564,7 @@ def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]],
     """
     cfg.config.last_run_kind = kind
     cfg.config.last_run_label = label
-    cfg.config.last_run_commands = [[str(a) for a in cmd] for cmd in (commands or [])] or None
+    cfg.config.last_run_commands = [_journal_line(cmd) for cmd in (commands or [])] or None
     cfg.config.last_run_time = time.strftime("%Y-%m-%d %H:%M:%S")
     if manifest_workflow is not None:
         manifest_workflow = {k: v for k, v in manifest_workflow.items() if k != "dry_run"}
@@ -5605,15 +5606,16 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
         if out_dir is None:
             return False
         recursive, dry_run = _ask_recursive_and_dry()
-        cmd = _backend_command("generate_thumbnails.py", ["-InputDir", input_dir, "-Remove"])
+        cmd = _backend_command("generate_thumbnails.py", tw.cli_value("InputDir", input_dir)
+                               + [tw.cli_switch("Remove", True)])
         if out_dir:
-            cmd += ["-OutputDir", out_dir]
+            cmd += tw.cli_value("OutputDir", out_dir)
         if recursive:
-            cmd += ["-Recursive"]
+            cmd += [tw.cli_switch("Recursive", True)]
         if dry_run:
-            cmd += ["-DryRun"]
+            cmd += [tw.cli_switch("DryRun", True)]
         _save_last_run(cfg, "thumbnails_remove", f"Thumbnails: REMOVE under {truncate_path(p, 60)}",
-                       [[a for a in cmd if a != "-DryRun"]])
+                       [[a for a in cmd if a != tw.cli_switch("DryRun", True)]])
         _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
         return run_subprocess(cmd) == 0
 
@@ -5650,25 +5652,25 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     recursive, dry_run = _ask_recursive_and_dry()
     exclude_folders = _ask_exclude_folders() if recursive else ""
 
-    cmd = _backend_command("generate_thumbnails.py", [
-        "-InputDir", input_dir,
-        "-Size", str(size),
-        "-Quality", quality_str,
-        "-Format", fmt,
-        "-Page", page,
-        "-Workers", str(clamp_workers(cfg.config.last_workers or cfg.config.default_workers)),
-    ])
+    cmd = _backend_command("generate_thumbnails.py",
+                           tw.cli_value("InputDir", input_dir)
+                           + tw.cli_value("Size", size)
+                           + tw.cli_value("Quality", quality_str)
+                           + tw.cli_value("Format", fmt)
+                           + tw.cli_value("Page", page)
+                           + tw.cli_value("Workers", clamp_workers(cfg.config.last_workers
+                                                                   or cfg.config.default_workers)))
     if out_dir:
-        cmd += ["-OutputDir", out_dir]
+        cmd += tw.cli_value("OutputDir", out_dir)
     if exclude_folders:
-        cmd += ["-ExcludeFolders", exclude_folders]
+        cmd += tw.cli_value("ExcludeFolders", exclude_folders)
     if recursive:
-        cmd += ["-Recursive"]
+        cmd += [tw.cli_switch("Recursive", True)]
     if dry_run:
-        cmd += ["-DryRun"]
+        cmd += [tw.cli_switch("DryRun", True)]
 
     _save_last_run(cfg, "thumbnails", f"Thumbnails: {size}px {fmt} under {truncate_path(p, 60)}",
-                   [[a for a in cmd if a != "-DryRun"]])
+                   [[a for a in cmd if a != tw.cli_switch("DryRun", True)]])
 
     _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
     return run_subprocess(cmd) == 0
@@ -5738,13 +5740,13 @@ def _run_manifest_journal(cfg, entry: Dict, title: str, unattended: bool, dry_ru
     return 0 if ok else 1
 
 
-def _redo_autofind(entry: Dict, parts_list: List[list]) -> Optional[int]:
+def _redo_autofind(entry: Dict, steps: List[JournalStep]) -> Optional[int]:
     """AutoFind is redone on every Fuji journal run: the root and the patterns were saved
     with it, so a scheduled preset sees the sessions added since it was saved (a journal from
     an older version has no such data and replays what it saved). Only the Fuji workflows
     (2/3/4) search; their labels all start with "Fuji:". Menu 1 also journals kind "compress"
-    but has a fixed folder and no AutoFind. The found sessions replace each -InputDir in
-    `parts_list`; returns the exit code to stop with (1: the root is gone, 0: nothing found),
+    but has a fixed folder and no AutoFind. The found sessions replace the --input-dir of
+    each step; returns the exit code to stop with (1: the root is gone, 0: nothing found),
     or None to go on."""
     af = entry.get("autofind")
     is_fuji = (entry.get("kind") in ("copy_exif", "compress", "both")
@@ -5764,11 +5766,11 @@ def _redo_autofind(entry: Dict, parts_list: List[list]) -> Optional[int]:
         _say(f"AutoFind: no matching folders under {root} -- nothing to do.", "yellow")
         return 0
     folder_str = ";".join(str(f) for f in folders)
-    for parts in parts_list:
-        if "-InputDir" in parts:
-            i = parts.index("-InputDir")
-            if i + 1 < len(parts):
-                parts[i + 1] = folder_str
+    for step in steps:
+        at = _option_at(step.args, "InputDir")
+        if at is not None:
+            i, words, _old = at
+            step.args[i:i + words] = tw.cli_value("InputDir", folder_str)
     _say(f"AutoFind: {len(folders)} session(s) under {root}")
     return None
 
@@ -5787,41 +5789,33 @@ def _run_journal_steps(run_cmds: List[List[str]], unattended: bool) -> int:
 
 
 def _run_command_journal(entry: Dict, title: str, unattended: bool, dry_run: bool) -> int:
-    """A journal of backend command lines (workflows 1-4 and 8), rebuilt from their
-    [script, *args] for this Python and the backends next to this wizard -- the journal may
-    have been written by another copy (see _journal_parts)."""
-    parts_list = [_journal_parts([str(a) for a in c]) for c in entry["commands"]]
-    if any(p is None for p in parts_list):
+    """A journal of backend command lines (workflows 1-4 and 8), each [subcommand, *args],
+    run by this Python with the backend next to this wizard -- the journal may have been
+    written by another copy (see _journal_line)."""
+    steps = [_journal_step(c) for c in entry["commands"]]
+    if any(s is None for s in steps):
         _say("Saved workflow cannot be replayed: its command line was recorded in a "
-             "form this version does not recognise. Run the workflow again from the "
-             "menu -- replaying it as-is could bind switches the wrong way.", "red")
+             "form this version does not recognise (an older version, or edited by hand). "
+             "Run the workflow again from the menu and save it again.", "red")
         return 1
 
-    stop = _redo_autofind(entry, parts_list)
+    stop = _redo_autofind(entry, steps)
     if stop is not None:
         return stop
 
-    for parts in parts_list:
-        # The script that will actually run: one of this wizard's backends, the copy next
-        # to it (_journal_parts let nothing else through).
-        script = _journaled_script_path(parts)
-        if not script.exists():
-            _say(f"Backend script no longer exists: {script}", "red")
-            return 1
-
-    # Read the flag from the [script, *args] parts, the way the backend binds it.
-    deletes = (not dry_run) and any(_parts_replace_sources(p) for p in parts_list)
+    # What each step deletes is read from what its backend binds.
+    deletes = (not dry_run) and any(_step_replaces_sources(s) for s in steps)
     if dry_run:
-        for parts in parts_list:
-            if "-DryRun" not in parts:
-                parts.append("-DryRun")
+        for s in steps:
+            if not s.values.get("DryRun"):
+                s.args.append(tw.cli_switch("DryRun", True))
     if unattended and deletes:
-        _say("Refused: this preset deletes or replaces source files (-DeleteSource or "
+        _say("Refused: this preset deletes or replaces source files (--delete-source or "
              "mode 8). That needs a confirmation, which cannot be given unattended -- run "
              "it from the menu, or pass --dry-run.", "red")
         return 1
 
-    run_cmds = [_rebuild_journaled_command(p) for p in parts_list]
+    run_cmds = [_backend_command(s.script, s.args) for s in steps]
 
     _say(f"\n{title}", "bold cyan")
     _say(f"  {entry.get('label') or ''}")
@@ -5829,11 +5823,11 @@ def _run_command_journal(entry: Dict, title: str, unattended: bool, dry_run: boo
     for c in run_cmds:
         _say(f"\n{' '.join(c)}", "dim")
     if dry_run:
-        _say("Note: --dry-run requested -- this is a simulation (-DryRun).", "yellow")
+        _say("Note: --dry-run requested -- this is a simulation.", "yellow")
     else:
         _say("Note: dry-run is never inherited -- this runs for real.", "yellow")
     if deletes:
-        _say("WARNING: this workflow DELETES or REPLACES source files (-DeleteSource / mode 8).", "red")
+        _say("WARNING: this workflow DELETES or REPLACES source files (--delete-source / mode 8).", "red")
     if not unattended and not _ask_yes_no("Run it now?", False):
         _say("Cancelled.", "dim")
         return 1
@@ -6148,7 +6142,7 @@ def main():
     parser.add_argument("--list-presets", action="store_true",
                         help="List saved presets and exit")
     parser.add_argument("--dry-run", action="store_true",
-                        help="With --run-preset: simulate (-DryRun) instead of running")
+                        help="With --run-preset: simulate instead of running")
     parser.add_argument("--version", action="version",
                         version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}",
                         help="Print the release and exit")

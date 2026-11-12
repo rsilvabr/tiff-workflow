@@ -219,7 +219,8 @@ class TestJournal:
     def test_a_later_workflow_clears_the_diagnose_settings(self):
         cfg = _cfg()
         ct._save_last_run(cfg, "diagnose", "d", None, diagnose=_settings("C:\\x"))
-        ct._save_last_run(cfg, "compress", "c", [["pwsh", "-File", "x.ps1"]])
+        ct._save_last_run(cfg, "compress", "c", [ct._backend_command("compress_tiff_zip.py",
+                                                                     ["--mode", "1"])])
         assert cfg.config.last_diagnose is None
 
     def test_a_diagnose_preset_survives_the_config_sanitiser(self, tmp_path, monkeypatch):

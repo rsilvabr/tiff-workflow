@@ -7,10 +7,11 @@ recurring bug class of the project. The Python backends have ONE implementation 
 per-file work; what is left of that axis is whether it runs on the caller's thread or on a
 thread pool. So every end-to-end test still runs twice, once per LANE:
 
-    parallel    the default (-Workers as the script has it)
-    sequential  compress: -ForceSequential; copy_exif and generate_thumbnails: -Workers 1
+    parallel    the default (--workers as the script has it)
+    sequential  compress: --force-sequential; copy_exif and generate_thumbnails: --workers 1
 """
 
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -27,18 +28,22 @@ LANES = ["parallel", "sequential"]
 
 
 def lane_args(lane, script, args):
-    """`args` plus what makes `script` run in `lane` (nothing when the test already chose)."""
+    """`args` plus what makes `script` run in `lane` (nothing when the test already chose).
+    During v3.1 phase 8 the tests move from -Name to --kebab-case one file at a time, and a
+    backend reads a line in one form only: the lane's words follow the form of `args`."""
     args = [str(a) for a in args]
     if lane != "sequential":
         return args
+    old = any(re.match(r"-[A-Za-z]", a) for a in args)
     lowered = [a.lower() for a in args]
     if Path(str(script)).name == COMPRESS:
-        if "-forcesequential" in lowered or "-forceparallel" in lowered:
+        if {"-forcesequential", "-forceparallel", "--force-sequential",
+                "--force-parallel"} & set(lowered):
             return args
-        return args + ["-ForceSequential"]
-    if "-workers" in lowered:
+        return args + (["-ForceSequential"] if old else ["--force-sequential"])
+    if {"-workers", "--workers"} & set(lowered) or any(a.startswith("--workers=") for a in lowered):
         return args
-    return args + ["-Workers", "1"]
+    return args + (["-Workers", "1"] if old else ["--workers", "1"])
 
 
 def backend_cmd(lane, script, args):

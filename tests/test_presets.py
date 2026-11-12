@@ -147,7 +147,7 @@ def _compress_entry(in_dir, mode=1, delete_source=False):
     label = f"Compress TIFFs -- mode {mode} -- {in_dir}"
     if delete_source:
         label += " [DELETES SOURCES]"
-    return _entry("compress", label, [cmd])
+    return _entry("compress", label, [convert_tiff._journal_line(cmd)])
 
 
 def _run_cli(args, tmp_path, timeout=300):
@@ -203,12 +203,12 @@ class TestRepeatManifestKeepsRunSettings:
         _confirm(monkeypatch, True)
         assert convert_tiff.run_repeat_last(cfg) is True
         cmd1 = calls[-1]["cmd"]
-        assert cmd1[cmd1.index("-Mode") + 1] == "3", \
+        assert cmd1[cmd1.index("--mode") + 1] == "3", \
             "rows without Mode must use the mode the run saved, not last_mode"
-        assert "-SafeMode:$false" in cmd1, "the repeat lost the Safe mode answer"
-        assert cmd1[cmd1.index("-ExcludeFolders") + 1] == "RAW", \
+        assert "--no-safe-mode" in cmd1, "the repeat lost the Safe mode answer"
+        assert cmd1[cmd1.index("--exclude-folders") + 1] == "RAW", \
             "the repeat lost the -ExcludeFolders answer"
-        assert cmd1[cmd1.index("-CapWorkers") + 1] == "2", \
+        assert cmd1[cmd1.index("--cap-workers") + 1] == "2", \
             "the repeat lost the worker cap"
 
         saved = getattr(cfg.config, "last_manifest_workflow", None)
@@ -224,10 +224,10 @@ class TestRepeatManifestKeepsRunSettings:
         _confirm(monkeypatch, True)
         assert convert_tiff.run_repeat_last(cfg) is True
         cmd2 = calls[-1]["cmd"]
-        assert cmd2[cmd2.index("-Mode") + 1] == "2"
-        assert cmd2[cmd2.index("-DuplicateAction") + 1] == "Skip", \
+        assert cmd2[cmd2.index("--mode") + 1] == "2"
+        assert cmd2[cmd2.index("--duplicate-action") + 1] == "Skip", \
             "the repeat forced its own duplicate policy instead of the run's"
-        assert "-SafeMode:$false" in cmd2
+        assert "--no-safe-mode" in cmd2
 
 
 # --- T2: an old manifest journal is refused --------------------------
@@ -257,11 +257,10 @@ class TestPresetsMenu:
     def test_save_run_and_delete_preset(self, tmp_path, monkeypatch, calls):
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         cfg = _isolated_manager(tmp_path, monkeypatch)
-        cmd = [sys.executable, str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.py"),
-               "-Mode", "1", "-InputDir", str(tmp_path / "in")]
+        line = ["compress", "--mode", "1", "--input-dir", str(tmp_path / "in")]
         cfg.config.last_run_kind = "compress"
         cfg.config.last_run_label = "Compress TIFFs -- mode 1"
-        cfg.config.last_run_commands = [cmd]
+        cfg.config.last_run_commands = [line]
         cfg.config.last_run_time = "2026-10-10 03:00:00"
         cfg.save_config()
 
@@ -280,22 +279,21 @@ class TestPresetsMenu:
         convert_tiff.presets_menu(cfg)
 
         assert len(calls) == 1, "the preset must run exactly once"
-        run_cmd = calls[0]["cmd"]
-        assert run_cmd[run_cmd.index("-Mode") + 1] == "1"
+        assert calls[0]["cmd"] == [sys.executable,
+                                   str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.py")] + line[1:]
         assert len(saves) == 2, "one save for the preset, one for the delete"
         assert "nightly" in saves[0]["presets"]
-        assert saves[0]["presets"]["nightly"]["commands"] == [cmd]
+        assert saves[0]["presets"]["nightly"]["commands"] == [line]
         assert saves[0]["presets"]["nightly"]["saved_at"]
         assert saves[-1]["presets"] == {}, "the delete must be persisted"
 
     def test_preset_is_a_copy(self, tmp_path, monkeypatch):
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         cfg = _isolated_manager(tmp_path, monkeypatch)
-        cmd = [sys.executable, str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.py"),
-               "-Mode", "1", "-InputDir", str(tmp_path / "in")]
+        line = ["compress", "--mode", "1", "--input-dir", str(tmp_path / "in")]
         cfg.config.last_run_kind = "compress"
         cfg.config.last_run_label = "Compress TIFFs -- mode 1"
-        cfg.config.last_run_commands = [cmd]
+        cfg.config.last_run_commands = [line]
         cfg.config.last_run_time = "2026-10-10 03:00:00"
         cfg.save_config()
 
@@ -304,10 +302,10 @@ class TestPresetsMenu:
         convert_tiff.presets_menu(cfg)
 
         # a later run mutates the live journal in place, then replaces it
-        cfg.config.last_run_commands[0].append("-Overwrite")
+        cfg.config.last_run_commands[0].append("--overwrite")
         cfg.config.last_run_label = "a different run"
         saved = cfg.config.presets["snap"]
-        assert "-Overwrite" not in saved["commands"][0], \
+        assert "--overwrite" not in saved["commands"][0], \
             "the preset shares the journal's list instead of a copy"
         assert saved["label"] == "Compress TIFFs -- mode 1"
         assert set(saved) == set(convert_tiff._JOURNAL_FIELDS) | {"saved_at"}
@@ -320,7 +318,8 @@ class TestAutoFindRedone:
     def _fuji_entry(self, root, first_folder):
         cmd = build_copy_exif_command({"workers": 4, "staging": ""},
                                       folders=[first_folder])
-        return _entry("copy_exif", "Fuji: Copy EXIF -- pattern 'S5pro'", [cmd],
+        return _entry("copy_exif", "Fuji: Copy EXIF -- pattern 'S5pro'",
+                      [convert_tiff._journal_line(cmd)],
                       autofind={"root": str(root), "patterns": ["S5pro"]})
 
     def test_autofind_is_redone(self, tmp_path, calls):
@@ -338,7 +337,7 @@ class TestAutoFindRedone:
 
         assert convert_tiff._run_journal(cfg, entry, "Preset: fuji", unattended=True) == 0
         cmd = calls[-1]["cmd"]
-        input_dir = cmd[cmd.index("-InputDir") + 1]
+        input_dir = cmd[cmd.index("--input-dir") + 1]
         assert str(a) in input_dir and str(b) in input_dir, \
             f"the AutoFind must see sessions added since: {input_dir}"
 
@@ -363,9 +362,8 @@ class TestAutoFindRedone:
         version" note on every scheduled run."""
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         cfg = _cfg()
-        cmd = build_compress_command({"mode": 9, "workers": 1, "staging": "",
-                                      "dry_run": False},
-                                     folders=[tmp_path])
+        cmd = convert_tiff._journal_line(build_compress_command(
+            {"mode": 9, "workers": 1, "staging": "", "dry_run": False}, folders=[tmp_path]))
         entry = _entry("compress", "Compress TIFFs -- mode 9 -- X", [cmd])
 
         assert convert_tiff._run_journal(cfg, entry, "Preset: compress",
@@ -374,7 +372,7 @@ class TestAutoFindRedone:
         assert "older version" not in out, (
             f"a menu-1 compress journal has no AutoFind; the Fuji note is false:\n{out}")
         run_cmd = calls[-1]["cmd"]
-        assert run_cmd[run_cmd.index("-InputDir") + 1] == str(tmp_path), \
+        assert run_cmd[run_cmd.index("--input-dir") + 1] == str(tmp_path), \
             "the fixed folder of a menu-1 journal must be replayed unchanged"
 
         # The same kind with a Fuji label still gets the note when its journal from
@@ -402,7 +400,7 @@ class TestUnattendedRuns:
                                          dry_run=True) == 0
         assert len(calls) == 1
         cmd, kw = calls[0]["cmd"], calls[0]["kw"]
-        assert "-DryRun" in cmd
+        assert "--dry-run" in cmd
         assert kw.get("stdin") is subprocess.DEVNULL
 
         # same for a manifest with a mode-8 row
@@ -421,7 +419,7 @@ class TestUnattendedRuns:
                                          dry_run=True) == 0
         assert len(calls) == 1
         cmd = calls[0]["cmd"]
-        assert "-DryRun" in cmd
+        assert "--dry-run" in cmd
         assert calls[0]["kw"].get("stdin") is subprocess.DEVNULL
 
     def test_unattended_never_prompts(self, tmp_path, monkeypatch, calls):
@@ -525,7 +523,9 @@ class TestRunPresetCliEndToEnd:
 class TestPresetRunsTheBackendNextToTheWizard:
     """Round 24: a preset recorded the absolute path of its backend. Saved from
     another copy (an older version, the program in another folder), it ran that
-    copy's backend -- or failed once that folder was gone."""
+    copy's backend -- or failed once that folder was gone. Since v3.1 (T8) a journal
+    names its backend, [compress, *args], and keeps no folder; the [python, <folder>\\
+    compress_tiff_zip.py, -Mode ...] of v3.0.0 is refused, whatever that folder holds."""
 
     @staticmethod
     def _tiff(tmp_path, in_dir):
@@ -536,26 +536,21 @@ class TestPresetRunsTheBackendNextToTheWizard:
         make_tiff(plain / "a.tif")
         shutil.move(str(plain / "a.tif"), str(in_dir / "a.tif"))
 
-    @staticmethod
-    def _entry_from(in_dir, old_dir):
-        entry = _compress_entry(in_dir)
-        cmd = entry["commands"][0]
-        assert cmd[1].endswith("compress_tiff_zip.py")
-        cmd[1] = str(old_dir / "compress_tiff_zip.py")
-        return entry
-
-    def test_a_deleted_folder(self, tmp_path):
+    def test_a_journal_keeps_no_folder(self, tmp_path):
         base = tmp_path / "伊豆沼 [旧] 100% copy"
         in_dir = base / "in"
         in_dir.mkdir(parents=True)
         self._tiff(tmp_path, in_dir)
-        _write_preset_config(tmp_path, {"nightly": self._entry_from(in_dir, base / "gone")})
+        entry = _compress_entry(in_dir)
+        line = entry["commands"][0]
+        assert line[0] == "compress" and not any(a.endswith(".py") for a in line), line
+        _write_preset_config(tmp_path, {"nightly": entry})
 
         r = _run_cli(["--run-preset", "nightly"], tmp_path)
         assert r.returncode == 0, r.stdout + r.stderr
         assert len(list((in_dir / "ZIP").glob("*.tif"))) == 1
 
-    def test_an_older_copy_still_on_disk(self, tmp_path):
+    def test_a_v3_0_0_journal_of_an_older_copy_is_refused(self, tmp_path):
         base = tmp_path / "伊豆沼 [旧] 100% copy"
         in_dir, old_dir = base / "in", base / "old version"
         in_dir.mkdir(parents=True)
@@ -563,13 +558,17 @@ class TestPresetRunsTheBackendNextToTheWizard:
         self._tiff(tmp_path, in_dir)
         marker = base / "old_backend_ran.txt"
         (old_dir / "compress_tiff_zip.py").write_text(
-            f"Set-Content -LiteralPath '{marker}' -Value x\nexit 0\n", encoding="utf-8")
-        _write_preset_config(tmp_path, {"nightly": self._entry_from(in_dir, old_dir)})
+            f"open(r'{marker}', 'w').close()\n", encoding="utf-8")
+        entry = _compress_entry(in_dir)
+        entry["commands"] = [[sys.executable, str(old_dir / "compress_tiff_zip.py"),
+                              "-Mode", "1", "-InputDir", str(in_dir)]]
+        _write_preset_config(tmp_path, {"nightly": entry})
 
         r = _run_cli(["--run-preset", "nightly"], tmp_path)
-        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "cannot be replayed" in r.stdout
         assert not marker.exists(), "the older copy's backend ran"
-        assert len(list((in_dir / "ZIP").glob("*.tif"))) == 1
+        assert not (in_dir / "ZIP").exists()
 
 
 @requires_preset_cli
@@ -630,12 +629,12 @@ def test_a_preset_edited_into_a_shape_the_runner_cannot_read_is_dropped(tmp_path
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
     good = {"kind": "compress", "label": "Compress TIFFs -- mode 1", "time": "t",
-            "commands": [["python", "compress_tiff_zip.py", "-Mode", "1"]]}
+            "commands": [["compress", "--mode", "1"]]}
     presets = {"good": good,
                "no root": dict(good, label="Fuji: Compress", autofind={"patterns": ["S5"]}),
                "patterns text": dict(good, autofind={"root": "E:\\x", "patterns": "S5"}),
                "workflow text": {"kind": "manifest", "label": "Manifest", "manifest_workflow": "x"},
-               "number in command": dict(good, commands=[["python", 5]])}
+               "number in command": dict(good, commands=[["compress", 5]])}
     (tmp_path / ".convert_tiff_config.json").write_text(
         json.dumps({"presets": presets}), encoding="utf-8")
     cfg = convert_tiff.ConfigManager()

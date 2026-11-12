@@ -100,22 +100,22 @@ def test_builders_pass_safe_mode_and_lzw_explicitly(tmp_path):
     shipped default -- omitting it let an edited backend default win."""
     workflow = {"safe_mode": True, "skip_lzw": False, "cap_workers": 0}
     cmd = ct.build_compress_command(workflow, folders=[tmp_path])
-    assert "-SafeMode:$true" in cmd
-    assert "-SkipLzwAsCompressed:$false" in cmd
-    assert "-CapWorkers" in cmd
-    assert cmd[cmd.index("-CapWorkers") + 1] == "0"
+    assert "--safe-mode" in cmd
+    assert "--no-skip-lzw-as-compressed" in cmd
+    assert "--cap-workers" in cmd
+    assert cmd[cmd.index("--cap-workers") + 1] == "0"
 
     copy_cmd = ct.build_copy_exif_command(
         {"safe_mode": True, "skip_lzw": False}, folders=[tmp_path])
-    assert "-SafeMode:$true" in copy_cmd
-    assert not any(a.startswith("-SkipLzwAsCompressed") for a in copy_cmd), (
+    assert "--safe-mode" in copy_cmd
+    assert not any(a.startswith("--skip-lzw-as-compressed") for a in copy_cmd), (
         "the Copy EXIF backend's -SkipLzwAsCompressed is a switch: only 'yes' is passed"
     )
 
     bare = ct.build_compress_command({}, folders=[tmp_path])
-    assert not any(a.startswith("-SafeMode") for a in bare)
+    assert not any(a.startswith("--safe-mode") for a in bare)
     bare_copy = ct.build_copy_exif_command({}, folders=[tmp_path])
-    assert not any(a.startswith("-SafeMode") for a in bare_copy)
+    assert not any(a.startswith("--safe-mode") for a in bare_copy)
 
 
 def test_tool_output_names_follow_the_backend(scripts_copy):
@@ -130,8 +130,8 @@ def test_thumbnail_no_configure_passes_no_values(tmp_path):
     runs on its own (possibly edited) defaults."""
     workflow = {"generate_thumbnail": True}
     cmd = ct.build_compress_command(workflow, folders=[tmp_path])
-    assert "-GenerateThumbnail" in cmd
-    for flag in ("-ThumbSize", "-ThumbQuality", "-ThumbFormat"):
+    assert "--generate-thumbnail" in cmd
+    for flag in ("--thumb-size", "--thumb-quality", "--thumb-format"):
         assert flag not in cmd
 
 

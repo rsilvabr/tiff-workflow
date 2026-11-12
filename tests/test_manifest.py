@@ -371,7 +371,7 @@ class TestExecuteGuards:
         _confirm(monkeypatch, True)
         assert execute_manifest_workflow(_cfg(), entries, _workflow()) is True
         assert len(no_subprocess) == 1
-        assert "-DeleteSource" in no_subprocess[0]
+        assert "--delete-source" in no_subprocess[0]
 
     @pytest.mark.parametrize("word, runs", [("sim", True), ("yes", True), ("S", True),
                                             ("n", False), ("não", False), ("", False)])
@@ -395,8 +395,8 @@ class TestExecuteGuards:
         _confirm(monkeypatch, True)
 
         assert execute_manifest_workflow(_cfg(), entries, _workflow()) is True
-        assert "-DeleteSource" not in no_subprocess[0]
-        assert "-DeleteSource" in no_subprocess[1]
+        assert "--delete-source" not in no_subprocess[0]
+        assert "--delete-source" in no_subprocess[1]
 
     def test_missing_source_refuses_the_run(self, tmp_path, no_subprocess):
         entries = [(str(tmp_path / "ghost"), str(tmp_path / "ghost"), 0)]
@@ -451,11 +451,11 @@ class TestExecution:
         assert len(no_subprocess) == 2
 
         cmd0, cmd2 = no_subprocess
-        assert cmd0[cmd0.index("-Mode") + 1] == "0"
-        assert cmd0[cmd0.index("-InputDir") + 1] == str(a)
-        assert "-OutputDir" not in cmd0
-        assert cmd2[cmd2.index("-Mode") + 1] == "2"
-        assert cmd2[cmd2.index("-OutputDir") + 1] == dest
+        assert cmd0[cmd0.index("--mode") + 1] == "0"
+        assert cmd0[cmd0.index("--input-dir") + 1] == str(a)
+        assert "--output-dir" not in cmd0
+        assert cmd2[cmd2.index("--mode") + 1] == "2"
+        assert cmd2[cmd2.index("--output-dir") + 1] == dest
 
     def test_failure_does_not_stop_remaining_entries(self, tmp_path, monkeypatch, capsys):
         a = tmp_path / "a"
@@ -491,8 +491,8 @@ class TestExecution:
             monkeypatch.setattr("builtins.input", boom)
 
         assert execute_manifest_workflow(_cfg(), entries, _workflow(dry_run=True)) is True
-        assert "-DryRun" in no_subprocess[0]
-        assert "-DeleteSource" not in no_subprocess[0]
+        assert "--dry-run" in no_subprocess[0]
+        assert "--delete-source" not in no_subprocess[0]
 
     def test_the_combined_log_is_beside_the_backends_logs(self, tmp_path, monkeypatch, no_subprocess):
         """v3.1 phase 6 (W-O14): the combined log went next to the scripts and pointed at
@@ -519,7 +519,7 @@ class TestExecution:
         _prompt(monkeypatch, "3")
 
         assert run_manifest_workflow(_cfg()) is True
-        assert no_subprocess[0][no_subprocess[0].index("-Mode") + 1] == "3"
+        assert no_subprocess[0][no_subprocess[0].index("--mode") + 1] == "3"
 
 
 # --- Repeat (tests 17-18) ----------------------------------------------
@@ -662,20 +662,20 @@ class TestGeneration:
 class TestBuildEntryCmd:
     def test_mode8_gets_delete_source(self, tmp_path):
         cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path), 8, _workflow())
-        assert "-DeleteSource" in cmd
+        assert "--delete-source" in cmd
 
     def test_non_mode8_never_gets_delete_source(self, tmp_path):
         cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path), 0, _workflow())
-        assert "-DeleteSource" not in cmd
+        assert "--delete-source" not in cmd
 
     def test_mode2_output_dir_honors_destination(self, tmp_path):
         dest = str(tmp_path / "out")
         cmd = build_manifest_entry_cmd(str(tmp_path), dest, 2, _workflow())
-        assert cmd[cmd.index("-OutputDir") + 1] == dest
+        assert cmd[cmd.index("--output-dir") + 1] == dest
 
     def test_destination_ignored_outside_mode2(self, tmp_path):
         cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path / "out"), 1, _workflow())
-        assert "-OutputDir" not in cmd
+        assert "--output-dir" not in cmd
 
 
 

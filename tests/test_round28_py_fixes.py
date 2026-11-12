@@ -468,11 +468,11 @@ def test_step_folder_returns_an_absolute_path(tmp_path, monkeypatch):
 def test_srgb_profile_auto_for_this_run_is_passed():
     wf = {"mode": 1, "workers": 1, "advanced": {"compress": {"SrgbProfile": ""}}}
     argv = ct._emit_all("compress", wf, folders=[Path("C:/x")])
-    i = argv.index("-SrgbProfile")
+    i = argv.index("--srgb-profile")
     assert argv[i + 1] == "", argv
     # not edited: not passed
     argv = ct._emit_all("compress", {"mode": 1, "workers": 1}, folders=[Path("C:/x")])
-    assert "-SrgbProfile" not in argv
+    assert "--srgb-profile" not in argv
 
 
 def test_manifest_collision_reads_the_backend_folder_names(monkeypatch):
@@ -486,11 +486,18 @@ def test_manifest_collision_reads_the_backend_folder_names(monkeypatch):
     assert ct._resolve_output_folder(root / "s" / "x" / "a.tif", 5, root, "") == root / "s" / "ARC"
 
 
-@pytest.mark.parametrize("spelling", ["-deletesource", "-DeleteS", "-DeleteSource:$true", "-De"])
-def test_unattended_refusal_reads_any_delete_source_spelling(tmp_path, calls, spelling):
-    entry = _compress_entry(tmp_path, mode=8, delete_source=True)
-    entry["commands"] = [[spelling if a == "-DeleteSource" else a for a in c]
-                         for c in entry["commands"]]
+@pytest.mark.parametrize("args", [
+    ["--delete-source"],
+    ["--no-delete-source", "--delete-source"],      # the last one is what the backend binds
+    ["--delete-s"], ["--Delete-Source"],            # the backend refuses these: so is the journal
+    ["-DeleteSource"], ["-DeleteS"],                # v3.0.0's form: refused
+])
+def test_unattended_refusal_reads_what_the_backend_binds(tmp_path, calls, args):
+    """Round 28: the refusal looked for one exact spelling of the switch, and an edited
+    preset got past it. v3.1: what a step deletes is what its backend binds, and a line the
+    backend would refuse is refused whole. Mode 9, so only the switch can refuse it."""
+    entry = _compress_entry(tmp_path, mode=9)
+    entry["commands"][0] += args
     assert ct._run_journal(_preset_cfg(), entry, "Preset: delete", unattended=True) == 1
     assert calls == []
 
@@ -498,13 +505,14 @@ def test_unattended_refusal_reads_any_delete_source_spelling(tmp_path, calls, sp
 def test_unattended_refuses_mode_8_without_the_switch(tmp_path, calls):
     entry = _compress_entry(tmp_path, mode=8, delete_source=False)
     assert ct._run_journal(_preset_cfg(), entry, "Preset: m8", unattended=True) == 1
+    entry = _compress_entry(tmp_path, mode=9)
+    entry["commands"][0] += ["--mode=8"]            # given again, last, in the other form
+    assert ct._run_journal(_preset_cfg(), entry, "Preset: m8 last", unattended=True) == 1
     assert calls == []
     entry = _compress_entry(tmp_path, mode=9, delete_source=False)
     assert ct._run_journal(_preset_cfg(), entry, "Preset: m9", unattended=True) == 0
-    entry = _compress_entry(tmp_path, mode=8, delete_source=True)
-    entry["commands"] = [[("-DeleteSource:$false" if a == "-DeleteSource" else a) for a in c]
-                         for c in entry["commands"]]
-    entry["commands"] = [[("9" if a == "8" else a) for a in c] for c in entry["commands"]]
+    entry = _compress_entry(tmp_path, mode=9)
+    entry["commands"][0] += ["--delete-source", "--no-delete-source"]
     assert ct._run_journal(_preset_cfg(), entry, "Preset: off", unattended=True) == 0
 
 

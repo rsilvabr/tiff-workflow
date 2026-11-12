@@ -4,9 +4,11 @@ T1  golden   -- the argv the command builders produced BEFORE the registry exist
                 workflow dicts (tests/data/wizard_registry_golden.json). Generated once from
                 the pre-registry builders of the PowerShell edition; never regenerate it. Each
                 case holds the `pwsh -NoProfile -File <script>.ps1 args` line and the Windows
-                PowerShell 5.1 `-Command` line: the ARGUMENTS of the first are what today's
-                builders must still produce. Both lines are what a preset saved by v2.x holds,
-                and since v3.1 neither is replayed (tests/test_powershell_journals.py).
+                PowerShell 5.1 `-Command` line: the ARGUMENTS of the first, translated into
+                v3.1's form by tools/legacy_args.py (option by option, the same values: its
+                own tests), are what today's builders must produce. Both lines are what a
+                preset saved by v2.x holds, and since v3.1 neither is replayed
+                (tests/test_journal_lines.py).
 T2  coverage -- every parameter of every backend is in REGISTRY or NOT_OFFERED, and vice versa.
 T3  advanced -- the per-run Advanced options screen.
 T4  a saved workflow that carries `advanced` rebuilds the same argv.
@@ -17,10 +19,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
 
 import pytest
 
 import convert_tiff
+import legacy_args
 
 GOLDEN = Path(__file__).parent / "data" / "wizard_registry_golden.json"
 TOKEN = "<SCRIPT_DIR>"
@@ -62,7 +66,7 @@ CASES = [
      {"workers": 3, "staging": "D:\\stage dir", "output_dir": "D:\\out [x]", "dry_run": True,
       "skip_exif": True, "compress_zip": True, "safe_mode": False, "skip_lzw": True,
       "overwrite": True, "exclude_folders": "ZIP;OLD_TIFFs"}, [HOSTILE],
-     ["-AutoFind", "-FolderPattern", "*Fuji*"]),
+     ["--auto-find", "--folder-pattern", "*Fuji*"]),
     ("e_empty_workflow_no_folders", "copy_exif", {}, None, None),
     ("e_two_folders_workers_over_max_safe_true", "copy_exif",
      {"workers": 100, "safe_mode": True, "skip_lzw": False}, [HOSTILE, HOSTILE2], None),
@@ -95,16 +99,17 @@ def _build(builder: str, workflow: dict, folders, extra):
 
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 def test_T1_golden_argv_unchanged(case):
-    """The arguments are byte for byte the golden ones; only what runs them changed
-    (`pwsh -NoProfile -File <script>.ps1` -> this Python and <script>.py)."""
+    """The arguments are the golden ones, option by option, in v3.1's form; only what runs
+    them changed (`pwsh -NoProfile -File <script>.ps1` -> this Python and <script>.py)."""
     cid, builder, wf, folders, extra = case
     golden = _golden_cmd(cid, "pwsh")
     assert golden[:3] == ["pwsh", "-NoProfile", "-File"]
+    script = _PS1_TO_PY[Path(golden[3]).name]
     argv = _build(builder, wf, folders, extra)
     assert argv[0] == sys.executable
-    assert argv[1] == str(convert_tiff.SCRIPT_DIR / _PS1_TO_PY[Path(golden[3]).name])
+    assert argv[1] == str(convert_tiff.SCRIPT_DIR / script)
     assert Path(argv[1]).name in convert_tiff.BACKEND_SCRIPTS
-    assert argv[2:] == golden[4:]
+    assert argv[2:] == legacy_args.translate(golden[4:], legacy_args.backend_module(script).PARAMS)
 
 
 @pytest.mark.parametrize("shell", ["pwsh", "powershell"])
@@ -113,9 +118,10 @@ def test_T1_a_golden_command_line_is_no_longer_replayed(case, shell):
     """What a preset saved by v2.x holds (either shell's form) is not read since v3.1: the
     journal reader knows one form, the one today's builders write."""
     cid, builder, wf, folders, extra = case
-    assert convert_tiff._journal_parts(_golden_cmd(cid, shell)) is None
+    assert convert_tiff._journal_step(_golden_cmd(cid, shell)) is None
     today = _build(builder, wf, folders, extra)
-    assert convert_tiff._rebuild_journaled_command(convert_tiff._journal_parts(today)) == today
+    step = convert_tiff._journal_step(convert_tiff._journal_line(today))
+    assert convert_tiff._backend_command(step.script, step.args) == today
 
 
 def test_T1_golden_file_covers_exactly_the_cases():
@@ -233,7 +239,7 @@ def test_T3_an_edited_value_equal_to_the_default_is_still_emitted(monkeypatch, u
     REAL_ADVANCED(_cfg(), wf)
     assert wf["advanced"] == {"compress": {"MagickTimeout": 30}}
     argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
-    assert argv[argv.index("-MagickTimeout") + 1] == "30"
+    assert argv[argv.index("--magick-timeout") + 1] == "30"
 
 
 @pytest.mark.parametrize("ui", UIS)
@@ -244,7 +250,7 @@ def test_T3_an_option_not_edited_is_not_passed(monkeypatch, ui):
     REAL_ADVANCED(_cfg(), wf)
     assert "advanced" not in wf
     argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
-    for p in ("-MagickTimeout", "-WorkerMemoryFraction", "-SrgbProfile", "-FailOnWarn"):
+    for p in ("--magick-timeout", "--worker-memory-fraction", "--srgb-profile", "--fail-on-warn"):
         assert p not in argv
 
 
@@ -266,8 +272,8 @@ def test_T3_float_and_path_options(monkeypatch, ui):
     assert wf["advanced"] == {"compress": {"WorkerMemoryFraction": 0.5,
                                            "SrgbProfile": "D:\\profiles\\写真 [x].icc"}}
     argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
-    assert argv[argv.index("-WorkerMemoryFraction") + 1] == "0.5"
-    assert argv[argv.index("-SrgbProfile") + 1] == "D:\\profiles\\写真 [x].icc"
+    assert argv[argv.index("--worker-memory-fraction") + 1] == "0.5"
+    assert argv[argv.index("--srgb-profile") + 1] == "D:\\profiles\\写真 [x].icc"
 
 
 @pytest.mark.parametrize("ui", UIS)
@@ -289,10 +295,10 @@ def test_T3_combined_workflow_lists_both_backends_and_keeps_them_apart(monkeypat
                               "compress": {"WorkerMemoryFraction": 0.25}}
     exif = convert_tiff.build_copy_exif_command(wf, [Path(HOSTILE)])
     comp = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
-    assert exif[exif.index("-MagickTimeout") + 1] == "77" and "-FailOnWarn" in exif
-    assert "-WorkerMemoryFraction" not in exif
-    assert comp[comp.index("-WorkerMemoryFraction") + 1] == "0.25"
-    assert "-MagickTimeout" not in comp and "-FailOnWarn" not in comp
+    assert exif[exif.index("--magick-timeout") + 1] == "77" and "--fail-on-warn" in exif
+    assert "--worker-memory-fraction" not in exif
+    assert comp[comp.index("--worker-memory-fraction") + 1] == "0.25"
+    assert "--magick-timeout" not in comp and "--fail-on-warn" not in comp
 
 
 @pytest.mark.parametrize("ui", UIS)
@@ -303,8 +309,8 @@ def test_T3_copy_exif_workflow_never_offers_compress_options(monkeypatch, ui):
     REAL_ADVANCED(_cfg(), wf)
     assert wf["advanced"] == {"copy_exif": {"FailOnWarn": False, "MagickTimeout": 45}}
     argv = convert_tiff.build_copy_exif_command(wf, [Path(HOSTILE)])
-    assert "-FailOnWarn" not in argv            # off is the switch's default
-    assert argv[argv.index("-MagickTimeout") + 1] == "45"
+    assert "--fail-on-warn" not in argv            # off is the switch's default
+    assert argv[argv.index("--magick-timeout") + 1] == "45"
 
 
 def test_T3_a_workflow_without_a_registry_backend_is_not_asked(monkeypatch):
@@ -344,11 +350,11 @@ def test_T3_a_hand_edited_value_that_fails_its_spec_is_dropped_not_passed():
           "advanced": {"compress": {"MagickTimeout": "abc", "WorkerMemoryFraction": 7,
                                     "SrgbProfile": 5}}}
     argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
-    for p in ("-MagickTimeout", "-WorkerMemoryFraction", "-SrgbProfile"):
+    for p in ("--magick-timeout", "--worker-memory-fraction", "--srgb-profile"):
         assert p not in argv
     for malformed in (["x"], "x", {"compress": ["x"]}, {"compress": None}):
         argv = convert_tiff.build_compress_command({"mode": 1, "advanced": malformed}, [Path(HOSTILE)])
-        assert "-MagickTimeout" not in argv
+        assert "--magick-timeout" not in argv
 
 
 def test_T4_a_saved_workflow_with_advanced_rebuilds_the_same_argv(tmp_path, monkeypatch):
@@ -365,7 +371,7 @@ def test_T4_a_saved_workflow_with_advanced_rebuilds_the_same_argv(tmp_path, monk
     # the manifest's per-entry command carries it too
     entry = convert_tiff.build_manifest_entry_cmd(HOSTILE, "", 1, wf)
     joined = " ".join(entry)
-    assert "-MagickTimeout" in joined and "-WorkerMemoryFraction" in joined
+    assert "--magick-timeout" in joined and "--worker-memory-fraction" in joined
     # and the config file's last_manifest_workflow, written and read back by a real manager
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("HOME", str(tmp_path))
