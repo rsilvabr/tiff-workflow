@@ -90,6 +90,31 @@ def test_one_table_description_for_both_screens(monkeypatch, capsys, screen):
         assert len({ln.index(ln.split()[-1]) + len(ln.split()[-1]) for ln in rows}) == 1, rows
 
 
+def test_only_the_screen_layer_knows_about_rich():
+    """v3.1 phase 7 (T4): 154 `if RICH_AVAILABLE` forks said most things twice, and the two
+    halves drifted apart (a yes/no word read two ways, user text unescaped on one side). Only
+    the screen layer shows, asks, or knows whether Rich is there; check_dependencies reports
+    Rich as a dependency, which is not showing anything."""
+    import ast
+    layer = {"_yes", "_plain", "_rich_text", "_highlighted", "_say", "_error", "_warn", "_ask",
+             "_ask_yes_no", "_table", "_panel"}
+    tree = ast.parse(Path(ct.__file__).read_text(encoding="utf-8"))
+    found = []
+    for fn in tree.body:
+        if not isinstance(fn, ast.FunctionDef) or fn.name in layer:
+            continue
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Name) and n.id == "RICH_AVAILABLE" and fn.name != "check_dependencies":
+                found.append(f"{fn.name}: RICH_AVAILABLE L{n.lineno}")
+            elif isinstance(n, ast.Call):
+                f = n.func
+                name = (f"{f.value.id}.{f.attr}" if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                        else f.id if isinstance(f, ast.Name) else "")
+                if name in ("console.print", "console.input", "Prompt.ask", "Confirm.ask", "input"):
+                    found.append(f"{fn.name}: {name} L{n.lineno}")
+    assert found == [], found
+
+
 def test_plain_questions(monkeypatch, capsys):
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
     asked = []

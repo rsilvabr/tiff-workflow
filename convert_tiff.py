@@ -3237,11 +3237,11 @@ def _ask_temp_dir() -> Optional[Path]:
     that read like yes/no -- so a "y" made a folder named y in the current folder). A yes/no
     word is read as one: no = the system temp folder, yes = asked for the path. A relative
     path is made absolute and shown before it is used; None = the system temp folder."""
-    answer = input("\nTemp folder for the checks (Enter = the system temp folder): ").strip()
+    answer = _ask("\nTemp folder for the checks (Enter = the system temp folder)", style="")
     if answer.lower() in _NO_WORDS:
         answer = ""
     elif answer.lower() in _YES_WORDS:
-        answer = input("Temp folder path: ").strip()
+        answer = _ask("Temp folder path", style="")
     if not answer:
         return None
     # audit round 16: an unwritable/invalid temp dir raised out of the wizard.
