@@ -86,13 +86,46 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
+# --- Yes / no -------------------------------------------------------
+# One reader for every yes/no question, the same words on both screens (v3.1 phase 6, T2):
+# until then six readers disagreed -- "yes" typed out counted as NO in 22 questions of the
+# plain screen, and the Portuguese "s"/"sim" the owner types was NO nearly everywhere.
+_YES_WORDS = ("y", "yes", "s", "sim")
+_NO_WORDS = ("n", "no", "nao", "não")
+
+
+def _yes(answer, default: bool) -> bool:
+    """A typed answer read as yes/no; anything else (Enter included) is the question's
+    default -- "no" for every question that deletes or replaces."""
+    a = (answer or "").strip().lower()
+    if a in _YES_WORDS:
+        return True
+    if a in _NO_WORDS:
+        return False
+    return default
+
+
 try:
     from rich.console import Console
     from rich.markup import escape
     from rich.panel import Panel
     from rich.table import Table
     from rich.box import SIMPLE as BOX_SIMPLE
-    from rich.prompt import Prompt, Confirm
+    from rich.prompt import Prompt, InvalidResponse
+    from rich.prompt import Confirm as _RichConfirm
+
+    class Confirm(_RichConfirm):
+        """Rich's yes/no question with the plain screen's words (y/yes/s/sim, n/no/nao/não);
+        another answer is asked again, as Rich does."""
+
+        def process_response(self, value: str) -> bool:
+            a = value.strip().lower()
+            if a in _YES_WORDS:
+                return True
+            if a in _NO_WORDS:
+                return False
+            raise InvalidResponse(self.validate_error_message)
+
     RICH_AVAILABLE = True
     console = Console(force_terminal=True)
 except ImportError:
@@ -1518,13 +1551,11 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
         workflow["staging"] = staging
         cfg.config.last_staging = staging
         dry = input("Dry-run? [y/N]: ").strip().lower()
-        workflow["dry_run"] = (dry == "y")
+        workflow["dry_run"] = _yes(dry, False)
         safe = input(f"Safe mode? (skip multi-page TIFFs) [{'Y/n' if safe_default else 'y/N'}]: ").strip().lower()
-        workflow["safe_mode"] = (False if safe in ("n", "no")
-                                 else True if safe in ("y", "yes") else safe_default)
+        workflow["safe_mode"] = _yes(safe, safe_default)
         skip_lzw = input(f"Skip LZW as already compressed? (LZW files will be ignored) [{'Y/n' if skip_default else 'y/N'}]: ").strip().lower()
-        workflow["skip_lzw"] = (True if skip_lzw in ("y", "yes")
-                                else False if skip_lzw in ("n", "no") else skip_default)
+        workflow["skip_lzw"] = _yes(skip_lzw, skip_default)
         if _supports_cap_workers(workflow):
             cap_str = input(f"Cap workers? (0 = no cap) [{cap_default}]: ").strip()
             try:
@@ -1543,7 +1574,7 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
             workflow["exclude_folders"] = excl
             cfg.config.last_exclude_folders = excl
         fp = input("Force sequential? (y/N): ").strip().lower()
-        if fp == "y":
+        if _yes(fp, False):
             workflow["force_sequential"] = True
 
     step_advanced_options(cfg, workflow)
@@ -1616,8 +1647,7 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
         wanted = Confirm.ask("[cyan]Advanced options?[/cyan] (timeouts, memory share, ...)",
                              default=False)
     else:
-        wanted = input("Advanced options? (timeouts, memory share, ...) [y/N]: "
-                       ).strip().lower() in ("y", "yes")
+        wanted = _yes(input("Advanced options? (timeouts, memory share, ...) [y/N]: "), False)
     if not wanted:
         return True
     while True:
@@ -1735,7 +1765,7 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
         elif workflow.get("force_sequential"):
             print(f"  Parallelism: FORCED OFF (-ForceSequential)")
         confirm = input("Proceed? [Y/n]: ").strip().lower()
-        if confirm == "n":
+        if not _yes(confirm, True):
             print("Cancelled.")
             return False
 
@@ -2431,7 +2461,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
         if RICH_AVAILABLE and console:
             only = Confirm.ask(f"\n[yellow]{escape(msg)}[/yellow]", default=True)
         else:
-            only = input(f"\n{msg} [Y/n]: ").strip().lower() not in ("n", "no", "nao", "não")
+            only = _yes(input(f"\n{msg} [Y/n]: "), True)
         if only:
             return _restore_stranded_only(stranded)
 
@@ -2441,7 +2471,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
             console.print("[dim]Will skip files that already exist in parent folder.[/dim]")
     else:
         resp = input("\nOverwrite existing files in parent folder? [y/N]: ").strip().lower()
-        overwrite = (resp == "y")
+        overwrite = _yes(resp, False)
         if not overwrite:
             print("Will skip files that already exist in parent folder.")
 
@@ -2451,7 +2481,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
             return False
     else:
         resp = input("\nMove all files back to parent folder? [Y/n]: ").strip().lower()
-        if resp == "n":
+        if not _yes(resp, True):
             print("Cancelled.")
             return False
 
@@ -2532,7 +2562,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
             _remove_empty_dirs()
     else:
         resp = input("\nDelete empty OLD_TIFFs folders? [y/N]: ").strip().lower()
-        if resp == "y":
+        if _yes(resp, False):
             _remove_empty_dirs()
 
     parts = [f"Moved {moved} file(s)"]
@@ -3298,7 +3328,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     if RICH_AVAILABLE and console:
         convert_padded = Confirm.ask(f"\n[cyan]{escape(convert_q)}[/cyan]", default=False)
     else:
-        convert_padded = input(f"\n{convert_q} [y/N]: ").strip().lower() == "y"
+        convert_padded = _yes(input(f"\n{convert_q} [y/N]: "), False)
 
     settings = {"roots": [os.path.abspath(str(folder))], "scope": scope, "skip_names": skip_names,
                 "workers": workers, "temp_dir": str(temp_dir) if temp_dir else None,
@@ -3373,7 +3403,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
         if padded_count > 0:
             print(f"\nWarning: {padded_count} file(s) are padded 8-bit (converted from 8-bit to 16-bit without adding real data).")
             resp = input("\nCompress padded files to 8-bit ZIP? [y/N]: ").strip().lower()
-            if resp == "y":
+            if _yes(resp, False):
                 print(f"Compressing {len(padded_files)} file(s)...")
                 _compress_padded_files(padded_files, temp_dir, workers, cfg)
 
@@ -3514,7 +3544,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         if RICH_AVAILABLE and console:
             go = Confirm.ask("Run it now?", default=False)
         else:
-            go = input("Run it now? [y/N]: ").strip().lower() == "y"
+            go = _yes(input("Run it now? [y/N]: "), False)
         if not go:
             _say("Cancelled.", "dim")
             return 1
@@ -5276,7 +5306,7 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
         if RICH_AVAILABLE and console:
             ok_overlap = Confirm.ask("Run anyway?", default=False)
         else:
-            ok_overlap = input("Run anyway? [y/N]: ").strip().lower().startswith('y')
+            ok_overlap = _yes(input("Run anyway? [y/N]: "), False)
         if not ok_overlap:
             return False
 
@@ -5543,7 +5573,7 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
             "[cyan]Generate a manifest CSV for this folder instead of running now?[/cyan]",
             default=False)
     else:
-        gen_manifest = input("Generate a manifest CSV for this folder instead of running now? [y/N]: ").strip().lower() == "y"
+        gen_manifest = _yes(input("Generate a manifest CSV for this folder instead of running now? [y/N]: "), False)
     if gen_manifest:
         manifest_path = generate_manifest(folder, mode)
         if manifest_path:
@@ -5628,10 +5658,10 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
             workflow["skip_compressed_with_thumb"] = Confirm.ask("[cyan]Skip already-compressed TIFFs that have thumbnails?[/cyan]", default=False)
     else:
         gen_thumb = input("Generate embedded thumbnails? [y/N]: ").strip().lower()
-        if gen_thumb == "y":
+        if _yes(gen_thumb, False):
             workflow["generate_thumbnail"] = True
             config_thumb = input("Configure thumbnail settings? [y/N]: ").strip().lower()
-            if config_thumb == "y":
+            if _yes(config_thumb, False):
                 size_str = input(f"Thumbnail size (px) [{thumb_size_default}]: ").strip() or str(thumb_size_default)
                 workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
                 quality_str = input(f"JPEG quality [{thumb_quality_default}]: ").strip() or thumb_quality_default
@@ -5645,7 +5675,7 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
                     fmt = thumb_format_default
                 workflow["thumb_format"] = fmt
             skip_existing = input("Skip already-compressed TIFFs that have thumbnails? [y/N]: ").strip().lower()
-            workflow["skip_compressed_with_thumb"] = (skip_existing == "y")
+            workflow["skip_compressed_with_thumb"] = _yes(skip_existing, False)
 
     # For mode 8: confirm delete
     if mode == 8:
@@ -5700,7 +5730,7 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
                 console.print("[dim]Skipped.[/dim]")
         else:
             resp = input("\nDry-run complete. Run for real now? [y/N]: ").strip().lower()
-            if resp == "y":
+            if _yes(resp, False):
                 print("Running for real (DryRun disabled)...\n")
                 workflow["dry_run"] = False
                 cmd_real = build_compress_command(workflow, folders=[folder])
@@ -5781,7 +5811,7 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
                     console.print("[dim]Skipped.[/dim]")
             else:
                 resp = input("\nDry-run complete. Run for real now? [y/N]: ").strip().lower()
-                if resp == "y":
+                if _yes(resp, False):
                     print("Running for real...\n")
                     workflow["dry_run"] = False
                     real_cmd = build_compress_command(workflow, folders=folders) if "compress" in workflow_type or workflow_type == "both" else build_copy_exif_command(workflow, folders=folders)
@@ -5880,7 +5910,7 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
                     console.print("[dim]Skipped.[/dim]")
             else:
                 resp = input("\nDry-run complete. Run both steps for real now? [y/N]: ").strip().lower()
-                if resp == "y":
+                if _yes(resp, False):
                     print("Running for real...\n")
                     workflow["dry_run"] = False
                     copy_workflow = workflow.copy()
@@ -5941,7 +5971,7 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     if RICH_AVAILABLE and console:
         remove_mode = Confirm.ask("[yellow]Remove existing thumbnails instead of creating them?[/yellow]", default=False)
     else:
-        remove_mode = input("Remove existing thumbnails instead of creating them? [y/N]: ").strip().lower() == "y"
+        remove_mode = _yes(input("Remove existing thumbnails instead of creating them? [y/N]: "), False)
 
     # Recursive / dry-run apply to both modes
     def _ask_recursive_and_dry():
@@ -5951,8 +5981,8 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
                 Confirm.ask("[cyan]Dry-run?[/cyan]", default=False),
             )
         return (
-            input("Recursive? [y/N]: ").strip().lower() == "y",
-            input("Dry-run? [y/N]: ").strip().lower() == "y",
+            _yes(input("Recursive? [y/N]: "), False),
+            _yes(input("Dry-run? [y/N]: "), False),
         )
 
     def _ask_exclude_folders():
@@ -6558,7 +6588,7 @@ def presets_menu(cfg) -> None:
                 if RICH_AVAILABLE and console:
                     overwrite = Confirm.ask("Replace it?", default=False)
                 else:
-                    overwrite = input("Replace it? [y/N]: ").strip().lower().startswith("y")
+                    overwrite = _yes(input("Replace it? [y/N]: "), False)
                 if not overwrite:
                     continue
             presets[name] = {**snapshot, "saved_at": time.strftime("%Y-%m-%d %H:%M")}
@@ -6581,7 +6611,7 @@ def presets_menu(cfg) -> None:
             if RICH_AVAILABLE and console:
                 sure = Confirm.ask(f"Delete preset '{escape(name)}'?", default=False)
             else:
-                sure = input(f"Delete preset '{name}'? [y/N]: ").strip().lower().startswith("y")
+                sure = _yes(input(f"Delete preset '{name}'? [y/N]: "), False)
             if sure:
                 del presets[name]
                 cfg.config.presets = presets

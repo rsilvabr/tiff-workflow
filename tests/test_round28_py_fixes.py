@@ -613,3 +613,24 @@ def test_autofind_has_one_order(tmp_path):
         (root / rel / "x.tif").write_bytes(b"TIFF")
     got = [p.relative_to(root).as_posix() for p in ct.find_folders_by_pattern(root, ["S5pro"])]
     assert got == ["b/S5pro 01", "c/s5PRO 01", "a/S5pro 02"], got
+
+
+def test_one_yes_no_reader_for_both_screens(monkeypatch):
+    """v3.1 phase 6 (T2, W-O24): six readers disagreed -- "yes" typed out counted as NO in 22
+    plain-screen questions, the Portuguese "s"/"sim" as NO nearly everywhere. One reader now,
+    the same words on both screens; anything else is the question's default."""
+    for a in ("y", "Yes", " S ", "sim"):
+        assert ct._yes(a, False) is True, a
+    for a in ("n", "NO", "nao", "não"):
+        assert ct._yes(a, True) is False, a
+    for a in ("", "maybe", "1"):
+        assert ct._yes(a, False) is False and ct._yes(a, True) is True, a
+    if ct.RICH_AVAILABLE:
+        import io
+        from rich.console import Console
+        answers = iter(["talvez", "sim"])          # an unknown word is asked again, as in Rich
+        console = Console(file=io.StringIO(), force_terminal=False)
+        monkeypatch.setattr(console, "input", lambda *a, **k: next(answers))
+        assert ct.Confirm.ask("Proceed?", console=console) is True
+        answers = iter(["não"])
+        assert ct.Confirm.ask("Proceed?", console=console, default=True) is False
