@@ -1113,24 +1113,23 @@ def backup_tiff_metadata(src, write_dst):
     return meta
 
 
-def restore_all_metadata(tag_source, dst):
-    """Copy every tag of `tag_source` (the source TIFF, or the container
-    backup_tiff_metadata made) onto `dst`, a TIFF magick just wrote. True when written.
+def _restore_metadata_args(tag_source, dst):
+    """The exiftool command that copies every tag of `tag_source` (the source TIFF, or the
+    container backup_tiff_metadata made) onto `dst`, a TIFF magick just wrote.
 
     ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
     exiftool gives when the -tagsfromfile source could not be opened -- it still exits 0.
-    Only that one message is a failure besides the exit code: the SOURCE was never opened.
-    A tag-less source legitimately reports "No writable tags set".
     IPTC:CodedCharacterSet is not part of -all:all: without it UTF-8 IPTC text was written
     back as Latin, every Japanese keyword a '?' (audit round 28)."""
-    try:
-        out = exiftool(["-q", "-overwrite_original", "-tagsfromfile", tag_source, "-all:all",
-                        "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe", dst],
-                       merge_stderr=True)
-    except ToolError:
-        return False
-    return not re.search("Error opening file", out, re.I)
+    return ["-q", "-overwrite_original", "-tagsfromfile", tag_source, "-all:all",
+            "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe", dst]
 
+
+def _metadata_restored(r):
+    """Whether the restore command (an ExifResult) wrote the tags. Only 'Error opening file'
+    is a failure besides the exit status: the SOURCE was never opened. A tag-less source
+    legitimately reports "No writable tags set"."""
+    return r.status == 0 and not re.search("Error opening file", r.output, re.I)
 
 def tiff_has_only_subfile_pages(path, page_count, allowed=("REDUCEDIMAGE", "REDUCED", "MASK", "PAGE"),
                                 timeout=30):
@@ -1200,36 +1199,25 @@ def _parse_subfile_types(out):
     return types
 
 
-def restore_tiff_subfile_types(src, dst, timeout=30, types=None):
-    """Re-apply the source's per-page NewSubfileType markers to a TIFF magick just wrote.
-    ImageMagick rewrites every page and does not keep the tag: a REDUCEDIMAGE thumbnail
-    comes back as PAGE, and an IR MASK page as what viewers take for a regular image. A page
-    that had no marker gets whatever magick stamped on it cleared. True when nothing needed
-    restoring or every marker was written. `types`: the source's markers as tiff_facts read
-    them (None: read them here)."""
+def subfile_marker_args(src, types, timeout=30):
+    """The exiftool assignments that put the source's per-page NewSubfileType markers back
+    on a TIFF magick wrote from it (finish_written_tiff writes them). ImageMagick rewrites
+    every page and does not keep the tag: a REDUCEDIMAGE thumbnail comes back as PAGE, and
+    an IR MASK page as what viewers take for a regular image. A page that had no marker gets
+    whatever magick stamped on it cleared; an explicit 0 is written back, not deleted.
+
+    `types`: the source's markers as tiff_facts read them. [] when there is nothing to
+    restore (one page), None when the source's page count cannot be read (fail closed: the
+    restore counts as failed)."""
     pc = tiff_page_count(src, timeout)
     if not pc.ok:
-        return False
+        return None
     if pc.count <= 1:
-        return True
+        return []
     if types is None:
-        types = _read_subfile_types(src)
-    if types is None:
-        return False
-    tags = []
-    for i in range(pc.count):
-        if i in types:
-            tags.append(f"-IFD{i}:SubfileType#={types[i]}")
-        else:
-            tags.append(f"-IFD{i}:SubfileType=")
-    if not tags:
-        return True
-    try:
-        exiftool(["-q", "-q", "-overwrite_original"] + tags + [dst], merge_stderr=True)
-    except ToolError:
-        return False
-    return True
-
+        return None
+    return [f"-IFD{i}:SubfileType#={types[i]}" if i in types else f"-IFD{i}:SubfileType="
+            for i in range(pc.count)]
 
 def set_tiff_thumb_markers(src, dst):
     """The page markers of a -GenerateThumbnail output: page 0 keeps the marker the SOURCE
@@ -1251,23 +1239,53 @@ def history_agent():
     return f"tiff-workflow {TOOLKIT_VERSION} ({TOOLKIT_URL})"
 
 
-def add_tiff_history_entry(path, agent, parameters):
-    """Append this rewrite to xmpMM:History (Action, When, SoftwareAgent, Parameters);
-    earlier entries (Capture One, scanner software) are kept. Its OWN exiftool call on
-    purpose: in the same call as `-tagsfromfile -all:all`, `+=` doubles every copied entry
-    (jxl-photo #531). The values must stay free of the struct characters , { } [ ] |.
-    True when written; never raises."""
-    try:
-        now = datetime.now().astimezone()
-        off = now.strftime("%z")
-        when = now.strftime("%Y-%m-%dT%H:%M:%S") + (off[:3] + ":" + off[3:5] if off else "")
-        assign = (f"-XMP-xmpMM:History+={{Action=converted,When={when},"
-                  f"SoftwareAgent={agent},Parameters={parameters}}}")
-        out = exiftool(["-q", "-overwrite_original", assign, path], merge_stderr=True)
-        return not re.search("error", out, re.I)
-    except Exception:
-        return False
+def _history_args(path, parameters):
+    """The exiftool command that appends this rewrite to xmpMM:History (Action, When,
+    SoftwareAgent, Parameters); earlier entries (Capture One, scanner software) are kept.
+    A command of its OWN on purpose: in the same command as `-tagsfromfile -all:all`, `+=`
+    doubles every copied entry (jxl-photo #531) -- an `-execute` of the same process is a
+    command of its own. The values must stay free of the struct characters , { } [ ] |."""
+    now = datetime.now().astimezone()
+    off = now.strftime("%z")
+    when = now.strftime("%Y-%m-%dT%H:%M:%S") + (off[:3] + ":" + off[3:5] if off else "")
+    assign = (f"-XMP-xmpMM:History+={{Action=converted,When={when},"
+              f"SoftwareAgent={history_agent()},Parameters={parameters}}}")
+    return ["-q", "-overwrite_original", assign, path]
 
+
+class Finished(NamedTuple):
+    metadata: bool      # every tag of the source is on the written file
+    markers: bool       # the page markers are back (True when there were none to put back)
+    history: bool       # the xmpMM:History entry is written (True when none was asked for)
+
+
+def finish_written_tiff(dst, tag_source, markers, history=None):
+    """The writes onto a TIFF magick just wrote, in ONE exiftool (v3.1 phase 4: three
+    processes until then), each a command of its own with its own verdict: the metadata
+    from `tag_source`, the page `markers` (subfile_marker_args: [] = none to write, None =
+    could not be read, so failed), and, with `history`, this rewrite in xmpMM:History
+    (`history` is its Parameters text). Run before the gates, so they check the final bytes.
+    FAIL-CLOSED: exiftool that cannot be started fails all three; never raises for it."""
+    commands = [_restore_metadata_args(tag_source, dst)]
+    if markers:
+        commands.append(["-q", "-q", "-overwrite_original"] + list(markers) + [dst])
+    if history is not None:
+        commands.append(_history_args(dst, history))
+    try:
+        results = exiftool_commands(commands)
+    except ToolError:
+        results = [ExifResult(-1, "")] * len(commands)
+    metadata = _metadata_restored(results[0])
+    done_markers = markers is not None
+    i = 1
+    if markers:
+        done_markers = results[i].status == 0
+        i += 1
+    done_history = True
+    if history is not None:
+        r = results[i]
+        done_history = r.status == 0 and not re.search("error", r.output, re.I)
+    return Finished(metadata, done_markers, done_history)
 
 class ThumbSafe(NamedTuple):
     ok: bool

@@ -3851,7 +3851,7 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     -- had the tag DELETED from the output instead of preserved; and the symbolic names only
     covered four values, so anything else silently became "no tag". exiftool prints one line
     per IFD that really has the tag, with its numeric value, which tells the cases apart.
-    The backends' restore_tiff_subfile_types was fixed for exactly this; this copy had been
+    The backends' marker restore (tw.subfile_marker_args) was fixed for exactly this; this copy had been
     left behind.
     """
     try:

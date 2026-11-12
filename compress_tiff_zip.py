@@ -712,8 +712,6 @@ def _compress_job(run, t, load, own):
 
     no_thumb_note = ""
     thumb_marker_failed = False
-    subfile_restore_failed = False
-    history_failed = False
 
     if generate_thumb:
         written = _write_with_thumbnail(run, src, write_dst, type_args, name)
@@ -752,25 +750,19 @@ def _compress_job(run, t, load, own):
         return res(f"ERROR (sample layout changed: {' '.join(layout_pages)} - output dropped, original untouched) | {name}", fd=True)
 
     staging_name = os.path.basename(write_dst)
-    # Always restore the metadata from the source (or the container).
-    exif_warn = True
-    try:
-        exif_warn = not tw.restore_all_metadata(meta_backup or src, write_dst)
-    except Exception:
-        exif_warn = True
-    tw.remove_quietly(meta_backup)
-
-    if not generate_thumb:
-        if not tw.restore_tiff_subfile_types(src, write_dst, timeout, facts.subfile_types):
-            subfile_restore_failed = True
-
-    # xmpMM:History: this rewrite, in its own exiftool call. Before the gates, so they check
-    # the final bytes; the irreversible step stays last. A failed entry is a WARN.
+    # The writes onto the output, in one exiftool (v3.1 phase 4): the metadata from the
+    # source (or the container), the page markers (the thumbnail path set its own), and
+    # this rewrite in xmpMM:History. Before the gates, so they check the final bytes; the
+    # irreversible step stays last. A failed history entry is a WARN.
+    markers = [] if generate_thumb else tw.subfile_marker_args(src, facts.subfile_types, timeout)
     history = f"compress_tiff_zip mode {mode}: ZIP (Deflate)"
     if generate_thumb and not no_thumb_note:
         history += " + thumbnail page"
-    if not tw.add_tiff_history_entry(write_dst, tw.history_agent(), history):
-        history_failed = True
+    done = tw.finish_written_tiff(write_dst, meta_backup or src, markers, history)
+    tw.remove_quietly(meta_backup)
+    exif_warn = not done.metadata
+    subfile_restore_failed = not done.markers
+    history_failed = not done.history
 
     # Modes 1-7 have no pixel gate: a rewrite that dropped pages is data loss (audit
     # round 16). Fail closed and drop an output this run created.

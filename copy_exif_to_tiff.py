@@ -276,19 +276,21 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
         return f"ERROR (ZIP pixel verification failed - original untouched) | {name}"
 
     # Same '%' trap as the JPEG copy, for a TIFF whose NAME carries one.
+    # The metadata and the page markers go back in one exiftool (v3.1 phase 4).
     try:
         tiff_meta = tw.backup_tiff_metadata(tiff_target, write_dst)
     except tw.ToolError:
-        restore_ok = False
+        done = tw.Finished(False, False, True)
     else:
         if tiff_meta:
             own.append(tiff_meta)
-        restore_ok = tw.restore_all_metadata(tiff_meta or tiff_target, write_dst)
+        markers = tw.subfile_marker_args(tiff_target, facts.subfile_types, timeout)
+        done = tw.finish_written_tiff(write_dst, tiff_meta or tiff_target, markers)
         tw.remove_quietly(tiff_meta)
-    if not restore_ok:
+    if not done.metadata:
         drop_staged()
         return f"ERROR (exiftool metadata restore failed - original untouched) | {name}"
-    if not tw.restore_tiff_subfile_types(tiff_target, write_dst, timeout, facts.subfile_types):
+    if not done.markers:
         drop_staged()
         return f"ERROR (subfiletype restore failed - original untouched) | {name}"
     return None

@@ -98,9 +98,9 @@ class FakeTools:
         m.setattr(tw, "backup_tiff_metadata", self._backup)
         m.setattr(tw, "magick_run", self._magick_run)
         m.setattr(tw, "exiftool", fake_exiftool(self._exiftool))
-        m.setattr(tw, "restore_tiff_subfile_types", self._subfile)
+        m.setattr(tw, "subfile_marker_args", lambda src, types, t=30: ["-IFD0:SubfileType#=0"])
+        m.setattr(tw, "finish_written_tiff", self._finish)
         m.setattr(tw, "set_tiff_thumb_markers", lambda s, d: self.thumb_markers)
-        m.setattr(tw, "add_tiff_history_entry", self._history)
         m.setattr(tw, "zip_integrity", self._integrity)
         m.setattr(tw, "pixel_identical", self._pixels)
         m.setattr(tw, "thumb_output_matches_source", self._thumb_match)
@@ -165,9 +165,23 @@ class FakeTools:
         self.exif_calls.append([str(a) for a in args])
         return self.exif_result
 
-    def _subfile(self, src, dst, timeout=30, types=None):
-        self.events.append("subfile")
-        return self.subfile_restore
+    def _finish(self, dst, tag_source, markers, history=None):
+        """finish_written_tiff: the metadata restore goes through the exiftool double (a test
+        that sabotages that call still reaches it); the markers and the history entry answer
+        from the knobs. The events keep the order of the real commands."""
+        try:
+            out = tw.exiftool(tw._restore_metadata_args(tag_source, dst), merge_stderr=True)
+            metadata = tw._metadata_restored(tw.ExifResult(0, out))
+        except tw.ToolError:
+            metadata = False
+        marks = markers is not None
+        if markers != []:
+            self.events.append("subfile")
+            marks = marks and self.subfile_restore
+        done_history = True
+        if history is not None:
+            done_history = self._history(dst, tw.history_agent(), history)
+        return tw.Finished(metadata, marks, done_history)
 
     def _history(self, path, agent, params):
         self.events.append("history")
@@ -586,13 +600,13 @@ class TestNothingOfAJobIsLeftBehind:
             src_mtime_ns=st.st_mtime_ns), sibling
 
     @pytest.mark.parametrize("shape, step", [
-        ("in-place", "tiff_sample_layout_kept"), ("in-place", "restore_tiff_subfile_types"),
-        ("in-place", "add_tiff_history_entry"), ("in-place", "zip_integrity"),
+        ("in-place", "tiff_sample_layout_kept"), ("in-place", "subfile_marker_args"),
+        ("in-place", "finish_written_tiff"), ("in-place", "zip_integrity"),
         ("in-place", "pixel_identical"),
-        ("staged", "tiff_sample_layout_kept"), ("staged", "add_tiff_history_entry"),
+        ("staged", "tiff_sample_layout_kept"), ("staged", "finish_written_tiff"),
         ("staged", "tiff_page_count"),
-        ("destination", "tiff_sample_layout_kept"), ("destination", "add_tiff_history_entry"),
-        ("modes-0-9", "tiff_sample_layout_kept"), ("modes-0-9", "add_tiff_history_entry"),
+        ("destination", "tiff_sample_layout_kept"), ("destination", "finish_written_tiff"),
+        ("modes-0-9", "tiff_sample_layout_kept"), ("modes-0-9", "finish_written_tiff"),
         ("modes-0-9", "zip_integrity"),
     ])
     def test_an_unexpected_exception_leaves_nothing(self, tools, photo, tmp_path, monkeypatch,
@@ -659,7 +673,7 @@ class TestNothingOfAJobIsLeftBehind:
 
         def boom(*a, **k):
             raise RuntimeError("history exploded")
-        monkeypatch.setattr(tw, "add_tiff_history_entry", boom)
+        monkeypatch.setattr(tw, "finish_written_tiff", boom)
         with pytest.raises(RuntimeError):
             job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
         assert not out.exists() and photo.read_bytes() == b"ORIGINAL"
@@ -969,7 +983,7 @@ class TestCopyExif:
 
     @pytest.mark.parametrize("step", ["exiftool", "tiff_facts", "magick_run",
                                       "tiff_sample_layout_kept", "pixel_identical",
-                                      "restore_all_metadata", "restore_tiff_subfile_types"])
+                                      "subfile_marker_args", "finish_written_tiff"])
     def test_with_outputdir_an_unexpected_exception_leaves_nothing_either(
             self, tools, photo, tmp_path, monkeypatch, step):
         """v3.1 (O8): the same, when the step does not answer "no" but raises: the copy in
@@ -1752,9 +1766,9 @@ class TestGroupSteps:
     def test_a_worker_that_raised_never_gets_its_original_archived(self, tools, photo, monkeypatch):
         """Modes 0/9: a worker that fails AFTER it wrote the copy is that file's ERROR line;
         the copy is dropped and the original stays where it is (round 26)."""
-        def boom(path, agent, params):
+        def boom(*a, **k):
             raise RuntimeError("history exploded")
-        monkeypatch.setattr(tw, "add_tiff_history_entry", boom)
+        monkeypatch.setattr(tw, "finish_written_tiff", boom)
         run = compress_run("-Mode", "9", "-ForceSequential")
         run.total = 1
         st = os.stat(photo)
@@ -2050,42 +2064,56 @@ class TestGatesFailClosed:
         with pytest.raises(tw.ToolError, match="'%' in its name"):
             tw.backup_tiff_metadata("a.tif", "a.tif")
 
-    def test_subfile_restore(self, monkeypatch):
+    def test_subfile_markers(self, monkeypatch):
+        """v3.1 phase 4: the markers to write come from tiff_facts' read of the source; the
+        page count (magick) says how many pages get one."""
         monkeypatch.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(False, 0, "timeout"))
-        assert tw.restore_tiff_subfile_types("a", "b") is False
+        assert tw.subfile_marker_args("a", {0: 0}) is None, "page count unreadable: failed"
+        monkeypatch.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(True, 1, ""))
+        assert tw.subfile_marker_args("a", {0: 0}) == [], "one page: nothing to put back"
+        assert tw.subfile_marker_args("a", None) == []
         monkeypatch.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(True, 3, ""))
-        calls = []
+        assert tw.subfile_marker_args("a", None) is None, "markers unread: failed"
+        assert tw.subfile_marker_args("a", {0: 0, 2: 4}) == [
+            "-IFD0:SubfileType#=0",     # an explicit 0 is kept, not deleted (round 11)
+            "-IFD1:SubfileType=",       # a page without the tag gets magick's stamp cleared
+            "-IFD2:SubfileType#=4"]
 
-        def exiftool(args):
-            calls.append(list(args))
-            if "-SubfileType" in args:
-                return 0, "[IFD0]  SubfileType: 0\n[IFD2]  SubfileType: 4\n"
-            return 0, ""
-        monkeypatch.setattr(tw, "exiftool", fake_exiftool(exiftool))
-        assert tw.restore_tiff_subfile_types("a", "b") is True
-        write = calls[-1]
-        assert "-IFD0:SubfileType#=0" in write, "an explicit 0 is kept, not deleted (round 11)"
-        assert "-IFD1:SubfileType=" in write, "a page without the tag gets magick's stamp cleared"
-        assert "-IFD2:SubfileType#=4" in write
-        exits = {"read": 0, "write": 1}
+    def test_finish_written_tiff(self, monkeypatch):
+        """v3.1 phase 4: the metadata, the markers and the history entry in ONE exiftool,
+        three commands, each judged on its own; exiftool not started fails all three."""
+        seen = []
+        answers = {}
 
-        def exiftool_exits(args):
-            calls.append(list(args))
-            if "-SubfileType" in args:
-                return exits["read"], "[IFD0]  SubfileType: 0\n"
-            return exits["write"], "Error: cannot write"
-        monkeypatch.setattr(tw, "exiftool", fake_exiftool(exiftool_exits))
-        assert tw.restore_tiff_subfile_types("a", "b") is False, "the write exited 1"
-        assert tw.set_tiff_thumb_markers("a", "b") is False, "the write exited 1"
-        exits["write"] = 0
-        assert tw.set_tiff_thumb_markers("a", "b") is True
-        assert calls[-1][-3:] == ["-IFD0:SubfileType#=0", "-IFD1:SubfileType#=1", "b"]
-        exits["read"] = 1
-        n = len(calls)
-        assert tw.restore_tiff_subfile_types("a", "b") is False, "the source's markers unreadable"
-        assert tw.set_tiff_thumb_markers("a", "b") is False, "the source's markers unreadable"
-        assert len(calls) == n + 2, "nothing is written when the source cannot be read"
-
+        def commands(cmds):
+            seen.append(cmds)
+            return [answers.get(k, tw.ExifResult(0, "")) for k in range(len(cmds))]
+        monkeypatch.setattr(tw, "exiftool_commands", commands)
+        dst, src = "E:\\伊豆沼 [x]\\a 50%.tif", "C:\\t\\tw_0123.mie"
+        assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "compress mode 9") == \
+            tw.Finished(True, True, True)
+        restore, marks, history = seen[-1]
+        assert restore == tw._restore_metadata_args(src, dst) and restore.count("-q") == 1
+        assert marks == ["-q", "-q", "-overwrite_original", "-IFD0:SubfileType#=0", dst]
+        assert history[-1] == dst and "-tagsfromfile" not in history, \
+            "the history entry is a command of its own (+= doubles the copied entries)"
+        assert history[2].startswith("-XMP-xmpMM:History+={Action=converted,")
+        assert history[2].endswith(",Parameters=compress mode 9}")
+        assert tw.finish_written_tiff(dst, src, [], None) == tw.Finished(True, True, True)
+        assert len(seen[-1]) == 1, "nothing else to write: one command"
+        assert tw.finish_written_tiff(dst, src, None) == tw.Finished(True, False, True)
+        answers[0] = tw.ExifResult(0, "Warning: Error opening file - C:\\t\\tw_0123.mie\n")
+        answers[1] = tw.ExifResult(1, "")
+        answers[2] = tw.ExifResult(0, "Error: XMP format error\n")
+        assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "x") == \
+            tw.Finished(False, False, False)
+        answers.clear()
+        answers[0] = tw.ExifResult(-1, "")
+        assert tw.finish_written_tiff(dst, src, [], "x") == tw.Finished(False, True, True), \
+            "a restore whose status could not be read failed"
+        monkeypatch.setattr(tw, "exiftool_commands", tool_fails)
+        assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "x") == \
+            tw.Finished(False, False, False)
 
 class TestResultKinds:
     """v3.1 (B3): one parser of the result lines, tw.result_kind, for the three tallies."""
