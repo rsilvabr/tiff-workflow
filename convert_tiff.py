@@ -6128,7 +6128,25 @@ def main():
     if upd:
         _say(upd[0], "yellow")
         cfg.update_available = (cfg.config.update_latest_seen, upd[1])
+    _menu_loop(cfg)
 
+
+# The workflows of "1 New workflow", by the key show_menu returns. Lambdas: the functions
+# are looked up when the workflow starts, so a test that replaces one reaches it.
+_WORKFLOWS = {
+    "1": lambda cfg: run_free_compress(cfg),
+    "2": lambda cfg: _run_exif_or_compress(cfg, "copy_exif"),
+    "3": lambda cfg: _run_exif_or_compress(cfg, "compress"),
+    "4": lambda cfg: _run_exif_or_compress(cfg, "both"),
+    "5": lambda cfg: run_undo_old_tiffs(cfg),
+    "6": lambda cfg: run_purge_old_tiffs(cfg),
+    "7": lambda cfg: run_diagnose_tiffs(cfg),
+    "8": lambda cfg: run_generate_thumbnails(cfg),
+}
+
+
+def _menu_loop(cfg) -> None:
+    """The main menu until 0 (Exit)."""
     while True:
         choice = show_main_menu(cfg)
 
@@ -6172,25 +6190,8 @@ def main():
 
         # choice == "1": New workflow -- pick the type
         wf = show_menu()
-        if wf == "0":
-            continue
-
-        if wf == "1":
-            run_free_compress(cfg)
-        elif wf == "2":
-            _run_exif_or_compress(cfg, "copy_exif")
-        elif wf == "3":
-            _run_exif_or_compress(cfg, "compress")
-        elif wf == "4":
-            _run_exif_or_compress(cfg, "both")
-        elif wf == "5":
-            run_undo_old_tiffs(cfg)
-        elif wf == "6":
-            run_purge_old_tiffs(cfg)
-        elif wf == "7":
-            run_diagnose_tiffs(cfg)
-        elif wf == "8":
-            run_generate_thumbnails(cfg)
+        if wf in _WORKFLOWS:
+            _WORKFLOWS[wf](cfg)
 
 
 if __name__ == "__main__":

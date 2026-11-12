@@ -890,6 +890,28 @@ class TestWorkTimeout:
         assert _work_timeout(120, a, b) == pytest.approx(expected)
 
 
+class TestMenuDispatch:
+    """v3.1 phase 7 (W9): "1 New workflow" dispatches through _WORKFLOWS. Every workflow the
+    menu offers has an entry, and an entry looks its function up when it runs -- a table of
+    the functions themselves would keep the originals, and a test that replaces one would
+    pass without reaching it."""
+
+    def test_every_offered_workflow_runs_its_function(self, monkeypatch):
+        offered = [k for k, _, _ in convert_tiff.WORKFLOW_OPTIONS]
+        assert sorted(offered) == sorted(convert_tiff._WORKFLOWS), (offered, sorted(convert_tiff._WORKFLOWS))
+        ran = []
+        for name in ("run_free_compress", "run_undo_old_tiffs", "run_purge_old_tiffs",
+                     "run_diagnose_tiffs", "run_generate_thumbnails"):
+            monkeypatch.setattr(convert_tiff, name, lambda cfg, _n=name: ran.append(_n))
+        monkeypatch.setattr(convert_tiff, "_run_exif_or_compress",
+                            lambda cfg, kind: ran.append(f"fuji:{kind}"))
+        for key in sorted(offered):
+            convert_tiff._WORKFLOWS[key](None)
+        assert ran == ["run_free_compress", "fuji:copy_exif", "fuji:compress", "fuji:both",
+                       "run_undo_old_tiffs", "run_purge_old_tiffs", "run_diagnose_tiffs",
+                       "run_generate_thumbnails"], ran
+
+
 class TestWorkflow4TwoSteps:
     """Workflow 4 (Copy EXIF, then compress): compress runs only when Copy EXIF exited 0 --
     it would ZIP TIFFs whose metadata never landed. v3.1 phase 7 (W7) wrote the two passes
