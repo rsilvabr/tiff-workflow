@@ -4985,25 +4985,11 @@ def build_manifest_entry_cmd(source: str, dest_path: str, mode: int,
     return build_compress_command(entry_wf, folders=[Path(source)])
 
 
-def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
-                              unattended: bool = False) -> bool:
-    """Execute a compress workflow from manifest entries.
-
-    `entries` must be mode-resolved (no None modes -- the caller replaced
-    them with the run's default mode). One child process per entry; a failed
-    entry does not stop the rest. Returns True only when every entry exited
-    cleanly.
-
-    `unattended` (--run-preset) never asks: overlapping Sources refuse instead
-    of offering "Run anyway?", each child gets a closed stdin (a backend never asks
-    without a console), and the mode-8 gate below stays as a defensive refusal (the runner
-    already refused a deleting preset before calling this)."""
-    if not entries:
-        _error("No manifest entries found!")
-        return False
-
-    dry_run = workflow.get("dry_run", False)
-
+def _manifest_ready(entries: List[Tuple], workflow: Dict, unattended: bool, dry_run: bool) -> bool:
+    """The checks before a manifest runs: notes on Destinations a mode ignores and on a mode 2
+    that flattens into its own Source; refusals for Source folders that overlap (asked, never
+    unattended), outputs that collide, a Source that is missing, and mode 8 without its
+    confirmation. False = do not run (said why)."""
     # The Destination column is only honored by mode 2 -- every other mode
     # computes its own output location from the backend's rules.
     ignored_dests = [(s, d, m) for s, d, m in entries
@@ -5079,6 +5065,31 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
                            "compression. Are you sure?", False, "red"):
             _say("Cancelled.", "dim")
             return False
+
+    return True
+
+
+def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
+                              unattended: bool = False) -> bool:
+    """Execute a compress workflow from manifest entries.
+
+    `entries` must be mode-resolved (no None modes -- the caller replaced
+    them with the run's default mode). One child process per entry; a failed
+    entry does not stop the rest. Returns True only when every entry exited
+    cleanly.
+
+    `unattended` (--run-preset) never asks: overlapping Sources refuse instead
+    of offering "Run anyway?", each child gets a closed stdin (a backend never asks
+    without a console), and the mode-8 gate below stays as a defensive refusal (the runner
+    already refused a deleting preset before calling this)."""
+    if not entries:
+        _error("No manifest entries found!")
+        return False
+
+    dry_run = workflow.get("dry_run", False)
+
+    if not _manifest_ready(entries, workflow, unattended, dry_run):
+        return False
 
     total_entries = len(entries)
     ok_count = 0
