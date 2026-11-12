@@ -257,6 +257,11 @@ the suite and the battery.
   (`grep ... | cat -A`) against a sibling construct.
 - **Stage files by name, never `git add -A`**: it once swept the owner's
   untracked bug report into a commit.
+- **Code inserted right above a `def` can land between it and its decorator**
+  (v3.1 phase 7, twice): `@_scoped_magick_aliases` then wraps the new code, the
+  gate keeps every alias copy, and nothing fails until a test reaches it. Anchor
+  such an insertion on the decorator line;
+  `test_every_function_that_makes_aliases_releases_them` checks the gates.
 
 ## AI workflow: planner -> coder -> reviewer
 Heavy changes run in three steps, each leaving a document in `AI_tools/`

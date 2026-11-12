@@ -501,6 +501,23 @@ class TestBracketAliasesAreReleased:
         assert list(alias_dir.iterdir()) == [], "alias copies were left in %TEMP%"
 
 
+def test_every_function_that_makes_aliases_releases_them():
+    """v3.1 phase 7: code inserted above a `def` slid between it and @_scoped_magick_aliases
+    twice (a9c437e, and once caught before a commit); the decorator went to the new code and
+    the gate kept its alias copies. Every module function that calls _magick_spec must be the
+    wrapper -- read from the module as it runs, not from the text."""
+    import ast
+    tree = ast.parse(Path(ct.__file__).read_text(encoding="utf-8"))
+    callers = sorted(
+        fn.name for fn in tree.body
+        if isinstance(fn, ast.FunctionDef) and fn.name != "_magick_spec"
+        and any(isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_magick_spec"
+                for n in ast.walk(fn)))
+    assert len(callers) >= 4, callers
+    unscoped = [name for name in callers if not hasattr(getattr(ct, name), "__wrapped__")]
+    assert unscoped == [], f"_magick_spec called outside an alias scope: {unscoped}"
+
+
 # --- progress line names the folder, not only the file -----------------------
 
 
