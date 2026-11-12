@@ -393,6 +393,25 @@ class ToolConfig:
     update_latest_seen: str = ""      # the tag it answered
 
 
+def _write_json_file(path: Path, data, prefix: str, ensure_ascii: bool = True) -> None:
+    """`data` as the JSON file `path`, in UTF-8: a temp file in the same folder, then one
+    replacing rename (tw.move_file_replacing). The file is whole at every moment -- a run
+    killed mid-write leaves the old one. Raises OSError."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=prefix, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            json.dump(data, f, indent=2, ensure_ascii=ensure_ascii)
+            f.write("\n")
+        tw.move_file_replacing(tmp, str(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 class ConfigManager:
     """Persistent JSON config for convert_tiff."""
 
@@ -465,7 +484,7 @@ class ConfigManager:
         in place, so a run killed mid-write lost every preset)."""
         try:
             with self._save_lock:
-                self._write_atomically(asdict(self.config))
+                _write_json_file(self.config_path, asdict(self.config), ".convert_tiff_config.")
         except Exception as e:
             # audit round 16: same story on save -- a config that silently never
             # persisted looked exactly like one that did.
@@ -494,24 +513,7 @@ class ConfigManager:
                     return
             data["update_checked_on"] = self.config.update_checked_on
             data["update_latest_seen"] = self.config.update_latest_seen
-            self._write_atomically(data)
-
-    def _write_atomically(self, data: Dict) -> None:
-        """`data` as the config file: a temp file in the same folder, then one replacing
-        rename (tw.move_file_replacing). The file is whole at every moment. Raises OSError."""
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=str(self.config_path.parent),
-                                   prefix=".convert_tiff_config.", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            tw.move_file_replacing(tmp, str(self.config_path))
-        except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
+            _write_json_file(self.config_path, data, ".convert_tiff_config.")
 
 
 # --- New-release notice -------------------------------------------------
@@ -2477,7 +2479,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     # header promise more than the run delivered whenever sidecars sat in OLD_TIFFs/.
     def _restorable(od) -> list:
         return [f for f in Path(od).glob("*")
-                if f.is_file() and f.suffix.lower() in (".tif", ".tiff")]
+                if f.is_file() and tw.is_tiff_name(f.name)]
 
     counts = {od: len(_restorable(od)) for od in old_dirs}
     total_files = sum(counts.values())
@@ -2566,7 +2568,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
             # symlink reported exists()==False yet passed the suffix check.
             if not f.is_file():
                 continue
-            if f.suffix.lower() not in (".tif", ".tiff"):
+            if not tw.is_tiff_name(f.name):
                 continue
             dest = parent / f.name
             if dest.exists():
@@ -3148,7 +3150,7 @@ def _diagnose_targets(roots, scope: str = "", skip_names: str = "") -> List[Path
                 continue
             for name in filenames:
                 low = name.lower()
-                if not low.endswith((".tif", ".tiff")):
+                if not tw.is_tiff_name(name):
                     continue
                 if any(fnmatch.fnmatchcase(low, p) for p in patterns):
                     continue
@@ -3273,6 +3275,20 @@ def _ask_line(prompt_text: str, default: str) -> str:
     return "" if value in ("-", "none") else value
 
 
+def _usable_temp_dir(path, style: str) -> Optional[Path]:
+    """The temp folder `path`, made when it is missing; None -- the system temp folder -- when
+    no folder is given or it cannot be made (said on the screen, in `style`)."""
+    if not path:
+        return None
+    temp_dir = Path(path)
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _say(f"Cannot use temp dir {temp_dir}: {e} -- using system temp.", style)
+        return None
+    return temp_dir
+
+
 def _ask_temp_dir() -> Optional[Path]:
     """Diagnose's temp folder: ONE question, the same on both screens (v3.1 phase 6, F3/F4:
     the Rich screen asked yes/no and then the path, the plain one the path under a question
@@ -3286,14 +3302,10 @@ def _ask_temp_dir() -> Optional[Path]:
         answer = input("Temp folder path: ").strip()
     if not answer:
         return None
-    temp_dir = Path(os.path.abspath(answer))
     # audit round 16: an unwritable/invalid temp dir raised out of the wizard.
-    try:
-        temp_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        _say(f"Cannot use temp dir {temp_dir}: {e} -- using system temp.", "red")
-        return None
-    _say(f"Using temp dir: {temp_dir}", "dim")
+    temp_dir = _usable_temp_dir(os.path.abspath(answer), "red")
+    if temp_dir is not None:
+        _say(f"Using temp dir: {temp_dir}", "dim")
     return temp_dir
 
 
@@ -3591,16 +3603,10 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
 
     results = list(cached)
     conv_failed = []
+    workers = clamp_workers(d.get("workers") or cfg.config.default_workers,
+                            cfg.config.default_workers)
     if todo:
-        temp_dir = Path(d["temp_dir"]) if d.get("temp_dir") else None
-        if temp_dir is not None:
-            try:
-                temp_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                _say(f"Cannot use temp dir {temp_dir}: {e} -- using system temp.", "yellow")
-                temp_dir = None
-        workers = clamp_workers(d.get("workers") or cfg.config.default_workers,
-                                cfg.config.default_workers)
+        temp_dir = _usable_temp_dir(d.get("temp_dir"), "yellow")
         budget, pixels = _memory_budget(todo, tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
         _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
         compress_tmp = d.get("compress_tmp") or "none"
@@ -3631,15 +3637,8 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         # audit round 28: the check phase falls back to the system temp when the saved
         # temp_dir cannot be made; this phase re-read the saved value and ended in a
         # traceback. Same fallback here.
-        temp_dir = Path(d["temp_dir"]) if d.get("temp_dir") else None
-        if temp_dir is not None:
-            try:
-                temp_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                _say(f"Cannot use temp dir {temp_dir}: {e} -- using system temp.", "yellow")
-                temp_dir = None
-        done = _compress_padded_files(padded, temp_dir, clamp_workers(
-            d.get("workers") or cfg.config.default_workers, cfg.config.default_workers), cfg)
+        temp_dir = _usable_temp_dir(d.get("temp_dir"), "yellow")
+        done = _compress_padded_files(padded, temp_dir, workers, cfg)
         n = (done or {}).get("converted", 0) if isinstance(done, dict) else 0
         conv_failed = list((done or {}).get("failed", [])) if isinstance(done, dict) else []
         lines.insert(lines.index(f"Errors: {len(by_status['error'])}") + 1,
@@ -4503,7 +4502,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     # Verify each image file; non-TIFF sidecars must at least have an identical-size copy in the parent
     def _verify(item):
         old_file, new_file, _ = item
-        if old_file.suffix.lower() not in (".tif", ".tiff"):
+        if not tw.is_tiff_name(old_file.name):
             if not new_file.exists():
                 return (old_file, new_file, MISSING_PARENT)
             # Compare content, not just size: this gate authorises permanent deletion, and a
@@ -4524,7 +4523,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         return None
 
     workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
-    workers = _memory_capped_pool_workers(workers, [it[0] for it in items if Path(it[0]).suffix.lower() in (".tif", ".tiff")], tw.COMPARE_BYTES_PER_PIXEL, "copy verification")
+    workers = _memory_capped_pool_workers(workers, [it[0] for it in items if tw.is_tiff_name(str(it[0]))], tw.COMPARE_BYTES_PER_PIXEL, "copy verification")
     _TIMEOUT_LOAD = workers
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -4916,7 +4915,6 @@ def show_main_menu(cfg) -> str:
 
 # --- Manifest System -------------------------------------------------
 
-TIFF_EXTS = {".tif", ".tiff"}
 
 # Modes 2/4/5 can land two entries in the same folder (shared flat Destination,
 # shared rename target, shared sibling ZIP/). Every other mode writes only
@@ -5085,7 +5083,7 @@ def generate_manifest(root: Path, mode: int) -> Optional[str]:
     # backups, and in mode 8 DELETE them. Relative to the root, via _is_tool_output_path.
     for p in root.rglob("*"):
         try:
-            if p.is_file() and p.suffix.lower() in TIFF_EXTS:
+            if p.is_file() and tw.is_tiff_name(p.name):
                 if _is_tool_output_path(p, root):
                     continue
                 tiff_dirs.add(p.parent)
@@ -5266,7 +5264,7 @@ def manifest_output_collisions(entries: List[Tuple], exclude_names=()) -> List[T
             continue
         for f in files:
             try:
-                if not f.is_file() or f.suffix.lower() not in TIFF_EXTS:
+                if not f.is_file() or not tw.is_tiff_name(f.name):
                     continue
             except OSError:
                 continue
@@ -6423,25 +6421,6 @@ def _convert_tiff_script_values() -> Dict[str, object]:
     return out
 
 
-def _write_overlay_file(path: Path, data: Dict) -> None:
-    """The overlay file, written whole through a temp file + os.replace in its own folder: a
-    run starting meanwhile reads the old file or the new one, never half of it."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".tiff_workflow_settings_", suffix=".tmp",
-                               dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def _read_overlay_data(path: Path):
     """(data, problem): the whole overlay file as a dict ({} when it does not exist yet), or
     ({}, why) when it exists and cannot be read as a JSON object -- never to be overwritten."""
@@ -6542,7 +6521,7 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
         else:
             data.pop(section, None)
         try:
-            _write_overlay_file(path, data)
+            _write_json_file(path, data, ".tiff_workflow_settings_", ensure_ascii=False)
         except OSError as e:
             _ui_say(f"Could not write {path}: {e}")
             return
