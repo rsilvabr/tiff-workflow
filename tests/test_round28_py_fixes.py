@@ -634,3 +634,27 @@ def test_one_yes_no_reader_for_both_screens(monkeypatch):
         assert ct.Confirm.ask("Proceed?", console=console) is True
         answers = iter(["não"])
         assert ct.Confirm.ask("Proceed?", console=console, default=True) is False
+
+
+
+@pytest.mark.parametrize("rich", [False, True], ids=["plain", "rich"])
+def test_diagnose_temp_folder_is_one_question(tmp_path, monkeypatch, rich):
+    """v3.1 phase 6 (F3/F4 of phase 2): the Rich screen asked yes/no then the path, the plain
+    one the path under a question that read like yes/no -- "y" made a folder named y in the
+    current folder. One question on both screens now; yes/no words are read as such, and a
+    relative path is made absolute."""
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", rich and ct.RICH_AVAILABLE)
+    monkeypatch.chdir(tmp_path)
+
+    def ask(*answers):
+        it = iter(answers)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+        return ct._ask_temp_dir()
+
+    assert ask("") is None and ask("n") is None and ask("não") is None
+    assert not (tmp_path / "n").exists() and not (tmp_path / "não").exists()
+    assert ask("y", "tmp [x] 伊豆沼") == tmp_path / "tmp [x] 伊豆沼"
+    assert ask("sim", "") is None
+    assert not (tmp_path / "y").exists() and not (tmp_path / "sim").exists()
+    got = ask("rel 50%")
+    assert got == tmp_path / "rel 50%" and got.is_absolute() and got.is_dir()

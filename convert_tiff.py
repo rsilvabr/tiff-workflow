@@ -3232,6 +3232,30 @@ def _ask_line(prompt_text: str, default: str) -> str:
     return "" if value in ("-", "none") else value
 
 
+def _ask_temp_dir() -> Optional[Path]:
+    """Diagnose's temp folder: ONE question, the same on both screens (v3.1 phase 6, F3/F4:
+    the Rich screen asked yes/no and then the path, the plain one the path under a question
+    that read like yes/no -- so a "y" made a folder named y in the current folder). A yes/no
+    word is read as one: no = the system temp folder, yes = asked for the path. A relative
+    path is made absolute and shown before it is used; None = the system temp folder."""
+    answer = input("\nTemp folder for the checks (Enter = the system temp folder): ").strip()
+    if answer.lower() in _NO_WORDS:
+        answer = ""
+    elif answer.lower() in _YES_WORDS:
+        answer = input("Temp folder path: ").strip()
+    if not answer:
+        return None
+    temp_dir = Path(os.path.abspath(answer))
+    # audit round 16: an unwritable/invalid temp dir raised out of the wizard.
+    try:
+        temp_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _say(f"Cannot use temp dir {temp_dir}: {e} -- using system temp.", "red")
+        return None
+    _say(f"Using temp dir: {temp_dir}", "dim")
+    return temp_dir
+
+
 def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     """
     Workflow 7: Diagnose 16-bit TIFFs.
@@ -3278,32 +3302,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     cfg.config.last_workers = workers
     cfg.save_config()
 
-    temp_dir = None
-    if RICH_AVAILABLE and console:
-        if Confirm.ask("\n[cyan]Use a specific temp directory?[/cyan]", default=False):
-            temp_dir_input = input("Temp directory (leave empty for system temp): ").strip()
-            if temp_dir_input:
-                temp_dir = Path(temp_dir_input)
-                # audit round 16: an unwritable/invalid temp dir raised out of the wizard.
-                try:
-                    temp_dir.mkdir(parents=True, exist_ok=True)
-                except OSError as e:
-                    console.print(f"[red]Cannot use temp dir {escape(str(temp_dir))}: {escape(str(e))} -- using system temp.[/red]")
-                    temp_dir = None
-            if temp_dir is not None:
-                console.print(f"[dim]Using temp dir: {escape(str(temp_dir))}[/dim]")
-    else:
-        resp = input("\nUse a specific temp directory? (leave empty for system temp): ").strip()
-        if resp:
-            temp_dir = Path(resp)
-            # audit round 16: an unwritable/invalid temp dir raised out of the wizard.
-            try:
-                temp_dir.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                print(f"ERROR: cannot use temp dir {temp_dir}: {e} -- using system temp.")
-                temp_dir = None
-        if temp_dir is not None:
-            print(f"Using temp dir: {temp_dir}")
+    temp_dir = _ask_temp_dir()
 
     compress_tmp = "none"
     if RICH_AVAILABLE and console:
