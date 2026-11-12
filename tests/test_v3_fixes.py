@@ -4,15 +4,15 @@ Each of these was confirmed on the v2.9.1 .ps1 scripts (both shells) on 2026-11-
 listed in docs/powershell_edition.md. None of them damaged a file; three made a run that did
 nothing (or did not do what was asked) end with exit code 0.
 
-    1. `-InputDir .` kept its trailing `\\.`, so the folder exclusion fell back to the whole
-       path and an -ExcludeFolders entry equal to the folder's OWN name excluded the whole
+    1. `--input-dir .` kept its trailing `\\.`, so the folder exclusion fell back to the whole
+       path and an --exclude-folders entry equal to the folder's OWN name excluded the whole
        run (generate_thumbnails and copy_exif; compress had been fixed in round 16).
-    2. copy_exif `-DryRun -CompressZip -OutputDir X` created the folder X.
-    3. Legacy mode with -StagingDir (or the output path) naming an existing FILE logged an
+    2. copy_exif `--dry-run --compress-zip --output-dir X` created the folder X.
+    3. Legacy mode with --staging-dir (or the output path) naming an existing FILE logged an
        ERROR for every folder and exited 0.
-    4. `-Mode 19` (a mode that does not exist) found no files and exited 0.
+    4. `--mode 19` (a mode that does not exist) found no files and exited 0.
 
-Also here: the two round-16 rules about how compress resolves -InputDir and -OutputDir,
+Also here: the two round-16 rules about how compress resolves --input-dir and --output-dir,
 end to end (they were pinned on the PowerShell source before).
 """
 
@@ -62,7 +62,7 @@ class TestRootsAndOutputDirAreResolvedOnce:
         assert "| a.tif" in result.stdout and "DRY" in result.stdout, result.stdout
 
     def test_relative_output_dir_is_one_folder_for_every_root(self, tmp_path, lane):
-        """Round 16: '-InputDir A;B -OutputDir out' scattered one flat output across A\\out
+        """Round 16: '--input-dir A;B --output-dir out' scattered one flat output across A\\out
         and B\\out."""
         for sub in ("A", "B"):
             (tmp_path / sub).mkdir()
@@ -109,7 +109,7 @@ def test_a_file_where_a_folder_is_needed_exits_1(tmp_path, lane, flag):
     else:
         # v3.1: said before anything starts. Until v3.0.0 os.makedirs raised in the middle of
         # the run and it ended in `FATAL (unhandled error) | FileExistsError`.
-        assert f"ERROR: -OutputDir is a file, not a folder: {not_a_folder}" in result.stdout, result.stdout
+        assert f"ERROR: --output-dir is a file, not a folder: {not_a_folder}" in result.stdout, result.stdout
         assert "FATAL" not in result.stdout and not (tmp_path / "Logs").exists(), result.stdout
     assert (work / "a.tif").read_bytes() == before
     assert not_a_folder.read_text() == "x"
@@ -119,12 +119,12 @@ def test_a_file_where_a_folder_is_needed_exits_1(tmp_path, lane, flag):
 @pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize("mode", ["10", "19", "99", "-1", "-5"])
 def test_a_mode_that_does_not_exist_is_refused(tmp_path, lane, mode):
-    """4. A typo in -Mode must not read as "nothing to do"."""
+    """4. A typo in --mode must not read as "nothing to do"."""
     if shutil.which("magick") is None or shutil.which("exiftool") is None:
         pytest.skip("ImageMagick and exiftool required")
     result = run_ps(lane, "compress_tiff_zip.py", ["--mode", mode, "--input-dir", tmp_path], tmp_path)
-    assert result.returncode == 1, result.stdout
-    assert f"-Mode {mode} does not exist" in result.stdout
+    assert result.returncode == 2, result.stdout          # a usage error (T5)
+    assert f"--mode {mode} does not exist" in result.stdout
     assert not (tmp_path / "Logs").exists(), "refused before anything is created"
 
 
@@ -134,13 +134,13 @@ def test_a_mode_that_does_not_exist_is_refused(tmp_path, lane, mode):
                                   ["--staging-dir", "stg", "--generate-thumbnail"]],
                          ids=["nothing", "inputdir", "restore-stranded", "other-options"])
 def test_compress_without_a_mode_is_refused(tmp_path, lane, args):
-    """v3.1: until v3.0.0 a run without -Mode was the "legacy" mode -- it compressed every
+    """v3.1: until v3.0.0 a run without --mode was the "legacy" mode -- it compressed every
     TIFF under the CURRENT folder in place, with no OLD_TIFFs backup. There is no default
-    mode now: a forgotten -Mode touches nothing."""
+    mode now: a forgotten --mode touches nothing."""
     work = hostile_folder(tmp_path, "a.tif")
     before = (work / "a.tif").read_bytes()
     result = run_ps(lane, "compress_tiff_zip.py", args, work)
-    assert result.returncode == 1, result.stdout
-    assert "-Mode is required" in result.stdout, result.stdout
-    assert (work / "a.tif").read_bytes() == before, "a run without -Mode rewrote the file"
+    assert result.returncode == 2, result.stdout          # a usage error (T5)
+    assert "--mode is required" in result.stdout, result.stdout
+    assert (work / "a.tif").read_bytes() == before, "a run without --mode rewrote the file"
     assert sorted(p.name for p in work.iterdir()) == ["a.tif"], "refused before anything is created"

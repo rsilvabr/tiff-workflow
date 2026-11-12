@@ -86,7 +86,7 @@ def test_stranded_originals_are_reported_in_every_mode(tree, tmp_path, lane):
         assert r.returncode == 0, out[-3000:]
         names = sorted(Path(ln.split("| ", 1)[1].strip()).name for ln in stranded_lines(out))
         assert names == ["a.tif", "c.tif", "c_20260803_081300.tif"], out[-3000:]
-        assert "Run again with -RestoreStranded" in out
+        assert "Run again with --restore-stranded" in out
         assert "still in OLD_TIFFs with nothing in their place" in out   # the end summary
     assert {p: p.read_bytes() for p in old.rglob("*.tif*")} == before
     assert not (cam / "a.tif").exists()

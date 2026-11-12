@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""generate_thumbnails.py -- sRGB thumbnails next to TIFFs (or in -OutputDir), and their
+"""generate_thumbnails.py -- sRGB thumbnails next to TIFFs (or in --output-dir), and their
 removal.
 
-    python generate_thumbnails.py -InputDir <folder> [-Recursive] [-Size 256] [-Format jpg]
-    python generate_thumbnails.py -InputDir <folder> -Remove [-DryRun]
+    python generate_thumbnails.py --input-dir <folder> [--recursive] [--size 256] [--format jpg]
+    python generate_thumbnails.py --input-dir <folder> --remove [--dry-run]
 
 The command line is the one generate_thumbnails.ps1 had (tiff-workflow up to v2.9.1):
 `-Name value`, `-Switch`, names without case. Exit code 1 when any file failed or an
@@ -80,7 +80,7 @@ class Counters:
 
 
 def frame_files(dest_path):
-    """The `name-0.jpg, name-1.jpg, ...` files magick writes for -Page all with a
+    """The `name-0.jpg, name-1.jpg, ...` files magick writes for --page all with a
     single-frame format. The names are compared as text, never as a pattern: a '[' in the
     basename is not a wildcard. Digits only between the dash and the extension: a
     name_thumb-old.jpg saved by hand is not a frame."""
@@ -103,7 +103,7 @@ def frame_files(dest_path):
 
 def thumb_exists(dest_path, frame_names):
     """True when a thumbnail for `dest_path` is already on disk. The frame set is only
-    looked for with -Page all: counted always, a `-Page all` run left `-Page 0` unable to
+    looked for with --page all: counted always, a `--page all` run left `--page 0` unable to
     ever write name.jpg."""
     if os.path.exists(dest_path):
         return True
@@ -166,7 +166,7 @@ def make_thumbnail(src, dest, cfg):
 
 
 def _input_roots(opt):
-    """(the -InputDir entries that exist, the ones that do not). A ';' separated list like
+    """(the --input-dir entries that exist, the ones that do not). A ';' separated list like
     the other backends; a bad path is an ERROR, not a WARN: a typo used to look identical
     to "folder has no TIFFs" and exited 0."""
     return tw.resolve_input_dirs(opt["InputDir"].split(";"), allow_files=True)
@@ -176,7 +176,7 @@ def _discover(log, input_roots, recurse, tool_output_names):
     """The TIFFs to make thumbnails of, in path order.
 
     Each file carries the root it was discovered under, so the exclusion is evaluated
-    relative to that root. A file passed directly as -InputDir is its own root: an
+    relative to that root. A file passed directly as --input-dir is its own root: an
     explicit path always wins."""
     unreadable = []
     by_path = {}
@@ -211,7 +211,7 @@ def _discover(log, input_roots, recurse, tool_output_names):
 def _plan(log, files, output_dir, fmt):
     """[(source, thumbnail path)] for `files`.
 
-    claimed: with -OutputDir + -Recursive, a\\photo.tif and b\\photo.tif both map to
+    claimed: with --output-dir + --recursive, a\\photo.tif and b\\photo.tif both map to
     photo_thumb.jpg. The second one used to report "SKIP (exists)" and never be generated,
     so later claimants are numbered instead."""
     claimed = {}
@@ -237,9 +237,9 @@ def run(argv):
         opt, bound = tw.parse_args(argv, PARAMS)
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
-        return 1
+        return tw.EXIT_USAGE
 
-    # The overlay is applied before anything reads a parameter. A -Param given on the command
+    # The overlay is applied before anything reads a parameter. A --param given on the command
     # line always beats it; an invalid entry never stops the run.
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
                                         os.path.dirname(os.path.abspath(__file__)))
@@ -248,7 +248,22 @@ def run(argv):
     for w in overlay["warnings"]:
         tw.say(f"WARNING: settings overlay: {w}")
 
-    # A relative -OutputDir is resolved per file folder here, so only an absolute one can be
+    # What the command line alone shows (v3.1, T5: exit 2, before a log exists).
+    if opt["Size"] < 32 or opt["Size"] > 4096:
+        tw.say(f"ERROR: thumbnail size {opt['Size']} is not supported (--size): "
+               f"it must be from 32 to 4096")
+        return tw.EXIT_USAGE
+    if opt["Format"].lower() not in FORMATS:
+        tw.say(f"ERROR: thumbnail format {opt['Format']} is not supported (--format): "
+               f"jpg, png, tif or tiff")
+        return tw.EXIT_USAGE
+    try:
+        exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])
+    except tw.UsageError as e:
+        tw.say(f"ERROR: {e}")
+        return tw.EXIT_USAGE
+
+    # A relative --output-dir is resolved per file folder here, so only an absolute one can be
     # judged before the run.
     if os.path.isabs(opt["OutputDir"].strip()) and tw.output_dir_error(opt["OutputDir"]):
         tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
@@ -275,13 +290,6 @@ def run(argv):
     dry_run = opt["DryRun"]
     recurse = opt["Recursive"]
 
-    if size < 32 or size > 4096:
-        log(f"Invalid size: {size}. Must be between 32 and 4096.", "ERROR")
-        return 1
-    if fmt.lower() not in FORMATS:
-        log(f"Invalid format: {fmt}. Must be jpg, png, tif, or tiff.", "ERROR")
-        return 1
-
     srgb = tw.resolve_srgb_profile(opt["SrgbProfile"])
     # An overlay path that does not exist must not stop the run: warn and auto-detect. A
     # -SrgbProfile typed on the command line still fails.
@@ -291,19 +299,14 @@ def run(argv):
         opt["SrgbProfile"] = ""
         srgb = tw.resolve_srgb_profile("")
     if opt["SrgbProfile"] and not srgb:
-        log(f"ERROR: -SrgbProfile not found: {opt['SrgbProfile']}", "ERROR")
+        log(f"ERROR: --srgb-profile not found: {opt['SrgbProfile']}", "ERROR")
         return 1
     if not srgb:
         log("WARN: no sRGB ICC profile found -- wide-gamut sources (ProPhoto, AdobeRGB) will "
-            "produce thumbnails with shifted colours. Pass -SrgbProfile <path.icc> to fix.", "WARN")
+            "produce thumbnails with shifted colours. Pass --srgb-profile <path.icc> to fix.", "WARN")
 
     input_roots, missing_roots = _input_roots(opt)
-
-    try:
-        tool_output_names = list(TOOL_OUTPUT_NAMES) + tw.parse_exclude_folders(opt["ExcludeFolders"])
-    except tw.UsageError as e:
-        tw.say(f"ERROR: {e}")
-        return 1
+    tool_output_names = list(TOOL_OUTPUT_NAMES) + exclude_names
 
     files = _discover(log, input_roots, recurse, tool_output_names)
 
@@ -356,7 +359,7 @@ def run(argv):
 
 
 def _search_roots(opt, input_roots, recurse):
-    """The folders -Remove looks for thumbnails in, each once."""
+    """The folders --remove looks for thumbnails in, each once."""
     output_dir = opt["OutputDir"]
     if output_dir:
         if os.path.isabs(output_dir):
@@ -387,11 +390,11 @@ def _search_roots(opt, input_roots, recurse):
 
 
 def _own_thumbnail(path, size):
-    """(True, "") when -Remove may delete `path`, else (False, why it is kept).
+    """(True, "") when --remove may delete `path`, else (False, why it is kept).
 
     A .tif named like a thumbnail can be a real photo (a 1200x800 16-bit
     "hitchhiker_thumb.tif" was deleted: audit round 28). This script never writes a
-    thumbnail larger than -Size, so a bigger or unreadable TIFF is kept and reported."""
+    thumbnail larger than --size, so a bigger or unreadable TIFF is kept and reported."""
     if not tw.TIFF_EXT_RE.match(os.path.splitext(path)[1]):
         return True, ""
     r = tw.magick_probe(["identify", "-ping", "-format", "%w %h\n",
@@ -403,7 +406,7 @@ def _own_thumbnail(path, size):
     if read_ok:
         w, h = int(parts[0]), int(parts[1])
     if not read_ok or max(w, h) > size:
-        return False, f"{w}x{h} is larger than -Size {size}" if read_ok else "size unreadable"
+        return False, f"{w}x{h} is larger than --size {size}" if read_ok else "size unreadable"
     return True, ""
 
 

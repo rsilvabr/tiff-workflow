@@ -1,10 +1,10 @@
-"""Round 22: -InputDirFile against the real backends, plus the wizard's spill.
+"""Round 22: --input-dir-file against the real backends, plus the wizard's spill.
 
 An AutoFind folder list redone by a preset grows with every session; past 32767
 characters CreateProcess fails and the wizard's run_subprocess returned -1 with
 nothing done. The backends accept a UTF-8 list file now (one folder per line),
-and run_subprocess swaps a too-long -InputDir for it at launch time only --
-journals and presets keep the plain -InputDir."""
+and run_subprocess swaps a too-long --input-dir for it at launch time only --
+journals and presets keep the plain --input-dir."""
 
 import os
 import subprocess
@@ -54,13 +54,17 @@ def test_backend_reads_the_list_file(lane, script, extra, tmp_path):
 
 
 @pytest.mark.parametrize("lane", LANES)
-def test_both_inputdir_and_file_is_refused(lane, tmp_path):
-    result = run_ps(lane, "compress_tiff_zip.py",
-                    ["--mode", "1", "--input-dir", str(tmp_path), "--input-dir-file",
-                     str(tmp_path / "dirs.txt"), "--dry-run"],
+@pytest.mark.parametrize("script, mode", [("compress_tiff_zip.py", ["--mode", "1"]),
+                                          ("copy_exif_to_tiff.py", [])])
+def test_both_inputdir_and_file_is_refused(lane, tmp_path, script, mode):
+    """A usage error since v3.1 (T5): exit 2, said before the run starts -- no log."""
+    result = run_ps(lane, script,
+                    mode + ["--input-dir", str(tmp_path), "--input-dir-file",
+                            str(tmp_path / "dirs.txt"), "--dry-run"],
                     tmp_path)
-    assert result.returncode == 1
-    assert "not both" in result.stdout
+    assert result.returncode == 2, result.stdout
+    assert "ERROR: pass --input-dir or --input-dir-file, not both" in result.stdout
+    assert not (tmp_path / "Logs").exists()
 
 
 @pytest.mark.parametrize("lane", LANES)

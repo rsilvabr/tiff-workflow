@@ -220,7 +220,7 @@ class TestCopyExifExitCodeContract:
 @requires_tools
 class TestInPlaceExifPreservation:
     """
-    With no -StagingDir and no output folder the write target IS the source, so magick
+    With no --staging-dir and no output folder the write target IS the source, so magick
     overwrote the original before `-tagsfromfile <source>` ran and every tag was lost while
     the run reported OK. Backup-TiffMetadata parks the metadata first; each of the three
     workers must use it.
@@ -254,7 +254,7 @@ class TestInPlaceExifPreservation:
         """
         CLASS 3 too: a failed thumbnail made the parallel worker return early, skipping the
         EXIF restore the sequential path reached via $noThumbNote. Same input, same file, two
-        different outcomes. An unencodable -ThumbFormat forces the fallback.
+        different outcomes. An unencodable --thumb-format forces the fallback.
         """
         work = tmp_path / "work"
         work.mkdir()
@@ -436,7 +436,7 @@ class TestMode8DeleteE2E:
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 class TestExcludeFoldersE2E:
-    """-ExcludeFolders '_EXPORT': the _EXPORT tree is never scanned, everything
+    """--exclude-folders '_EXPORT': the _EXPORT tree is never scanned, everything
     else in the hierarchy is processed, and the exclusion is logged."""
 
     def _tree(self, tmp_path):
@@ -462,7 +462,7 @@ class TestExcludeFoldersE2E:
         assert read_compression(photoset / "img.tif").lower() in ("zip", "adobe deflate")
         assert read_compression(photoset / "Selecao" / "img2.tif").lower() in ("zip", "adobe deflate")
         assert read_compression(photoset / "_EXPORT" / "TIFF" / "edit.tif").lower() != "zip", (
-            "a file inside _EXPORT was processed despite -ExcludeFolders"
+            "a file inside _EXPORT was processed despite --exclude-folders"
         )
         assert not (photoset / "_EXPORT" / "TIFF" / "OLD_TIFFs").exists()
 
@@ -481,11 +481,11 @@ class TestExcludeFoldersE2E:
             "'My_EXPORT_photos' was excluded by a substring match -- only exact segments may match"
         )
 
-    def test_path_entry_rejected_with_exit_1(self, tmp_path, lane):
+    def test_path_entry_rejected_with_exit_2(self, tmp_path, lane):
         result = run_ps(lane, "compress_tiff_zip.py",
                         ["--mode", "9", "--input-dir", str(tmp_path),
                          "--exclude-folders", r"foo\bar"], tmp_path)
-        assert result.returncode == 1
+        assert result.returncode == 2          # a usage error (T5)
         assert "not paths" in result.stdout
 
 
@@ -517,7 +517,7 @@ class TestCopyExifE2E:
 
     def test_miss_exits_0_but_failonwarn_exits_1(self, tmp_path, lane):
         """A TIFF without a JPEG pair is a MISS (warning class): default contract
-        keeps exit 0, -FailOnWarn turns it into a gateable failure."""
+        keeps exit 0, --fail-on-warn turns it into a gateable failure."""
         script = "copy_exif_to_tiff.py"
         work = tmp_path / "S5pro"
         work.mkdir()
@@ -570,7 +570,7 @@ class TestCopyExifVariantAndHeuristicNames:
         assert "WARN (heuristic JPEG match)" in result.stdout, result.stdout
 
     def test_compress_zip_on_a_zip_tiff_counts_the_exif_copy(self, tmp_path, lane):
-        """Round 21: with -CompressZip a TIFF that is already ZIP gets its EXIF and only the
+        """Round 21: with --compress-zip a TIFF that is already ZIP gets its EXIF and only the
         ZIP step is skipped -- but the summary counted it as 'skipped', so a run that wrote
         EXIF into every file ended in 'Done: 0 OK | N skipped' (seen on real Capture One
         exports, which are all ZIP)."""
@@ -595,9 +595,9 @@ class TestCopyExifVariantAndHeuristicNames:
 class TestThumbnailLifecycle:
     """
     Generation and removal must agree on where thumbnails live and what they are called.
-    They did not: a relative -OutputDir was resolved per file directory when generating and
+    They did not: a relative --output-dir was resolved per file directory when generating and
     per input root when removing, and the collision rename (_v2) matched neither the
-    self-exclusion nor the -Remove filter.
+    self-exclusion nor the --remove filter.
     """
 
     @staticmethod
@@ -620,7 +620,7 @@ class TestThumbnailLifecycle:
         rem = run_ps("parallel", "generate_thumbnails.py", args + ["--remove"], tmp_path)
         assert rem.returncode == 0, rem.stdout
         assert not list(root.rglob("*_thumb*")), (
-            "-Remove with the flags that created them found nothing:\n" + rem.stdout
+            "--remove with the flags that created them found nothing:\n" + rem.stdout
         )
 
     def test_renamed_thumbnail_is_not_rescanned_as_a_source(self, tmp_path):
@@ -1070,7 +1070,7 @@ class TestSafeMoveNeverLosesBoth:
 
 
 class TestThumbnailNeverDropsPages:
-    """-GenerateThumbnail rebuilds the output from page 0 only ("$src[0]") and appends a
+    """--generate-thumbnail rebuilds the output from page 0 only ("$src[0]") and appends a
     freshly generated thumbnail. Replacing an existing REDUCEDIMAGE preview is the intent;
     dropping a scanner IR (MASK) page or a Photoshop layer is silent data loss -- and the
     in-place integrity gate cannot see it, because a page-short TIFF still decodes cleanly.
@@ -1090,7 +1090,7 @@ class TestThumbnailNeverDropsPages:
                                  ["--mode", "3", "--input-dir", str(work), "--no-safe-mode",
                                   "--generate-thumbnail", "--workers", "1"], work)
 
-        assert "-GenerateThumbnail refused" in result.stdout, result.stdout
+        assert "--generate-thumbnail refused" in result.stdout, result.stdout
         assert result.returncode == 1, "a refusal must be an error, not a silent success"
         assert not (work / "ZIP" / "scan.tif").exists(), "a page-short output was written"
         assert src.read_bytes() == before, "source must be untouched"
@@ -1098,7 +1098,7 @@ class TestThumbnailNeverDropsPages:
     @requires_tools
     @pytest.mark.parametrize("lane", LANES)
     def test_in_place_keeps_every_page(self, tmp_path, lane):
-        """The irreversible case: mode 2 without -OutputDir overwrites the only copy (a file
+        """The irreversible case: mode 2 without --output-dir overwrites the only copy (a file
         directly in the input root)."""
         work = tmp_path / "work"
         work.mkdir()
@@ -1111,9 +1111,9 @@ class TestThumbnailNeverDropsPages:
                                  ["--mode", "2", "--input-dir", str(work), "--no-safe-mode",
                                   "--generate-thumbnail"], work)
 
-        assert "-GenerateThumbnail refused" in result.stdout, result.stdout
+        assert "--generate-thumbnail refused" in result.stdout, result.stdout
         assert len(read_subfiletypes(src)) == 3, (
-            "in-place -GenerateThumbnail destroyed a page of the only copy"
+            "in-place --generate-thumbnail destroyed a page of the only copy"
         )
 
     @requires_tools
@@ -1195,12 +1195,12 @@ class TestCopyExifZipIsPixelVerified:
         assert read_ifd0_compression(src).lower().startswith(("zip", "deflate", "adobe"))
         for page in range(2):
             assert rmse_pages(pristine, src, page).startswith("0 "), (
-                f"page {page} changed during the -CompressZip round trip"
+                f"page {page} changed during the --compress-zip round trip"
             )
 
 
 class TestMode5PathSeparator:
-    """-InputDir with forward slashes (legal on Windows) made the mode 5 prefix compare
+    """--input-dir with forward slashes (legal on Windows) made the mode 5 prefix compare
     fail for every nested file, so the "never climb above the input root" fallback fired
     and the whole tree collapsed into <root>\\ZIP with spurious _v2 renames."""
 
@@ -1226,7 +1226,7 @@ class TestMode5PathSeparator:
             )
 
         assert results["fwd"] == results["back"], (
-            "forward-slash -InputDir produced a different output tree"
+            "forward-slash --input-dir produced a different output tree"
         )
         assert any(p.startswith("other/ZIP/") for p in results["fwd"]), (
             "nested branch must get its own sibling ZIP folder, not the root one"
@@ -1489,7 +1489,7 @@ class TestCopyExifExcludeFolders:
                             ["--input-dir", str(root), "--dry-run",
                              "--exclude-folders", name], tmp_path)
             assert "a.tif" in result.stdout, (
-                f"-ExcludeFolders {name!r} excluded the whole run:\n{result.stdout}"
+                f"--exclude-folders {name!r} excluded the whole run:\n{result.stdout}"
             )
 
 
@@ -1509,7 +1509,7 @@ def numeric_subfiletypes(path):
 
 
 class TestThumbnailPathKeepsPageMarkers:
-    """-GenerateThumbnail wrote only `-IFD1:SubfileType#=1` and skipped the restore that
+    """--generate-thumbnail wrote only `-IFD1:SubfileType#=1` and skipped the restore that
     every other write path runs, so magick's PAGE (2) stamp stayed on the MAIN image: every
     thumbnail-generated file claimed page 0 was one page of a multi-page document."""
 
@@ -1551,7 +1551,7 @@ class TestThumbnailPathKeepsPageMarkers:
     @requires_tools
     @pytest.mark.parametrize("lane", LANES)
     def test_generated_file_is_not_multi_page_on_a_later_run(self, tmp_path, lane):
-        """The round trip that matters: whatever -GenerateThumbnail writes must still be
+        """The round trip that matters: whatever --generate-thumbnail writes must still be
         touchable by SafeMode afterwards, or the toolkit refuses its own output forever."""
         work = tmp_path / "work"
         work.mkdir()
@@ -1585,8 +1585,8 @@ class TestThumbnailPathKeepsPageMarkers:
                         ["--mode", "1", "--input-dir", str(work), "--workers", "1",
                          "--generate-thumbnail", "--thumb-page", "0"], work)
 
-        assert result.returncode == 1, result.stdout
-        assert "-ThumbPage 0 is not supported" in result.stdout
+        assert result.returncode == 2, result.stdout          # a usage error (T5)
+        assert "--thumb-page 0 is not supported" in result.stdout
         assert not (work / "ZIP").exists(), "a refused run must not write anything"
 
 
@@ -1767,7 +1767,7 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
 
 
 class TestGenerateThumbnailSaysWhyItSkipped:
-    """The already-compressed SKIP runs before the thumbnail step, so -GenerateThumbnail on
+    """The already-compressed SKIP runs before the thumbnail step, so --generate-thumbnail on
     a Deflate library produced nothing at all and still reported a clean run."""
 
     @requires_tools
@@ -1785,7 +1785,7 @@ class TestGenerateThumbnailSaysWhyItSkipped:
                          "--generate-thumbnail", "--thumb-size", "16"], work)
 
         assert "no thumbnail added" in result.stdout, result.stdout
-        assert "SkipCompressedWithThumb" in result.stdout
+        assert "--skip-compressed-with-thumb" in result.stdout
 
 
 class TestGroupHeaderNamesTheOutputFolder:
@@ -1817,12 +1817,12 @@ class TestGroupHeaderNamesTheOutputFolder:
 
 
 class TestExcludeFoldersIsRelativeToTheScanRoot:
-    """-ExcludeFolders split the ABSOLUTE directory path, so every ancestor above the folder
+    """--exclude-folders split the ABSOLUTE directory path, so every ancestor above the folder
     the user pointed at was matched too -- the drive letter, the root's own name, and
     whatever the archive happens to live under. An entry matching one of those excluded the
     ENTIRE run, logged it as a normal exclusion and exited 0:
 
-        -ExcludeFolders Temp   on ...\\Temp\\TESTE   ->  kept: (nothing)
+        --exclude-folders Temp   on ...\\Temp\\TESTE   ->  kept: (nothing)
 
     The docs promise folder TREES below the root, the parameter validation already refuses
     paths, and the Python mirror in convert_tiff.py was already relative."""
@@ -1863,7 +1863,7 @@ class TestExcludeFoldersIsRelativeToTheScanRoot:
     @requires_tools
     @pytest.mark.parametrize("lane", LANES)
     def test_forward_slash_input_root_still_matches(self, tmp_path, lane):
-        """-InputDir given with '/' separators must not defeat the relative compare -- the
+        """--input-dir given with '/' separators must not defeat the relative compare -- the
         same normalisation bug mode 5 already had. Without the normalisation the root prefix
         never matches, every file falls into the "not under the root" fallback, and the
         matcher is back to reading the absolute path."""
@@ -1886,7 +1886,7 @@ class TestExcludeFoldersIsRelativeToTheScanRoot:
         # prefix compare silently degrades to the absolute-path fallback.
         out = out_for(tmp_path.name)
         assert "| keep.tif" in out and "| drop.tif" in out, (
-            f"an ancestor excluded files when -InputDir used '/':\n{out}"
+            f"an ancestor excluded files when --input-dir used '/':\n{out}"
         )
 
 
@@ -1935,7 +1935,7 @@ def page_count(path):
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 class TestMode8ThumbnailGate:
-    """Mode 8 verified the staged file with whole-file pixel identity, which -GenerateThumbnail
+    """Mode 8 verified the staged file with whole-file pixel identity, which --generate-thumbnail
     can never satisfy: it writes source page 0 plus a NEW thumbnail. Every file came back
     "ERROR (ZIP integrity check failed - source preserved)", so the combination produced no
     output at all -- while the in-place worker had had the exemption all along."""
@@ -1963,7 +1963,7 @@ class TestMode8ThumbnailGate:
         )
 
     def test_no_thumb_fallback_is_still_verified(self, tmp_path, lane):
-        """-ThumbFormat notaformat forces the [no thumb] path: one page, and the gate must
+        """--thumb-format notaformat forces the [no thumb] path: one page, and the gate must
         still hold (expected page count 1, page 0 identical)."""
         work = tmp_path / "work"
         work.mkdir()
@@ -2063,7 +2063,7 @@ class TestPercentInFileNames:
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 class TestToolOutputExclusionIsRelative:
-    """Round 14 made -ExcludeFolders relative to the scan root in the three backends. The same
+    """Round 14 made --exclude-folders relative to the scan root in the three backends. The same
     absolute match survived in generate_thumbnails.py and in the diagnose workflow: an
     archive under D:/Backup/zip/2019 reported "No TIFF files found" and exited 0, and
     pointing the tool AT a folder named ZIP could never work."""
@@ -2190,12 +2190,12 @@ class TestThumbnailFrameMatching:
 
 @requires_tools
 class TestPurgeAcceptsRegeneratedThumbnails:
-    """The purge compared every page, so a folder compressed with -GenerateThumbnail came back
+    """The purge compared every page, so a folder compressed with --generate-thumbnail came back
     "PAGE_COUNT_MISMATCH 1 vs 2" / "PIXEL_DIFF page 1" for every file -- and one mismatch
     aborted the purge for the whole tree, leaving the user to delete OLD_TIFFs by hand."""
 
     def _with_thumb(self, tmp_path, main, thumb_size="16x12"):
-        """`main` plus a tagged REDUCEDIMAGE thumbnail, the shape -GenerateThumbnail writes."""
+        """`main` plus a tagged REDUCEDIMAGE thumbnail, the shape --generate-thumbnail writes."""
         thumb = tmp_path / "t.tif"
         subprocess.run(["magick", str(main) + "[0]", "-thumbnail", thumb_size, str(thumb)],
                        capture_output=True, check=True, timeout=120)
@@ -2284,7 +2284,7 @@ class TestPurgeAcceptsRegeneratedThumbnails:
 @pytest.mark.parametrize("lane", LANES)
 class TestRound15Reporting:
     def test_thumbpage_above_one_is_reported_as_ignored(self, tmp_path, lane):
-        """-ThumbPage was validated (>= 1) and then ignored: the thumbnail is always page 1."""
+        """--thumb-page was validated (>= 1) and then ignored: the thumbnail is always page 1."""
         work = tmp_path / "work"
         work.mkdir()
         make_tiff(work / "a.tif")
@@ -2294,7 +2294,7 @@ class TestRound15Reporting:
                          "--thumb-page", "3", "--thumb-size", "16", "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, result.stdout
-        assert "-ThumbPage 3 is not implemented" in result.stdout, result.stdout
+        assert "--thumb-page 3 is not implemented" in result.stdout, result.stdout
         assert page_count(work / "ZIP" / "a.tif") == 2
 
     def test_dry_run_counts_what_it_would_do(self, tmp_path, lane):
@@ -2311,7 +2311,7 @@ class TestRound15Reporting:
         assert "2 dry-run" in result.stdout, result.stdout
 
     def test_superseded_duplicate_is_reported(self, tmp_path, lane):
-        """-DuplicateAction Overwrite dropped the earlier task without counting it, so the
+        """--duplicate-action Overwrite dropped the earlier task without counting it, so the
         file was missing from the N/total tally -- indistinguishable from one that worked."""
         work = tmp_path / "work"
         (work / "a").mkdir(parents=True)
@@ -2500,7 +2500,7 @@ class TestBackupsAreNeverInput:
         assert "Found: 1 TIFF(s)" in result.stdout and "STRANDED" not in result.stdout, result.stdout
 
     def test_pointing_at_old_tiffs_still_works(self, tmp_path, lane):
-        """Relative matching, not absolute: the round 14 rule. An explicit -InputDir wins."""
+        """Relative matching, not absolute: the round 14 rule. An explicit --input-dir wins."""
         work = tmp_path / "work" / "OLD_TIFFs"
         work.mkdir(parents=True)
         make_tiff(work / "a.tif")
@@ -2515,7 +2515,7 @@ class TestBackupsAreNeverInput:
 
     def test_leftovers_from_an_interrupted_run_are_not_photos(self, tmp_path, lane):
         """Both shapes this toolkit writes and may leave behind: a staged file (copy_exif with
-        no -StagingDir stages into the source folder) and an in-place temp sibling."""
+        no --staging-dir stages into the source folder) and an in-place temp sibling."""
         work = tmp_path / "work"
         work.mkdir()
         make_tiff(work / "a.tif")
@@ -2535,9 +2535,9 @@ class TestBackupsAreNeverInput:
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 class TestThumbnailPageSwitch:
-    """`-Page all` writes name_thumb-0.jpg, name_thumb-1.jpg, ...; `-Page 0` writes
+    """`--page all` writes name_thumb-0.jpg, name_thumb-1.jpg, ...; `--page 0` writes
     name_thumb.jpg. Test-ThumbExists looked for the frame set unconditionally, so once a
-    `-Page all` run had happened, `-Page 0` reported SKIP (exists) for every file forever and
+    `--page all` run had happened, `--page 0` reported SKIP (exists) for every file forever and
     name_thumb.jpg could only be produced by deleting the frames by hand."""
 
     def test_page_zero_after_page_all(self, tmp_path, lane):
@@ -2554,7 +2554,7 @@ class TestThumbnailPageSwitch:
                         ["--input-dir", str(work), "--size", "32", "--page", "0"], tmp_path)
         assert second.returncode == 0, second.stdout
         assert (work / "scan_thumb.jpg").exists(), (
-            f"-Page 0 was skipped because the -Page all frames existed\n{second.stdout}"
+            f"--page 0 was skipped because the --page all frames existed\n{second.stdout}"
         )
 
     def test_page_all_still_no_ops_on_a_repeat(self, tmp_path, lane):
@@ -2569,7 +2569,7 @@ class TestThumbnailPageSwitch:
 
         assert again.returncode == 0, again.stdout
         assert "SKIP (exists)" in again.stdout, (
-            f"the -Page all frame set is no longer recognised\n{again.stdout}"
+            f"the --page all frame set is no longer recognised\n{again.stdout}"
         )
 
 
@@ -2732,7 +2732,7 @@ def _read_tags_utf8(path, *tags):
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 class TestCopyExifSkipIfTiffHasExif:
-    """Round 23: -SkipIfTiffHasExif probed `-EXIF:all`, which in exiftool includes IFD0 --
+    """Round 23: --skip-if-tiff-has-exif probed `-EXIF:all`, which in exiftool includes IFD0 --
     the size, resolution and orientation every TIFF has -- so it skipped EVERY TIFF, the
     Hyper Utility exports it exists for included (451 of 451 on a real S5 Pro folder). Only
     camera EXIF (the Exif IFD: exposure, aperture, dates) counts as "already has EXIF"."""

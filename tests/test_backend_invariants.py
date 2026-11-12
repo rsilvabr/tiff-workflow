@@ -296,7 +296,7 @@ class TestInPlaceReplace:
         assert r.result.startswith("OK "), r.result
 
     def test_staged_for_its_own_place_is_verified_like_an_in_place_write(self, tools, photo, tmp_path):
-        """Round 28: with -StagingDir the output is not a temp sibling, and the gate keyed on
+        """Round 28: with --staging-dir the output is not a temp sibling, and the gate keyed on
         the temp sibling alone -- an unverified file was moved over the only copy."""
         stg = tmp_path / "stg"
         stg.mkdir()
@@ -394,7 +394,7 @@ class TestSafeModeAndSkips:
     def test_a_refused_thumbnail_is_reported_by_a_dry_run_too(self, tools, photo):
         tools.thumb_safe = tw.ThumbSafe(False, 3, "would drop 2 extra page(s)")
         r = job(compress_run(*IN_PLACE, "--generate-thumbnail", "--dry-run"), photo)
-        assert r.result.startswith("ERROR (-GenerateThumbnail refused)"), r.result
+        assert r.result.startswith("ERROR (--generate-thumbnail refused)"), r.result
 
     def test_dry_run_writes_nothing(self, tools, photo):
         r = job(compress_run(*IN_PLACE, "--dry-run"), photo)
@@ -425,7 +425,7 @@ class TestGatesPerMode:
         assert r.can_delete is False and "[SOURCE DELETED]" not in r.result
 
     def test_mode8_thumbnail_output_is_checked_on_page_zero(self, tools, photo, tmp_path):
-        """Round 15: whole-file identity refused EVERY -GenerateThumbnail file in mode 8."""
+        """Round 15: whole-file identity refused EVERY --generate-thumbnail file in mode 8."""
         r = job(compress_run("--mode", "8", "--generate-thumbnail"), photo, write_dst=tmp_path / "a.tif")
         assert "thumb_match" in tools.events and "pixels" not in tools.events
         assert tools.thumb_expected == 2
@@ -473,7 +473,7 @@ class TestGatesPerMode:
 
 
 class TestThumbnailWrite:
-    """-GenerateThumbnail is three magick calls -- the main image, the thumbnail, the two
+    """--generate-thumbnail is three magick calls -- the main image, the thumbnail, the two
     together -- in _write_with_thumbnail, which hands process_job a ThumbWrite. What
     process_job does with each of its fields: the [no thumb] fallback and the page count the
     gate then expects, the marker warning, and what a failure leaves behind (nothing: not
@@ -572,7 +572,7 @@ class TestThumbnailWrite:
 class TestNothingOfAJobIsLeftBehind:
     """v3.1 (O6, O8): what a job made for itself -- the metadata container, the output it
     was writing -- is gone when the job ends in an error, whatever the error. Until v3.0.0
-    a staged file refused by the page gate stayed in -StagingDir, and an exception nobody
+    a staged file refused by the page gate stayed in --staging-dir, and an exception nobody
     expected left the temp sibling and the container next to the photo."""
 
     STAGED = "abcd1234_0123456789ab_p.tif"
@@ -654,7 +654,7 @@ class TestNothingOfAJobIsLeftBehind:
 
     def test_an_output_of_an_earlier_run_is_not_this_jobs_before_it_is_written(self, tools, photo,
                                                                               tmp_path):
-        """-Overwrite in a copy mode: until magick has written, the file at the destination
+        """--overwrite in a copy mode: until magick has written, the file at the destination
         is the EARLIER run's output. A failure before the write must not delete it."""
         out = tmp_path / "ZIP [x]" / photo.name
         out.parent.mkdir()
@@ -667,9 +667,9 @@ class TestNothingOfAJobIsLeftBehind:
         assert out.read_bytes() == b"EARLIER OUTPUT" and not container.exists()
 
     def test_once_written_over_the_earlier_output_is_this_jobs(self, tools, photo, tmp_path, monkeypatch):
-        """-Overwrite, and the failure comes AFTER magick wrote: what sits at the destination
+        """--overwrite, and the failure comes AFTER magick wrote: what sits at the destination
         is this job's output, with nothing verified and maybe no metadata. It goes -- left
-        there, the next run without -Overwrite would skip it as "exists"."""
+        there, the next run without --overwrite would skip it as "exists"."""
         out = tmp_path / "ZIP [x]" / photo.name
         out.parent.mkdir()
         out.write_bytes(b"EARLIER OUTPUT")
@@ -867,7 +867,7 @@ class TestCopyExif:
 
     def test_an_icc_probe_that_cannot_run_never_copies_a_profile_over_the_tiffs(self, tools, photo,
                                                                                 monkeypatch):
-        """Review V2: -IccPolicy preserve_tiff copies the JPEG's profile only when the TIFF has
+        """Review V2: --icc-policy preserve_tiff copies the JPEG's profile only when the TIFF has
         none. When the probe cannot run, the TIFF may have one: never copy over it."""
         def exiftool(args, merge_stderr=False, check=True):
             tools.exif_calls.append([str(a) for a in args])
@@ -967,7 +967,7 @@ class TestCopyExif:
     ])
     def test_with_outputdir_a_failure_leaves_neither_the_copy_nor_a_staged_file(
             self, tools, photo, tmp_path, monkeypatch, failing, text):
-        """With -OutputDir the TIFF is copied there first and the ZIP staged next to the
+        """With --output-dir the TIFF is copied there first and the ZIP staged next to the
         copy. Whatever fails after the copy, both go: a copy left behind is skipped as
         "exists in OutputDir" by the next run, without EXIF and uncompressed."""
         if failing == "exif_copy":
@@ -996,7 +996,7 @@ class TestCopyExif:
         if failing == "magick_rc":
             assert r.line == f"ERROR (magick ZIP) | {photo.name} | magick: boom"
         assert r.staged is None
-        assert os.listdir(out) == [], "the copy or the staged file stayed in -OutputDir"
+        assert os.listdir(out) == [], "the copy or the staged file stayed in --output-dir"
         assert photo.read_bytes() == b"ORIGINAL"
         assert sorted(os.listdir(photo.parent)) == [photo.name]
 
@@ -1006,7 +1006,7 @@ class TestCopyExif:
     def test_with_outputdir_an_unexpected_exception_leaves_nothing_either(
             self, tools, photo, tmp_path, monkeypatch, step):
         """v3.1 (O8): the same, when the step does not answer "no" but raises: the copy in
-        -OutputDir, the staged ZIP (half written when magick is the one that dies) and the
+        --output-dir, the staged ZIP (half written when magick is the one that dies) and the
         two metadata containers used to stay on disk."""
         made = []
 
@@ -1027,7 +1027,7 @@ class TestCopyExif:
         with pytest.raises(RuntimeError, match="exploded"):
             self._to_outputdir(photo, tmp_path, "--compress-zip")
         assert made, "no container was made: the test proves nothing about them"
-        assert os.listdir(out) == [], "the copy, the staged file or a container stayed in -OutputDir"
+        assert os.listdir(out) == [], "the copy, the staged file or a container stayed in --output-dir"
         assert not any(c.exists() for c in made)
         assert photo.read_bytes() == b"ORIGINAL"
         assert sorted(os.listdir(photo.parent)) == [photo.name]
@@ -1115,7 +1115,7 @@ def failing_move(kind):
 class TestCopyExifOutputNames:
     """copy_exif -OutputDir: every session writes into ONE folder, and the cameras restart
     their numbering (two sessions hold DSCF0001.tif). The second claimant of a name gets
-    _v2: it is never skipped as "exists in OutputDir", and with -Overwrite it never lands on
+    _v2: it is never skipped as "exists in OutputDir", and with --overwrite it never lands on
     the first one's output (_dest_name)."""
 
     NAME = "DSCF0001 50%.tif"
@@ -1195,7 +1195,7 @@ class TestCopyExifOutputNames:
 
 class TestCopyExifAutoFind:
     """copy_exif -AutoFind: the folders below the root whose name holds the pattern. v3.1
-    (O4): -ExcludeFolders did nothing in this backend; its names now leave out the sessions
+    (O4): --exclude-folders did nothing in this backend; its names now leave out the sessions
     that sit below a folder of that name (or are named so), as in the other backends."""
 
     @pytest.fixture
@@ -1258,7 +1258,7 @@ def error_lines(run):
 
 class TestStagedMoveFailures:
     """A staged file that did not land is ONE counted error line (exit code 1), and the
-    run goes on. The loops: modes 1-8, copy_exif -CompressZip."""
+    run goes on. The loops: modes 1-8, copy_exif --compress-zip."""
 
     NAME = "photo 50%off.tif"
 
@@ -1375,8 +1375,8 @@ class TestPlan:
     @pytest.mark.parametrize("mode", ["1", "0", "9"])
     def test_a_compressed_file_with_its_thumbnail_is_skipped_with_one_line_in_every_mode(
             self, tools, photo, mode, monkeypatch):
-        """v3.1 (O1): with -SkipCompressedWithThumb the modes 0/9 said `SKIP (Adobe Deflate)
-        ... [no thumbnail added: pass -SkipCompressedWithThumb]` -- the option that WAS passed."""
+        """v3.1 (O1): with --skip-compressed-with-thumb the modes 0/9 said `SKIP (Adobe Deflate)
+        ... [no thumbnail added: pass --skip-compressed-with-thumb]` -- the option that WAS passed."""
         tools.comp = "Adobe Deflate"
         monkeypatch.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: True)
         run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--generate-thumbnail",
@@ -1389,12 +1389,12 @@ class TestPlan:
         tools.comp = "Adobe Deflate"
         run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--generate-thumbnail")
         assert said(run, "SKIP") == [f"[1/1] SKIP (Adobe Deflate) | {photo.name} "
-                                     "[no thumbnail added: pass -SkipCompressedWithThumb]"]
+                                     "[no thumbnail added: pass --skip-compressed-with-thumb]"]
 
     @pytest.mark.parametrize("mode", ["0", "9"])
     def test_a_compressed_file_without_a_thumbnail_is_reprocessed_when_asked(self, tools, photo, mode,
                                                                            monkeypatch):
-        """-SkipCompressedWithThumb skips ONLY the files that have their thumbnail."""
+        """--skip-compressed-with-thumb skips ONLY the files that have their thumbnail."""
         tools.comp = "Adobe Deflate"
         monkeypatch.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: False)
         run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--generate-thumbnail",
@@ -1404,7 +1404,7 @@ class TestPlan:
     @pytest.mark.parametrize("memory_for, runs, reduced", [(4, 2, False), (1, 1, True), (8, 2, False)])
     def test_the_memory_limit_starts_from_the_capped_workers(self, tools, monkeypatch,
                                                              memory_for, runs, reduced):
-        """v3.1 (O5): -Workers 8 -CapWorkers 2 with memory for 4 logged `Workers reduced
+        """v3.1 (O5): --workers 8 --cap-workers 2 with memory for 4 logged `Workers reduced
         from 8 to 4` while 2 ran."""
         run = compress_run("--mode", "1", "--workers", "8", "--cap-workers", "2")
         run.parallel = True
@@ -1473,7 +1473,7 @@ class TestPlan:
 
     def test_an_output_over_its_own_source_is_refused_in_the_copy_modes(self, tools, tmp_path):
         """Modes 1/3/4/6/7 never mean "in place": a folder name that makes the output resolve
-        onto the source (-ZipSuffix _TIFF in mode 4) is an error, not a silent replace."""
+        onto the source (--zip-suffix _TIFF in mode 4) is an error, not a silent replace."""
         d = tmp_path / "伊豆沼 [x]" / "shots_TIFF"
         d.mkdir(parents=True)
         (d / "p.tif").write_bytes(b"ORIGINAL")
@@ -1497,10 +1497,10 @@ class TestPlan:
 
 
 class TestMode2InTheInputFolder:
-    """Mode 2 writes every output into ONE folder. Without -OutputDir (or with -OutputDir on
+    """Mode 2 writes every output into ONE folder. Without --output-dir (or with --output-dir on
     the root) that folder is the input folder itself: the files of its subfolders become
     copies in the root. v3.1: that is announced, and the one case that lost a photo -- with
-    -Overwrite, a source replaced by another source of the same name -- is refused."""
+    --overwrite, a source replaced by another source of the same name -- is refused."""
 
     @pytest.fixture(params=["!first [1]", "zz NORITSU [1]"], ids=["subfolder-listed-first", "root-first"])
     def lib(self, request, tmp_path):
@@ -1523,7 +1523,7 @@ class TestMode2InTheInputFolder:
         run, rc = modes("--mode", "2", "--input-dir", str(root), *extra)
         assert rc == 1, run.log.lines
         refused = said(run, "ERROR (mode 2 would replace another source file of this run - refused; "
-                            "pass -OutputDir) | a 50%.tif | " + str(root / "a 50%.tif"))
+                            "pass --output-dir) | a 50%.tif | " + str(root / "a 50%.tif"))
         assert len(refused) == 1 and run.err == 1, run.log.lines
         assert str(sub / "a 50%.tif") not in self.converted(tools), "the other photo was converted"
         assert str(root / "a 50%.tif") in self.converted(tools), "the root photo is compressed in place"
@@ -1550,7 +1550,7 @@ class TestMode2InTheInputFolder:
             assert len(lines) == 1, (argv, run.log.lines)
             assert lines[0].startswith(f"Mode 2 writes into the input folder itself: 2 file(s) from its "
                                        f"subfolders will be COPIED into {root} ")
-            assert ("WARN", lines[0]) in run.log.lines and "Pass -OutputDir" in lines[0]
+            assert ("WARN", lines[0]) in run.log.lines and "Pass --output-dir" in lines[0]
 
     def test_an_output_folder_of_its_own_is_not_announced(self, tools, lib, tmp_path):
         root, sub = lib
@@ -1571,7 +1571,7 @@ class TestMode2InTheInputFolder:
 class TestCopyModesNeverReplaceASource:
     """v3.1 (review of phases 3+4, V4; already so in v3.0.0): the A8 refusal of mode 2 holds
     in every copy mode. Mode 5 sends sub\\x.tif to ZIP\\x.tif; when ZIP\\x.tif is itself a
-    source (an uncompressed TIFF living in ZIP\\), -Overwrite replaced that photo with the
+    source (an uncompressed TIFF living in ZIP\\), --overwrite replaced that photo with the
     other one, OK and exit code 0. Mode 4 the same with shoot\\x.tif -> shoot_ZIP\\x.tif."""
 
     LAYOUTS = {
@@ -1616,7 +1616,7 @@ class TestCopyModesNeverReplaceASource:
 
 
 class TestMode8DefaultStaging:
-    """Mode 8 without -StagingDir stages in a folder of its own (_cs8_<id>): inside the input
+    """Mode 8 without --staging-dir stages in a folder of its own (_cs8_<id>): inside the input
     folder when there is one, in the temp folder when there are several. On an interactive
     console it asks first; an unattended run (the wizard, a preset, a pipe) is never asked."""
 
@@ -2313,7 +2313,7 @@ class TestPathsAndMoves:
               "copy_exif": lambda: cx.main(args),
               "thumbnails": lambda: gt.main(args)}[backend]()
         out = capsys.readouterr().out
-        assert rc == 1 and f"ERROR: -OutputDir is a file, not a folder: {not_a_folder}" in out, out
+        assert rc == 1 and f"ERROR: --output-dir is a file, not a folder: {not_a_folder}" in out, out
         assert "FATAL" not in out and "not found in PATH" not in out, out
         assert not (tmp_path / "Logs").exists(), "a refused run made its log"
         assert not_a_folder.read_bytes() == b"MINE" and sorted(os.listdir(lib)) == ["a.jpg", "a.tif"]
@@ -2323,7 +2323,7 @@ class TestPathsAndMoves:
         (tmp_path / "f.txt").write_bytes(b"x")
         (tmp_path / "d").mkdir()
         monkeypatch.chdir(tmp_path)
-        assert tw.output_dir_error("f.txt") == f"-OutputDir is a file, not a folder: {tmp_path / 'f.txt'}"
+        assert tw.output_dir_error("f.txt") == f"--output-dir is a file, not a folder: {tmp_path / 'f.txt'}"
         assert tw.output_dir_error("d") == "" and tw.output_dir_error("new") == ""
         assert tw.output_dir_error("") == "" and tw.output_dir_error("  ") == ""
 
@@ -2561,12 +2561,40 @@ class TestCommandLine:
             tw.parse_args(["--page", "first"], gt.PARAMS)
         assert str(e.value) == "argument --page: 'first' is not a valid value"
 
-    def test_a_bad_command_line_exits_1_before_anything_is_touched(self, tmp_path, monkeypatch, capsys):
+    def test_a_bad_command_line_exits_2_before_anything_is_touched(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         for module in (cz, cx, gt):
-            assert module.main(["--no-such-thing"]) == 1
+            assert module.main(["--no-such-thing"]) == 2
         assert "ERROR: unrecognized arguments: --no-such-thing" in capsys.readouterr().out
         assert os.listdir(tmp_path) == [], "not even a log folder"
+
+    @pytest.mark.parametrize("module, argv", [
+        (cz, ["--input-dir", "x"]),                                     # no --mode
+        (cz, ["--mode", "10", "--input-dir", "x"]),
+        (cz, ["--mode", "1", "--input-dir", "x", "--input-dir-file", "l.txt"]),
+        (cx, ["--input-dir", "x", "--input-dir-file", "l.txt"]),
+        (cz, ["--mode", "1", "--input-dir", "x", "--exclude-folders", "a\\b"]),
+        (cx, ["--input-dir", "x", "--exclude-folders", "a\\b"]),
+        (gt, ["--input-dir", "x", "--exclude-folders", "a\\b"]),
+        (cz, ["--mode", "1", "--input-dir", "x", "--generate-thumbnail", "--thumb-page", "0"]),
+        (gt, ["--input-dir", "x", "--size", "16"]),
+        (gt, ["--input-dir", "x", "--format", "gif"]),
+    ], ids=["no-mode", "mode-10", "both-inputs-compress", "both-inputs-copy-exif",
+            "exclude-path-compress", "exclude-path-copy-exif", "exclude-path-thumbnails",
+            "thumb-page-0", "size-16", "format-gif"])
+    def test_what_the_command_line_alone_refuses_exits_2(self, tmp_path, monkeypatch, capsys,
+                                                         module, argv):
+        """v3.1 (T5): a line that cannot run as written exits 2 -- argparse's convention --,
+        with one ERROR line, before the tools are looked for and before a log exists. What
+        depends on the disk (an --output-dir that is a file, a folder that does not exist)
+        stays 1."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tw, "find_tool", lambda n: None)        # not even looked for
+        assert tw.EXIT_USAGE == 2
+        assert module.main(argv) == 2
+        out = capsys.readouterr().out
+        assert out.startswith("ERROR: ") and "not found in PATH" not in out, out
+        assert os.listdir(tmp_path) == [], "a refused run made its log"
 
     def test_exiftool_gets_its_arguments_on_stdin(self, monkeypatch):
         """Round 27: its command line -- an argfile path included -- is read in the ANSI
@@ -2642,7 +2670,7 @@ class TestCommandLine:
         assert "-profile" not in tw.thumbnail_magick_args(None, 64)
 
     def test_thumbnail_frames_need_digits(self, tmp_path):
-        """Round 16: name_thumb-old.jpg is not a frame of -Page all."""
+        """Round 16: name_thumb-old.jpg is not a frame of --page all."""
         for n in ("p [1]_thumb-0.jpg", "p [1]_thumb-12.JPG", "p [1]_thumb-old.jpg", "p [1]_thumb-.jpg",
                   "q_thumb-0.jpg"):
             (tmp_path / n).write_bytes(b"x")
@@ -2665,7 +2693,7 @@ class TestThumbnails:
                                                       ("3", 3, False)])
     def test_more_workers_than_the_limit_is_said_not_silent(self, tools, tmp_path, monkeypatch, capsys,
                                                             asked, used, said_so):
-        """v3.1 (O7): -Workers accepts up to 64 and at most 16 ran, without a word."""
+        """v3.1 (O7): --workers accepts up to 64 and at most 16 ran, without a word."""
         lib = tmp_path / "伊豆沼 [FINAL] 50% x"
         lib.mkdir()
         (lib / "a.tif").write_bytes(b"ORIGINAL")
@@ -2682,8 +2710,8 @@ class TestThumbnails:
         assert (line in out) == said_so, out
 
     def test_remove_keeps_a_tiff_larger_than_size(self, monkeypatch):
-        """Round 28: -Remove finds thumbnails by NAME, and a 1200x800 hitchhiker_thumb.tif
-        was a photo. This script never writes a thumbnail larger than -Size."""
+        """Round 28: --remove finds thumbnails by NAME, and a 1200x800 hitchhiker_thumb.tif
+        was a photo. This script never writes a thumbnail larger than --size."""
         seen = []
 
         def says(*lines):
@@ -2693,13 +2721,13 @@ class TestThumbnails:
             monkeypatch.setattr(tw, "magick_probe", fake)
         path = "E:\\伊豆沼 [FINAL] 50%\\hitchhiker_thumb.tif"
         says("1200 800")
-        assert gt._own_thumbnail(path, 256) == (False, "1200x800 is larger than -Size 256")
+        assert gt._own_thumbnail(path, 256) == (False, "1200x800 is larger than --size 256")
         assert seen[-1][0] == "identify", "a probe (with a timeout), never a conversion"
         assert seen[-1][-1] == path.replace("%", "%%") + "[0]", "a '[n]' spec needs '%' escaped"
         says("256 171")
         assert gt._own_thumbnail(path, 256) == (True, "")
         says("171 257")
-        assert gt._own_thumbnail(path, 256) == (False, "171x257 is larger than -Size 256"), \
+        assert gt._own_thumbnail(path, 256) == (False, "171x257 is larger than --size 256"), \
             "the longer side decides"
 
     @pytest.mark.parametrize("result", [
@@ -2720,7 +2748,7 @@ class TestThumbnails:
             assert gt._own_thumbnail(name, 32) == (True, "")
 
     def test_a_taken_thumbnail_name_is_numbered(self):
-        """Round 16: with -OutputDir + -Recursive the second p_thumb.jpg was reported
+        """Round 16: with --output-dir + --recursive the second p_thumb.jpg was reported
         "SKIP (exists)" and never made."""
         files = [tw.FoundFile(f"E:\\r\\{d}\\p.tif", "p.tif", f"E:\\r\\{d}", 1, 1) for d in "abc"]
         log = NoLog()
@@ -2737,7 +2765,7 @@ class TestThumbnails:
 
     def test_what_a_thumbnail_sends_to_magick(self, tmp_path, monkeypatch):
         """Round 13: '%' is expanded in the output name and in an input with a '[n]' suffix;
-        a plain input (-Page all) is opened literally."""
+        a plain input (--page all) is opened literally."""
         calls = []
 
         def magick_run(args):
@@ -2801,7 +2829,7 @@ class TestSourceRules:
         assert not [1 for _n, owner, _f in _calls(tree) if owner == "subprocess"]
 
     def test_the_staging_folder_is_read_from_one_place(self):
-        """v3.1 (B5): -StagingDir is read once, into run.staging, which mode 8's default
+        """v3.1 (B5): --staging-dir is read once, into run.staging, which mode 8's default
         folder replaces. A step reading the option itself would look in another folder
         than the plan wrote to, and the move skips a file it does not find."""
         readers = set()

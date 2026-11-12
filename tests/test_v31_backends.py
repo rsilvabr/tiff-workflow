@@ -108,7 +108,7 @@ def first_pixel(path):
 @pytest.mark.parametrize("extra", [["--overwrite"], ["--duplicate-action", "Overwrite", "--overwrite"]],
                          ids=["overwrite", "duplicates-overwrite"])
 def test_mode2_never_replaces_a_photo_with_another_one(tmp_path, lane, extra):
-    """Mode 2 without -OutputDir flattens into the input folder itself. With -Overwrite the
+    """Mode 2 without --output-dir flattens into the input folder itself. With --overwrite the
     red photo of the root was replaced by the blue one of a subfolder that has the same
     name -- the only copy of it gone, "OK", exit code 0 (v3.0.0, found by the review of
     phase 1). The blue one is refused; the red one is compressed in its own place."""
@@ -128,7 +128,7 @@ def test_mode2_never_replaces_a_photo_with_another_one(tmp_path, lane, extra):
 
     out = result.stdout
     assert result.returncode == 1, out
-    assert "ERROR (mode 2 would replace another source file of this run - refused; pass -OutputDir) | a.tif" in out
+    assert "ERROR (mode 2 would replace another source file of this run - refused; pass --output-dir) | a.tif" in out
     assert "Mode 2 writes into the input folder itself: 2 file(s) from its subfolders will be COPIED" in out
     assert first_pixel_plain(root / "a.tif", tmp_path) == RED, "the red photo is gone"
     assert read_compression(root / "a.tif").lower() == "zip", "and it is compressed in its own place"
@@ -151,7 +151,7 @@ def first_pixel_plain(path, tmp_path):
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 def test_copy_exif_zip_keeps_the_page_markers(tmp_path, hostile, lane):
-    """v3.1 phase 4: copy_exif -CompressZip reads the TIFF's page markers in the same exiftool
+    """v3.1 phase 4: copy_exif --compress-zip reads the TIFF's page markers in the same exiftool
     call as its compression and layout, and puts them back on the ZIP: an explicit 0 on the
     main image and the REDUCEDIMAGE preview."""
     plain, land = hostile
@@ -179,7 +179,7 @@ def test_copy_exif_zip_keeps_the_page_markers(tmp_path, hostile, lane):
 def test_mode5_never_replaces_a_photo_living_in_zip(tmp_path, lane):
     """v3.1 (review of phases 3+4, V4; so since v3.0.0): ZIP/x.tif (an uncompressed photo
     living in ZIP/) and sub/x.tif (another photo). Mode 5 sends sub/x.tif to ZIP/x.tif; with
-    -Overwrite the red photo was replaced by the blue one, OK and exit code 0."""
+    --overwrite the red photo was replaced by the blue one, OK and exit code 0."""
     plain = tmp_path / "plain"
     (plain / "ZIP").mkdir(parents=True)
     (plain / "sub [1]").mkdir()
@@ -245,7 +245,7 @@ def test_an_exiftool_without_the_status_of_each_command_is_refused(tmp_path, hos
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
 def test_a_new_thumbnail_is_marked_even_when_the_old_preview_was_not(tmp_path, hostile, lane):
-    """Review of v3.1 phases 3+4, V2: -GenerateThumbnail on a source whose second page is a
+    """Review of v3.1 phases 3+4, V2: --generate-thumbnail on a source whose second page is a
     smaller preview WITHOUT a marker. The new thumbnail page must come out REDUCEDIMAGE (1);
     putting the SOURCE's markers back (none) would leave it unmarked -- a page that every
     later run takes for a second image."""

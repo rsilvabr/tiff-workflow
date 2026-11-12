@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """compress_tiff_zip.py -- TIFF -> ZIP/Deflate, lossless and verified.
 
-    python compress_tiff_zip.py -Mode 9 -InputDir <folder> [-DryRun]
+    python compress_tiff_zip.py --mode 9 --input-dir <folder> [--dry-run]
 
 Modes: 0 in place (one folder, originals kept in OLD_TIFFs/), 1 ZIP/ subfolder, 2 flat
 output, 3 ZIP/ subfolder (recursive), 4 sibling folder (_TIFF -> _ZIP), 5 ZIP/ next to the
@@ -72,7 +72,7 @@ PARAMS = (
     P("SkipCompressedWithThumb", "switch", help="Skip TIFFs that are already compressed AND have thumbnail"),
     P("SrgbProfile", "str", "", help='ICC profile used to convert wide-gamut sources; "" = auto-detect'),
     P("WorkerMemoryFraction", "float", 0.8, help="Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap"),
-    P("InputDirFile", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)"),
+    P("InputDirFile", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when --input-dir would exceed the command-line limit)"),
     P("RestoreStranded", "switch", help="Move originals stranded in OLD_TIFFs/ (nothing left in their place) back where they came from"),
 )
 
@@ -204,7 +204,7 @@ find_stranded_originals = tw.find_stranded_originals
 
 
 def report_stranded(run, input_roots):
-    """Report (and with -RestoreStranded move back) the stranded originals of every root.
+    """Report (and with --restore-stranded move back) the stranded originals of every root.
     On EVERY run, whatever the mode: discovery skips OLD_TIFFs/ and nothing else would ever
     notice them. Runs BEFORE discovery, so a restored original is compressed by this run."""
     opt = run.opt
@@ -253,7 +253,7 @@ def report_stranded(run, input_roots):
                 f"place, {run.restored} restored", "WARN")
         else:
             log(f"STRANDED: {run.stranded} original(s) in OLD_TIFFs with nothing in their place "
-                f"(an interrupted run?). Run again with -RestoreStranded to move them back; "
+                f"(an interrupted run?). Run again with --restore-stranded to move them back; "
                 f"never delete or move OLD_TIFFs away until then.", "WARN")
 
 
@@ -502,7 +502,7 @@ def _compress_job(run, t, load, own):
         else:
             # Say WHY nothing was produced when a thumbnail was asked for: this SKIP runs
             # before the thumbnail step.
-            note = " [no thumbnail added: pass -SkipCompressedWithThumb]" if generate_thumb else ""
+            note = " [no thumbnail added: pass --skip-compressed-with-thumb]" if generate_thumb else ""
             return res(f"SKIP ({comp}) | {name}{note}")
 
     if os.path.exists(final_dst) and not opt["Overwrite"] and not tw.same_path(final_dst, src):
@@ -524,7 +524,7 @@ def _compress_job(run, t, load, own):
     if generate_thumb:
         ts = tw.thumbnail_safe_source(src, timeout)
         if not ts.ok:
-            return res(f"ERROR (-GenerateThumbnail refused) | {name} | {ts.reason}", fd=True)
+            return res(f"ERROR (--generate-thumbnail refused) | {name} | {ts.reason}", fd=True)
         if ts.reason == "thumb-replaced":
             thumb_note = " [thumb replaced]"
 
@@ -719,9 +719,9 @@ def _job_result(t, result):
 
 
 def effective_workers(run, paths, bytes_per_pixel):
-    """The workers this run uses: -Workers, clamped by -CapWorkers and by the memory the
+    """The workers this run uses: --workers, clamped by --cap-workers and by the memory the
     ImageMagick processes need (not in a dry run, which starts none). 1 with
-    -ForceSequential."""
+    --force-sequential."""
     opt = run.opt
     if not run.parallel:
         return 1
@@ -747,7 +747,7 @@ class _Plan:
 
 
 def _flat_destination(run, plan, f, final_dst, used_names):
-    """Mode 2: where `f` goes in the flat output once -DuplicateAction has dealt with a
+    """Mode 2: where `f` goes in the flat output once --duplicate-action has dealt with a
     name another source folder already gave out; None when the file is skipped (reported
     here). `used_names`: the names given out so far, per output folder. Overwrite takes
     the earlier claimant out of the plan."""
@@ -834,7 +834,7 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map):
                 run.count(f"SKIP (compressed+thumb) | {f.name}")
                 return None
         else:
-            note = (" [no thumbnail added: pass -SkipCompressedWithThumb]"
+            note = (" [no thumbnail added: pass --skip-compressed-with-thumb]"
                     if opt["GenerateThumbnail"] else "")
             run.count(f"SKIP ({comp}) | {f.name}{note}")
             return None
@@ -880,7 +880,7 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map):
 
 
 def _warn_flat_output_in_the_input(run, files):
-    """Mode 2 whose output folder is an input folder itself (no -OutputDir, or -OutputDir on
+    """Mode 2 whose output folder is an input folder itself (no --output-dir, or --output-dir on
     the root): the files of its subfolders are COPIED into it, their originals stay
     uncompressed where they are, and every run adds another set of copies. Said once,
     before the work; nothing is refused for it."""
@@ -897,7 +897,7 @@ def _warn_flat_output_in_the_input(run, files):
     for out_dir, n in copies.items():
         run.log(f"Mode 2 writes into the input folder itself: {n} file(s) from its subfolders will be "
                 f"COPIED into {out_dir} (the originals stay where they are, uncompressed, and "
-                f"another run adds another set of copies). Pass -OutputDir to keep the output apart.",
+                f"another run adds another set of copies). Pass --output-dir to keep the output apart.",
                 "WARN")
 
 
@@ -932,7 +932,7 @@ def _plan_jobs(run, files, comp_map):
             overlay_names = [n for n in run.overlay_applied if n in _OVERLAY_PATH_NAMES]
             if mode not in (2, 5) or overlay_names:
                 why = (f"settings overlay: {', '.join(overlay_names)}" if overlay_names else
-                       "check -ZipSuffix / -ZipSubfolderName / -ExportZipSubfolder / -ExportTiffSubfolder")
+                       "check --zip-suffix / --zip-subfolder-name / --export-zip-subfolder / --export-tiff-subfolder")
                 run.count(f"ERROR (mode {mode} would write over its own source - refused; {why}) | {f.name}")
                 continue
 
@@ -959,7 +959,7 @@ def _plan_jobs(run, files, comp_map):
         # in-place write, allowed. Modes 0/8/9 write in place and are not copy modes.
         replaces_another = final_dst.lower() in sources and not tw.same_path(final_dst, f.path)
         if 1 <= mode <= 7 and opt["Overwrite"] and replaces_another:
-            hint = "; pass -OutputDir" if mode == 2 else ""
+            hint = "; pass --output-dir" if mode == 2 else ""
             run.count(f"ERROR (mode {mode} would replace another source file of this run - refused"
                       f"{hint}) | {f.name} | {final_dst}")
             continue
@@ -1155,18 +1155,16 @@ def _delete_sources(run, outcome):
             log(f"  -> Deleted {deleted} source file(s) after successful move")
 
 
-def _input_roots(run, bound):
+def _input_roots(run):
     """(the input folders, the entries that do not exist), or None after logging why the
-    run cannot start: -InputDir together with -InputDirFile, an unusable list file, or no
-    folder that exists. The missing ones are logged here; the caller counts them."""
+    run cannot start: an unusable list file, or no folder that exists (--input-dir together
+    with --input-dir-file is refused before, by run_main). The missing ones are logged here;
+    the caller counts them."""
     opt = run.opt
     log = run.log
-    # Several input folders separated by ';' (the wizard's AutoFind), or -InputDirFile.
+    # Several input folders separated by ';' (the wizard's AutoFind), or --input-dir-file.
     entries = opt["InputDir"].split(";")
     if opt["InputDirFile"]:
-        if "InputDir" in bound:
-            log("ERROR: pass -InputDir or -InputDirFile, not both", "ERROR")
-            return None
         try:
             entries = tw.read_input_dir_file(opt["InputDirFile"])
         except tw.UsageError as e:
@@ -1245,7 +1243,7 @@ def _default_mode8_staging(run, input_roots):
     msg = ("Mode 8 deletes source files after compression. A staging directory is required "
            "to avoid overwriting originals before verification.")
     log(msg, "WARN")
-    log("Recommended: provide -StagingDir on a fast local drive.", "WARN")
+    log("Recommended: provide --staging-dir on a fast local drive.", "WARN")
     log(f"Default temporary staging will be used: {default_staging}", "WARN")
     if _is_interactive():
         tw.say("")
@@ -1273,7 +1271,7 @@ def run_modes(run, bound):
     dry = opt["DryRun"]
     overwrite = opt["Overwrite"]
 
-    resolved = _input_roots(run, bound)
+    resolved = _input_roots(run)
     if resolved is None:
         return 1
     input_roots, missing_roots = resolved
@@ -1291,7 +1289,7 @@ def run_modes(run, bound):
     # TOP of the original whether or not -DeleteSource was passed.
     if mode == 8 and not opt["DeleteSource"]:
         log("NOTE: mode 8 replaces each original in place (verified pixel-identical first). "
-            "-DeleteSource additionally removes a .tiff source whose output is written as .tif.", "WARN")
+            "--delete-source additionally removes a .tiff source whose output is written as .tif.", "WARN")
     log(f"Mode: {mode} | Workers: {opt['Workers']} | "
         f"OutputDir: {opt['OutputDir'] or '(in-place/flat)'} | Staging: {run.staging or 'disabled'} | "
         f"DryRun: {dry} | SafeMode: {opt['SafeMode']} | SkipLzw: {opt['SkipLzwAsCompressed']} | "
@@ -1401,7 +1399,7 @@ def run_main(argv, state):
         opt, bound = tw.parse_args(argv, PARAMS)
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
-        return 1
+        return tw.EXIT_USAGE
 
     # The overlay is applied before anything reads a parameter. A -Param given on the command
     # line always beats it; an invalid entry never stops the run.
@@ -1413,14 +1411,17 @@ def run_main(argv, state):
         tw.say(f"WARNING: settings overlay: {w}")
 
     # There is no default mode: until v3.0.0 a run without -Mode was the "legacy" mode,
-    # which compressed the CURRENT folder in place. A forgotten -Mode must never do that.
+    # which compressed the CURRENT folder in place. A forgotten --mode must never do that.
     if "Mode" not in bound:
-        tw.say("ERROR: -Mode is required: the modes are 0 to 9")
-        tw.say("       Example: python compress_tiff_zip.py -Mode 9 -InputDir <folder>")
-        return 1
+        tw.say("ERROR: --mode is required: the modes are 0 to 9")
+        tw.say("       Example: python compress_tiff_zip.py --mode 9 --input-dir <folder>")
+        return tw.EXIT_USAGE
     if not 0 <= opt["Mode"] <= 9:
-        tw.say(f"ERROR: -Mode {opt['Mode']} does not exist: the modes are 0 to 9")
-        return 1
+        tw.say(f"ERROR: --mode {opt['Mode']} does not exist: the modes are 0 to 9")
+        return tw.EXIT_USAGE
+    if opt["InputDirFile"] and "InputDir" in bound:
+        tw.say("ERROR: pass --input-dir or --input-dir-file, not both")
+        return tw.EXIT_USAGE
     if tw.output_dir_error(opt["OutputDir"]):
         tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
         return 1
@@ -1429,17 +1430,17 @@ def run_main(argv, state):
         exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
-        return 1
+        return tw.EXIT_USAGE
 
     # Only "thumbnail AFTER the main image" is supported: every page classifier of this
     # project treats page 0 as the main image, so a thumbnail-first file would read as
     # multi-page and be refused by every later run.
     if opt["GenerateThumbnail"] and opt["ThumbPage"] < 1:
-        tw.say(f"ERROR: -ThumbPage {opt['ThumbPage']} is not supported: the thumbnail must come AFTER the main image.")
+        tw.say(f"ERROR: --thumb-page {opt['ThumbPage']} is not supported: the thumbnail must come AFTER the main image.")
         tw.say("       Page 0 has to stay the full-resolution image -- SafeMode classifies a")
         tw.say("       thumbnail-first file as multi-page, so every later run would skip it.")
-        tw.say("       Use -ThumbPage 1 (the default).")
-        return 1
+        tw.say("       Use --thumb-page 1 (the default).")
+        return tw.EXIT_USAGE
 
     srgb = tw.resolve_srgb_profile(opt["SrgbProfile"])
     # A profile path from the settings overlay that does not exist must never stop a run:
@@ -1450,7 +1451,7 @@ def run_main(argv, state):
         opt["SrgbProfile"] = ""
         srgb = tw.resolve_srgb_profile("")
     if opt["SrgbProfile"] and not srgb:
-        tw.say(f"ERROR: -SrgbProfile not found: {opt['SrgbProfile']}")
+        tw.say(f"ERROR: --srgb-profile not found: {opt['SrgbProfile']}")
         return 1
 
     missing = tw.missing_tools(["exiftool", "magick"])
@@ -1478,13 +1479,13 @@ def run_main(argv, state):
         log(f"settings overlay: {w}", "WARN")
     if opt["GenerateThumbnail"] and not srgb:
         log("WARN: no sRGB ICC profile found -- embedded thumbnails from wide-gamut sources "
-            "(ProPhoto, AdobeRGB) will have shifted colours. Pass -SrgbProfile <path.icc> to fix.", "WARN")
+            "(ProPhoto, AdobeRGB) will have shifted colours. Pass --srgb-profile <path.icc> to fix.", "WARN")
     # -ThumbPage is accepted for compatibility but only page 1 is implemented.
     if opt["GenerateThumbnail"] and opt["ThumbPage"] > 1:
-        log(f"WARN: -ThumbPage {opt['ThumbPage']} is not implemented -- the thumbnail is always "
+        log(f"WARN: --thumb-page {opt['ThumbPage']} is not implemented -- the thumbnail is always "
             f"written at page 1 (right after the main image). Ignoring the value.", "WARN")
 
-    note = " [FORCED via -ForceSequential]" if opt["ForceSequential"] else ""
+    note = " [FORCED via --force-sequential]" if opt["ForceSequential"] else ""
     tw.say(f"{tw.python_label()} ({'PARALLEL' if run.parallel else 'SEQUENTIAL'}){note}")
     return run_modes(run, bound)
 

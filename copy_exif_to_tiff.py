@@ -3,12 +3,12 @@
 exported from the same shot, optionally compressing the TIFF to ZIP/Deflate in the same
 pass.
 
-    python copy_exif_to_tiff.py -InputDir <session folder> [-CompressZip] [-DryRun]
-    python copy_exif_to_tiff.py -InputDir <root> -AutoFind -FolderPattern S5pro
+    python copy_exif_to_tiff.py --input-dir <session folder> [--compress-zip] [--dry-run]
+    python copy_exif_to_tiff.py --input-dir <root> --auto-find --folder-pattern S5pro
 
 The command line is the one copy_exif_to_TIFF_ps5.ps1 / _ps7.ps1 had (tiff-workflow up to
 v2.9.1; the two scripts are this one file now). Exit code 1 when any file failed or an
-input folder does not exist (with -FailOnWarn also on a warning or a TIFF without a
+input folder does not exist (with --fail-on-warn also on a warning or a TIFF without a
 JPEG), else 0. docs/README_copy_exif.md has the reference.
 """
 
@@ -45,7 +45,7 @@ PARAMS = (
     P("FailOnWarn", "switch"),
     P("ExcludeFolders", "str", "", help="';'-separated folder NAMES to skip during discovery"),
     P("WorkerMemoryFraction", "float", 0.8, help="Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap"),
-    P("InputDirFile", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when -InputDir would exceed the command-line limit)"),
+    P("InputDirFile", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when --input-dir would exceed the command-line limit)"),
 )
 
 # Settings overlay (.tiff_workflow_settings.json): the ONLY names it can change in this script,
@@ -232,7 +232,7 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
     """The ZIP half of process_pair: write `tiff_target` as ZIP to the staged file
     `write_dst` and prove it. Returns None when the staged file may be registered for the
     move, else the ERROR result line -- by then the staged file is gone, and so is the copy
-    in -OutputDir (`drop_copy`). `facts`: tiff_target's tw.tiff_facts. `own`: see
+    in --output-dir (`drop_copy`). `facts`: tiff_target's tw.tiff_facts. `own`: see
     process_pair."""
     own.append(write_dst)       # a staged name carries this run's id: this pair's, half written too
     # magick turned a neutral RGB TIFF into a 1-channel gray one with the RGB profile still
@@ -297,12 +297,12 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
 
 
 def process_pair(run, p, write_dir, final_dir, load_factor):
-    """One TIFF: copy the EXIF from its JPEG/RAF and, with -CompressZip, stage a verified
+    """One TIFF: copy the EXIF from its JPEG/RAF and, with --compress-zip, stage a verified
     ZIP copy. `p` is a Pair; returns a PairResult. Runs on a worker thread: it never logs
     or counts.
 
     An exception nobody expected must not leave this pair's own files behind: the copy in
-    -OutputDir (the next run would skip it as "exists", without EXIF), the metadata
+    --output-dir (the next run would skip it as "exists", without EXIF), the metadata
     containers and the staged ZIP (v3.1; until v3.0.0 they stayed on disk)."""
     own = []
     try:
@@ -472,7 +472,7 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
 def _dest_name(run, tif, final_dir):
     """The name `tif` gets in its destination folder.
 
-    With -OutputDir every session writes into the SAME folder, so two sessions holding
+    With --output-dir every session writes into the SAME folder, so two sessions holding
     DSC_0001.tif used to overwrite/skip each other. Later claimants get _v2, _v3, ..."""
     dest_name = tif.name
     if run.opt["OutputDir"] and final_dir.lower() != tif.dir.lower():
@@ -620,16 +620,13 @@ def process_folder(run, root):
 
 def _input_dirs(opt, log):
     """(the folders to process, the entries that do not exist), or None after logging why
-    the command line cannot be used. Without -InputDir and -InputDirFile: the current
-    folder.
+    the list file cannot be used (--input-dir together with --input-dir-file is refused
+    before, by run_main). Without --input-dir and --input-dir-file: the current folder.
 
     A bad path used to fall through to "No TIFFs found" and exit 0, and convert_tiff.py
     gates Step 2 of the combined workflow on this exit code."""
     entries = []
     if opt["InputDirFile"]:
-        if opt["InputDir"]:
-            log("ERROR: pass -InputDir or -InputDirFile, not both", "ERROR")
-            return None
         try:
             entries = tw.read_input_dir_file(opt["InputDirFile"])
         except tw.UsageError as e:
@@ -645,8 +642,8 @@ def _input_dirs(opt, log):
 
 def _autofind_folders(root, pattern, exclude_names=()):
     """(the folders below `root` whose name contains `pattern`, how many more of them
-    -ExcludeFolders left out). The pattern is text, not a wildcard: a '[' in a folder name
-    is itself. The tool-output folders and the -ExcludeFolders names are matched as
+    --exclude-folders left out). The pattern is text, not a wildcard: a '[' in a folder name
+    is itself. The tool-output folders and the --exclude-folders names are matched as
     segments BELOW the root (a session inside an excluded folder, or named like one)."""
     hits = [d for d in tw.list_dirs(root, True)
             if pattern.lower() in os.path.basename(d).lower()
@@ -676,7 +673,7 @@ def run_main(argv, state):
         opt, bound = tw.parse_args(argv, PARAMS)
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
-        return 1
+        return tw.EXIT_USAGE
 
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
                                         os.path.dirname(os.path.abspath(__file__)))
@@ -685,14 +682,18 @@ def run_main(argv, state):
     for w in overlay["warnings"]:
         tw.say(f"WARNING: settings overlay: {w}")
 
+    if opt["InputDirFile"] and opt["InputDir"]:
+        tw.say("ERROR: pass --input-dir or --input-dir-file, not both")
+        return tw.EXIT_USAGE
+
     # ';'-separated folder NAMES (not paths). This backend lists the TIFFs of a folder
     # without descending, so inside a folder there is nothing to exclude: the names apply
-    # to the folders -AutoFind finds (v3.1; until v3.0.0 the flag did nothing here).
+    # to the folders --auto-find finds (v3.1; until v3.0.0 the flag did nothing here).
     try:
         exclude_names = tw.parse_exclude_folders(opt["ExcludeFolders"])
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
-        return 1
+        return tw.EXIT_USAGE
 
     if tw.output_dir_error(opt["OutputDir"]):
         tw.say(f"ERROR: {tw.output_dir_error(opt['OutputDir'])}")
@@ -723,7 +724,7 @@ def run_main(argv, state):
     else:
         opt["OutputDir"] = ""
 
-    # Before the banner: the two -InputDir/-InputDirFile errors are the first lines of the log.
+    # Before the banner: an unusable --input-dir-file is the first line of the log.
     resolved = _input_dirs(opt, log)
     if resolved is None:
         return 1

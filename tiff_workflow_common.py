@@ -74,8 +74,11 @@ THUMBNAIL_PAGE_TYPES = ("REDUCEDIMAGE", "REDUCED")
 class P:
     """One command-line parameter of a backend.
 
-    kind: "int", "float", "str", "bool" (takes a value: -SafeMode:$false) or "switch"
-    (-DryRun; -DryRun:$false is off). lo/hi: allowed range of a number. choices: allowed
+    kind: "int", "float", "str", "bool" or "switch". Both yes/no kinds are --x / --no-x on
+    the command line; a switch is off unless given (--dry-run), a bool has a default of its
+    own (--safe-mode is on). In v3.0.0's command line a bool took a value (-SafeMode:$false)
+    and a switch stood alone (-DryRun): the old reader, kept for the translation, still
+    tells them apart. lo/hi: allowed range of a number. choices: allowed
     values of a string, matched without case. pattern: a regex the value must match.
     `help` is the one-line text the wizard's Script settings screen shows.
 
@@ -98,6 +101,14 @@ class P:
 
 class UsageError(Exception):
     """A command line that cannot be bound to the parameters."""
+
+
+#: The exit code of a command line that cannot run as written (v3.1, T5: argparse's
+#: convention): an option that does not bind, a missing --mode, two options that exclude each
+#: other -- what the line alone shows, before anything is touched. 1 stays every other
+#: failure, also what depends on the disk (a folder that does not exist, an --output-dir that
+#: is a file); 0 is a clean run. The wizard gates a step on "not 0".
+EXIT_USAGE = 2
 
 
 class ToolError(Exception):
@@ -573,7 +584,7 @@ def full_path(path):
 
 
 def resolve_input_dirs(entries, allow_files=False):
-    """The entries of -InputDir / -InputDirFile as (the ones that exist, the ones that do
+    """The entries of --input-dir / --input-dir-file as (the ones that exist, the ones that do
     not): each made absolute ("." or "a\\..\\b" once broke the root compare of the folder
     exclusion), blank ones dropped, and a repeated one taken ONCE -- "A;A" used to process a
     folder twice, and a missing folder listed twice was two errors in one backend and one
@@ -594,13 +605,13 @@ def resolve_input_dirs(entries, allow_files=False):
 
 
 def output_dir_error(path):
-    """The usage error for an -OutputDir that names an existing FILE, or "". Until v3.0.0
+    """The usage error for an --output-dir that names an existing FILE, or "". Until v3.0.0
     compress ended in `FATAL (unhandled error) | FileExistsError` when it tried to make the
     folder; the answer is the same (exit code 1, nothing touched), said before anything
     starts. A relative path is checked against the current folder."""
     path = str(path).strip()
     if path and os.path.isfile(full_path(path)):
-        return f"-OutputDir is a file, not a folder: {full_path(path)}"
+        return f"--output-dir is a file, not a folder: {full_path(path)}"
     return ""
 
 
@@ -811,7 +822,7 @@ def find_stranded_originals(root, recurse, backup_names, exclude_names):
 
 
 def parse_exclude_folders(text):
-    """The ';'-separated folder NAMES of -ExcludeFolders, or raises UsageError for a path."""
+    """The ';'-separated folder NAMES of --exclude-folders, or raises UsageError for a path."""
     names = []
     for entry in str(text or "").split(";"):
         entry = entry.strip()
@@ -819,8 +830,8 @@ def parse_exclude_folders(text):
             continue
         if "\\" in entry or "/" in entry:
             raise UsageError(
-                f"-ExcludeFolders takes folder NAMES, not paths: '{entry}'\n"
-                "       Use a ';'-separated list of bare names, e.g. -ExcludeFolders '_EXPORT;temp'")
+                f"--exclude-folders takes folder NAMES, not paths: '{entry}'\n"
+                "       Use a ';'-separated list of bare names, e.g. --exclude-folders \"_EXPORT;temp\"")
         names.append(entry)
     return names
 
@@ -949,17 +960,17 @@ def is_tiff_name(name):
 
 def read_input_dir_file(path):
     """The folders of -InputDirFile: a UTF-8 text file, one folder per line (the wizard
-    writes it when -InputDir would pass the command-line limit). Raises UsageError."""
+    writes it when --input-dir would pass the command-line limit). Raises UsageError."""
     if not os.path.isfile(path):
-        raise UsageError(f"-InputDirFile not found: {path}")
+        raise UsageError(f"--input-dir-file not found: {path}")
     try:
         with open(path, "r", encoding="utf-8-sig") as fh:
             entries = [ln.strip() for ln in fh.read().splitlines()]
     except (OSError, UnicodeError) as e:
-        raise UsageError(f"cannot read -InputDirFile: {path} ({e})")
+        raise UsageError(f"cannot read --input-dir-file: {path} ({e})")
     entries = [e for e in entries if e]
     if not entries:
-        raise UsageError(f"-InputDirFile lists no folders: {path}")
+        raise UsageError(f"--input-dir-file lists no folders: {path}")
     return entries
 
 
@@ -1311,7 +1322,7 @@ def pixel_identical(src, dst, timeout=30, load_factor=1.0):
 
 
 def thumb_output_matches_source(src, dst, expected_pages, timeout=30):
-    """The gate for a -GenerateThumbnail output: True only when the output has exactly
+    """The gate for a --generate-thumbnail output: True only when the output has exactly
     `expected_pages` pages (2 with the thumbnail, 1 on the [no thumb] fallback) and its
     page 0 is PIXEL-IDENTICAL to the source's page 0. pixel_identical cannot serve: the
     thumbnail path builds a new page layout on purpose, and the thumbnail is derived data
@@ -1480,7 +1491,7 @@ def subfile_marker_list(page_count, types):
             for i in range(page_count)]
 
 def set_tiff_thumb_markers(src, dst):
-    """The page markers of a -GenerateThumbnail output: page 0 keeps the marker the SOURCE
+    """The page markers of a --generate-thumbnail output: page 0 keeps the marker the SOURCE
     had on its main image (absent stays absent), page 1 is stamped REDUCEDIMAGE (1). magick
     stamps PAGE on every page of a multi-page write, so both have to be written."""
     types = _read_subfile_types(src)
@@ -1554,7 +1565,7 @@ class ThumbSafe(NamedTuple):
 
 
 def thumbnail_safe_source(path, timeout=30):
-    """Whether -GenerateThumbnail may rewrite `path`: the thumbnail path rebuilds the file
+    """Whether --generate-thumbnail may rewrite `path`: the thumbnail path rebuilds the file
     from page 0 only, so EVERY other page of the source is dropped. Replacing an existing
     REDUCEDIMAGE thumbnail is the intent (reason "thumb-replaced"); dropping a scanner IR
     (MASK) page, a layer or a second photo is data loss, and no later gate can see it (a
@@ -1723,7 +1734,7 @@ def associated_alpha_rewritable(path, pages, timeout=30):
 def tiff_sample_layout_kept(src_pages, dst, main_page_only=False):
     """True only when `dst` has the sample layout `src_pages` describe: the same number of
     pages and, per page, the same color class, samples per pixel, bits per sample and alpha
-    kind. `main_page_only` compares page 0 alone (the -GenerateThumbnail path builds a new
+    kind. `main_page_only` compares page 0 alone (the --generate-thumbnail path builds a new
     page layout on purpose). Anything unreadable fails CLOSED."""
     if not src_pages:
         return False
