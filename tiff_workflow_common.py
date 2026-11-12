@@ -251,9 +251,9 @@ def _overlay_value(spec: str, value):
     """`value` (from JSON) checked against an overlay spec: (True, the value to use) or
     (False, what it should have been). Grammar: int:lo:hi | float:lo:hi | intstr:lo:hi (a
     JSON int; the value used is its string) | bool | name | path? | choice:a|b|c. A bool is
-    never a number; an int must fit 32 bits. The wizard (convert_tiff.py) and the backends
-    (tiff_workflow_common.py) each carry this function, so the wizard plans with the value
-    the backend will run with: tests/test_backend_invariants.py keeps the two identical."""
+    never a number; an int must fit 32 bits. The wizard (convert_tiff.py) reads the overlay
+    with this same function (v3.1: until then it carried a copy), so it plans with the value
+    the backend will run with."""
     kind, _, rest = spec.partition(":")
     if kind == "choice":
         options = rest.split("|")

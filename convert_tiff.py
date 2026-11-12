@@ -106,6 +106,13 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 
+# What the three backends share. It sits next to this file wherever the toolkit is installed
+# (the backends cannot run without it); the wizard uses its helpers instead of carrying copies
+# of them (v3.1 phase 5). The folder goes on sys.path the way the backends do it, so a preset
+# started from another folder finds it too.
+sys.path.insert(0, str(SCRIPT_DIR))
+import tiff_workflow_common as tw  # noqa: E402
+
 
 # --- Settings overlay ----------------------------------------------
 #
@@ -117,10 +124,8 @@ SCRIPT_DIR = Path(__file__).parent.resolve()
 # does not pass its spec, an unreadable file, an unknown name: the script's own value stays and
 # a warning says so; it never stops a run. A `-Param` on the command line always beats the file.
 
-_SETTINGS_OVERLAY_FILE = ".tiff_workflow_settings.json"
-_SETTINGS_OVERLAY_ENV = "TIFFWORKFLOW_SETTINGS"
-_OVERLAY_INT_MAX = 2147483647   # what a setting file written for v2.x could hold ([int] parameters)
-_OVERLAY_NAME_FORBIDDEN = '/\\:*?"<>|'
+_SETTINGS_OVERLAY_FILE = tw.SETTINGS_OVERLAY_FILE
+_SETTINGS_OVERLAY_ENV = tw.SETTINGS_OVERLAY_ENV
 
 #: script file -> its section of the overlay file
 _OVERLAY_SECTIONS = {
@@ -148,21 +153,10 @@ def _settings_overlay_path() -> Optional[Path]:
     return home / _SETTINGS_OVERLAY_FILE
 
 
-def _overlay_object_pairs(pairs):
-    """json object_pairs_hook for the overlay file. audit round 28: the PowerShell readers
-    refuse the WHOLE file when an object has an empty "" key or two keys that differ only
-    in case (a PowerShell object cannot hold them), so the wizard planned with a value the
-    backends never applied. Refuse the same files here. Exact duplicates keep the last
-    value in every reader."""
-    seen = {}
-    for k, _v in pairs:
-        if k == "":
-            raise ValueError('an empty "" key')
-        low = k.casefold()
-        if low in seen and seen[low] != k:
-            raise ValueError(f"keys that differ only in case: '{seen[low]}' and '{k}'")
-        seen.setdefault(low, k)
-    return dict(pairs)
+# The overlay grammar is the backends' own (one reader: the wizard plans with the value the
+# backend will run with).
+_overlay_object_pairs = tw._overlay_object_pairs
+_overlay_value = tw._overlay_value
 
 
 def _settings_overlay_section(path: Optional[Path], section: str) -> Optional[dict]:
@@ -181,62 +175,6 @@ def _settings_overlay_section(path: Optional[Path], section: str) -> Optional[di
     if not isinstance(sect, dict):
         raise ValueError(f"the '{section}' entry is not an object")
     return sect
-
-
-def _overlay_bound(text: str):
-    return None if text.strip() == "" else float(text) if "." in text else int(text)
-
-
-def _overlay_value(spec: str, value):
-    """`value` (from JSON) checked against an overlay spec: (True, the value to use) or
-    (False, what it should have been). Grammar: int:lo:hi | float:lo:hi | intstr:lo:hi (a
-    JSON int; the value used is its string) | bool | name | path? | choice:a|b|c. A bool is
-    never a number; an int must fit 32 bits. The wizard (convert_tiff.py) and the backends
-    (tiff_workflow_common.py) each carry this function, so the wizard plans with the value
-    the backend will run with: tests/test_backend_invariants.py keeps the two identical."""
-    kind, _, rest = spec.partition(":")
-    if kind == "choice":
-        options = rest.split("|")
-        if isinstance(value, str) and value in options:
-            return True, value
-        return False, "one of " + ", ".join(options)
-    if kind == "bool":
-        return (True, value) if isinstance(value, bool) else (False, "true or false")
-    if kind in ("int", "float", "intstr"):
-        lo_t, _, hi_t = rest.partition(":")
-        lo, hi = _overlay_bound(lo_t), _overlay_bound(hi_t)
-        if isinstance(value, bool):
-            ok = False
-        elif kind == "float":
-            try:
-                ok = isinstance(value, (int, float)) and math.isfinite(value)
-            except OverflowError:    # an int too large for a float
-                ok = False
-        else:
-            ok = isinstance(value, int) and -_OVERLAY_INT_MAX - 1 <= value <= _OVERLAY_INT_MAX
-        if ok and (lo is None or value >= lo) and (hi is None or value <= hi):
-            if kind == "float":
-                return True, float(value)
-            return True, (str(value) if kind == "intstr" else value)
-        what = "a number" if kind == "float" else "a whole number"
-        if lo is not None and hi is not None:
-            what += f" from {lo_t} to {hi_t}"
-        elif lo is not None:
-            what += f" of at least {lo_t}"
-        return False, what
-    if kind == "name":
-        if isinstance(value, str):
-            v = value.strip()
-            if v and v not in (".", "..") and not any(ch in v for ch in _OVERLAY_NAME_FORBIDDEN):
-                return True, v
-        return False, "a folder or file name (no path separators)"
-    if kind == "path?":
-        if value is None:
-            return True, ""
-        if isinstance(value, str) and value.strip():
-            return True, value.strip()
-        return False, "a path, or null"
-    return False, "a setting the overlay cannot change"
 
 
 def _parse_setting_text(spec: str, text: str):

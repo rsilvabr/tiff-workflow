@@ -2791,9 +2791,8 @@ class TestSourceRules:
 
     def test_the_overlay_reader_is_the_wizards(self):
         """One grammar: the wizard plans with the values the backend will run with."""
-        import inspect
         import convert_tiff as ct
-        for fn in ("_overlay_object_pairs", "_overlay_bound", "_overlay_value"):
-            assert inspect.getsource(getattr(ct, fn)) == inspect.getsource(getattr(tw, fn)), fn
+        for fn in ("_overlay_object_pairs", "_overlay_value"):
+            assert getattr(ct, fn) is getattr(tw, fn), f"{fn}: v3.1 phase 5, one copy"
         assert ct._SETTINGS_OVERLAY_FILE == tw.SETTINGS_OVERLAY_FILE
         assert ct._SETTINGS_OVERLAY_ENV == tw.SETTINGS_OVERLAY_ENV

@@ -50,11 +50,10 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   the golden PowerShell command lines; `tests/test_powershell_journals.py` the
   journal forms.
 - **One copy of everything.** A helper two backends need goes in
-  `tiff_workflow_common.py`, never into both. The only deliberate duplicate is
-  the overlay reader (`_overlay_object_pairs`, `_overlay_bound`,
-  `_overlay_value`), which `convert_tiff.py` carries too so that the wizard does
-  not import the backends: `tests/test_backend_invariants.py` requires the
-  copies to be identical. The wizard's own TIFF helpers (`_tiff_sample_layout`,
+  `tiff_workflow_common.py`, never into both. Since v3.1 the wizard imports
+  that module too (never a backend), and reads the overlay with its functions;
+  its own copies are being removed one by one (v3.1 phase 5). The wizard's own
+  TIFF helpers that remain (`_tiff_sample_layout`,
   `_restore_subfile_types`, `_magick_spec`, ...) serve the padded conversion and
   the purge gate and are a separate pipeline.
 - **A worker never logs, counts or lands a file.** `process_job` and
