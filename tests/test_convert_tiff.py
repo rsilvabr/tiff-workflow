@@ -827,9 +827,10 @@ class TestConfigCorruptWarning:
 
 class TestThumbFormatPlainTextFallback:
     """audit round 16: the plain-text path of workflow [1] passed any string to
-    -ThumbFormat and the backend failed at parameter binding."""
+    -ThumbFormat and the backend failed at parameter binding. v3.1 phase 7 (T4): a format
+    that is not offered is asked again, on both screens, as Rich always did."""
 
-    def test_invalid_format_falls_back_to_jpg(self, tmp_path, monkeypatch, capsys):
+    def test_invalid_format_is_asked_again(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         captured = []
 
@@ -845,6 +846,7 @@ class TestThumbFormatPlainTextFallback:
             "", "", "n", "", "", "", "", "",  # workers/staging/dry/safe/skip_lzw/cap/exclude/force-parallel
             "y", "y",       # generate thumbnails? configure?
             "", "", "bmp",  # size, quality, FORMAT (invalid)
+            "png",          # ... asked again
             "n",            # skip compressed with thumb?
             "y",            # proceed?
         ])
@@ -853,10 +855,10 @@ class TestThumbFormatPlainTextFallback:
         cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
         assert run_free_compress(cfg) is True
 
-        assert "Invalid format 'bmp', using jpg." in capsys.readouterr().out
+        assert "Please select one of the available options" in capsys.readouterr().out
         assert captured, "the backend command was never built"
         cmd = captured[0]
-        assert cmd[cmd.index("-ThumbFormat") + 1] == "jpg"
+        assert cmd[cmd.index("-ThumbFormat") + 1] == "png"
 
 
 class TestWorkTimeout:
@@ -886,6 +888,60 @@ class TestWorkTimeout:
                 fh.truncate(10 * 1024 * 1024)
         expected = 120 + 20 * convert_tiff.TIMEOUT_S_PER_MB
         assert _work_timeout(120, a, b) == pytest.approx(expected)
+
+
+class TestWorkflow4TwoSteps:
+    """Workflow 4 (Copy EXIF, then compress): compress runs only when Copy EXIF exited 0 --
+    it would ZIP TIFFs whose metadata never landed. v3.1 phase 7 (W7) wrote the two passes
+    once for the dry run and the run for real; nothing tested either before."""
+
+    def _wizard(self, monkeypatch, rcs, answers=()):
+        ran = []
+        rc = iter(rcs)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        monkeypatch.setattr(convert_tiff, "run_subprocess", lambda cmd, **k: ran.append(cmd) or next(rc))
+        it = iter(answers)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(it))
+        return ran
+
+    def test_compress_runs_only_after_copy_exif_succeeded(self, monkeypatch, capsys):
+        ran = self._wizard(monkeypatch, [1])
+        assert convert_tiff._run_exif_then_compress(["copy"], ["zip"]) == (1, None)
+        assert ran == [["copy"]], "compress ran after a failed Copy EXIF"
+        assert "ERROR: Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress)." in capsys.readouterr().out
+        ran = self._wizard(monkeypatch, [0, 2])
+        assert convert_tiff._run_exif_then_compress(["copy"], ["zip"]) == (0, 2)
+        assert ran == [["copy"], ["zip"]]
+        out = capsys.readouterr().out
+        assert out.index("Step 1/2") < out.index("Running: copy") < out.index("Step 2/2") < out.index("Running: zip")
+
+    def test_the_offer_to_run_for_real(self, monkeypatch, capsys):
+        self._wizard(monkeypatch, [], ["sim"])
+        assert convert_tiff._offer_real_run(True, "Run it?", "Going...", lambda: 7) == 7
+        out = capsys.readouterr().out
+        assert "Dry-run completed with errors" in out and "Going..." in out
+        self._wizard(monkeypatch, [], [""])                    # default: no
+        assert convert_tiff._offer_real_run(False, "Run it?", "Going...", lambda: 7) is None
+        assert "Skipped." in capsys.readouterr().out
+
+    def test_the_run_for_real_keeps_the_gate(self, monkeypatch, tmp_path):
+        """Dry run: both steps exit 0. Run for real: Copy EXIF fails -- compress must not run,
+        and the workflow reports the failure."""
+        sessions = [tmp_path / "S5pro 01", tmp_path / "S5pro 02"]
+        for s in sessions:
+            s.mkdir()
+        monkeypatch.setattr(convert_tiff, "step_pattern", lambda cfg: ["S5pro"])
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a: tmp_path)
+        monkeypatch.setattr(convert_tiff, "step_autofind", lambda cfg, p, root: sessions)
+        monkeypatch.setattr(convert_tiff, "step_basic_params",
+                            lambda cfg, wf: wf.update(workers=2, dry_run=True) or True)
+        monkeypatch.setattr(convert_tiff, "step_confirm", lambda wf, cfg: True)
+        ran = self._wizard(monkeypatch, [0, 0, 1], ["y"])
+        cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
+        assert convert_tiff._run_exif_or_compress(cfg, "both") is False
+        assert len(ran) == 3, "compress ran after the real Copy EXIF failed"
+        assert "-DryRun" in ran[0] and "-DryRun" in ran[1] and "-DryRun" not in ran[2]
+        assert "copy_exif_to_tiff.py" in " ".join(map(str, ran[2]))
 
 
 if __name__ == "__main__":

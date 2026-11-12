@@ -112,7 +112,6 @@ def _yes(answer, default: bool) -> bool:
 
 try:
     from rich.console import Console
-    from rich.markup import escape
     from rich.panel import Panel
     from rich.table import Table
     from rich.text import Text
@@ -1463,20 +1462,12 @@ def _safe_move(src: Path, dst: Path) -> None:
 
 def step_pattern(cfg: "ConfigManager") -> Optional[List[str]]:
     """Choose AutoFind pattern (S5, S3, Both, Custom)."""
-    if RICH_AVAILABLE and console:
-        console.print("\n[bold cyan]Auto-Find Pattern[/bold cyan]")
-        console.print("  [1] [bold]S5 Pro[/bold] folders -- matches 'S5pro' in folder name")
-        console.print("  [2] [bold]S3 Pro[/bold] folders -- matches 'S3pro' in folder name")
-        console.print("  [3] [bold]Both[/bold]          -- matches 'S5pro' and 'S3pro'")
-        console.print("  [4] [bold]Custom[/bold]         -- type any pattern")
-        choice = Prompt.ask("Choice", choices=["1", "2", "3", "4"], default="1")
-    else:
-        print("\n--- Auto-Find Pattern ---")
-        print("[1] S5 Pro folders -- matches 'S5pro' in folder name")
-        print("[2] S3 Pro folders -- matches 'S3pro' in folder name")
-        print("[3] Both          -- matches 'S5pro' and 'S3pro'")
-        print("[4] Custom        -- type any pattern")
-        choice = input("Choice [1]: ").strip() or "1"
+    _say("\nAuto-Find Pattern", "bold cyan")
+    _say(["  [1] ", ("S5 Pro", "bold"), " folders -- matches 'S5pro' in folder name"])
+    _say(["  [2] ", ("S3 Pro", "bold"), " folders -- matches 'S3pro' in folder name"])
+    _say(["  [3] ", ("Both", "bold"), "          -- matches 'S5pro' and 'S3pro'"])
+    _say(["  [4] ", ("Custom", "bold"), "         -- type any pattern"])
+    choice = _ask("Choice", "1", style="", choices=["1", "2", "3", "4"])
 
     patterns_map = {
         "1": ["S5pro"],
@@ -1486,10 +1477,7 @@ def step_pattern(cfg: "ConfigManager") -> Optional[List[str]]:
     if choice in patterns_map:
         return patterns_map[choice]
     if choice == "4":
-        if RICH_AVAILABLE and console:
-            pat = Prompt.ask("Custom pattern (case-insensitive, partial match)").strip()
-        else:
-            pat = input("Custom pattern (case-insensitive, partial match): ").strip()
+        pat = _ask("Custom pattern (case-insensitive, partial match)", style="")
         if not pat:
             return None
         return [pat]
@@ -1500,48 +1488,30 @@ def step_pattern(cfg: "ConfigManager") -> Optional[List[str]]:
 
 def step_autofind(cfg: "ConfigManager", patterns: List[str], root: Path) -> Optional[List[Path]]:
     """Scan folders matching pattern, let user confirm."""
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[cyan]Scanning for folders matching:[/cyan] {escape(', '.join(patterns))}")
-    else:
-        print(f"\nScanning for folders matching: {', '.join(patterns)}")
+    _say(["\n", ("Scanning for folders matching:", "cyan"), f" {', '.join(patterns)}"])
 
     found = find_folders_by_pattern(root, patterns)
     if not found:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No matching folders found.[/yellow]")
-        else:
-            print("No matching folders found.")
+        _say("No matching folders found.", "yellow")
         return None
 
-    if RICH_AVAILABLE and console:
-        table = Table(title=f"Found {len(found)} session(s)", header_style="bold cyan")
-        table.add_column("#", justify="right", style="dim", width=4)
-        table.add_column("Folder", style="green")
-        table.add_column("TIFFs", justify="center", style="yellow", width=6)
-        table.add_column("Path", style="dim")
-        for i, (folder, count) in enumerate(found.items(), 1):
-            table.add_row(str(i), escape(folder.name), str(count), escape(truncate_path(folder, 40)))
-        console.print(Panel(table, border_style="green"))
-    else:
-        print(f"\nFound {len(found)} session(s):")
-        for i, (folder, count) in enumerate(found.items(), 1):
-            print(f"  {i}. {folder.name} ({count} TIFFs) -- {folder}")
+    _table([{"name": "#", "justify": "right", "style": "dim", "width": 4},
+            {"name": "Folder", "style": "green"},
+            {"name": "TIFFs", "justify": "center", "style": "yellow", "width": 6},
+            {"name": "Path", "style": "dim"}],
+           [[str(i), folder.name, str(count), truncate_path(folder, 40)]
+            for i, (folder, count) in enumerate(found.items(), 1)],
+           panel={"border_style": "green"}, title=f"Found {len(found)} session(s)",
+           header_style="bold cyan")
 
     total_tiffs = sum(found.values())
-    if RICH_AVAILABLE and console:
-        msg = f"Proceed with all {len(found)} session(s) ({total_tiffs} TIFFs)?"
-        if not Confirm.ask(f"[green]{msg}[/green]", default=True):
-            return None
-    else:
-        msg = f"Proceed with all {len(found)} session(s) ({total_tiffs} TIFFs)? [Y/n]: "
-        if not _yes(input(msg), True):
-            return None
+    if not _ask_yes_no(f"Proceed with all {len(found)} session(s) ({total_tiffs} TIFFs)?", True, "green"):
+        return None
 
     # Verify folders still exist before returning
     existing = [p for p in found.keys() if p.exists()]
     if len(existing) != len(found):
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]Note: {len(found) - len(existing)} folder(s) were removed during selection.[/yellow]")
+        _say(f"Note: {len(found) - len(existing)} folder(s) were removed during selection.", "yellow")
     return existing
 
 
@@ -1576,24 +1546,12 @@ MODE_DESCS = {
 
 def step_mode(cfg: "ConfigManager") -> Optional[int]:
     """Select mode 0-9 for Free Compress."""
-    if RICH_AVAILABLE and console:
-        console.print("\n[bold cyan]Step 2: Organization Mode (Free Compress)[/bold cyan]")
-        for m, name in MODE_NAMES.items():
-            style = "red" if m == 8 else "green"
-            console.print(f"[{m}] [bold {style}]{name}[/bold {style}]")
-            console.print(f"    {MODE_DESCS[m]}\n")
-        valid = [str(m) for m in MODE_NAMES]
-        choice = Prompt.ask("Select mode", choices=valid, default=str(cfg.config.last_mode or 0))
-    else:
-        print("\n--- Mode (0-9) ---")
-        for m, name in MODE_NAMES.items():
-            warning = " [!]️" if m == 8 else ""
-            print(f"[{m}] {name}{warning}")
-            print(f"    {MODE_DESCS[m]}\n")
-        valid = [str(m) for m in MODE_NAMES]
-        # Same default as the Rich path, which offers the last mode used
-        _default_mode = str(cfg.config.last_mode or 0)
-        choice = input(f"Mode [{_default_mode}]: ").strip() or _default_mode
+    _say("\nStep 2: Organization Mode (Free Compress)", "bold cyan")
+    for m, name in MODE_NAMES.items():
+        _say([f"[{m}] ", (name, "bold red" if m == 8 else "bold green")])
+        _say(f"    {MODE_DESCS[m]}\n")
+    choice = _ask("Select mode", str(cfg.config.last_mode or 0), style="",
+                  choices=[str(m) for m in MODE_NAMES])
 
     try:
         mode = int(choice)
@@ -1609,32 +1567,20 @@ def step_mode(cfg: "ConfigManager") -> Optional[int]:
 def step_folder(cfg: "ConfigManager", prompt_text: str = "Input folder") -> Optional[Path]:
     """Choose input folder."""
     default = cfg.config.last_input_dir or str(Path.cwd())
-    if RICH_AVAILABLE and console:
-        folder = Prompt.ask(f"[cyan]{prompt_text}[/cyan]", default=default).strip()
-    else:
-        folder = input(f"{prompt_text} [{default}]: ").strip() or default
+    folder = _ask(prompt_text, default)
     # Strip surrounding quotes from pasted/dragged paths
     if len(folder) >= 2 and folder[0] == folder[-1] and folder[0] in ("'", '"'):
         folder = folder[1:-1]
     p = Path(folder)
     if not p.exists():
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]Folder not found: {escape(folder)}[/red]")
-        else:
-            print(f"ERROR: Folder not found: {folder}")
+        _error(f"Folder not found: {folder}")
         return None
     if not p.is_dir():
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]Not a directory: {escape(folder)}[/red]")
-        else:
-            print(f"ERROR: Not a directory: {folder}")
+        _error(f"Not a directory: {folder}")
         return None
     # ';' breaks the multi-folder contract (paths are joined/split on ';')
     if ";" in str(p):
-        if RICH_AVAILABLE and console:
-            console.print(f"[red]Folder path contains ';' which is not supported: {escape(str(p))}[/red]")
-        else:
-            print(f"ERROR: Folder path contains ';' which is not supported: {p}")
+        _error(f"Folder path contains ';' which is not supported: {p}")
         return None
     cfg.config.last_input_dir = os.path.abspath(str(p))
     # audit round 28: ABSOLUTE, never the text as typed. A relative answer ("photos") went
@@ -1697,83 +1643,42 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
     skip_default = (_backend_default("compress_tiff_zip.py", "SkipLzwAsCompressed")
                     if _ref == "compress_tiff_zip.py" else False)
     cap_default = _backend_default("compress_tiff_zip.py", "CapWorkers")
-    if RICH_AVAILABLE and console:
-        workers_str = Prompt.ask(
-            "[cyan]Workers[/cyan]",
-            default=str(cfg.config.last_workers or cfg.config.default_workers)
-        ).strip()
-        workflow["workers"] = _read_workers(workers_str, cfg)
+    workflow["workers"] = _read_workers(
+        _ask("Workers", str(cfg.config.last_workers or cfg.config.default_workers)), cfg)
+    workflow["staging"] = _read_staging(
+        _ask("Staging folder (SSD for faster I/O; '-' = none)", _staging_default(cfg) or "-"), cfg)
+    cfg.config.last_staging = workflow["staging"]
 
-        staging = Prompt.ask(
-            "[cyan]Staging folder (SSD for faster I/O; '-' = none)[/cyan]",
-            default=_staging_default(cfg) or "-"
-        ).strip()
-        workflow["staging"] = _read_staging(staging, cfg)
-        cfg.config.last_staging = workflow["staging"]
+    workflow["dry_run"] = _ask_yes_no("Dry-run mode?", False)
 
-        workflow["dry_run"] = Confirm.ask("Dry-run mode?", default=False)
-        
-        # SafeMode and SkipLzw options
-        workflow["safe_mode"] = Confirm.ask("[cyan]Safe mode?[/cyan] (skip multi-page TIFFs)", default=safe_default)
-        workflow["skip_lzw"] = Confirm.ask("[cyan]Skip LZW as already compressed?[/cyan] (LZW files will be ignored)", default=skip_default)
+    # SafeMode and SkipLzw options
+    workflow["safe_mode"] = _ask_yes_no([("Safe mode?", "cyan"), " (skip multi-page TIFFs)"], safe_default)
+    workflow["skip_lzw"] = _ask_yes_no([("Skip LZW as already compressed?", "cyan"),
+                                        " (LZW files will be ignored)"], skip_default)
 
-        # -CapWorkers only exists on compress_tiff_zip.py; asking it for a Copy EXIF
-        # workflow produced an answer that was silently dropped by the command builder.
-        if _supports_cap_workers(workflow):
-            cap_str = Prompt.ask("[cyan]Cap workers?[/cyan] (0 = no cap)", default=str(cap_default))
-            try:
-                workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS))
-            except ValueError:
-                console.print(f"[yellow]Invalid cap '{cap_str}', using {cap_default}[/yellow]")
-                workflow["cap_workers"] = cap_default
+    # -CapWorkers only exists on compress_tiff_zip.py; asking it for a Copy EXIF
+    # workflow produced an answer that was silently dropped by the command builder.
+    if _supports_cap_workers(workflow):
+        cap_str = _ask([("Cap workers?", "cyan"), " (0 = no cap)"], str(cap_default), style="")
+        try:
+            workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS))
+        except ValueError:
+            _say(f"Invalid cap '{cap_str}', using {cap_default}", "yellow")
+            workflow["cap_workers"] = cap_default
 
-        excl_default = cfg.config.last_exclude_folders or ""
-        excl = Prompt.ask(
-            "[cyan]Exclude folders?[/cyan] (';'-separated folder names, '-' = none)",
-            default=excl_default or "-"
-        ).strip()
-        if excl in ("-", "", "none"):
-            workflow["exclude_folders"] = ""
-            cfg.config.last_exclude_folders = None
-        else:
-            workflow["exclude_folders"] = excl
-            cfg.config.last_exclude_folders = excl
-
-        # The backends work on several files at once; -ForceSequential turns that off.
-        if Confirm.ask("[yellow]Force sequential? (override parallelism)[/yellow]", default=False):
-            workflow["force_sequential"] = True
+    excl_default = cfg.config.last_exclude_folders or ""
+    excl = _ask([("Exclude folders?", "cyan"), " (';'-separated folder names, '-' = none)"],
+                excl_default or "-", style="")
+    if excl in ("-", "", "none"):
+        workflow["exclude_folders"] = ""
+        cfg.config.last_exclude_folders = None
     else:
-        workers_str = input(f"Workers [{(cfg.config.last_workers or cfg.config.default_workers)}]: ").strip()
-        workflow["workers"] = _read_workers(workers_str, cfg)
-        staging = input(f"Staging folder (SSD for faster I/O; '-' = none) [{_staging_default(cfg) or '-'}]: ").strip()
-        workflow["staging"] = _read_staging(staging, cfg)
-        cfg.config.last_staging = workflow["staging"]
-        dry = input("Dry-run? [y/N]: ").strip().lower()
-        workflow["dry_run"] = _yes(dry, False)
-        safe = input(f"Safe mode? (skip multi-page TIFFs) [{'Y/n' if safe_default else 'y/N'}]: ").strip().lower()
-        workflow["safe_mode"] = _yes(safe, safe_default)
-        skip_lzw = input(f"Skip LZW as already compressed? (LZW files will be ignored) [{'Y/n' if skip_default else 'y/N'}]: ").strip().lower()
-        workflow["skip_lzw"] = _yes(skip_lzw, skip_default)
-        if _supports_cap_workers(workflow):
-            cap_str = input(f"Cap workers? (0 = no cap) [{cap_default}]: ").strip()
-            try:
-                workflow["cap_workers"] = max(0, min(int(cap_str), MAX_WORKERS)) if cap_str else cap_default
-            except ValueError:
-                print(f"Invalid cap '{cap_str}', using {cap_default}")
-                workflow["cap_workers"] = cap_default
-        excl_default = cfg.config.last_exclude_folders or ""
-        excl = input(f"Exclude folders? (';'-separated names, '-' = none) [{excl_default or '-'}]: ").strip()
-        if excl == "":
-            excl = excl_default
-        if excl in ("-", "none"):
-            workflow["exclude_folders"] = ""
-            cfg.config.last_exclude_folders = None
-        else:
-            workflow["exclude_folders"] = excl
-            cfg.config.last_exclude_folders = excl
-        fp = input("Force sequential? (y/N): ").strip().lower()
-        if _yes(fp, False):
-            workflow["force_sequential"] = True
+        workflow["exclude_folders"] = excl
+        cfg.config.last_exclude_folders = excl
+
+    # The backends work on several files at once; -ForceSequential turns that off.
+    if _ask_yes_no("Force sequential? (override parallelism)", False, "yellow"):
+        workflow["force_sequential"] = True
 
     step_advanced_options(cfg, workflow)
     return True
@@ -1828,11 +1733,7 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
     rows = [(b, o) for b in backends for o in REGISTRY[b] if o.level == "advanced"]
     if not rows:
         return True
-    if RICH_AVAILABLE and console:
-        wanted = Confirm.ask("[cyan]Advanced options?[/cyan] (timeouts, memory share, ...)",
-                             default=False)
-    else:
-        wanted = _yes(input("Advanced options? (timeouts, memory share, ...) [y/N]: "), False)
+    wanted = _ask_yes_no([("Advanced options?", "cyan"), " (timeouts, memory share, ...)"], False)
     if not wanted:
         return True
     while True:
@@ -1888,71 +1789,47 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
     dry = "Yes" if workflow.get("dry_run") else "No"
     folders_count = len(workflow.get("folders", []))
 
-    if RICH_AVAILABLE and console:
-        table = Table(box=None, show_header=False, pad_edge=False)
-        table.add_column(style="bold cyan")
-        table.add_column()
-        if origin in ("copy_exif",):
-            table.add_row("Workflow:", f"Copy EXIF ({origin})")
-        elif origin == "free_compress":
-            table.add_row("Workflow:", "Compress TIFFs")
-        elif origin in ("compress", "both"):
-            table.add_row("Workflow:", f"Fuji: Compress ({origin})")
+    rows = []
+    if origin in ("copy_exif",):
+        rows.append(["Workflow:", f"Copy EXIF ({origin})"])
+    elif origin == "free_compress":
+        rows.append(["Workflow:", "Compress TIFFs"])
+    elif origin in ("compress", "both"):
+        rows.append(["Workflow:", f"Fuji: Compress ({origin})"])
 
-        if origin != "free_compress" and folders_count > 1:
-            pattern_val = workflow.get("pattern", [])
-            pattern_str = ", ".join(pattern_val) if isinstance(pattern_val, list) else str(pattern_val)
-            table.add_row("Pattern:", escape(pattern_str or "?"))
-            table.add_row("Sessions:", f"{folders_count} folder(s)")
-        elif origin == "free_compress":
-            table.add_row("Mode:", f"{mode} - {MODE_NAMES.get(mode, '?')}")
-            table.add_row("Folder:", escape(str(workflow.get("input_dir", "?"))[:60]))
-        else:
-            table.add_row("Folder:", escape(str(workflow.get("folders", [workflow.get("input_dir")])[0].name if workflow.get("folders") else workflow.get("input_dir", "?"))))
-
-        table.add_row("Workers:", str(workflow.get("workers", cfg.config.default_workers)))
-        if workflow.get("cap_workers"):
-            table.add_row("Cap workers:", str(workflow["cap_workers"]))
-        if workflow.get("exclude_folders"):
-            table.add_row("[yellow]Excluding:[/yellow]", escape(workflow["exclude_folders"]))
-        table.add_row("Staging:", escape(str(workflow.get("staging") or "disabled")))
-        table.add_row("Dry-run:", dry)
-        if workflow.get("force_parallel"):
-            table.add_row("[yellow]Parallelism:[/yellow]", "FORCED ON (-ForceParallel)")
-        elif workflow.get("force_sequential"):
-            table.add_row("[yellow]Parallelism:[/yellow]", "FORCED OFF (-ForceSequential)")
-
-        if origin == "free_compress" and mode == 8:
-            table.add_row("[red]Delete source:[/red]", "ON -- originals will be DELETED")
-
-        console.print(Panel(table, title="[bold]Summary[/bold]", border_style="green"))
-        if not Confirm.ask("[yellow]Proceed?[/yellow]", default=True):
-            console.print("[dim]Cancelled.[/dim]")
-            return False
+    if origin != "free_compress" and folders_count > 1:
+        pattern_val = workflow.get("pattern", [])
+        pattern_str = ", ".join(pattern_val) if isinstance(pattern_val, list) else str(pattern_val)
+        rows.append(["Pattern:", pattern_str or "?"])
+        rows.append(["Sessions:", f"{folders_count} folder(s)"])
+    elif origin == "free_compress":
+        rows.append(["Mode:", f"{mode} - {MODE_NAMES.get(mode, '?')}"])
+        rows.append(["Folder:", str(workflow.get("input_dir", "?"))[:60]])
     else:
-        print("\n=== Summary ===")
-        print(f"  Workflow: {origin}")
-        if origin == "free_compress":
-            print(f"  Mode: {mode} - {MODE_NAMES.get(mode, '?')}")
-            print(f"  Folder: {workflow.get('input_dir', '?')}")
-        else:
-            print(f"  Pattern: {workflow.get('pattern', '?')}")
-            print(f"  Sessions: {folders_count} folder(s)")
-        print(f"  Workers: {workflow.get('workers', cfg.config.default_workers)}")
-        if workflow.get("cap_workers"):
-            print(f"  Cap workers: {workflow['cap_workers']}")
-        if workflow.get("exclude_folders"):
-            print(f"  Excluding: {workflow['exclude_folders']}")
-        print(f"  Staging: {workflow.get('staging') or 'disabled'}")
-        print(f"  Dry-run: {dry}")
-        if workflow.get("force_parallel"):
-            print("  Parallelism: FORCED ON (-ForceParallel)")
-        elif workflow.get("force_sequential"):
-            print("  Parallelism: FORCED OFF (-ForceSequential)")
-        confirm = input("Proceed? [Y/n]: ").strip().lower()
-        if not _yes(confirm, True):
-            print("Cancelled.")
-            return False
+        rows.append(["Folder:", str(workflow.get("folders", [workflow.get("input_dir")])[0].name
+                                    if workflow.get("folders") else workflow.get("input_dir", "?"))])
+
+    rows.append(["Workers:", str(workflow.get("workers", cfg.config.default_workers))])
+    if workflow.get("cap_workers"):
+        rows.append(["Cap workers:", str(workflow["cap_workers"])])
+    if workflow.get("exclude_folders"):
+        rows.append([("Excluding:", "yellow"), workflow["exclude_folders"]])
+    rows.append(["Staging:", str(workflow.get("staging") or "disabled")])
+    rows.append(["Dry-run:", dry])
+    if workflow.get("force_parallel"):
+        rows.append([("Parallelism:", "yellow"), "FORCED ON (-ForceParallel)"])
+    elif workflow.get("force_sequential"):
+        rows.append([("Parallelism:", "yellow"), "FORCED OFF (-ForceSequential)"])
+
+    if origin == "free_compress" and mode == 8:
+        rows.append([("Delete source:", "red"), "ON -- originals will be DELETED"])
+
+    _table([{"style": "bold cyan"}, {}], rows,
+           panel={"title": ("Summary", "bold"), "border_style": "green"},
+           box=None, show_header=False, pad_edge=False)
+    if not _ask_yes_no("Proceed?", True, "yellow"):
+        _say("Cancelled.", "dim")
+        return False
 
     return True
 
@@ -5347,6 +5224,38 @@ def run_manifest_workflow(cfg) -> bool:
 
 # --- Workflow Runners -----------------------------------------------
 
+def _echo_command(cmd, lead: str = "\n") -> None:
+    """The line shown before a backend starts: the command line it gets."""
+    _say(f"{lead}Running: {' '.join(str(a) for a in cmd)}\n", "dim")
+
+
+def _offer_real_run(failed: bool, question: str, announce: str, run_real):
+    """After a dry run: say so when it had errors, ask whether to run it for real (default
+    no) and, if so, announce it and return what `run_real()` returns; None when skipped."""
+    if failed:
+        _say("Dry-run completed with errors. Review output above before running for real.", "yellow")
+    if not _ask_yes_no(f"\nDry-run complete. {question}", False, "yellow"):
+        _say("Skipped.", "dim")
+        return None
+    _say(f"{announce}\n", "cyan")
+    return run_real()
+
+
+def _run_exif_then_compress(cmd_copy: List[str], cmd_compress: List[str]):
+    """Workflow 4's two runs, (exit code of Copy EXIF, of compress). Compress runs only when
+    Copy EXIF exited 0 -- it would ZIP TIFFs whose metadata never landed; its code is then
+    None. The dry run and the run for real both go through here."""
+    _say("\n=== Step 1/2: Copy EXIF ===", "cyan")
+    _echo_command(cmd_copy, lead="")
+    rc_copy = run_subprocess(cmd_copy)
+    if rc_copy != 0:
+        _error("Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).")
+        return rc_copy, None
+    _say("\n=== Step 2/2: Fuji: Compress ===", "cyan")
+    _echo_command(cmd_compress, lead="")
+    return rc_copy, run_subprocess(cmd_compress)
+
+
 def run_free_compress(cfg: "ConfigManager") -> bool:
     """Workflow 1: Free compress with modes 0-9."""
     workflow = {
@@ -5374,23 +5283,13 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
 
     # Offer to generate a manifest CSV of subfolders instead of running now.
     # The user edits it in Excel, then runs it from the main menu option [3].
-    if RICH_AVAILABLE and console:
-        gen_manifest = Confirm.ask(
-            "[cyan]Generate a manifest CSV for this folder instead of running now?[/cyan]",
-            default=False)
-    else:
-        gen_manifest = _yes(input("Generate a manifest CSV for this folder instead of running now? [y/N]: "), False)
-    if gen_manifest:
+    if _ask_yes_no("Generate a manifest CSV for this folder instead of running now?", False, "cyan"):
         manifest_path = generate_manifest(folder, mode)
         if manifest_path:
             cfg.config.last_manifest_path = manifest_path
             cfg.save_config()
-            if RICH_AVAILABLE and console:
-                console.print(f"[green]Manifest saved to:[/green] {escape(manifest_path)}")
-                console.print("[dim]Edit in Excel, then run it from the main menu: [3] Run from manifest[/dim]")
-            else:
-                print(f"Manifest saved to: {manifest_path}")
-                print("Edit in Excel, then run it from the main menu: [3] Run from manifest")
+            _say([("Manifest saved to:", "green"), f" {manifest_path}"])
+            _say("Edit in Excel, then run it from the main menu: [3] Run from manifest", "dim")
         return True
 
     # Mode 2 flattens every TIFF into one folder. Without an explicit output folder the
@@ -5398,46 +5297,24 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
     # root-level TIFFs in place -- so ask for it here.
     if mode == 2:
         default_out = str(folder / "ZIP_flat")
-        if RICH_AVAILABLE and console:
-            out_dir = Prompt.ask(
-                "[cyan]Output folder (mode 2 merges all TIFFs here)[/cyan]",
-                default=default_out,
-            ).strip()
-        else:
-            out_dir = input(f"Output folder (mode 2 merges all TIFFs here) [{default_out}]: ").strip() or default_out
+        out_dir = _ask("Output folder (mode 2 merges all TIFFs here)", default_out)
         if len(out_dir) >= 2 and out_dir[0] == out_dir[-1] and out_dir[0] in ("'", '"'):
             out_dir = out_dir[1:-1]
         if ";" in out_dir:
-            msg = f"Output path contains ';' which is not supported: {out_dir}"
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]{escape(msg)}[/red]")
-            else:
-                print(f"ERROR: {msg}")
+            _error(f"Output path contains ';' which is not supported: {out_dir}")
             return False
         if Path(out_dir).resolve() == folder.resolve():
             warn = "Output folder is the input folder: TIFFs will be recompressed in place, without a backup."
-            if RICH_AVAILABLE and console:
-                if not Confirm.ask(f"[yellow]{warn} Continue?[/yellow]", default=False):
-                    console.print("[dim]Cancelled.[/dim]")
-                    return False
-            else:
-                if not _yes(input(f"{warn} Continue? [y/N]: "), False):
-                    print("Cancelled.")
-                    return False
+            if not _ask_yes_no(f"{warn} Continue?", False, "yellow"):
+                _say("Cancelled.", "dim")
+                return False
         else:
             workflow["output_dir"] = out_dir
 
         # Collision policy for the flattened output
         dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
-        if RICH_AVAILABLE and console:
-            workflow["duplicate_action"] = Prompt.ask(
-                "[cyan]Duplicate filenames[/cyan]",
-                choices=["Numbered", "Skip", "Overwrite"],
-                default=dup_default,
-            )
-        else:
-            dup = input(f"Duplicate filenames (Numbered/Skip/Overwrite) [{dup_default}]: ").strip() or dup_default
-            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else dup_default
+        workflow["duplicate_action"] = _ask("Duplicate filenames", dup_default,
+                                            choices=["Numbered", "Skip", "Overwrite"])
 
     # Basic params
     step_basic_params(cfg, workflow)
@@ -5448,51 +5325,23 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
     thumb_size_default = _backend_default("compress_tiff_zip.py", "ThumbSize")
     thumb_quality_default = _backend_default("compress_tiff_zip.py", "ThumbQuality")
     thumb_format_default = _backend_default("compress_tiff_zip.py", "ThumbFormat")
-    if RICH_AVAILABLE and console:
-        if Confirm.ask("[cyan]Generate embedded thumbnails?[/cyan]", default=False):
-            workflow["generate_thumbnail"] = True
-            if Confirm.ask("[cyan]Configure thumbnail settings?[/cyan]", default=False):
-                # Thumbnail size
-                size_str = Prompt.ask("[cyan]Thumbnail size (px)[/cyan]", default=str(thumb_size_default))
-                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
-                # Quality
-                quality_str = Prompt.ask("[cyan]JPEG quality[/cyan]", default=thumb_quality_default)
-                workflow["thumb_quality"] = quality_str
-                # Format
-                workflow["thumb_format"] = Prompt.ask("[cyan]Format[/cyan]", choices=["jpg", "png", "tif"], default=thumb_format_default)
-            # Option to skip compressed TIFFs with existing thumbnails
-            workflow["skip_compressed_with_thumb"] = Confirm.ask("[cyan]Skip already-compressed TIFFs that have thumbnails?[/cyan]", default=False)
-    else:
-        gen_thumb = input("Generate embedded thumbnails? [y/N]: ").strip().lower()
-        if _yes(gen_thumb, False):
-            workflow["generate_thumbnail"] = True
-            config_thumb = input("Configure thumbnail settings? [y/N]: ").strip().lower()
-            if _yes(config_thumb, False):
-                size_str = input(f"Thumbnail size (px) [{thumb_size_default}]: ").strip() or str(thumb_size_default)
-                workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
-                quality_str = input(f"JPEG quality [{thumb_quality_default}]: ").strip() or thumb_quality_default
-                workflow["thumb_quality"] = quality_str
-                fmt = input(f"Format (jpg/png/tif) [{thumb_format_default}]: ").strip().lower() or thumb_format_default
-                # audit round 16: the Rich path constrains choices, but the plain-text
-                # path passed any string straight to -ThumbFormat and the backend failed
-                # at parameter binding. Fall back to the default with a warning instead.
-                if fmt not in ("jpg", "jpeg", "png", "tif", "tiff"):
-                    print(f"Invalid format '{fmt}', using {thumb_format_default}.")
-                    fmt = thumb_format_default
-                workflow["thumb_format"] = fmt
-            skip_existing = input("Skip already-compressed TIFFs that have thumbnails? [y/N]: ").strip().lower()
-            workflow["skip_compressed_with_thumb"] = _yes(skip_existing, False)
+    if _ask_yes_no("Generate embedded thumbnails?", False, "cyan"):
+        workflow["generate_thumbnail"] = True
+        if _ask_yes_no("Configure thumbnail settings?", False, "cyan"):
+            size_str = _ask("Thumbnail size (px)", str(thumb_size_default))
+            workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
+            workflow["thumb_quality"] = _ask("JPEG quality", thumb_quality_default)
+            # audit round 16: -ThumbFormat only ever gets one of the formats the backend takes
+            workflow["thumb_format"] = _ask("Format", thumb_format_default, choices=["jpg", "png", "tif"])
+        # Option to skip compressed TIFFs with existing thumbnails
+        workflow["skip_compressed_with_thumb"] = _ask_yes_no(
+            "Skip already-compressed TIFFs that have thumbnails?", False, "cyan")
 
     # For mode 8: confirm delete
     if mode == 8:
-        if RICH_AVAILABLE and console:
-            if not Confirm.ask("[red]Mode 8 will DELETE source TIFFs after compression. Are you sure?[/red]", default=False):
-                console.print("[dim]Cancelled.[/dim]")
-                return False
-        else:
-            if not _yes(input("Mode 8 will DELETE source TIFFs. Confirm? [y/N]: "), False):
-                print("Cancelled.")
-                return False
+        if not _ask_yes_no("Mode 8 will DELETE source TIFFs after compression. Are you sure?", False, "red"):
+            _say("Cancelled.", "dim")
+            return False
         workflow["delete_source"] = True
     else:
         workflow["delete_source"] = False
@@ -5512,36 +5361,14 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
     if workflow.get("delete_source"):
         label += " [DELETES SOURCES]"
     _save_last_run(cfg, "compress", label, [journal_cmd])
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[dim]Running: {escape(' '.join(str(a) for a in cmd))}[/dim]\n")
-    else:
-        print(f"\nRunning: {' '.join(cmd)}\n")
-
+    _echo_command(cmd)
     result = run_subprocess(cmd)
 
     if workflow.get("dry_run"):
-        if result != 0:
-            if RICH_AVAILABLE and console:
-                console.print("[yellow]Dry-run completed with errors. Review output above before running for real.[/yellow]")
-            else:
-                print("Dry-run completed with errors. Review output above before running for real.")
-        if RICH_AVAILABLE and console:
-            if Confirm.ask("\n[yellow]Dry-run complete. Run for real now?[/yellow]", default=False):
-                console.print("[cyan]Running for real (DryRun disabled)...[/cyan]\n")
-                workflow["dry_run"] = False
-                cmd_real = build_compress_command(workflow, folders=[folder])
-                run_subprocess(cmd_real)
-            else:
-                console.print("[dim]Skipped.[/dim]")
-        else:
-            resp = input("\nDry-run complete. Run for real now? [y/N]: ").strip().lower()
-            if _yes(resp, False):
-                print("Running for real (DryRun disabled)...\n")
-                workflow["dry_run"] = False
-                cmd_real = build_compress_command(workflow, folders=[folder])
-                run_subprocess(cmd_real)
-            else:
-                print("Skipped.")
+        def real():
+            workflow["dry_run"] = False
+            return run_subprocess(build_compress_command(workflow, folders=[folder]))
+        _offer_real_run(result != 0, "Run for real now?", "Running for real (DryRun disabled)...", real)
 
     return True
 
@@ -5577,10 +5404,7 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
     # AutoFind
     found_folders = step_autofind(cfg, patterns, root)
     if not found_folders:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No folders found matching pattern. Workflow cancelled.[/yellow]")
-        else:
-            print("No folders found matching pattern. Workflow cancelled.")
+        _say("No folders found matching pattern. Workflow cancelled.", "yellow")
         return False
     workflow["folders"] = found_folders
 
@@ -5595,34 +5419,16 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
     cfg.save_config()
 
     def run_and_prompt(cmd_list, folders):
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[dim]Running: {escape(' '.join(str(a) for a in cmd_list))}[/dim]\n")
-        else:
-            print(f"\nRunning: {' '.join(cmd_list)}\n")
+        _echo_command(cmd_list)
         run_result = run_subprocess(cmd_list)
         if workflow.get("dry_run"):
-            if run_result != 0:
-                if RICH_AVAILABLE and console:
-                    console.print("[yellow]Dry-run completed with errors. Review output above before running for real.[/yellow]")
-                else:
-                    print("Dry-run completed with errors. Review output above before running for real.")
-            if RICH_AVAILABLE and console:
-                if Confirm.ask("\n[yellow]Dry-run complete. Run for real now?[/yellow]", default=False):
-                    console.print("[cyan]Running for real...[/cyan]\n")
-                    workflow["dry_run"] = False
-                    real_cmd = build_compress_command(workflow, folders=folders) if "compress" in workflow_type or workflow_type == "both" else build_copy_exif_command(workflow, folders=folders)
-                    run_subprocess(real_cmd)
-                else:
-                    console.print("[dim]Skipped.[/dim]")
-            else:
-                resp = input("\nDry-run complete. Run for real now? [y/N]: ").strip().lower()
-                if _yes(resp, False):
-                    print("Running for real...\n")
-                    workflow["dry_run"] = False
-                    real_cmd = build_compress_command(workflow, folders=folders) if "compress" in workflow_type or workflow_type == "both" else build_copy_exif_command(workflow, folders=folders)
-                    run_subprocess(real_cmd)
-                else:
-                    print("Skipped.")
+            def real():
+                workflow["dry_run"] = False
+                return run_subprocess(
+                    build_compress_command(workflow, folders=folders)
+                    if "compress" in workflow_type or workflow_type == "both"
+                    else build_copy_exif_command(workflow, folders=folders))
+            _offer_real_run(run_result != 0, "Run for real now?", "Running for real...", real)
 
     journal_wf = dict(workflow)
     journal_wf["dry_run"] = False
@@ -5654,82 +5460,23 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
     else:  # both
         step1_workflow = workflow.copy()
         step1_workflow["compress_zip"] = False
-        cmd_copy = build_copy_exif_command(step1_workflow, folders=found_folders)
-        if RICH_AVAILABLE and console:
-            console.print("\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
-            console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_copy))}[/dim]\n")
-        else:
-            print("\n=== Step 1/2: Copy EXIF ===")
-            print(f"Running: {' '.join(cmd_copy)}\n")
-        step1_result = run_subprocess(cmd_copy)
-
-        if step1_result != 0:
-            if RICH_AVAILABLE and console:
-                console.print("[red]Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).[/red]")
-            else:
-                print("ERROR: Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).")
+        rc_copy, rc_compress = _run_exif_then_compress(
+            build_copy_exif_command(step1_workflow, folders=found_folders),
+            build_compress_command(workflow, folders=found_folders))
+        if rc_compress is None:
             return False
 
-        cmd = build_compress_command(workflow, folders=found_folders)
-        if RICH_AVAILABLE and console:
-            console.print("\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
-            console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd))}[/dim]\n")
-        else:
-            print("\n=== Step 2/2: Fuji: Compress ===")
-            print(f"Running: {' '.join(cmd)}\n")
-        step2_result = run_subprocess(cmd)
-
         if workflow.get("dry_run"):
-            if step1_result != 0 or step2_result != 0:
-                if RICH_AVAILABLE and console:
-                    console.print("[yellow]Dry-run completed with errors. Review output above before running for real.[/yellow]")
-                else:
-                    print("Dry-run completed with errors. Review output above before running for real.")
-            if RICH_AVAILABLE and console:
-                if Confirm.ask("\n[yellow]Dry-run complete. Run both steps for real now?[/yellow]", default=False):
-                    console.print("[cyan]Running for real...[/cyan]\n")
-                    workflow["dry_run"] = False
-                    copy_workflow = workflow.copy()
-                    copy_workflow["compress_zip"] = False
-                    cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders)
-                    cmd_real = build_compress_command(workflow, folders=found_folders)
-                    if RICH_AVAILABLE and console:
-                        console.print("\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
-                        console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_copy_real))}[/dim]\n")
-                    else:
-                        print("\n=== Step 1/2: Copy EXIF ===")
-                        print(f"Running: {' '.join(cmd_copy_real)}\n")
-                    # Same gate as the first pass above: a failed Copy EXIF must not fall
-                    # through to Compress, which would ZIP TIFFs whose metadata never landed.
-                    if run_subprocess(cmd_copy_real) != 0:
-                        console.print("[red]Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).[/red]")
-                        return False
-                    if RICH_AVAILABLE and console:
-                        console.print("\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
-                        console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_real))}[/dim]\n")
-                    else:
-                        print("\n=== Step 2/2: Fuji: Compress ===")
-                        print(f"Running: {' '.join(cmd_real)}\n")
-                    run_subprocess(cmd_real)
-                else:
-                    console.print("[dim]Skipped.[/dim]")
-            else:
-                resp = input("\nDry-run complete. Run both steps for real now? [y/N]: ").strip().lower()
-                if _yes(resp, False):
-                    print("Running for real...\n")
-                    workflow["dry_run"] = False
-                    copy_workflow = workflow.copy()
-                    copy_workflow["compress_zip"] = False
-                    cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders)
-                    cmd_real = build_compress_command(workflow, folders=found_folders)
-                    print("=== Step 1/2: Copy EXIF ===")
-                    if run_subprocess(cmd_copy_real) != 0:
-                        print("ERROR: Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).")
-                        return False
-                    print("=== Step 2/2: Fuji: Compress ===")
-                    run_subprocess(cmd_real)
-                else:
-                    print("Skipped.")
+            def real():
+                workflow["dry_run"] = False
+                copy_workflow = workflow.copy()
+                copy_workflow["compress_zip"] = False
+                return _run_exif_then_compress(
+                    build_copy_exif_command(copy_workflow, folders=found_folders),
+                    build_compress_command(workflow, folders=found_folders))[1] is not None
+            if _offer_real_run(rc_compress != 0, "Run both steps for real now?", "Running for real...",
+                               real) is False:
+                return False
         return True
 
 
@@ -6364,10 +6111,7 @@ def main():
         choice = show_main_menu(cfg)
 
         if choice == "0":
-            if RICH_AVAILABLE and console:
-                console.print("[dim]Done.[/dim]")
-            else:
-                print("Done.")
+            _say("Done.", "dim")
             break
 
         if choice == "U":
