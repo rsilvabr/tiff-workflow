@@ -2805,6 +2805,25 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
 
 
 @_scoped_magick_aliases
+def _compare_output(result) -> str:
+    """What a finished `magick compare` printed: the metric goes to stderr."""
+    return result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
+
+
+# magick prints a large RMSE in scientific notation ("1.23457e+06 (0.0188)"); an older
+# pattern read "06" as the RMSE.
+_RMSE_RE = re.compile(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)")
+
+
+def _rmse_value(output: str) -> Tuple[Optional[float], str]:
+    """(the absolute RMSE in `magick compare -metric RMSE` output, the output without magick's
+    noise); the RMSE is None when the output holds no number. Used by both gates -- the purge's
+    page compare and the Diagnose round trip -- so a fix to the reading reaches both."""
+    output = _strip_magick_noise(output).strip()
+    match = _RMSE_RE.search(output)
+    return (float(match.group(1)) if match else None), output
+
+
 def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     """
     Compare two TIFFs pixel-by-pixel using RMSE.
@@ -2830,18 +2849,6 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
         except Exception:
             return None, None
 
-    def get_page_count(path):
-        try:
-            result = _run_captured(
-                ["magick", "identify", "-ping", "-format", "%n\n", str(path)],
-                _work_timeout(30, path), text=True
-            )
-            if result.returncode == 0 and result.stdout:
-                return int(result.stdout.splitlines()[0].strip())
-            return None
-        except Exception:
-            return None
-
     old_w, old_h = get_dimensions(old_path)
     new_w, new_h = get_dimensions(new_path)
 
@@ -2854,8 +2861,8 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     # Page-count check: RMSE below only compares page [0], so a lost extra page must block the
     # purge. This gate authorises permanent deletion, so an unreadable count fails CLOSED --
     # skipping the check on None let a page-losing conversion pass on nothing but page-0 RMSE.
-    old_pages = get_page_count(old_path)
-    new_pages = get_page_count(new_path)
+    old_pages = _tiff_page_count(old_path)
+    new_pages = _tiff_page_count(new_path)
     if old_pages is None or new_pages is None:
         return False, "page count unreadable (cannot verify pages were preserved)"
     # A differing page count is still a refusal by default -- it is decided below, together
@@ -2875,20 +2882,12 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
                      f"{_magick_spec(old_path)}[{old_page}]", f"{_magick_spec(new_path)}[{new_page}]", "null:"],
                     _work_timeout(COMPARE_TIMEOUT_S, old_path, new_path), text=True
                 )
-                output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
-
+                output = _compare_output(result)
                 if result.returncode not in (0, 1):
                     return False, f"compare failed on page {old_page}: {output}"
-
-                output = _strip_magick_noise(output).strip()
-                # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
-                # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
-                # it matched "06" as the RMSE.
-                match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
-                if not match:
+                rmse, output = _rmse_value(output)
+                if rmse is None:
                     return False, f"parse failed on page {old_page}: '{output}'"
-
-                rmse = float(match.group(1))
                 if rmse != 0.0:
                     return False, f"PIXEL_DIFF page {old_page} RMSE={rmse}"
 
@@ -3073,17 +3072,12 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             sz16 = os.path.getsize(tmp16) if tmp16.exists() else 0
             print(f"[DEBUG] {tiff_path.name} | 8bit:{(t1-t0):.2f}s({sz8//1024}KB) 16bit:{(t2-t1):.2f}s({sz16//1024}KB) compare:{(t3-t2):.2f}s")
 
-        output = result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
-
+        output = _compare_output(result)
         if result.returncode not in (0, 1):
             return False, 0.0, f"ERROR: compare failed (exit={result.returncode}): {output}"
-
-        output = _strip_magick_noise(output).strip()
-        match = re.search(r"([\d.]+(?:[eE][+-]?\d+)?)\s*\(([\d.eE+-]+)\)", output)
-        if not match:
+        rmse, output = _rmse_value(output)
+        if rmse is None:
             return False, 0.0, f"ERROR: RMSE parse failed: '{output}'"
-
-        rmse = float(match.group(1))
 
         if rmse == 0.0:
             return False, 0.0, "padded 8-bit (round-trip RMSE=0)"

@@ -187,6 +187,37 @@ def test_purge_gate_sees_a_gray_collapse_and_lost_xmp_iptc(tmp_path):
     assert not ok and "SAMPLE_LAYOUT" in detail, detail
 
 
+def test_one_rmse_reading():
+    """v3.1 phase 7 (W3): magick prints a large RMSE in scientific notation; an older pattern
+    read the "06" of "1.23457e+06" as the value -- a large difference taken for a tiny one."""
+    assert ct._rmse_value("1.23457e+06 (0.0188)")[0] == 1.23457e+06
+    assert ct._rmse_value("12.5 (0.000191)")[0] == 12.5
+    assert ct._rmse_value("0 (0)") == (0.0, "0 (0)")
+    for nothing in ("", "compare: image widths or heights differ"):
+        assert ct._rmse_value(nothing)[0] is None, nothing
+
+
+@requires_tools
+def test_both_gates_read_the_rmse_through_one_function(tmp_path, monkeypatch):
+    """v3.1 phase 7 (W3): the purge gate (a page compare) and the Diagnose round trip each
+    parsed `magick compare` with a copy of the same regex; now both call _rmse_value, so a fix
+    to the reading reaches both. A double that says "they differ" must turn both verdicts."""
+    def build(out):
+        _magick("-size", "96x64", "gradient:red-blue", "-depth", "8", "-depth", "16",
+                "-type", "TrueColor", "-compress", "none", out)
+    old = _hostile_file(tmp_path, "OLD_TIFFs/0014_14 (2) 50%.tif", build)
+    new = old.parent.parent / old.name
+    shutil.copyfile(old, new)
+    assert ct._compare_tiff_metadata(old, new)[0], "precondition: a copy passes the gate"
+    assert ct._is_real_16bit(new)[0] is False, "precondition: the file is padded"
+    seen = []
+    monkeypatch.setattr(ct, "_rmse_value", lambda out: seen.append(out) or (7.0, "7 (0.0001)"))
+    ok, detail = ct._compare_tiff_metadata(old, new)
+    assert not ok and "PIXEL_DIFF" in detail, detail
+    assert ct._is_real_16bit(new)[:2] == (True, 7.0)
+    assert len(seen) == 2
+
+
 # --- #3: UTF-8 IPTC through the '%' container ---------------------------------------
 
 
