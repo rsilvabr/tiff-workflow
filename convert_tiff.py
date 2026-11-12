@@ -5402,17 +5402,19 @@ def _render_manifest_summary(entry_reports: List[Dict], ok_count: int,
     for line in lines:
         print(line)
 
-    # Combined wrapper log: the per-entry child logs live in
-    # Logs/compress_tiff_zip/, so before this file there was no single place
-    # holding the run's per-entry outcome.
+    # Combined wrapper log: the per-entry child logs live in Logs/compress_tiff_zip/ under the
+    # current folder (where every backend and Diagnose write theirs), so before this file
+    # there was no single place holding the run's per-entry outcome. It goes there too, and
+    # names the children's folder by its full path (v3.1 phase 6, W-O14: it went next to the
+    # scripts and pointed at a relative folder that only existed under the current one).
     try:
-        log_dir = SCRIPT_DIR / "Logs" / "convert_tiff"
+        log_dir = Path.cwd() / "Logs" / "convert_tiff"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / f"manifest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         with open(log_path, 'w', encoding='utf-8') as f:
             f.write(f"{TOOLKIT_NAME} {TOOLKIT_VERSION}\n")
             f.write("\n".join(lines))
-            f.write("\n\nChild logs: Logs/compress_tiff_zip/ (one per entry)\n")
+            f.write(f"\n\nChild logs: {Path.cwd() / 'Logs' / 'compress_tiff_zip'} (one per entry)\n")
         print(f"Combined log: {log_path}")
     except OSError:
         pass

@@ -481,6 +481,19 @@ class TestExecution:
         assert "-DryRun" in no_subprocess[0]
         assert "-DeleteSource" not in no_subprocess[0]
 
+    def test_the_combined_log_is_beside_the_backends_logs(self, tmp_path, monkeypatch, no_subprocess):
+        """v3.1 phase 6 (W-O14): the combined log went next to the scripts and pointed at
+        Logs/compress_tiff_zip/ relative -- a folder that exists under the current one."""
+        here = tmp_path / "伊豆沼 [x] 50%"
+        src = here / "a"
+        src.mkdir(parents=True)
+        monkeypatch.chdir(here)
+        assert execute_manifest_workflow(_cfg(), [(str(src), str(src), 1)], _workflow()) is True
+        logs = list((here / "Logs" / "convert_tiff").glob("manifest_*.log"))
+        assert len(logs) == 1, list(here.rglob("*"))
+        assert f"Child logs: {here / 'Logs' / 'compress_tiff_zip'} (one per entry)" in \
+            logs[0].read_text(encoding="utf-8")
+
     def test_default_mode_applied_to_rows_without_mode(self, tmp_path, monkeypatch, no_subprocess):
         """Rows with an empty Mode cell inherit the run's default mode."""
         src = tmp_path / "a"
