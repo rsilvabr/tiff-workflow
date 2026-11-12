@@ -4416,6 +4416,16 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     return {"converted": converted, "failed": failed}
 
 
+def _size_and_time(path: Path):
+    """(size, write time in ns) of a file, or None when it cannot be read: what Delete
+    OLD_TIFFs compares right before deleting (W-O16)."""
+    try:
+        st = os.stat(tw.long_path(str(path)))
+    except OSError:
+        return None
+    return st.st_size, st.st_mtime_ns
+
+
 def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     """
     Verify and delete OLD_TIFFs/ folders.
@@ -4508,6 +4518,10 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     mismatch_keys = {(m[0], m[1]) for m in mismatches}
     deletable = [it for it in items
                  if (it[0], it[1]) not in orphan_keys and (it[0], it[1]) not in mismatch_keys]
+    # What each verified pair looked like when it was checked: the deletion below comes after
+    # the questions -- minutes later, or at the end of a big tree -- and re-checks this first
+    # (v3.1 phase 6, W-O16, the owner's choice: size and write time, not a second full compare).
+    checked_as = {(it[0], it[1]): (_size_and_time(it[0]), _size_and_time(it[1])) for it in deletable}
 
     # Display results
     total_old_size = sum(s for _, _, s in deletable)
@@ -4638,8 +4652,19 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     # `deletable`, never `items`: an orphaned backup is the only copy of that image left,
     # so it is kept even when everything else in the folder verified clean.
     deleted = 0
-    for old_file, _, _ in deletable:
+    changed = []
+    for old_file, new_file, _ in deletable:
         if not old_file.exists():
+            continue
+        # Changed since the check (an edit, another run, the copy gone): kept, and listed.
+        if (_size_and_time(old_file), _size_and_time(new_file)) != checked_as[(old_file, new_file)] \
+                or _size_and_time(new_file) is None:
+            changed.append(old_file)
+            line = f"  KEPT (changed since it was checked): {old_file.relative_to(folder)}"
+            if RICH_AVAILABLE and console:
+                console.print(f"  [yellow]{escape(line.strip())}[/yellow]")
+            else:
+                print(line)
             continue
         try:
             old_file.unlink()
@@ -4668,8 +4693,12 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[green]Done. Deleted {deleted} file(s).[/green]")
+        if changed:
+            console.print(f"[yellow]{len(changed)} kept: they changed after the check -- run Delete OLD_TIFFs again to check them anew.[/yellow]")
     else:
         print(f"\nDone. Deleted {deleted} file(s).")
+        if changed:
+            print(f"{len(changed)} kept: they changed after the check -- run Delete OLD_TIFFs again to check them anew.")
 
     # False when something did not verify: those backups were deliberately kept, and the
     # caller should not read the run as "everything checked out".

@@ -1629,6 +1629,31 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         convert_tiff.run_purge_old_tiffs(cfg)
         return folder, old_dir
 
+    def _run_purge_scripted(self, tmp_path, monkeypatch):
+        """_run_purge with the answers left to the caller's input() double (plain screen)."""
+        folder = tmp_path / "root"
+        old_dir = folder / "OLD_TIFFs"
+        old_dir.mkdir(parents=True)
+        (old_dir / "img.tif").write_bytes(b"tiffdata")
+        (folder / "img.tif").write_bytes(b"tiffdata")
+
+        def fake_run(cmd, **kwargs):
+            r28 = _fake_round28_exiftool(cmd, kwargs)
+            if r28:
+                return r28
+            cmd = [str(a) for a in cmd]
+            if "compare" in cmd:
+                return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt == "%n\n":
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="10 10", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, prompt: folder)
+        convert_tiff.run_purge_old_tiffs(SimpleNamespace(config=ToolConfig()))
+        return folder, old_dir
+
     def test_verified_files_are_purged_and_the_orphan_is_kept(self, tmp_path, monkeypatch):
         folder, old_dir = self._run_purge(tmp_path, monkeypatch, answers=True)
         assert not (old_dir / "img.tif").exists(), "the verified backup should have been purged"
@@ -1647,6 +1672,33 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         size = convert_tiff._format_size
         assert f"Total size in OLD_TIFFs: {size(len(b'tiffdata') + len(b'orphan'))}" in out, out
         assert f"Total to delete: {size(len(b'tiffdata'))}" in out, out
+
+
+    @pytest.mark.parametrize("what", ["edited", "removed"])
+    def test_a_copy_that_changes_during_the_questions_keeps_its_backup(self, tmp_path, monkeypatch,
+                                                                       capsys, what):
+        """v3.1 phase 6 (W-O16, the owner's choice): the copy is checked BEFORE the questions
+        and the backup deleted after them; something that changed the copy in between (an
+        edit, another run) did not stop the deletion. Size and write time are compared right
+        before; a change keeps the backup."""
+        folder = tmp_path / "root"
+
+        def answer(prompt="", *a, **k):
+            if "Delete" in prompt:
+                target = folder / "img.tif"            # changed while the question is open
+                if what == "edited":
+                    target.write_bytes(b"tiffdata EDITED AFTER THE CHECK")
+                else:
+                    target.unlink()
+                return "y"
+            return __import__("datetime").datetime.now().strftime("%H:%M")
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        monkeypatch.setattr("builtins.input", answer)
+        self._run_purge_scripted(tmp_path, monkeypatch)
+        out = capsys.readouterr().out
+        assert (folder / "OLD_TIFFs" / "img.tif").exists(), "the backup of a changed copy was deleted"
+        assert "KEPT (changed since it was checked): OLD_TIFFs" in out and "1 kept" in out, out
+
 
 
 class TestGenerateThumbnailSaysWhyItSkipped:
