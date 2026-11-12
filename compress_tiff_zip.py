@@ -8,10 +8,11 @@ output, 3 ZIP/ subfolder (recursive), 4 sibling folder (_TIFF -> _ZIP), 5 ZIP/ n
 parent, 6/7 inside an _EXPORT folder, 8 replace in place (no backup, pixel-verified),
 9 in place recursive (originals kept in OLD_TIFFs/).
 
-The command line is the one compress_tiff_zip.ps1 had (tiff-workflow up to v2.9.1):
-`-Name value`, `-Switch`, `-SafeMode:$false`, names without case. Exit code 1 when any file
-failed or an input folder does not exist, else 0. docs/README_compress_tiff_zip.md has the
-reference.
+The command line (v3.1): `--name value`, every yes/no as `--x` / `--no-x`, also as
+`convert_tiff.py compress ...`; `--help` lists the options. tools/legacy_args.py translates
+a line of v3.0.0 or of the .ps1 (`-Name value`, `-SafeMode:$false`). Exit code 0 when
+every file went right, 1 when any file failed or an input folder does not exist, 2 when
+the command line cannot run as written. docs/README_compress_tiff_zip.md has the reference.
 
 The irreversible step comes last: an original leaves its place only after its replacement
 is written, checked and sitting next to it on the same volume, and the swap is one rename.
@@ -1395,6 +1396,9 @@ def _remove_default_staging(run):
 # -- Entry point ----------------------------------------------------
 
 def run_main(argv, state):
+    if tw.asks_for_help(argv):
+        tw.say(tw.help_text(PARAMS, os.path.basename(__file__), __doc__))
+        return 0
     try:
         opt, bound = tw.parse_args(argv, PARAMS)
     except tw.UsageError as e:

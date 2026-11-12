@@ -77,6 +77,7 @@ import locale
 import os
 import platform
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -6120,6 +6121,22 @@ def _overlay_notice() -> None:
         _say(f"WARNING: settings overlay: {warning}", "yellow")
 
 
+def _run_backend(sub: str, args: List[str]) -> int:
+    """`convert_tiff.py compress|copy-exif|thumbnails ...`: the backend next to this wizard, in
+    this process, exactly as if its script had been started with `args` (v3.1, one entry
+    point; each script still runs on its own too). Its exit code."""
+    script = SCRIPT_DIR / SUBCOMMANDS[sub]
+    saved = sys.argv
+    sys.argv = [str(script)] + [str(a) for a in args]
+    try:
+        runpy.run_path(str(script), run_name="__main__")
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    finally:
+        sys.argv = saved
+    return 0
+
+
 def main():
     # Plain print() on a legacy Windows console (cp850/cp1252) raises
     # UnicodeEncodeError on non-ANSI paths (e.g. 横浜) -- a crash in the middle of a
@@ -6131,10 +6148,16 @@ def main():
             except Exception:
                 pass
 
+    argv = sys.argv[1:]
+    if argv and argv[0] in SUBCOMMANDS:
+        sys.exit(_run_backend(argv[0], argv[1:]))
+
     parser = argparse.ArgumentParser(
         description="TIFF Workflow Manager -- interactive wizard for TIFF compression, "
                     "EXIF copy, diagnostics and cleanup.",
-        epilog="Run without arguments to start the interactive wizard. "
+        epilog="Run without arguments to start the interactive wizard. A backend runs "
+               "directly as `convert_tiff.py compress|copy-exif|thumbnails [options]` "
+               "(--help after the name lists its options). "
                "See README.md and docs/README_convert_tiff_py.md for full documentation.",
     )
     parser.add_argument("--run-preset", metavar="NAME",

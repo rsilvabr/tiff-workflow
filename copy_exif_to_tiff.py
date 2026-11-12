@@ -6,10 +6,12 @@ pass.
     python copy_exif_to_tiff.py --input-dir <session folder> [--compress-zip] [--dry-run]
     python copy_exif_to_tiff.py --input-dir <root> --auto-find --folder-pattern S5pro
 
-The command line is the one copy_exif_to_TIFF_ps5.ps1 / _ps7.ps1 had (tiff-workflow up to
-v2.9.1; the two scripts are this one file now). Exit code 1 when any file failed or an
-input folder does not exist (with --fail-on-warn also on a warning or a TIFF without a
-JPEG), else 0. docs/README_copy_exif.md has the reference.
+The command line (v3.1): `--name value`, every yes/no as `--x` / `--no-x`, also as
+`convert_tiff.py copy-exif ...`; `--help` lists the options. tools/legacy_args.py translates
+a line of v3.0.0 or of the .ps1 (`-Name value`, `-SafeMode:$false`). Exit code 0 when
+every file went right, 1 when any file failed or an input folder does not exist (with
+--fail-on-warn also on a warning or a TIFF without a JPEG), 2 when the command line
+cannot run as written. docs/README_copy_exif.md has the reference.
 """
 
 import os
@@ -669,6 +671,9 @@ def _log_summary(run):
 
 
 def run_main(argv, state):
+    if tw.asks_for_help(argv):
+        tw.say(tw.help_text(PARAMS, os.path.basename(__file__), __doc__))
+        return 0
     try:
         opt, bound = tw.parse_args(argv, PARAMS)
     except tw.UsageError as e:

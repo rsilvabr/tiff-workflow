@@ -89,6 +89,7 @@ def test_an_older_form_is_not_read(old):
     ["compress", "--safe-mode=no"],
     ["compress", "9"],
     ["copy-exif", "--mode", "9"],                   # an option of another backend
+    ["compress", "--mode", "9", "--help"],          # a journal never prints and exits
     ["Compress", "--mode", "9"], ["compress_tiff_zip.py", "--mode", "9"],
     "compress --mode 9", None,
 ])

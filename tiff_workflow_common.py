@@ -239,6 +239,35 @@ def _new_parser(params) -> argparse.ArgumentParser:
     return ap
 
 
+def asks_for_help(argv) -> bool:
+    """`--help` or `-h` anywhere on the command line."""
+    return any(str(a) in ("--help", "-h") for a in argv)
+
+
+def help_text(params, prog: str, doc: str = "") -> str:
+    """What --help prints: the script's own description (its docstring) and every option with
+    its default. Built apart from the parser that reads the command line, which has no --help
+    of its own: the wizard binds saved command lines with that one, and it must never print
+    and exit."""
+    ap = argparse.ArgumentParser(prog=prog, usage=f"{prog} [options]", add_help=False,
+                                 description=doc.strip(),
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    for p in params:
+        yes_no = p.kind in ("bool", "switch")
+        shown = ("on" if p.default else "off") if yes_no else (
+            p.default if p.default not in ("", None) else "none")
+        text = (f"{p.help} (default: {shown})" if p.help else f"default: {shown}").replace("%", "%%")
+        if yes_no:
+            ap.add_argument(cli_name(p.name), "--no-" + cli_name(p.name)[2:], action="store_true",
+                            help=text)
+        else:
+            metavar = ("{" + ",".join(p.choices) + "}" if p.choices
+                       else {"int": "N", "float": "NUMBER"}.get(p.kind, "TEXT"))
+            ap.add_argument(cli_name(p.name), metavar=metavar, help=text)
+    ap.add_argument("--help", "-h", action="store_true", help="this text")
+    return ap.format_help()
+
+
 # An argv of the old form: some token is -Name (one dash and a letter), never --name.
 _LEGACY_TOKEN = re.compile(r"-[A-Za-z]")
 
