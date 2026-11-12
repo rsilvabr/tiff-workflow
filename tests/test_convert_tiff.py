@@ -116,7 +116,7 @@ class TestBuildCompressCommand:
         workflow = {"mode": 0}
         cmd = build_compress_command(workflow, folders=[tmp_path])
         assert cmd[0] == sys.executable
-        assert cmd[1].endswith("compress_tiff_zip.py")
+        assert cmd[1:3] == [str(convert_tiff.ENTRY), "compress"]
         assert "--mode" in cmd
         assert "0" in cmd
 
@@ -202,7 +202,7 @@ class TestBuildCopyExifCommand:
         workflow = {}
         cmd = build_copy_exif_command(workflow, folders=[tmp_path])
         assert cmd[0] == sys.executable
-        assert cmd[1].endswith("copy_exif_to_tiff.py")
+        assert cmd[1:3] == [str(convert_tiff.ENTRY), "copy-exif"]
 
 
     def test_workers(self, tmp_path):
@@ -1077,7 +1077,7 @@ class TestWorkflow4TwoSteps:
         assert convert_tiff._run_exif_or_compress(cfg, "both") is False
         assert len(ran) == 3, "compress ran after the real Copy EXIF failed"
         assert "--dry-run" in ran[0] and "--dry-run" in ran[1] and "--dry-run" not in ran[2]
-        assert "copy_exif_to_tiff.py" in " ".join(map(str, ran[2]))
+        assert convert_tiff._command_backend(ran[2]) == "copy-exif"
 
 
 if __name__ == "__main__":

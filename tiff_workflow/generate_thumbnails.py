@@ -1,16 +1,15 @@
-#!/usr/bin/env python3
 """generate_thumbnails.py -- sRGB thumbnails next to TIFFs (or in --output-dir), and their
 removal.
 
-    python generate_thumbnails.py --input-dir <folder> [--recursive] [--size 256] [--format jpg]
-    python generate_thumbnails.py --input-dir <folder> --remove [--dry-run]
+    python convert_tiff.py thumbnails --input-dir <folder> [--recursive] [--size 256] [--format jpg]
+    python convert_tiff.py thumbnails --input-dir <folder> --remove [--dry-run]
 
 The command line (v3.1): `--name value`, every yes/no as `--x` / `--no-x`, also as
-`convert_tiff.py thumbnails ...`; `--help` lists the options. tools/legacy_args.py translates
-a line of v3.0.0 or of the .ps1 (`-Name value`, `-SafeMode:$false`). Exit code 0 when
-every file went right, 1 when any file failed or an input folder does not exist, 2 when
-the command line cannot run as written. docs/README_generate_thumbnails.md has the
-reference.
+`python -m tiff_workflow.generate_thumbnails ...`; `--help` lists the options.
+tools/legacy_args.py translates a line of v3.0.0 or of the .ps1 (`-Name value`,
+`-SafeMode:$false`). Exit code 0 when every file went right, 1 when any file failed or an
+input folder does not exist, 2 when the command line cannot run as written.
+docs/README_generate_thumbnails.md has the reference.
 """
 
 import os
@@ -18,10 +17,8 @@ import re
 import sys
 from typing import NamedTuple, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import tiff_workflow_common as tw  # noqa: E402
-from tiff_workflow_common import P  # noqa: E402
+from . import common as tw
+from .common import P
 
 # -- CLI PARAMETERS -----------------------------------------------
 # The defaults are the settings of this script: edit them here, or leave the file alone
@@ -237,7 +234,7 @@ def _plan(log, files, output_dir, fmt):
 
 def run(argv):
     if tw.asks_for_help(argv):
-        tw.say(tw.help_text(PARAMS, os.path.basename(__file__), __doc__))
+        tw.say(tw.help_text(PARAMS, "convert_tiff.py thumbnails", __doc__))
         return 0
     try:
         opt, bound = tw.parse_args(argv, PARAMS)
@@ -248,7 +245,7 @@ def run(argv):
     # The overlay is applied before anything reads a parameter. A --param given on the command
     # line always beats it; an invalid entry never stops the run.
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
-                                        os.path.dirname(os.path.abspath(__file__)))
+                                        tw.INSTALL_DIR)
     if overlay["info"]:
         tw.say(overlay["info"])
     for w in overlay["warnings"]:

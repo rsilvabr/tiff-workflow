@@ -29,7 +29,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
+from backends import SUBCOMMANDS  # noqa: E402
 from test_regression_classes import make_tiff, read_compression  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
@@ -120,12 +121,14 @@ def slow_magick(tmp_path):
 
 
 def interrupted_run(script, args, cwd, env, mark, tmp_path):
-    """Start a backend with its own console, wait until the slow conversion is in flight,
-    press Ctrl+C. Returns (exit code, everything it printed)."""
+    """Start a backend (through the entry point: convert_tiff.py <subcommand>) with its own
+    console, wait until the slow conversion is in flight, press Ctrl+C. Returns (exit code,
+    everything it printed)."""
     out_file = tmp_path / "run_output.txt"
     with open(out_file, "wb") as out:
         p = subprocess.Popen(
-            [sys.executable, "-c", _RUN_SCRIPT, str(REPO / script)] + [str(a) for a in args],
+            [sys.executable, "-c", _RUN_SCRIPT, str(REPO / "convert_tiff.py"), SUBCOMMANDS[script]]
+            + [str(a) for a in args],
             cwd=str(cwd), env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
             creationflags=subprocess.CREATE_NO_WINDOW)
         try:
@@ -186,7 +189,7 @@ def test_compress_mode9_interrupted_leaves_every_original_and_nothing_else(tmp_p
     assert sorted(p.name for p in work.iterdir() if p.is_file()) == [fast.name, slow.name]
 
     # and the next run, with the real magick, finds a folder it can work on
-    again = subprocess.run([sys.executable, str(REPO / "compress_tiff_zip.py"), "--mode", "9",
+    again = subprocess.run([sys.executable, str(REPO / "convert_tiff.py"), "compress", "--mode", "9",
                             "--input-dir", str(work)], cwd=str(tmp_path), stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            env=dict(os.environ, TIFFWORKFLOW_SETTINGS=""), timeout=300)

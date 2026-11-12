@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
-"""Shared code of the tiff-workflow backends (compress_tiff_zip.py, copy_exif_to_tiff.py,
-generate_thumbnails.py): the command line, the settings overlay, the log, the calls to
-ImageMagick and exiftool, the gates that decide whether a rewritten TIFF may replace its
-original, and the moves that put it in place.
+"""Shared code of the tiff-workflow backends (compress_tiff_zip, copy_exif_to_tiff,
+generate_thumbnails, in this package): the command line, the settings overlay, the log, the
+calls to ImageMagick and exiftool, the gates that decide whether a rewritten TIFF may replace
+its original, and the moves that put it in place. Until v3.1 it was
+tiff_workflow_common.py, next to the scripts.
 
 Until v2.9.1 the backends were PowerShell scripts and every helper here existed in up to
 four copies (three worker paths in compress_tiff_zip.ps1, two copy_exif scripts). The
@@ -38,10 +38,11 @@ from datetime import datetime
 from enum import Enum
 from typing import NamedTuple, Optional
 
-# The tiff-workflow release this file belongs to. Not a setting: tests/test_version_parity.py
-# requires the same value in convert_tiff.py's TOOLKIT_VERSION.
-TOOLKIT_VERSION = "3.0.0"
-TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
+from . import TOOLKIT_URL, TOOLKIT_VERSION  # noqa: F401  (the backends read them here)
+
+#: The folder of an installation: convert_tiff.py and this package. The settings file
+#: ".tiff_workflow_settings.json" is looked for here ("next to the scripts").
+INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 IS_WINDOWS = os.name == "nt"
 

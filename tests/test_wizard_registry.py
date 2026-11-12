@@ -100,16 +100,17 @@ def _build(builder: str, workflow: dict, folders, extra):
 @pytest.mark.parametrize("case", CASES, ids=[c[0] for c in CASES])
 def test_T1_golden_argv_unchanged(case):
     """The arguments are the golden ones, option by option, in v3.1's form; only what runs
-    them changed (`pwsh -NoProfile -File <script>.ps1` -> this Python and <script>.py)."""
+    them changed (`pwsh -NoProfile -File <script>.ps1` -> this Python, convert_tiff.py and
+    the backend's subcommand)."""
     cid, builder, wf, folders, extra = case
     golden = _golden_cmd(cid, "pwsh")
     assert golden[:3] == ["pwsh", "-NoProfile", "-File"]
     script = _PS1_TO_PY[Path(golden[3]).name]
     argv = _build(builder, wf, folders, extra)
     assert argv[0] == sys.executable
-    assert argv[1] == str(convert_tiff.SCRIPT_DIR / script)
-    assert Path(argv[1]).name in convert_tiff.BACKEND_SCRIPTS
-    assert argv[2:] == legacy_args.translate(golden[4:], legacy_args.backend_module(script).PARAMS)
+    assert argv[1] == str(convert_tiff.ENTRY)
+    assert convert_tiff.SUBCOMMANDS[argv[2]] == script
+    assert argv[3:] == legacy_args.translate(golden[4:], legacy_args.backend_module(script).PARAMS)
 
 
 @pytest.mark.parametrize("shell", ["pwsh", "powershell"])

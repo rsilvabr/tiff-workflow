@@ -89,9 +89,11 @@ def check(name, ok, detail=""):
           flush=True)
 
 
-# What starts a backend script: this Python. tiff-workflow-exe's battery puts the built
-# program here (tiff-workflow.exe runs a backend script it is handed).
+# What starts a backend: this Python, with the entry point convert_tiff.py and the backend's
+# subcommand. tiff-workflow-exe's battery puts the built program here.
 RUNNER = [sys.executable]
+_SUBCOMMANDS = {"compress_tiff_zip.py": "compress", "copy_exif_to_tiff.py": "copy-exif",
+                "generate_thumbnails.py": "thumbnails"}
 
 
 def backend_cmd(script, args):
@@ -103,7 +105,7 @@ def backend_cmd(script, args):
                 args.append("--force-sequential")
         elif "--workers" not in args:
             args += ["--workers", "1"]
-    return RUNNER + [str(REPO / script)] + args
+    return RUNNER + [str(REPO / "convert_tiff.py"), _SUBCOMMANDS[script]] + args
 
 
 def run(tag, script, args, timeout=1800):
@@ -951,8 +953,9 @@ def main():
         if shutil.which(tool) is None:
             print(f"{tool} is not on PATH")
             sys.exit(2)
-    common = REPO / "tiff_workflow_common.py"
-    if "def cli_value(" not in common.read_text(encoding="utf-8", errors="replace"):
+    common = REPO / "tiff_workflow" / "common.py"
+    if not common.is_file() or "def cli_value(" not in common.read_text(encoding="utf-8",
+                                                                         errors="replace"):
         print(f"The scripts in {REPO} take the command line of v3.0.x or older; this battery "
               f"runs v3.1's. Run the battery of their release (TIFFWORKFLOW_REPO=<a checkout "
               f"of that tag>).")

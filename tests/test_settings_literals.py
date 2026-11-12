@@ -11,6 +11,7 @@ the wizard's decision explicitly even when it equals the shipped default; (d) a 
 run proves the answer now overrides an edited backend default.
 """
 
+import importlib
 import re
 import shutil
 import subprocess
@@ -21,19 +22,18 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent))
 
 import convert_tiff as ct
+from backends import PACKAGE, install_copy, wizard_uses_install
 
 
 @pytest.fixture
 def scripts_copy(tmp_path, monkeypatch):
-    """A copy of the backends whose defaults a test can edit; the wizard reads its
-    settings from there."""
-    for name in ct.BACKEND_SCRIPTS + [ct.BACKEND_SHARED]:
-        shutil.copy2(ct.SCRIPT_DIR / name, tmp_path / name)
-    monkeypatch.setattr(ct, "SCRIPT_DIR", tmp_path)
-    ct._backend_tables.cache_clear()
-    yield tmp_path
+    """A copy of the installation whose backends' defaults a test can edit; the wizard
+    reads its settings from there and runs that copy. Yields the copy's package folder."""
+    wizard_uses_install(monkeypatch, ct, install_copy(tmp_path / "install"))
+    yield tmp_path / "install" / PACKAGE
     ct._backend_tables.cache_clear()
 
 
@@ -63,7 +63,7 @@ def test_the_table_the_wizard_reads_is_the_one_the_script_runs_with():
     """T1b: read with `ast`, never imported -- and still exactly the script's own table."""
     slots = ct.tw.P.__slots__
     for script in ct.BACKEND_SCRIPTS:
-        module = __import__(script[:-3])
+        module = importlib.import_module("tiff_workflow." + script[:-3])
         mine = [tuple(getattr(p, s) for s in slots) for p in ct._backend_tables(script)[0]]
         theirs = [tuple(getattr(p, s) for s in slots) for p in module.PARAMS]
         assert mine == theirs, script
@@ -72,7 +72,7 @@ def test_the_table_the_wizard_reads_is_the_one_the_script_runs_with():
 
 
 def test_an_unreadable_script_gives_the_fallbacks(tmp_path, monkeypatch):
-    monkeypatch.setattr(ct, "SCRIPT_DIR", tmp_path)
+    monkeypatch.setattr(ct, "PACKAGE_DIR", tmp_path)
     ct._backend_tables.cache_clear()
     try:
         (tmp_path / "compress_tiff_zip.py").write_text("PARAMS = (P('thumb_size', 'int', 512),\n", encoding="utf-8")

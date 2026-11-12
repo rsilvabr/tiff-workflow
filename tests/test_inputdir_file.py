@@ -8,6 +8,7 @@ journals and presets keep the plain --input-dir."""
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -125,8 +126,8 @@ def test_spill_rewrites_only_long_commands(tmp_path):
     out, spill = convert_tiff._spill_long_input_dir(rebuilt)
     try:
         assert spill is not None
-        assert out[:2] == rebuilt[:2]
-        assert out[2:] == ["--mode", "1", "--input-dir-file", spill, "--dry-run"]
+        assert out[:3] == rebuilt[:3] == [sys.executable, str(convert_tiff.ENTRY), "compress"]
+        assert out[3:] == ["--mode", "1", "--input-dir-file", spill, "--dry-run"]
     finally:
         if spill:
             os.unlink(spill)

@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
 import convert_tiff as ct
+from backends import install_copy
 from test_regression_classes import IMAGE_TOOLS, make_tiff, read_tag, run_ps
 
 REPO = Path(__file__).resolve().parent.parent
@@ -358,18 +359,14 @@ def test_compress_memory_estimate_reads_non_ascii_paths(tmp_path):
 
     cmd_file = tmp_path / "run_compress.cmd"
     # The .cmd is cp850: a repository in a folder with characters outside it (a Japanese
-    # name) cannot be written there. The script runs from a copy in tmp_path instead, with
-    # the module it imports (review of v3.1 phases 3+4, V3).
-    scripts = tmp_path / "scripts"
-    scripts.mkdir()
-    for name in ("compress_tiff_zip.py", "tiff_workflow_common.py"):
-        shutil.copy2(REPO / name, scripts / name)
-    script = scripts / "compress_tiff_zip.py"
+    # name) cannot be written there. The backend runs from a copy of the installation in
+    # tmp_path instead (review of v3.1 phases 3+4, V3), through its entry point.
+    script = install_copy(tmp_path / "scripts") / "convert_tiff.py"
     cmd_file.write_bytes(("\r\n".join([
         "@echo off",
         "chcp 850 >nul",
         f'cd /d "{tmp_path}"',
-        f'"{sys.executable}" "{script}" --mode 3 '
+        f'"{sys.executable}" "{script}" compress --mode 3 '
         f'--input-dir "{in_dir}" --workers 4 --worker-memory-fraction 0.8',
         "exit /b %ERRORLEVEL%",
     ]) + "\r\n").encode("cp850"))

@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import convert_tiff as ct  # noqa: E402
 
 HOSTILE = "伊豆沼_夏 [FINAL] 5% off"
-COMPRESS = [sys.executable, "C:\\x\\compress_tiff_zip.py", "--mode", "8",
+# A compress run of the entry point of any copy (v3.1 phase 9: convert_tiff.py compress ...)
+COMPRESS = [sys.executable, "C:\\x\\convert_tiff.py", "compress", "--mode", "8",
             "--input-dir", "G:\\2025"]
 
 
@@ -53,7 +54,7 @@ def test_no_offer_without_stranded_files_or_for_other_backends(monkeypatch):
     called = []
     monkeypatch.setattr(ct, "run_subprocess", lambda *a, **k: called.append(a) or 0)
     assert ct._offer_restore_stranded(COMPRESS, 0, None) is None
-    other = [sys.executable, "C:\\x\\copy_exif_to_tiff.py"]
+    other = [sys.executable, "C:\\x\\convert_tiff.py", "copy-exif"]
     assert ct._offer_restore_stranded(other, 5, None) is None
     assert ct._offer_restore_stranded(COMPRESS + ["--restore-stranded"], 5, None) is None
     assert called == []
@@ -121,7 +122,7 @@ def test_the_wizard_and_the_backend_agree_on_what_is_stranded(tmp_path):
     """v3.1 phase 6 (W-O5): the wizard had its own copy of the rule. It walked INTO backup
     folders (OLD_TIFFs/sub/OLD_TIFFs/deep.tif was "stranded" and would have been restored
     into OLD_TIFFs/sub/), and missed the singular OLD_TIFF. One rule now:
-    tiff_workflow_common.find_stranded_originals."""
+    tiff_workflow.common.find_stranded_originals."""
     cam = tmp_path / HOSTILE / "01_D810"
     put(cam / "OLD_TIFFs" / "sub" / "OLD_TIFFs" / "deep.tif")      # a backup of a backup
     put(cam / "OLD_TIFF" / "single.tif")                           # the singular folder name
@@ -129,7 +130,7 @@ def test_the_wizard_and_the_backend_agree_on_what_is_stranded(tmp_path):
     got = sorted((b.relative_to(cam).as_posix(), t.relative_to(cam).as_posix())
                  for b, t in ct._stranded_backups(cam))
     assert got == [("OLD_TIFF/single.tif", "single.tif"), ("OLD_TIFFs/a.tif", "a.tif")], got
-    import compress_tiff_zip as cz
+    from tiff_workflow import compress_tiff_zip as cz
     backend = sorted((os.path.relpath(x["backup"], cam).replace("\\", "/"))
                      for x in cz.find_stranded_originals(str(cam), True, cz.TOOL_OUTPUT_NAMES, []))
     assert backend == [b for b, _t in got], "the wizard and the backend answer the same"

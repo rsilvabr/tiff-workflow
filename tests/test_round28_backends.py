@@ -33,10 +33,10 @@ import pytest
 import tifffile
 
 REPO = Path(__file__).resolve().parent.parent
-COMPRESS = REPO / "compress_tiff_zip.py"
-THUMBS = REPO / "generate_thumbnails.py"
+COMPRESS = REPO / "tiff_workflow" / "compress_tiff_zip.py"
+THUMBS = REPO / "tiff_workflow" / "generate_thumbnails.py"
 sys.path.insert(0, str(REPO))
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
 from backends import LANES, backend_cmd  # noqa: E402
 TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not None
 need_tools = [
@@ -265,7 +265,7 @@ def test_copy_exif_keeps_utf8_iptc_of_the_jpeg(tmp_path, lane, folder):
     exif(jpg, "-q", "-overwrite_original", "-Make=FUJIFILM", "-Model=FinePix S5Pro",
          "-IPTC:CodedCharacterSet=UTF8", "-IPTC:Keywords=伊豆沼", "-IPTC:Caption-Abstract=伊豆沼の夏")
     assert exif(jpg, "-s3", "-IPTC:Keywords") == "伊豆沼"
-    r, out = run(lane, REPO / script, ["--input-dir", cam, "--workers", 2], tmp_path)
+    r, out = run(lane, REPO / "tiff_workflow" / script, ["--input-dir", cam, "--workers", 2], tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert exif(tif, "-s3", "-EXIF:Model") == "FinePix S5Pro", out[-2000:]
     assert exif(tif, "-s3", "-IPTC:Keywords") == "伊豆沼", out[-2000:]
@@ -284,7 +284,7 @@ def test_copy_exif_creates_no_iptc_when_neither_file_has_one(tmp_path, lane):
                    check=True, capture_output=True)
     shutil.move(str(tmp_path / "j.jpg"), str(jpg))
     exif(jpg, "-q", "-overwrite_original", "-Make=FUJIFILM", "-Model=FinePix S5Pro")
-    r, out = run(lane, REPO / script, ["--input-dir", cam, "--workers", 2], tmp_path)
+    r, out = run(lane, REPO / "tiff_workflow" / script, ["--input-dir", cam, "--workers", 2], tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert "] OK |" in out and "WARN" not in out, out[-3000:]
     assert exif(tif, "-s3", "-EXIF:Model") == "FinePix S5Pro"

@@ -684,7 +684,7 @@ def test_the_wizard_and_the_backend_agree_on_where_a_mode_writes():
     r"""v3.1 phase 6 (W-O4): the wizard's collision scan had its own copy of the backend's
     output rule, which differed at a drive root: mode 5 with Q:\a\b\x.tif under Q:\ gave
     Q:\ZIP (the backend writes Q:\a\ZIP); mode 4 with a file in the root gave Q:\_ZIP (the
-    backend has no place for it). One rule now: tiff_workflow_common.resolve_output."""
+    backend has no place for it). One rule now: tiff_workflow.common.resolve_output."""
     import convert_tiff as ct
     assert ct._resolve_output_folder(Path(r"Q:\a\b\x.tif"), 5, Path("Q:\\"), "") == Path(r"Q:\a\ZIP")
     assert ct._resolve_output_folder(Path(r"Q:\x.tif"), 4, Path("Q:\\"), "") is None

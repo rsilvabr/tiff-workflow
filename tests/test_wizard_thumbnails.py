@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import convert_tiff as ct  # noqa: E402
 
 HOSTILE = "写真 [FINAL] 50% x"
-SCRIPT = str(ct.SCRIPT_DIR / "generate_thumbnails.py")
+#: what runs the backend: this Python, the entry point, the subcommand (v3.1 phase 9)
+RUNS = [sys.executable, str(ct.ENTRY), "thumbnails"]
 
 
 def default(name):
@@ -61,8 +62,8 @@ class Wizard:
 
     def argv(self):
         assert len(self.ran) == 1, self.ran
-        assert self.ran[0][:2] == [sys.executable, SCRIPT]
-        return self.ran[0][2:]
+        assert self.ran[0][:3] == RUNS
+        return self.ran[0][3:]
 
 
 @pytest.fixture(params=["plain", "rich"])

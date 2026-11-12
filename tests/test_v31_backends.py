@@ -17,8 +17,8 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import tiff_workflow_common as tw  # noqa: E402
-from backends import LANES  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
+from backends import LANES, backend_cmd  # noqa: E402
 from test_regression_classes import (  # noqa: E402
     make_multipage_tiff, numeric_subfiletypes, page_count, read_compression, requires_tools, run_ps,
 )
@@ -233,7 +233,7 @@ def test_an_exiftool_without_the_status_of_each_command_is_refused(tmp_path, hos
         encoding="ascii", newline="")
     env = dict(os.environ, TW_REAL_EXIFTOOL=shutil.which("exiftool"), TIFFWORKFLOW_SETTINGS="")
     env["PATH"] = str(shim) + os.pathsep + env["PATH"]
-    r = subprocess.run([sys.executable, str(REPO / script), "--input-dir", str(photo.parent)] + args,
+    r = subprocess.run(backend_cmd("parallel", script, ["--input-dir", str(photo.parent)] + args),
                        cwd=str(tmp_path), env=env, capture_output=True, timeout=300)
     out = r.stdout.decode("utf-8", "replace")
     assert r.returncode == 1, out

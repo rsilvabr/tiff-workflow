@@ -5,7 +5,7 @@ to pass `-@ <argfile>` with the argfile in %TEMP%; a %TEMP% with characters the 
 lacks (a Windows user name in Japanese, Greek, Polish...) gave
 `Error opening arg file C:\\...\\?? O? ae [x] 100%\\probe.args` on EVERY call. The argfile's
 CONTENT now goes on stdin (`exiftool -@ -`). Same bug as jxl-photo #553. The Python backends
-make every call through tiff_workflow_common.exiftool (tests/test_backend_invariants.py pins
+make every call through tiff_workflow.common.exiftool (tests/test_backend_invariants.py pins
 that and what it sends); the real runs below are under a %TEMP% outside the code page.
 
 Helper rule (AGENTS.md): a test that reads tags must not put a Japanese path on exiftool's
@@ -26,8 +26,8 @@ import pytest
 import tifffile
 
 REPO = Path(__file__).resolve().parent.parent
-COMPRESS = REPO / "compress_tiff_zip.py"
-COPY_EXIF = REPO / "copy_exif_to_tiff.py"
+COMPRESS = REPO / "tiff_workflow" / "compress_tiff_zip.py"
+COPY_EXIF = REPO / "tiff_workflow" / "copy_exif_to_tiff.py"
 from backends import LANES, backend_cmd  # noqa: E402
 TOOLS = (shutil.which("magick") is not None and shutil.which("exiftool") is not None)
 
@@ -103,13 +103,13 @@ def make_jpeg(path: Path):
 
 def test_generate_thumbnails_never_calls_exiftool():
     """It runs on a machine with ImageMagick alone: a future exiftool call there is noticed."""
-    src = (REPO / "generate_thumbnails.py").read_text(encoding="utf-8")
+    src = (REPO / "tiff_workflow" / "generate_thumbnails.py").read_text(encoding="utf-8")
     code = [l for l in src.splitlines() if not l.lstrip().startswith("#")]
     assert not [l for l in code if re.search(r"\bexiftool\b", l)]
 
 
 
-@pytest.mark.parametrize("rel", ["convert_tiff.py", "tiff_workflow_common.py",
+@pytest.mark.parametrize("rel", ["convert_tiff.py", "tiff_workflow/common.py",
                                  "tools/real_photo_battery.py"])
 def test_python_never_passes_an_argfile_path(rel):
     src = (REPO / rel).read_text(encoding="utf-8")
@@ -235,7 +235,7 @@ def test_commands_in_one_process_keep_their_own_status_and_output(tmp_path):
     its warning stays its own, and the writes of the earlier commands are on disk when a
     later command reads the file."""
     sys.path.insert(0, str(REPO))
-    import tiff_workflow_common as tw
+    from tiff_workflow import common as tw
     src = tmp_path / HOSTILE / "src.tif"
     tiff(src, seed=1)
     exif_stdin(src, "-q", "-overwrite_original", "-XMP-dc:Title=伊豆沼")

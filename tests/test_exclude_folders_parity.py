@@ -5,7 +5,7 @@ The expected column below is written from jxl-photo's tests/test_exclude_folders
 This is a pinning test of the CURRENT semantics -- if a row fails, the code and
 jxl-photo disagree and Claude decides (see the round 22 plan).
 
-The matcher is tiff_workflow_common.path_excluded (one copy for the three backends; the
+The matcher is tiff_workflow.common.path_excluded (one copy for the three backends; the
 PowerShell edition had four) and, in the wizard, convert_tiff._is_tool_output_path."""
 
 import sys
@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
 
 _R = r"C:\Data\Photos"
 

@@ -19,7 +19,7 @@ import pytest
 import tifffile
 
 REPO = Path(__file__).resolve().parent.parent
-SCRIPT = REPO / "compress_tiff_zip.py"
+SCRIPT = REPO / "tiff_workflow" / "compress_tiff_zip.py"
 from backends import LANES, backend_cmd, run_backend  # noqa: E402
 TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not None
 pytestmark = [

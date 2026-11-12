@@ -52,7 +52,7 @@ def _todays_cmd():
 
 def test_todays_journal_round_trips():
     cmd = _todays_cmd()
-    assert cmd == [sys.executable, str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.py")] + ARGS
+    assert cmd == [sys.executable, str(convert_tiff.ENTRY), "compress"] + ARGS
     line = convert_tiff._journal_line(cmd)
     assert line == ["compress"] + ARGS
     step = convert_tiff._journal_step(line)
@@ -98,7 +98,7 @@ def test_a_line_its_backend_would_refuse_is_not_read(line):
 
 
 def test_a_backend_whose_table_cannot_be_read_runs_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+    monkeypatch.setattr(convert_tiff, "PACKAGE_DIR", tmp_path)
     convert_tiff._backend_tables.cache_clear()
     try:
         assert convert_tiff._journal_step(["compress"] + ARGS) is None

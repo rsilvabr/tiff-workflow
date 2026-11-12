@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tools"))
 
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
 import legacy_args  # noqa: E402
 
 GOLDEN = ROOT / "tests" / "data" / "wizard_registry_golden.json"
@@ -224,7 +224,7 @@ def test_what_v3_0_0_refused_is_refused(old):
 def test_the_table_in_the_docs_is_every_option(backend):
     """docs/command_line.md translates every option by hand, for whoever has no clone of the
     repository: each row must be what the translation does, and no option may be missing."""
-    import tiff_workflow_common as twc
+    from tiff_workflow import common as twc
     text = (ROOT / "docs" / "command_line.md").read_text(encoding="utf-8")
     module = legacy_args.backend_module(backend)
     section = text.split(f"`convert_tiff.py {backend}`)", 1)[1].split("###", 1)[0]

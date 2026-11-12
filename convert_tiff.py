@@ -71,13 +71,13 @@ import csv
 import fnmatch
 import functools
 import hashlib
+import importlib
 import io
 import json
 import locale
 import os
 import platform
 import re
-import runpy
 import shutil
 import stat
 import subprocess
@@ -294,13 +294,16 @@ def _panel(text, title: str, style: str = "") -> None:
 # --- Paths ---------------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
+#: The package next to this file: the three backends and what they share (v3.1 phase 9).
+PACKAGE_DIR = SCRIPT_DIR / "tiff_workflow"
+#: What runs a backend: this file, with the backend's subcommand.
+ENTRY = SCRIPT_DIR / "convert_tiff.py"
 
-# What the three backends share. It sits next to this file wherever the toolkit is installed
-# (the backends cannot run without it); the wizard uses its helpers instead of carrying copies
-# of them (v3.1 phase 5). The folder goes on sys.path the way the backends do it, so a preset
-# started from another folder finds it too.
+# What the three backends share; the wizard uses its helpers instead of carrying copies of
+# them (v3.1 phase 5). This folder goes on sys.path, so a preset started from another
+# folder finds the package too.
 sys.path.insert(0, str(SCRIPT_DIR))
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
 
 
 # --- Settings overlay ----------------------------------------------
@@ -390,7 +393,7 @@ def _backend_tables(script_name: str) -> Tuple[Tuple["tw.P", ...], Tuple[Tuple[s
     literals only) --, specs as ((name, spec), ...). ((), ()) when the file cannot be read or
     parsed; an entry that does not make a tw.P is left out."""
     try:
-        text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
+        text = (PACKAGE_DIR / script_name).read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(text)
     except (OSError, SyntaxError, ValueError):
         return (), ()
@@ -795,14 +798,14 @@ def _update_check_now(cfg) -> Tuple[str, Optional[Tuple[str, str]]]:
 
 # --- Dependency check ----------------------------------------------
 
-#: The backends this wizard runs (next to this file).
+#: The backends this wizard runs (in PACKAGE_DIR).
 BACKEND_SCRIPTS = [
     "compress_tiff_zip.py",
     "generate_thumbnails.py",
     "copy_exif_to_tiff.py",
 ]
 #: ...and the module the three of them import.
-BACKEND_SHARED = "tiff_workflow_common.py"
+BACKEND_SHARED = "common.py"
 #: The name of each backend in a journal (v3.1, T8): [subcommand, *args]. The Windows
 #: program takes the same three names.
 SUBCOMMANDS = {"compress": "compress_tiff_zip.py", "copy-exif": "copy_exif_to_tiff.py",
@@ -829,7 +832,8 @@ def check_dependencies(cfg) -> List[Tuple[str, bool, str]]:
     results.append(("magick", magick_ver is not None, magick_ver or "not found on PATH"))
     exif_ver = _probe_version(["exiftool", "-ver"]) if shutil.which("exiftool") else None
     results.append(("exiftool", exif_ver is not None, exif_ver or "not found on PATH"))
-    missing = [s for s in BACKEND_SCRIPTS + [BACKEND_SHARED] if not (SCRIPT_DIR / s).exists()]
+    missing = [s for s in BACKEND_SCRIPTS + [BACKEND_SHARED, "__init__.py"]
+               if not (PACKAGE_DIR / s).exists()]
     results.append(("backend scripts", not missing,
                     "all present" if not missing else "missing: " + ", ".join(missing)))
     results.append(("rich", RICH_AVAILABLE,
@@ -1032,7 +1036,7 @@ def _is_tool_output_path(path: Path, root: Path) -> bool:
 
 
 # Captured at import. The wizard's tests replace subprocess.run (the module is shared with
-# tiff_workflow_common, whose run_captured the wizard's _run_captured calls).
+# tiff_workflow.common, whose run_captured the wizard's _run_captured calls).
 _CompletedProcess = subprocess.CompletedProcess
 
 
@@ -1359,7 +1363,7 @@ def _scoped_magick_aliases(fn):
 def _magick_spec(path) -> str:
     """Escape '%' for the filename SPECS ImageMagick expands.
 
-    Same rule as magick_path_spec in tiff_workflow_common.py. ImageMagick reads
+    Same rule as magick_path_spec in tiff_workflow/common.py. ImageMagick reads
     printf-style scene specifiers in a filename spec: `50%off.tif` addresses `500ff.tif`
     ('%o' consumed), `100%dpi.tif` addresses `1000pi.tif`. '%%' is the escape.
 
@@ -1841,11 +1845,24 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
 
 # --- Command Builders ----------------------------------------------
 
+#: backend script -> its subcommand
+_SUBCOMMAND_OF = {name: sub for sub, name in SUBCOMMANDS.items()}
+
+
 def _backend_command(script_name: str, args: List[str]) -> List[str]:
-    """The command line that runs a backend next to this wizard: this Python, the script,
-    its arguments. In the Windows program `sys.executable` is tiff-workflow.exe, whose
-    launcher runs a backend script it is handed the same way."""
-    return [sys.executable, str(SCRIPT_DIR / script_name)] + [str(a) for a in args]
+    """The command line that runs a backend of this installation: this Python, the entry
+    point convert_tiff.py, the backend's subcommand, its arguments (v3.1 phase 9: the
+    backends live in the package). In the Windows program `sys.executable` is
+    tiff-workflow.exe, whose launcher runs convert_tiff.py the same way."""
+    return [sys.executable, str(ENTRY), _SUBCOMMAND_OF[script_name]] + [str(a) for a in args]
+
+
+def _command_backend(cmd) -> Optional[str]:
+    """The subcommand a command line of _backend_command runs; None for any other."""
+    cmd = [str(a) for a in cmd]
+    if len(cmd) > 2 and Path(cmd[1]).name == ENTRY.name and cmd[2] in SUBCOMMANDS:
+        return cmd[2]
+    return None
 
 
 def _journal_line(cmd: List[str]) -> List[str]:
@@ -1853,11 +1870,10 @@ def _journal_line(cmd: List[str]) -> List[str]:
     Neither the Python nor the folder is kept: a repeat runs the backend next to the wizard
     that repeats it (round 24: a preset saved from another copy ran that copy's backend).
     Anything but a command line of _backend_command is a programming error."""
-    script = Path(str(cmd[1])).name if len(cmd) > 1 else ""
-    for sub, name in SUBCOMMANDS.items():
-        if name == script:
-            return [sub] + [str(a) for a in cmd[2:]]
-    raise ValueError(f"not a backend command line: {cmd!r}")
+    sub = _command_backend(cmd)
+    if sub is None:
+        raise ValueError(f"not a backend command line: {cmd!r}")
+    return [sub] + [str(a) for a in cmd[3:]]
 
 
 @dataclass
@@ -2212,9 +2228,10 @@ def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
     cmd = [str(a) for a in cmd]
     if len(subprocess.list2cmdline(cmd)) <= _CMDLINE_SPILL_CHARS:
         return cmd, None
-    if len(cmd) < 2 or Path(cmd[1]).name not in _INPUTDIR_FILE_BACKENDS:
+    sub = _command_backend(cmd)
+    if sub is None or SUBCOMMANDS[sub] not in _INPUTDIR_FILE_BACKENDS:
         return cmd, None
-    args = cmd[2:]
+    args = cmd[3:]
     at = _option_at(args, "input_dir")
     if at is None:
         return cmd, None
@@ -2224,7 +2241,7 @@ def _spill_long_input_dir(cmd: List[str]) -> Tuple[List[str], Optional[str]]:
     with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(folders) + "\n")
     new_args = args[:i] + tw.cli_value("input_dir_file", list_path) + args[i + words:]
-    return cmd[:2] + new_args, list_path
+    return cmd[:3] + new_args, list_path
 
 
 # compress_tiff_zip.py's end-of-run line when originals are still stranded in OLD_TIFFs/
@@ -2243,7 +2260,7 @@ def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[in
     which moves them back and compresses them. Returns that run's exit code, or None when
     nothing was run. Never asks on an unattended run (closed stdin, a preset) or a dry
     run: it says what to do instead."""
-    if stranded <= 0 or not any("compress_tiff_zip" in str(c) for c in cmd):
+    if stranded <= 0 or _command_backend(cmd) != "compress":
         return None
     if tw.cli_switch("restore_stranded", True) in [str(c) for c in cmd]:
         return None
@@ -3558,7 +3575,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
 
 
 def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
-    """The wizard's own tiff_has_only_subfile_pages (tiff_workflow_common.py).
+    """The wizard's own tiff_has_only_subfile_pages (tiff_workflow/common.py).
 
     True when every page beyond IFD0 is a thumbnail: tagged REDUCEDIMAGE/REDUCED AND
     strictly smaller than the main image. False when any extra page is a real page
@@ -5549,7 +5566,7 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
 
 def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     """Workflow 8: Generate sRGB thumbnails from TIFFs."""
-    script = SCRIPT_DIR / "generate_thumbnails.py"
+    script = PACKAGE_DIR / "generate_thumbnails.py"
     if not script.exists():
         _error("generate_thumbnails.py not found.")
         return False
@@ -6136,19 +6153,11 @@ def _overlay_notice() -> None:
 
 
 def _run_backend(sub: str, args: List[str]) -> int:
-    """`convert_tiff.py compress|copy-exif|thumbnails ...`: the backend next to this wizard, in
-    this process, exactly as if its script had been started with `args` (v3.1, one entry
-    point; each script still runs on its own too). Its exit code."""
-    script = SCRIPT_DIR / SUBCOMMANDS[sub]
-    saved = sys.argv
-    sys.argv = [str(script)] + [str(a) for a in args]
-    try:
-        runpy.run_path(str(script), run_name="__main__")
-    except SystemExit as e:
-        return e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
-    finally:
-        sys.argv = saved
-    return 0
+    """`convert_tiff.py compress|copy-exif|thumbnails ...`: that backend of the package, in
+    this process, with `args` (v3.1: one entry point). Its exit code -- main()'s return
+    value, as when it runs as `python -m tiff_workflow.<module>`."""
+    module = importlib.import_module("tiff_workflow." + Path(SUBCOMMANDS[sub]).stem)
+    return module.main([str(a) for a in args])
 
 
 def main():

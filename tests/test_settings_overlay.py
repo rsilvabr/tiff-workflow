@@ -13,6 +13,7 @@ Nothing here reads or writes the owner's real settings file: every run points
 TIFFWORKFLOW_SETTINGS (or USERPROFILE and a copy of the script) into tmp_path.
 """
 
+import importlib
 import json
 import os
 import re
@@ -29,8 +30,8 @@ import convert_tiff  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = ["compress_tiff_zip.py", "copy_exif_to_tiff.py", "generate_thumbnails.py"]
-import tiff_workflow_common as twc  # noqa: E402
-from backends import LANES, backend_cmd  # noqa: E402
+from tiff_workflow import common as twc  # noqa: E402
+from backends import LANES, backend_cmd, install_copy  # noqa: E402
 HOSTILE = "写真 [FINAL] x"
 ENV = "TIFFWORKFLOW_SETTINGS"
 need_tools = pytest.mark.skipif(shutil.which("magick") is None or shutil.which("exiftool") is None,
@@ -158,7 +159,7 @@ def test_T6_no_safety_or_per_run_name_is_in_a_spec_table(script):
     # every name is a real parameter of the script, and only those the plan lists
     assert set(table) <= set(convert_tiff._backend_param_names(script))
     # ...and the table the wizard reads from the file is the one the script runs with
-    module = __import__(script[:-3])
+    module = importlib.import_module("tiff_workflow." + script[:-3])
     assert table == module.OVERLAY_SPECS
 
 
@@ -178,7 +179,7 @@ def test_T6_a_name_of_v3_0_0_in_the_file_changes_nothing(tmp_path, monkeypatch):
     """v3.1 (T7): the file takes the names the code has (zip_subfolder_name). One written
     before, ZipSubfolderName, is an unknown name like any other: a warning, and the script's
     value stays -- never a guess at what it meant."""
-    import compress_tiff_zip as cz
+    from tiff_workflow import compress_tiff_zip as cz
     ov = _write(tmp_path / HOSTILE / "s.json", {"compress_tiff_zip": {
         "ZipSubfolderName": "OLD", "WorkerMemoryFraction": 1.1, "cap_workers": 3}})
     monkeypatch.setenv(ENV, str(ov))
@@ -205,7 +206,7 @@ def test_T6_the_overlay_is_applied_before_anything_reads_a_parameter(
     must come after the one apply_settings_overlay, and the log names the overlay right
     after its first line (v3.1: was a text match on the source)."""
     import importlib
-    module = importlib.import_module(script[:-3])
+    module = importlib.import_module("tiff_workflow." + script[:-3])
     applied, early, late = [], [], []
 
     class Watched(dict):
@@ -420,8 +421,7 @@ def test_T9_backend_discovery_order(tmp_path, lane):
     empty = tmp_path / "empty input"
     for d in (scripts, home, empty):
         d.mkdir()
-    for name in ("generate_thumbnails.py", "tiff_workflow_common.py"):   # a portable copy
-        shutil.copy(REPO / name, scripts / name)
+    install_copy(scripts)                                       # a portable copy
     name = ".tiff_workflow_settings.json"
     explicit = _write(tmp_path / "explicit.json", {"generate_thumbnails": {"size": 111}})
 

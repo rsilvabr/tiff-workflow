@@ -1,8 +1,9 @@
 """v3.1 phase 8: one entry point, and --help.
 
 `python convert_tiff.py` is the wizard; `python convert_tiff.py compress|copy-exif|thumbnails
-...` runs that backend, in the same process, exactly as its script would run with the same
-arguments (the scripts still run on their own too). Each backend prints its options with
+...` runs that backend, in the same process, exactly as its module would run with the same
+arguments (`python -m tiff_workflow.compress_tiff_zip ...` runs too; v3.1 phase 9: the
+backends are modules of the package `tiff_workflow`). Each backend prints its options with
 --help; the parser that reads the command line has no --help of its own, because the wizard
 binds saved command lines with it (tests/test_journal_lines.py)."""
 
@@ -19,11 +20,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import compress_tiff_zip as cz  # noqa: E402
+from tiff_workflow import compress_tiff_zip as cz  # noqa: E402
 import convert_tiff  # noqa: E402
-import copy_exif_to_tiff as cx  # noqa: E402
-import generate_thumbnails as gt  # noqa: E402
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import copy_exif_to_tiff as cx  # noqa: E402
+from tiff_workflow import generate_thumbnails as gt  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
 
 MODULES = {"compress": cz, "copy-exif": cx, "thumbnails": gt}
 HOSTILE = "写真 [FINAL] 50% x"
@@ -37,14 +38,17 @@ def _wizard(args, cwd, timeout=300):
 
 
 def _script(script, args, cwd, timeout=300):
-    r = subprocess.run([sys.executable, str(ROOT / script)] + [str(a) for a in args],
+    """The backend run as its module, `python -m tiff_workflow.<module>`."""
+    r = subprocess.run([sys.executable, "-m", "tiff_workflow." + Path(script).stem]
+                       + [str(a) for a in args],
                        cwd=str(cwd), stdin=subprocess.DEVNULL, capture_output=True,
-                       timeout=timeout, env=dict(os.environ, TIFFWORKFLOW_SETTINGS=""))
+                       timeout=timeout, env=dict(os.environ, TIFFWORKFLOW_SETTINGS="",
+                                                 PYTHONPATH=str(ROOT)))
     return r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace")
 
 
 def test_the_subcommands_are_the_three_backends():
-    assert {s: Path(f).stem for s, f in convert_tiff.SUBCOMMANDS.items()} == \
+    assert {s: "tiff_workflow." + Path(f).stem for s, f in convert_tiff.SUBCOMMANDS.items()} == \
         {s: m.__name__ for s, m in MODULES.items()}
 
 
@@ -87,6 +91,22 @@ def test_the_exit_code_is_the_backends(sub, args, code, tmp_path):
     assert rc2 == code and first(out) == first(out2), (out, out2)
 
 
+def test_the_wizard_checks_the_package_next_to_it(tmp_path, monkeypatch):
+    """The startup panel's "backend scripts" line: the files of the package next to
+    convert_tiff.py, and which one is missing (v3.1 phase 9). A hostile installation folder."""
+    from backends import PACKAGE, install_copy, wizard_uses_install
+    monkeypatch.setattr(convert_tiff, "_probe_version", lambda cmd: None)
+    install = wizard_uses_install(monkeypatch, convert_tiff, install_copy(tmp_path / HOSTILE))
+
+    def backend_scripts():
+        return {n: (ok, detail) for n, ok, detail in convert_tiff.check_dependencies(None)}["backend scripts"]
+
+    assert backend_scripts() == (True, "all present")
+    (install / PACKAGE / "common.py").unlink()
+    (install / PACKAGE / "generate_thumbnails.py").unlink()
+    assert backend_scripts() == (False, "missing: generate_thumbnails.py, common.py")
+
+
 def test_the_entry_point_gives_argv_back(monkeypatch, capsys):
     before = list(sys.argv)
     assert convert_tiff._run_backend("thumbnails", ["--help"]) == 0
@@ -98,7 +118,8 @@ def test_the_entry_point_gives_argv_back(monkeypatch, capsys):
                     reason="ImageMagick and exiftool required")
 def test_a_real_run_through_the_entry_point_is_the_scripts(tmp_path):
     """The same compression, twice, from a hostile folder: through convert_tiff.py compress
-    and through compress_tiff_zip.py. Same exit code, same result lines, same files."""
+    and through python -m tiff_workflow.compress_tiff_zip. Same exit code, same result
+    lines, same files."""
     from test_regression_classes import make_tiff
     outs = []
     for how in ("entry", "script"):

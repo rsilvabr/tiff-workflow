@@ -2,8 +2,8 @@
 
 convert_tiff.py has TOOLKIT_VERSION (pinned to the newest docs/CHANGELOG.md section by
 tests/test_diagnose_preset.py; the Windows program's build reads it there), and the three
-backends take theirs from tiff_workflow_common.py. The release bumps both at once; these
-tests fail when one is forgotten.
+backends take theirs from the package (tiff_workflow/__init__.py, through tiff_workflow.common).
+The release bumps both at once; these tests fail when one is forgotten.
 """
 
 import re
@@ -20,21 +20,21 @@ import tifffile
 import convert_tiff
 
 REPO = Path(__file__).resolve().parent.parent
-import tiff_workflow_common  # noqa: E402
+from tiff_workflow import common as twc  # noqa: E402
 from backends import BACKENDS, LANES, backend_cmd  # noqa: E402
 TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not None
 HOSTILE = "写真 [FINAL] x"
 
 
 def test_the_backends_carry_the_release_of_convert_tiff():
-    assert tiff_workflow_common.TOOLKIT_VERSION == convert_tiff.TOOLKIT_VERSION
-    assert tiff_workflow_common.TOOLKIT_URL == convert_tiff.TOOLKIT_URL
+    assert twc.TOOLKIT_VERSION == convert_tiff.TOOLKIT_VERSION
+    assert twc.TOOLKIT_URL == convert_tiff.TOOLKIT_URL
 
 
 @pytest.mark.parametrize("name", BACKENDS)
 def test_no_backend_has_a_version_of_its_own(name):
     """One number for the three of them: a literal in a backend would be a third place."""
-    text = (REPO / name).read_text(encoding="utf-8")
+    text = (REPO / "tiff_workflow" / name).read_text(encoding="utf-8")
     assert not re.search(r"^\s*(TOOLKIT_VERSION|__version__)\s*=", text, re.M), name
     assert "tw.TOOLKIT_VERSION" in text
 

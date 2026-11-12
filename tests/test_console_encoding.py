@@ -4,7 +4,7 @@ A program whose output is redirected falls back to a legacy code page (the Power
 backends wrote in the console's OEM one, Python uses the ANSI one), so every Japanese folder
 name the wizard streamed on screen came out as '?????' -- the log file, written as UTF-8,
 was right. Each backend switches its output to UTF-8 when it is redirected
-(tiff_workflow_common.setup_console). Real run, both lanes, a hostile path (Japanese +
+(tiff_workflow.common.setup_console). Real run, both lanes, a hostile path (Japanese +
 brackets + space), per the AGENTS.md rule.
 """
 
@@ -40,7 +40,7 @@ def test_compress_streams_japanese_folder_names(tmp_path, lane):
     stage = tmp_path.parent / (tmp_path.name + "_stage")  # outside the scanned tree
     stage.mkdir()
     # the owner's preset: mode 8 with staging, which prints a "-- Group: <folder>" line
-    r = subprocess.run(backend_cmd(lane, REPO / "compress_tiff_zip.py", ["--mode", "8", "--input-dir",
+    r = subprocess.run(backend_cmd(lane, REPO / "tiff_workflow" / "compress_tiff_zip.py", ["--mode", "8", "--input-dir",
                         str(tmp_path), "--staging-dir", str(stage), "--workers", "1"]),
                        cwd=str(tmp_path), capture_output=True, stdin=subprocess.DEVNULL,
                        timeout=300)
@@ -56,7 +56,7 @@ def test_the_first_line_already_carries_utf8(tmp_path, lane):
     backend's plain output is UTF-8 -- run it from a Japanese folder."""
     cwd = tmp_path / NAME
     cwd.mkdir()
-    r = subprocess.run(backend_cmd(lane, REPO / "compress_tiff_zip.py", ["--mode", "1", "--input-dir",
+    r = subprocess.run(backend_cmd(lane, REPO / "tiff_workflow" / "compress_tiff_zip.py", ["--mode", "1", "--input-dir",
                         str(cwd), "--workers", "1", "--dry-run"]),
                        cwd=str(cwd), capture_output=True, stdin=subprocess.DEVNULL, timeout=300)
     lines = r.stdout.decode("utf-8", "replace").splitlines()

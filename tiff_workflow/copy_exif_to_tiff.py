@@ -1,17 +1,17 @@
-#!/usr/bin/env python3
 """copy_exif_to_tiff.py -- copy the EXIF of a Fuji S3/S5 Pro JPEG (or RAF) into the TIFF
 exported from the same shot, optionally compressing the TIFF to ZIP/Deflate in the same
 pass.
 
-    python copy_exif_to_tiff.py --input-dir <session folder> [--compress-zip] [--dry-run]
-    python copy_exif_to_tiff.py --input-dir <root> --auto-find --folder-pattern S5pro
+    python convert_tiff.py copy-exif --input-dir <session folder> [--compress-zip] [--dry-run]
+    python convert_tiff.py copy-exif --input-dir <root> --auto-find --folder-pattern S5pro
 
 The command line (v3.1): `--name value`, every yes/no as `--x` / `--no-x`, also as
-`convert_tiff.py copy-exif ...`; `--help` lists the options. tools/legacy_args.py translates
-a line of v3.0.0 or of the .ps1 (`-Name value`, `-SafeMode:$false`). Exit code 0 when
-every file went right, 1 when any file failed or an input folder does not exist (with
---fail-on-warn also on a warning or a TIFF without a JPEG), 2 when the command line
-cannot run as written. docs/README_copy_exif.md has the reference.
+`python -m tiff_workflow.copy_exif_to_tiff ...`; `--help` lists the options.
+tools/legacy_args.py translates a line of v3.0.0 or of the .ps1 (`-Name value`,
+`-SafeMode:$false`). Exit code 0 when every file went right, 1 when any file failed or an
+input folder does not exist (with --fail-on-warn also on a warning or a TIFF without a
+JPEG), 2 when the command line cannot run as written. docs/README_copy_exif.md has the
+reference.
 """
 
 import os
@@ -21,10 +21,8 @@ import sys
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import tiff_workflow_common as tw  # noqa: E402
-from tiff_workflow_common import P  # noqa: E402
+from . import common as tw
+from .common import P
 
 # -- CLI PARAMETERS -------------------------------------------------
 # The defaults are the settings of this script: edit them here, or leave the file alone
@@ -672,7 +670,7 @@ def _log_summary(run):
 
 def run_main(argv, state):
     if tw.asks_for_help(argv):
-        tw.say(tw.help_text(PARAMS, os.path.basename(__file__), __doc__))
+        tw.say(tw.help_text(PARAMS, "convert_tiff.py copy-exif", __doc__))
         return 0
     try:
         opt, bound = tw.parse_args(argv, PARAMS)
@@ -681,7 +679,7 @@ def run_main(argv, state):
         return tw.EXIT_USAGE
 
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
-                                        os.path.dirname(os.path.abspath(__file__)))
+                                        tw.INSTALL_DIR)
     if overlay["info"]:
         tw.say(overlay["info"])
     for w in overlay["warnings"]:

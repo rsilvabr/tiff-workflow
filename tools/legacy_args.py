@@ -15,6 +15,7 @@ it was written; an argv the old reader refused is refused here too (exit 2).
 
 The old reader itself lives here since v3.1 (parse_legacy): what the translation stands on.
 """
+import importlib
 import re
 import shlex
 import subprocess
@@ -25,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
 
 BACKENDS = {"compress": "compress_tiff_zip", "copy-exif": "copy_exif_to_tiff",
             "thumbnails": "generate_thumbnails"}
@@ -38,7 +39,7 @@ PARAM_TOKEN = re.compile(r"-([A-Za-z][A-Za-z0-9]*)(?::(.*))?", re.S)
 def backend_module(word: str):
     """The backend module a subcommand name or a script name stands for; None for neither."""
     name = BACKENDS.get(word, Path(word).stem)
-    return __import__(name) if name in BACKENDS.values() else None
+    return importlib.import_module("tiff_workflow." + name) if name in BACKENDS.values() else None
 
 
 # --- the old reader (tiff_workflow_common.parse_args until v3.0.0) --------------------------

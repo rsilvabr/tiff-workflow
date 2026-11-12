@@ -23,14 +23,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import compress_tiff_zip as cz  # noqa: E402
-import copy_exif_to_tiff as cx  # noqa: E402
-import generate_thumbnails as gt  # noqa: E402
-import tiff_workflow_common as tw  # noqa: E402
+from tiff_workflow import compress_tiff_zip as cz  # noqa: E402
+from tiff_workflow import copy_exif_to_tiff as cx  # noqa: E402
+from tiff_workflow import generate_thumbnails as gt  # noqa: E402
+from tiff_workflow import common as tw  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 BACKEND_FILES = ["compress_tiff_zip.py", "copy_exif_to_tiff.py", "generate_thumbnails.py"]
-ALL_FILES = BACKEND_FILES + ["tiff_workflow_common.py"]
+ALL_FILES = BACKEND_FILES + ["common.py"]
 RGB = ["rgb/3/8,8,8/"]
 
 
@@ -55,7 +55,7 @@ def tool_fails(*args, **kwargs):
 
 
 class FakeTools:
-    """Replaces every tool call of tiff_workflow_common and records the order of the steps.
+    """Replaces every tool call of tiff_workflow.common and records the order of the steps.
     Defaults describe a healthy single-page uncompressed RGB TIFF; a test overrides what it
     wants to fail."""
 
@@ -1879,7 +1879,7 @@ class TestGroupSteps:
 
 
 # ---------------------------------------------------------------------------
-# tiff_workflow_common: the gates fail closed
+# tiff_workflow.common: the gates fail closed
 # ---------------------------------------------------------------------------
 
 def probe(timed_out=False, rc=0, lines=()):
@@ -2244,7 +2244,7 @@ class TestResultKinds:
 
 
 # ---------------------------------------------------------------------------
-# tiff_workflow_common: paths, moves, the command line
+# tiff_workflow.common: paths, moves, the command line
 # ---------------------------------------------------------------------------
 
 class TestPathsAndMoves:
@@ -2823,7 +2823,11 @@ class TestThumbnails:
 # ---------------------------------------------------------------------------
 
 def _tree(name):
-    return ast.parse((REPO / name).read_text(encoding="utf-8"))
+    """A module of the package, or the wizard (convert_tiff.py, next to the package)."""
+    path = REPO / "tiff_workflow" / name
+    if not path.exists():
+        path = REPO / name
+    return ast.parse(path.read_text(encoding="utf-8"))
 
 
 def _calls(tree):
@@ -2858,7 +2862,7 @@ class TestSourceRules:
         assert readers == {"__init__"}, readers
 
     def test_one_place_runs_subprocess(self):
-        tree = _tree("tiff_workflow_common.py")
+        tree = _tree("common.py")
         sites = []
         for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
             for _node, owner, name in _calls(fn):

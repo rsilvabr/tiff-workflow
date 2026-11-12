@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 """compress_tiff_zip.py -- TIFF -> ZIP/Deflate, lossless and verified.
 
-    python compress_tiff_zip.py --mode 9 --input-dir <folder> [--dry-run]
+    python convert_tiff.py compress --mode 9 --input-dir <folder> [--dry-run]
 
 Modes: 0 in place (one folder, originals kept in OLD_TIFFs/), 1 ZIP/ subfolder, 2 flat
 output, 3 ZIP/ subfolder (recursive), 4 sibling folder (_TIFF -> _ZIP), 5 ZIP/ next to the
@@ -9,10 +8,11 @@ parent, 6/7 inside an _EXPORT folder, 8 replace in place (no backup, pixel-verif
 9 in place recursive (originals kept in OLD_TIFFs/).
 
 The command line (v3.1): `--name value`, every yes/no as `--x` / `--no-x`, also as
-`convert_tiff.py compress ...`; `--help` lists the options. tools/legacy_args.py translates
-a line of v3.0.0 or of the .ps1 (`-Name value`, `-SafeMode:$false`). Exit code 0 when
-every file went right, 1 when any file failed or an input folder does not exist, 2 when
-the command line cannot run as written. docs/README_compress_tiff_zip.md has the reference.
+`python -m tiff_workflow.compress_tiff_zip ...`; `--help` lists the options.
+tools/legacy_args.py translates a line of v3.0.0 or of the .ps1 (`-Name value`,
+`-SafeMode:$false`). Exit code 0 when every file went right, 1 when any file failed or an
+input folder does not exist, 2 when the command line cannot run as written.
+docs/README_compress_tiff_zip.md has the reference.
 
 The irreversible step comes last: an original leaves its place only after its replacement
 is written, checked and sitting next to it on the same volume, and the swap is one rename.
@@ -28,10 +28,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import NamedTuple, Optional
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-import tiff_workflow_common as tw  # noqa: E402
-from tiff_workflow_common import P  # noqa: E402
+from . import common as tw
+from .common import P
 
 # -- CLI PARAMETERS -----------------------------------------------
 # The defaults are the settings of this script: edit them here, or leave the file alone
@@ -200,7 +198,7 @@ class Run:
 # -- Stranded originals ---------------------------------------------
 
 # Originals left in OLD_TIFFs with nothing in their place: one rule for the backend, the
-# wizard's Restore (tiff_workflow_common.find_stranded_originals; v3.1 phase 6, W-O5).
+# wizard's Restore (tiff_workflow.common.find_stranded_originals; v3.1 phase 6, W-O5).
 find_stranded_originals = tw.find_stranded_originals
 
 
@@ -322,7 +320,7 @@ def complete_keep_original(run, written, src, final_dst, keep_dir, src_length, s
 # -- Output path per mode -------------------------------------------
 
 # Where a mode writes: one rule for the backend and the wizard's collision scan
-# (tiff_workflow_common.resolve_output; v3.1 phase 6, W-O4).
+# (tiff_workflow.common.resolve_output; v3.1 phase 6, W-O4).
 resolve_output = tw.resolve_output
 
 
@@ -1397,7 +1395,7 @@ def _remove_default_staging(run):
 
 def run_main(argv, state):
     if tw.asks_for_help(argv):
-        tw.say(tw.help_text(PARAMS, os.path.basename(__file__), __doc__))
+        tw.say(tw.help_text(PARAMS, "convert_tiff.py compress", __doc__))
         return 0
     try:
         opt, bound = tw.parse_args(argv, PARAMS)
@@ -1408,7 +1406,7 @@ def run_main(argv, state):
     # The overlay is applied before anything reads a parameter. A -Param given on the command
     # line always beats it; an invalid entry never stops the run.
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
-                                        os.path.dirname(os.path.abspath(__file__)))
+                                        tw.INSTALL_DIR)
     if overlay["info"]:
         tw.say(overlay["info"])
     for w in overlay["warnings"]:
@@ -1418,7 +1416,7 @@ def run_main(argv, state):
     # which compressed the CURRENT folder in place. A forgotten --mode must never do that.
     if "mode" not in bound:
         tw.say("ERROR: --mode is required: the modes are 0 to 9")
-        tw.say("       Example: python compress_tiff_zip.py --mode 9 --input-dir <folder>")
+        tw.say("       Example: python convert_tiff.py compress --mode 9 --input-dir <folder>")
         return tw.EXIT_USAGE
     if not 0 <= opt["mode"] <= 9:
         tw.say(f"ERROR: --mode {opt['mode']} does not exist: the modes are 0 to 9")

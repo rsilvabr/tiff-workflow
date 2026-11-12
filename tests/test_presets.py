@@ -279,8 +279,7 @@ class TestPresetsMenu:
         convert_tiff.presets_menu(cfg)
 
         assert len(calls) == 1, "the preset must run exactly once"
-        assert calls[0]["cmd"] == [sys.executable,
-                                   str(convert_tiff.SCRIPT_DIR / "compress_tiff_zip.py")] + line[1:]
+        assert calls[0]["cmd"] == [sys.executable, str(convert_tiff.ENTRY), "compress"] + line[1:]
         assert len(saves) == 2, "one save for the preset, one for the delete"
         assert "nightly" in saves[0]["presets"]
         assert saves[0]["presets"]["nightly"]["commands"] == [line]
