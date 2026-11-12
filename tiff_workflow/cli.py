@@ -11,6 +11,7 @@ run does not depend on the wizard's module, its settings or the screen library (
 
 import importlib
 import sys
+from typing import Optional, Sequence
 
 #: The backends by subcommand (v3.1): the file of the package each one is. The wizard reads a
 #: backend's PARAMS table from that file with `ast`, and keeps a step of a journal as
@@ -19,14 +20,14 @@ SUBCOMMANDS = {"compress": "compress_tiff_zip.py", "copy-exif": "copy_exif_to_ti
                "thumbnails": "generate_thumbnails.py"}
 
 
-def run_backend(sub, args) -> int:
+def run_backend(sub: str, args: Sequence[str]) -> int:
     """`convert_tiff.py <sub> ...`: that backend's main() with `args`, in this process. Its exit
     code is main()'s return value, as when the module runs as `python -m tiff_workflow.<module>`."""
     module = importlib.import_module("." + SUBCOMMANDS[sub][:-len(".py")], __package__)
     return module.main([str(a) for a in args])
 
 
-def main(argv=None) -> int:
+def main(argv: Optional[Sequence[str]] = None) -> int:
     """The exit code of `convert_tiff.py` with `argv` (sys.argv[1:] when None): a backend when
     the first word is one of SUBCOMMANDS, the wizard otherwise."""
     argv = sys.argv[1:] if argv is None else [str(a) for a in argv]

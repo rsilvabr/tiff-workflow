@@ -605,7 +605,9 @@ def process_folder(run, root):
 
         staging_map = {}
         for p, result in tw.run_tasks(pairs,
-                                      lambda q: process_pair(run, q, write_dir, final_dir, load),
+                                      # this group's folders and load, bound now
+                                      lambda q, wd=write_dir, fd=final_dir, lf=load:
+                                      process_pair(run, q, wd, fd, lf),
                                       workers):
             if isinstance(result, Exception):
                 result = PairResult(f"ERROR | {p.tif_name} | {type(result).__name__}: {result}")

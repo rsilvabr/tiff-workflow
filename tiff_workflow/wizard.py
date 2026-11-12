@@ -86,7 +86,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # --- Yes / no -------------------------------------------------------
 # One reader for every yes/no question, the same words on both screens (v3.1 phase 6, T2):
@@ -129,7 +129,7 @@ try:
             raise InvalidResponse(self.validate_error_message)
 
     RICH_AVAILABLE = True
-    console = Console(force_terminal=True)
+    console: Optional[Console] = Console(force_terminal=True)
 except ImportError:
     RICH_AVAILABLE = False
     console = None
@@ -204,7 +204,7 @@ def _ask(question, default: Optional[str] = None, style: str = "cyan",
     after the question, also when empty; None = nothing shown, Enter gives ""). With
     `choices`, an answer that is not one of them is asked again, on both screens."""
     if RICH_AVAILABLE and console:
-        kw = {} if default is None else {"default": default}
+        kw: Dict[str, Any] = {} if default is None else {"default": default}
         if choices is not None:
             kw["choices"] = choices
         return Prompt.ask(_rich_text(question, style), **kw).strip()
@@ -270,10 +270,10 @@ def _table(columns: List[Dict], rows: List[list], panel: Optional[Dict] = None, 
     widths = [max(len(r[i]) for r in grid) for i in range(len(columns))]
     for r in grid:
         cells = []
-        for i, cell in enumerate(r):
+        for i, value in enumerate(r):
             how = columns[i].get("justify", "left")
-            cells.append(cell.rjust(widths[i]) if how == "right" else
-                         cell.center(widths[i]) if how == "center" else cell.ljust(widths[i]))
+            cells.append(value.rjust(widths[i]) if how == "right" else
+                         value.center(widths[i]) if how == "center" else value.ljust(widths[i]))
         print(" " + "  ".join(cells).rstrip())
 
 
@@ -839,7 +839,7 @@ def check_dependencies(cfg) -> List[Tuple[str, bool, str]]:
 def show_environment_panel(cfg) -> None:
     """Print the dependency status panel shown at startup (jxl_photo style)."""
     checks = check_dependencies(cfg)
-    parts = []
+    parts: List[object] = []
     for name, ok, _ in checks:
         if parts:
             parts.append(" | ")
@@ -1793,7 +1793,7 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
     dry = "Yes" if workflow.get("dry_run") else "No"
     folders_count = len(workflow.get("folders", []))
 
-    rows = []
+    rows: List[list] = []
     if origin in ("copy_exif",):
         rows.append(["Workflow:", f"Copy EXIF ({origin})"])
     elif origin == "free_compress":
@@ -2178,13 +2178,13 @@ REGISTRY_SCRIPTS = {
 }
 
 
-def build_compress_command(workflow: Dict, folders: List[Path] = None) -> List[str]:
+def build_compress_command(workflow: Dict, folders: Optional[List[Path]] = None) -> List[str]:
     """The command line for compress_tiff_zip.py (the argv comes from REGISTRY)."""
     return _backend_command("compress_tiff_zip.py", _emit_all("compress", workflow, folders))
 
 
-def build_copy_exif_command(workflow: Dict, folders: List[Path] = None,
-                            extra_flags: List[str] = None) -> List[str]:
+def build_copy_exif_command(workflow: Dict, folders: Optional[List[Path]] = None,
+                            extra_flags: Optional[List[str]] = None) -> List[str]:
     """The command line for copy_exif_to_tiff.py (the argv comes from REGISTRY)."""
     return _backend_command("copy_exif_to_tiff.py",
                             _emit_all("copy_exif", workflow, folders) + list(extra_flags or []))
@@ -2285,7 +2285,7 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
     cmd, _spill_path = _spill_long_input_dir(cmd)
     stranded_left = [0]
 
-    popen_kwargs = {
+    popen_kwargs: Dict[str, Any] = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.STDOUT,
         # Binary mode: lines are decoded manually in the reader thread
@@ -2378,7 +2378,8 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
             return -1
 
         try:
-            process.stdout.close()
+            if process.stdout is not None:      # a PIPE: always there
+                process.stdout.close()
         except (OSError, ValueError):
             pass
 
@@ -2968,7 +2969,7 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
 
 
 @_scoped_magick_aliases
-def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "none") -> tuple[bool, float, str]:
+def _is_real_16bit(tiff_path: Path, temp_dir: Optional[Path] = None, compress_tmp: str = "none") -> tuple[bool, float, str]:
     """
     Check if a TIFF is real 16-bit or padded 8-bit (stretched to 16).
     Method: Convert to 8-bit and back to 16-bit. If RMSE=0, it's padded 8-bit.
@@ -3009,7 +3010,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
         compress_8 = f"-compress {compress_tmp}" if compress_tmp != "none" else ""
         compress_16 = f"-compress {compress_tmp}" if compress_tmp == "zip" else ""
 
-        t0 = time.time() if DEBUG_TIMING else None
+        t0 = time.time()
         try:
             # [0] on every step: multi-page TIFFs (Capture One main+thumbnail, scanner
             # RGB+IR) made the whole-file compare return garbage RMSE (~27%) even for
@@ -3020,7 +3021,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found"
-        t1 = time.time() if DEBUG_TIMING else None
+        t1 = time.time()
         if result.returncode != 0:
             return False, 0.0, "ERROR: 8-bit conversion failed"
 
@@ -3031,7 +3032,7 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found"
-        t2 = time.time() if DEBUG_TIMING else None
+        t2 = time.time()
         if result.returncode != 0:
             return False, 0.0, "ERROR: 16-bit back conversion failed"
 
@@ -3045,9 +3046,9 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Path = None, compress_tmp: str = "
             )
         except FileNotFoundError:
             return False, 0.0, "ERROR: ImageMagick not found (compare failed)"
-        t3 = time.time() if DEBUG_TIMING else None
+        t3 = time.time()
 
-        if DEBUG_TIMING and t3 is not None:
+        if DEBUG_TIMING:
             sz8 = os.path.getsize(tmp8) if tmp8.exists() else 0
             sz16 = os.path.getsize(tmp16) if tmp16.exists() else 0
             print(f"[DEBUG] {tiff_path.name} | 8bit:{(t1-t0):.2f}s({sz8//1024}KB) 16bit:{(t2-t1):.2f}s({sz16//1024}KB) compare:{(t3-t2):.2f}s")
@@ -3102,7 +3103,7 @@ def _diagnose_targets(roots, scope: str = "", skip_names: str = "") -> List[Path
     want = _scope_parts(scope)
     skip_dirs = _TOOL_OUTPUT_PARTS - set(want)
     patterns = [p.lower() for p in _split_semicolons(skip_names)]
-    found = []
+    found: List[Path] = []
     roots = list(roots)
     # A photo library on a hard disk takes minutes to walk: report every few seconds.
     _say(f"Searching for TIFFs under {'; '.join(str(r) for r in roots)} ...", "dim")
@@ -3409,7 +3410,7 @@ def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[DiagnoseResult],
         key = _file_key(f)
         keys[f] = key
         hit = cache.get(key[0]) if key else None
-        if (isinstance(hit, dict) and hit.get("size") == key[1]
+        if (key is not None and isinstance(hit, dict) and hit.get("size") == key[1]
                 and hit.get("mtime_ns") == key[2]
                 and hit.get("status") in ("real", "padded", "other")):
             cached.append(DiagnoseResult(f, hit["status"] == "real", float(hit.get("rmse") or 0.0),
@@ -3513,7 +3514,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
         compress_tmp = d.get("compress_tmp") or "none"
         results += _diagnose_check(todo, keys, cache, workers, temp_dir, compress_tmp, roots)
 
-    by_status = {"padded": [], "real": [], "other": [], "error": []}
+    by_status: Dict[str, List[Tuple[Path, str]]] = {"padded": [], "real": [], "other": [], "error": []}
     for r in sorted(results, key=lambda r: str(r.path)):
         by_status[r.status].append((r.path, r.detail))
 
@@ -3594,7 +3595,7 @@ def _tiff_extra_pages_are_thumbnails(tiff_path) -> Optional[bool]:
         )
         if r.returncode != 0 or not r.stdout:
             return None
-        lines = [l for l in r.stdout.splitlines() if l.strip()]
+        lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
     except Exception:
         return None
 
@@ -4074,7 +4075,7 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
             size = tmp8.stat().st_size
             shutil.copyfile(str(tmp8), str(sibling))
             if sibling.stat().st_size != size:
-                raise OSError("size mismatch after copy")
+                raise OSError("size mismatch after copy") from None
             tmp8.unlink(missing_ok=True)
     except Exception as e:
         sibling.unlink(missing_ok=True)
@@ -4206,6 +4207,13 @@ def _finalize_padded(n: int, total: int, result: PaddedResult, failed: list) -> 
         if line:
             _say(*line)
         return False
+    if tmp8 is None or size_orig is None or size_zip is None or ratio is None:
+        # An "ok" always carries its 8-bit file and the sizes; without them nothing lands.
+        _say("    FAILED: the conversion did not report its 8-bit file — original preserved", "red")
+        failed.append((final_dst, "the conversion did not report its 8-bit file"))
+        if tmp8 is not None:
+            tmp8.unlink(missing_ok=True)
+        return False
     if not exif_ok:
         # Do NOT overwrite original if EXIF was lost
         _say("    FAILED: EXIF copy or History entry failed — original preserved", "red")
@@ -4253,7 +4261,7 @@ def _finalize_padded(n: int, total: int, result: PaddedResult, failed: list) -> 
     return True
 
 
-def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg: "ConfigManager"):
+def _compress_padded_files(padded_files: list, temp_dir: Optional[Path], workers: int, cfg: "ConfigManager"):
     """
     Compress padded 8-bit TIFFs to 8-bit ZIP.
     Converts 16-bit to 8-bit then ZIP compresses. Preserves EXIF via exiftool.
@@ -4264,7 +4272,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     not (refusals such as real 16-bit data or a multi-page scan are not failures).
     """
     converted = 0
-    failed = []
+    failed: List[Tuple[Path, str]] = []
     if temp_dir is None:
         temp_dir = Path(tempfile.gettempdir())
     # Run-scoped staging dir. A shared "compress_staging" meant the cleanup below wiped
@@ -4372,7 +4380,8 @@ def _purge_verify(items: list, cfg) -> Tuple[list, list]:
     # lumped in with real mismatches and blocked the whole purge -- which a healthy folder
     # reaches routinely, because modes 0/9 rename a backup when one of that name already
     # exists (photo_20260805_101500.tif) and a photo.tiff source produces a photo.tif output.
-    orphans, mismatches = [], []
+    orphans: List[tuple] = []
+    mismatches: List[tuple] = []
     workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
     workers = _memory_capped_pool_workers(workers, [it[0] for it in items if tw.is_tiff_name(str(it[0]))], tw.COMPARE_BYTES_PER_PIXEL, "copy verification")
     with _timeout_load(workers), \
@@ -4416,7 +4425,7 @@ def _purge_report(folder: Path, old_dirs: list, items: list, orphans: list, mism
         head = (f"{len(mismatches)} file(s) did not verify against their parent copy and will "
                 f"be KEPT (nothing below is deleted for them):")
         _say(f"\n{head}", "red")
-        for old_file, new_file, reason in mismatches:
+        for old_file, _new_file, reason in mismatches:
             _say(f"  ! {old_file.relative_to(folder)}: {reason}", "red")
 
     if orphans:
@@ -4544,7 +4553,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
 
 
 
-def _format_size(size_bytes: int) -> str:
+def _format_size(size_bytes: float) -> str:
     """Format bytes as human-readable string."""
     if size_bytes < 0:
         return "0B"
@@ -4554,7 +4563,7 @@ def _format_size(size_bytes: int) -> str:
         size_bytes /= 1024
     return f"{size_bytes:.1f}TB"
 
-def _save_last_run(cfg, kind: str, label: str, commands: List[List[str]],
+def _save_last_run(cfg, kind: str, label: str, commands: Optional[List[List[str]]],
                    manifest_workflow: Optional[Dict] = None,
                    manifest_default_mode: Optional[int] = None,
                    autofind: Optional[Dict] = None,
@@ -5054,7 +5063,7 @@ def _manifest_ready(entries: List[Tuple], workflow: Dict, unattended: bool, dry_
     if ignored_dests:
         _warn(f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
               f"Destination column (only mode 2 honors it) -- outputs follow the mode rules.")
-        for s, d, m in ignored_dests[:5]:
+        for _s, d, m in ignored_dests[:5]:
             print(f"  mode {m}: {d} (ignored)")
 
     # Mode 2 with Destination == Source flattens every TIFF into the input
@@ -5803,8 +5812,9 @@ def _run_command_journal(entry: Dict, title: str, unattended: bool, dry_run: boo
     """A journal of backend command lines (workflows 1-4 and 8), each [subcommand, *args],
     run by this Python with the backend next to this wizard -- the journal may have been
     written by another copy (see _journal_line)."""
-    steps = [_journal_step(c) for c in entry["commands"]]
-    if any(s is None for s in steps):
+    parsed = [_journal_step(c) for c in entry["commands"]]
+    steps = [s for s in parsed if s is not None]
+    if len(steps) != len(parsed):
         _say("Saved workflow cannot be replayed: its command line was recorded in a "
              "form this version does not recognise (an older version, or edited by hand). "
              "Run the workflow again from the menu and save it again.", "red")
@@ -6044,6 +6054,8 @@ def script_settings_menu(cfg) -> None:
                 f"Unset it to use a settings file.")
         return
     path = _settings_overlay_path()
+    if path is None:                # the variable is set and empty: said above
+        return
     data, problem = _read_overlay_data(path)
     if problem:
         _say(f"{path} cannot be read ({problem}). Fix or delete it first; nothing was "

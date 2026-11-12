@@ -1011,6 +1011,26 @@ class TestPhase7SweepGaps:
             assert not (folder / "OLD_PADDED").exists() and not tmp8.exists()
         assert failed == [], "a bigger ZIP is a refusal, not a failure"
 
+    @pytest.mark.parametrize("missing", ["tmp8", "size_zip", "ratio"])
+    def test_an_ok_without_its_8bit_file_lands_nothing(self, tmp_path, monkeypatch, missing):
+        """v3.1 phase 10 (T11, what mypy pointed at): an "ok" always carries its 8-bit file and
+        the sizes. One that does not (never seen) fails closed: the original stays in its place,
+        no OLD_PADDED, the staged file it names is dropped, and the file counts as failed."""
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        folder = tmp_path / "伊豆沼 [FINAL] 50%"
+        folder.mkdir()
+        (folder / "p 1.tif").write_bytes(b"ORIGINAL")
+        tmp8 = tmp_path / "tmp8_p 1.tif"
+        tmp8.write_bytes(b"EIGHTBIT")
+        fields = {"size_orig": 2000, "size_zip": 100, "ratio": 95.0, "tmp8": tmp8, missing: None}
+        r = convert_tiff.PaddedResult("p 1.tif", folder, "ok", exif_ok=True, error=None, **fields)
+        failed = []
+        assert convert_tiff._finalize_padded(1, 1, r, failed) is False
+        assert (folder / "p 1.tif").read_bytes() == b"ORIGINAL"
+        assert not (folder / "OLD_PADDED").exists()
+        assert tmp8.exists() is (missing == "tmp8"), "a staged file the result names is dropped"
+        assert failed == [(folder / "p 1.tif", "the conversion did not report its 8-bit file")]
+
     @pytest.mark.parametrize("answer, want", [("999", convert_tiff.MAX_WORKERS), ("-5", 0), ("4", 4)])
     def test_the_cap_of_workers_stays_in_the_backends_range(self, monkeypatch, answer, want):
         """Sweep S10: -CapWorkers outside 0..MAX_WORKERS would stop compress_tiff_zip.py at

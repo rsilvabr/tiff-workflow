@@ -35,6 +35,7 @@ portrait.tif / IMG.tif next to it, was moved off the disk as a spare copy.
 """
 import argparse
 import hashlib
+import io
 import os
 import re
 import sys
@@ -111,7 +112,7 @@ def find(source: Path, roots, folder: str):
         root = source / r
         if not root.is_dir():
             continue
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, _dirnames, filenames in os.walk(root):
             if Path(dirpath).name.upper() != folder.upper():
                 continue
             for name in filenames:
@@ -121,7 +122,8 @@ def find(source: Path, roots, folder: str):
 
 def main(argv=None) -> int:
     for stream in (sys.stdout, sys.stderr):
-        stream.reconfigure(encoding="utf-8", errors="replace")
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", default=DEFAULT_SOURCE)
     ap.add_argument("--roots", default=";".join(DEFAULT_ROOTS),

@@ -64,7 +64,8 @@ os.environ["TIFFWORKFLOW_SETTINGS"] = ""
 from tiff_workflow import wizard as convert_tiff  # noqa: E402  (the repo root must be on sys.path first)
 
 try:  # folder names with Japanese characters must not kill the console print
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
@@ -1000,7 +1001,7 @@ def main():
         print(f"\n{n_ok}/{len(results)} passed -- report: {report}")
         if failed:
             print(f"{len(failed)} FAIL(s):")
-            for sec, name, ok, d in failed:
+            for _sec, name, _ok, d in failed:
                 print(f"  FAIL {name} - {d}")
         if not args.keep and not failed:
             shutil.rmtree(SCRATCH, ignore_errors=True)

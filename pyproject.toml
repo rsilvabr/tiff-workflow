@@ -1,0 +1,25 @@
+# Development tools only (v3.1, T11). The toolkit is not a pip package, and at run time it uses
+# the standard library alone (Rich is optional), on Python 3.9 or later. tests/test_lint.py runs
+# both tools where they are installed:
+#
+#     python -m pip install ruff "mypy<2"        (mypy 2 no longer checks against Python 3.9)
+#     python -m ruff check
+#     python -m mypy
+
+[tool.ruff]
+target-version = "py39"
+include = ["convert_tiff.py", "tiff_workflow/*.py", "tools/*.py"]
+
+[tool.ruff.lint]
+# pyflakes, the errors of pycodestyle that are not about style, and bugbear
+select = ["E4", "E7", "E9", "F", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# The settings a user edits sit at the top of the wizard, above its imports.
+"tiff_workflow/wizard.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.9"
+files = ["convert_tiff.py", "tiff_workflow", "tools"]
+# Rich is optional: without it installed, its imports are not an error.
+ignore_missing_imports = true

@@ -140,7 +140,7 @@ def _convert_param(p, raw):
         try:
             val = float(raw)
         except ValueError:
-            raise UsageError(f"needs a number, got '{raw}'")
+            raise UsageError(f"needs a number, got '{raw}'") from None
         if not math.isfinite(val):
             raise UsageError(f"needs a number, got '{raw}'")
     else:
@@ -194,7 +194,7 @@ def _arg_type(p):
         try:
             return _convert_param(p, raw)
         except UsageError as e:
-            raise argparse.ArgumentTypeError(str(e))
+            raise argparse.ArgumentTypeError(str(e)) from None
     convert.__name__ = p.kind
     return convert
 
@@ -934,7 +934,7 @@ def read_input_dir_file(path):
         with open(path, "r", encoding="utf-8-sig") as fh:
             entries = [ln.strip() for ln in fh.read().splitlines()]
     except (OSError, UnicodeError) as e:
-        raise UsageError(f"cannot read --input-dir-file: {path} ({e})")
+        raise UsageError(f"cannot read --input-dir-file: {path} ({e})") from None
     entries = [e for e in entries if e]
     if not entries:
         raise UsageError(f"--input-dir-file lists no folders: {path}")
@@ -1202,7 +1202,7 @@ def _size_scaled_timeout(timeout, paths, load_factor=1.0):
 
 class PageCount(NamedTuple):
     ok: bool
-    count: int
+    count: int  # type: ignore[assignment]  # a field named like tuple.count; read as .count
     error: str
 
 

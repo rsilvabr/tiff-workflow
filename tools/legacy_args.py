@@ -122,7 +122,7 @@ def parse_legacy(argv, params):
             try:
                 val = _value(p, raw)
             except tw.UsageError as e:
-                raise tw.UsageError(f"{old} {e}")
+                raise tw.UsageError(f"{old} {e}") from None
         values[p.name] = val
         bound.add(p.name)
     return values, bound
@@ -138,6 +138,7 @@ def translate(argv, params) -> list:
     i = 0
     while i < len(argv):
         m = PARAM_TOKEN.fullmatch(argv[i])
+        assert m is not None, argv[i]       # parse_legacy accepted the line: a -Name here
         p = resolve_param(m.group(1), params)
         inline = m.group(2)
         i += 1
