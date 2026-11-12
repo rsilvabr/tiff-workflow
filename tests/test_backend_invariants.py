@@ -2839,6 +2839,12 @@ class TestSourceRules:
             assert "identify" not in literals and "compare" not in literals, \
                 f"{name}:{node.lineno}: use magick_probe for identify/compare"
 
+    def test_the_wizard_never_moves_with_shutil(self):
+        """v3.1 phase 6 (W-O8): shutil.move turns into a copy and a delete on a locked file;
+        the wizard moves with tw.move_file_into_place, like the backends."""
+        for node, owner, fname in _calls(_tree("convert_tiff.py")):
+            assert not (owner == "shutil" and fname == "move"), f"convert_tiff.py:{node.lineno}"
+
     @pytest.mark.parametrize("name", ALL_FILES)
     def test_the_swap_is_one_rename(self, name):
         """os.replace only inside move_file_replacing (which handles a read-only

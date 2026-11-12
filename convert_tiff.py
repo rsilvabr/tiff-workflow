@@ -1218,36 +1218,21 @@ def _file_digest(path: Path) -> str:
 
 
 def _safe_move(src: Path, dst: Path) -> None:
-    """
-    Move file, overwriting destination if it exists (Windows-safe).
-
-    The destination is only destroyed once the replacement is in place: the old code
-    unlinked dst first, so a move that failed afterwards (disk full, permission, cross-device)
-    left BOTH files gone. An existing dst is parked under a sibling .bak-<uuid> name, and only
-    unlinked after the move succeeds; on failure it is put back.
+    """Move a file onto `dst`, replacing it, the way the backends land a file
+    (tw.move_file_into_place): on one volume ONE rename that replaces `dst` (there is never a
+    moment with nothing at `dst`); from another volume a copy next to `dst`, size-checked,
+    then that rename; `src` goes only after. Raises OSError when it cannot, with `src` and
+    `dst` as they were. Never shutil.move: on a locked or read-only file it turned into a copy
+    and a delete (v3.1 phase 6, W-O8).
 
     A destination that is a directory is an error, not something to delete -- the old
     shutil.rmtree(dst) would recursively erase a whole folder that merely shared the filename.
     """
     if dst.exists() and dst.is_dir():
         raise IsADirectoryError(f"refusing to replace directory with file: {dst}")
-
-    backup = None
-    if dst.exists():
-        backup = dst.with_name(f"{dst.name}.bak-{uuid.uuid4().hex[:8]}")
-        os.replace(str(dst), str(backup))
-    try:
-        shutil.move(str(src), str(dst))
-    except Exception:
-        if backup is not None:
-            os.replace(str(backup), str(dst))
-        raise
-    if backup is not None:
-        try:
-            backup.unlink()
-        except OSError:
-            pass
-
+    error = tw.move_file_into_place(str(src), str(dst), tw.new_run_id())
+    if error:
+        raise OSError(f"{error}: {src} -> {dst}")
 
 # --- AutoFind: Pattern Selection ----------------------------------
 

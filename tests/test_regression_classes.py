@@ -975,7 +975,7 @@ class TestSafeMoveNeverLosesBoth:
         def boom(*args, **kwargs):
             raise OSError("No space left on device")
 
-        monkeypatch.setattr(shutil, "move", boom)
+        monkeypatch.setattr(convert_tiff.tw, "move_file_replacing", boom)
         with pytest.raises(OSError):
             _safe_move(src, dst)
 
