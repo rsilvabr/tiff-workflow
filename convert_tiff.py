@@ -1351,7 +1351,7 @@ def step_autofind(cfg: "ConfigManager", patterns: List[str], root: Path) -> Opti
             return None
     else:
         msg = f"Proceed with all {len(found)} session(s) ({total_tiffs} TIFFs)? [Y/n]: "
-        if input(msg).strip().lower().startswith("n"):
+        if not _yes(input(msg), True):
             return None
 
     # Verify folders still exist before returning
@@ -2217,7 +2217,7 @@ def _offer_restore_stranded(cmd: List[str], stranded: int, stdin) -> Optional[in
         yes = Confirm.ask("Put them back and compress them now?", default=True)
     else:
         print("\n" + msg)
-        yes = input("Put them back and compress them now? [Y/n]: ").strip().lower() in ("", "y", "yes", "s", "sim")
+        yes = _yes(input("Put them back and compress them now? [Y/n]: "), True)
     if not yes:
         return None
     return run_subprocess(_with_restore_stranded(cmd), stdin=stdin)
@@ -4645,8 +4645,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         # Time confirmation (like mode 8)
         time_str = Prompt.ask("[red]Type current time (HH:MM) to confirm deletion[/red]").strip()
     else:
-        resp = input("\nDelete ALL OLD_TIFFs content? THIS CANNOT BE UNDONE. [y/N]: ").strip().lower()
-        if resp != "y":
+        if not _yes(input("\nDelete ALL OLD_TIFFs content? THIS CANNOT BE UNDONE. [y/N]: "), False):
             print("Cancelled.")
             return False
         time_str = input("Type current time (HH:MM) to confirm: ").strip()
@@ -5199,7 +5198,7 @@ def confirm_manifest_entries(manifest_path: str, entries: List[Tuple]) -> bool:
     if len(entries) > 15:
         print(f"  ... and {len(entries) - 15} more entries")
     print()
-    return not input("Proceed with manifest? [Y/n]: ").strip().lower().startswith('n')
+    return _yes(input("Proceed with manifest? [Y/n]: "), True)
 
 
 def manifest_source_overlaps(entries: List[Tuple]) -> List[Tuple[str, str]]:
@@ -5435,8 +5434,7 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
                 console.print("[dim]Cancelled.[/dim]")
                 return False
         else:
-            confirm = input("Manifest contains mode-8 entries: source TIFFs will be DELETED. Confirm? [y/N]: ").strip().lower()
-            if confirm != "y":
+            if not _yes(input("Manifest contains mode-8 entries: source TIFFs will be DELETED. Confirm? [y/N]: "), False):
                 print("Cancelled.")
                 return False
 
@@ -5689,7 +5687,7 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
                     console.print("[dim]Cancelled.[/dim]")
                     return False
             else:
-                if input(f"{warn} Continue? [y/N]: ").strip().lower() != "y":
+                if not _yes(input(f"{warn} Continue? [y/N]: "), False):
                     print("Cancelled.")
                     return False
         else:
@@ -5758,8 +5756,7 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
                 console.print("[dim]Cancelled.[/dim]")
                 return False
         else:
-            confirm = input("Mode 8 will DELETE source TIFFs. Confirm? [y/N]: ").strip().lower()
-            if confirm != "y":
+            if not _yes(input("Mode 8 will DELETE source TIFFs. Confirm? [y/N]: "), False):
                 print("Cancelled.")
                 return False
         workflow["delete_source"] = True
@@ -6263,7 +6260,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
                 print(f"  {len(entries)} entry(ies)")
                 if any(m == 8 for _, _, m in entries):
                     print("WARNING: manifest contains mode-8 entries (DELETES sources).")
-                if input("Run it now? [y/N]: ").strip().lower() != "y":
+                if not _yes(input("Run it now? [y/N]: "), False):
                     print("Cancelled.")
                     return 1
         ok = execute_manifest_workflow(cfg, entries, workflow, unattended=unattended)
@@ -6358,7 +6355,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
             print("Note: dry-run is never inherited -- this runs for real.")
         if deletes:
             print("WARNING: this workflow DELETES or REPLACES source files (-DeleteSource / mode 8).")
-        if not unattended and input("Run it now? [y/N]: ").strip().lower() != "y":
+        if not unattended and not _yes(input("Run it now? [y/N]: "), False):
             print("Cancelled.")
             return 1
 

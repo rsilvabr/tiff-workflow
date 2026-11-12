@@ -638,6 +638,34 @@ def test_one_yes_no_reader_for_both_screens(monkeypatch):
         assert ct.Confirm.ask("Proceed?", console=console) is True
 
 
+def test_every_yes_no_answer_goes_through_the_one_reader():
+    """v3.1 phase 6 (T2 finished): T2 replaced 25 hand-made readers and missed eight on the
+    plain screen -- the mode 8 and Delete OLD_TIFFs confirmations among them, where "sim" and
+    "yes" still cancelled. A yes/no word compared by hand anywhere in the wizard is a reader
+    that disagrees with _yes. (_parse_setting_text reads a bool SETTING, not a question.)"""
+    import ast
+    words = {"y", "n", "yes", "no", "s", "sim", "nao", "não"}
+    words |= {w.upper() for w in words} - {"S"}       # "S" is the presets menu's Save letter
+    tree = ast.parse(Path(ct.__file__).read_text(encoding="utf-8"))
+    found = []
+    for fn in ast.walk(tree):
+        if not isinstance(fn, ast.FunctionDef) or fn.name == "_parse_setting_text":
+            continue
+        for node in ast.walk(fn):
+            consts = []
+            if isinstance(node, ast.Compare):
+                for side in [node.left, *node.comparators]:
+                    if isinstance(side, ast.Constant):
+                        consts.append(side.value)
+                    elif isinstance(side, (ast.Tuple, ast.List, ast.Set)):
+                        consts += [e.value for e in side.elts if isinstance(e, ast.Constant)]
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                  and node.func.attr in ("startswith", "endswith")):
+                consts += [a.value for a in node.args if isinstance(a, ast.Constant)]
+            if any(isinstance(c, str) and c.strip() in words for c in consts):
+                found.append(f"{fn.name} L{node.lineno}")
+    assert found == [], f"a yes/no answer read by hand, not by _yes: {sorted(set(found))}"
+
 
 @pytest.mark.parametrize("rich", [False, True], ids=["plain", "rich"])
 def test_diagnose_temp_folder_is_one_question(tmp_path, monkeypatch, rich):

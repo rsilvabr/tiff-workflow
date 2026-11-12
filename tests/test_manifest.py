@@ -373,6 +373,19 @@ class TestExecuteGuards:
         assert len(no_subprocess) == 1
         assert "-DeleteSource" in no_subprocess[0]
 
+    @pytest.mark.parametrize("word, runs", [("sim", True), ("yes", True), ("S", True),
+                                            ("n", False), ("não", False), ("", False)])
+    def test_mode8_confirmation_reads_the_same_words(self, tmp_path, monkeypatch, no_subprocess,
+                                                     word, runs):
+        """v3.1 phase 6 (T2 finished): T2 missed this question -- on the plain screen only 'y'
+        confirmed, so 'sim' and 'yes' cancelled a run the user had confirmed."""
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        src = tmp_path / "伊豆沼 [FINAL] 50%" / "a"
+        src.mkdir(parents=True)
+        monkeypatch.setattr("builtins.input", lambda *a, **k: word)
+        assert execute_manifest_workflow(_cfg(), [(str(src), str(src), 8)], _workflow()) is runs
+        assert len(no_subprocess) == (1 if runs else 0)
+
     def test_delete_source_only_for_mode8_entries(self, tmp_path, monkeypatch, no_subprocess):
         a = tmp_path / "a"
         b = tmp_path / "b"
