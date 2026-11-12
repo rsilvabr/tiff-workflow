@@ -978,7 +978,8 @@ def thumb_output_matches_source(src, dst, expected_pages, timeout=30):
 
 def backup_tiff_metadata(src, write_dst):
     """Park the metadata of `src` in a temp MIE container when `src` cannot be the
-    `-tagsfromfile` source itself. Returns (needed, path or None).
+    `-tagsfromfile` source itself. Returns the container's path, or None when `src` can be
+    the source itself.
 
     Two cases need it: `write_dst` IS `src` (an in-place write destroys the original before
     the restore runs), and a '%' in `src` (exiftool expands printf codes in the
@@ -986,28 +987,28 @@ def backup_tiff_metadata(src, write_dst):
     doubling the '%' does not escape it). The file operand is not expanded, so dumping FROM
     the '%' name works. The caller deletes the container.
 
-    FAIL-CLOSED: needed and no path = the container could not be written; the caller must
-    refuse the write, which would strip every tag."""
+    FAIL-CLOSED: raises ToolError when the container is needed and could not be written;
+    the caller must refuse the write, which would strip every tag."""
     if not same_path(write_dst, src) and "%" not in str(src):
-        return False, None
+        return None
     meta = temp_file_path(".mie")
     # `-o` is format-expanded like `-tagsfromfile`: a '%' in the temp folder would send the
     # container somewhere else.
     if "%" in meta:
-        return True, None
+        raise ToolError(f"no metadata container: the temp folder has a '%' in its name ({meta})")
     try:
-        rc, _out = exiftool(["-q", "-q", "-all:all",
-                             "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-o", meta, src])
-    except Exception:
+        rc, out = exiftool(["-q", "-q", "-all:all",
+                            "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-o", meta, src])
+    except Exception as e:
         remove_quietly(meta)
-        return True, None
+        raise ToolError(f"no metadata container for {src}: {e}") from e
     if rc != 0:
         # a failed dump can leave a PARTIAL container behind
         remove_quietly(meta)
-        return True, None
-    if os.path.exists(meta):
-        return True, meta
-    return True, None
+        raise ToolError(f"no metadata container for {src}", out, rc)
+    if not os.path.exists(meta):
+        raise ToolError(f"exiftool wrote no metadata container for {src}", out, rc)
+    return meta
 
 
 def restore_all_metadata(tag_source, dst):

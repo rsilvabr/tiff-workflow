@@ -58,7 +58,8 @@ class FakeTools:
         self.layout = list(RGB)       # None = unreadable (ToolError)
         self.layout_kept = True
         self.alpha_ok = True
-        self.meta = "auto"            # "auto" = what backup_tiff_metadata would decide
+        self.meta = "auto"            # "auto" = what backup_tiff_metadata would decide;
+                                      # "fail" = no container (ToolError); else the answer
         self.magick_rc = 0
         self.magick_writes = True
         # one entry per magick call, in order, for a test that needs the calls to differ:
@@ -113,9 +114,11 @@ class FakeTools:
         return self.layout_kept
 
     def _backup(self, src, write_dst):
+        if self.meta == "fail":
+            tool_fails()
         if self.meta == "auto":
             needed = tw.same_path(write_dst, src) or "%" in str(src)
-            return (True, None) if False else ((True, str(src) + ".meta") if needed else (False, None))
+            return str(src) + ".meta" if needed else None
         return self.meta
 
     def _magick_run(self, args):
@@ -275,7 +278,7 @@ class TestInPlaceReplace:
     def test_the_metadata_is_parked_first_and_a_failed_container_refuses_the_write(self, tools, photo):
         """In place the original is gone before the restore runs (round 2); without the
         container the write would strip every tag: refuse it, fail closed."""
-        tools.meta = (True, None)
+        tools.meta = "fail"
         r = job(compress_run(*IN_PLACE), photo)
         assert r.result == f"ERROR (metadata container failed - write refused) | {photo.name}"
         assert tools.magick_calls == [], "magick must not run without the container"
@@ -904,7 +907,7 @@ class TestCopyExif:
         if failing == "exif_copy":
             tools.exif_result = (0, "Warning: Error opening file - x.jpg")
         elif failing == "jpeg_container":
-            tools.meta = (True, None)
+            tools.meta = "fail"
         elif failing == "compression":
             monkeypatch.setattr(tw, "ifd0_compression", tool_fails)
         elif failing == "layout":
@@ -912,8 +915,9 @@ class TestCopyExif:
         elif failing == "magick_rc":
             tools.magick_rc = 1
         elif failing == "tiff_container":
-            answers = [(False, None), (True, None)]      # the JPEG's, then the TIFF's
-            monkeypatch.setattr(tw, "backup_tiff_metadata", lambda s, d: answers.pop(0))
+            answers = [None, "fail"]      # the JPEG's (none needed), then the TIFF's
+            monkeypatch.setattr(tw, "backup_tiff_metadata",
+                                lambda s, d: tool_fails() if answers.pop(0) == "fail" else None)
         elif failing == "restore":
             monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: (
                 (0, "Warning: Error opening file") if "-all:all" in args else (0, "")))
@@ -942,7 +946,7 @@ class TestCopyExif:
             container = Path(str(src) + ".meta")
             container.write_bytes(b"MIE")
             made.append(container)
-            return True, str(container)
+            return str(container)
         monkeypatch.setattr(tw, "backup_tiff_metadata", backup)
 
         def boom(*a, **k):
@@ -1930,21 +1934,22 @@ class TestGatesFailClosed:
                 Path(args[args.index("-o") + 1]).write_bytes(b"MIE")
             return made.get("rc", 0), ""
         monkeypatch.setattr(tw, "exiftool", exiftool)
-        assert tw.backup_tiff_metadata("a.tif", "b.tif") == (False, None)
+        assert tw.backup_tiff_metadata("a.tif", "b.tif") is None
         assert calls == [], "no container needed: nothing runs"
-        needed, path = tw.backup_tiff_metadata("a.tif", "A.TIF")
-        assert needed and path is None, "exit 0 without a container is a failure"
+        with pytest.raises(tw.ToolError):
+            tw.backup_tiff_metadata("a.tif", "A.TIF")      # exit 0 without a container
         made["write"] = True
-        needed, path = tw.backup_tiff_metadata("50%off.tif", "other.tif")
-        assert needed and path and "%" not in path and os.path.exists(path)
+        path = tw.backup_tiff_metadata("50%off.tif", "other.tif")
+        assert path and "%" not in path and os.path.exists(path)
         os.remove(path)
         assert "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet" in calls[-1]
         made["rc"] = 1
-        needed, path = tw.backup_tiff_metadata("a.tif", "a.tif")
-        assert needed and path is None, "a failed dump leaves no partial container"
+        with pytest.raises(tw.ToolError):
+            tw.backup_tiff_metadata("a.tif", "a.tif")
         assert not os.path.exists(calls[-1][calls[-1].index("-o") + 1])
         monkeypatch.setattr(tw.tempfile, "gettempdir", lambda: str(tmp_path / "100% temp"))
-        assert tw.backup_tiff_metadata("a.tif", "a.tif") == (True, None), "'%' in the temp folder"
+        with pytest.raises(tw.ToolError, match="'%' in its name"):
+            tw.backup_tiff_metadata("a.tif", "a.tif")
 
     def test_subfile_restore(self, monkeypatch):
         monkeypatch.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(False, 0, "timeout"))

@@ -279,13 +279,15 @@ def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_co
         return f"ERROR (ZIP pixel verification failed - original untouched) | {name}"
 
     # Same '%' trap as the JPEG copy, for a TIFF whose NAME carries one.
-    needed, tiff_meta = tw.backup_tiff_metadata(tiff_target, write_dst)
-    if tiff_meta:
-        own.append(tiff_meta)
-    restore_ok = False
-    if not (needed and not tiff_meta):
+    try:
+        tiff_meta = tw.backup_tiff_metadata(tiff_target, write_dst)
+    except tw.ToolError:
+        restore_ok = False
+    else:
+        if tiff_meta:
+            own.append(tiff_meta)
         restore_ok = tw.restore_all_metadata(tiff_meta or tiff_target, write_dst)
-    tw.remove_quietly(tiff_meta)
+        tw.remove_quietly(tiff_meta)
     if not restore_ok:
         drop_staged()
         return f"ERROR (exiftool metadata restore failed - original untouched) | {name}"
@@ -400,8 +402,9 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
     # exiftool expands printf codes in the -tagsfromfile ARGUMENT: a JPEG named `50%off.jpg`
     # is read as `50ff.jpg`, exiftool warns and STILL EXITS 0. Park the tags in a container
     # with a safe name first; a name without '%' is passed through untouched.
-    needed, jpeg_meta = tw.backup_tiff_metadata(p.jpeg, tiff_target)
-    if needed and not jpeg_meta:
+    try:
+        jpeg_meta = tw.backup_tiff_metadata(p.jpeg, tiff_target)
+    except tw.ToolError:
         drop_copy()
         return PairResult(f"ERROR (metadata container failed - EXIF copy refused) | {name}")
     if jpeg_meta:

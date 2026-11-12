@@ -675,8 +675,9 @@ def _compress_job(run, t, load, own):
 
     # When the output overwrites the input the original is gone by the time the EXIF
     # restore runs: park the metadata in a temp MIE container first (also for a '%' name).
-    needed, meta_backup = tw.backup_tiff_metadata(src, write_dst)
-    if needed and not meta_backup:
+    try:
+        meta_backup = tw.backup_tiff_metadata(src, write_dst)
+    except tw.ToolError:
         # Fail-closed: a write without the container would strip every tag
         return res(f"ERROR (metadata container failed - write refused) | {name}", fd=True)
     if meta_backup:
