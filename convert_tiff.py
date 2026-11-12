@@ -834,7 +834,6 @@ def _is_tool_output_path(path: Path, root: Path) -> bool:
 
 
 # Captured at import: some tests replace this module's `subprocess` with a stub.
-_DEVNULL = subprocess.DEVNULL
 _CompletedProcess = subprocess.CompletedProcess
 
 
@@ -846,22 +845,17 @@ def _run_captured(cmd, timeout, text=False, input=None):
     (MemoryError) before it signals "started", and Thread.start() then waits
     forever -- before the timeout is even armed (jxl-photo, 2026-10-04: one
     worker hung 60 min). With files there is no thread: a failed spawn raises
-    OSError, which the callers already handle. Copied from jxl-photo; keep in
-    step. text=True decodes as UTF-8 (what magick and exiftool print), where
+    OSError, which the callers already handle. It is tw.run_captured (v3.1: one runner
+    for the wizard and the backends); this adapter gives the wizard's callers a
+    CompletedProcess. text=True decodes as UTF-8 (what magick and exiftool print), where
     subprocess's text mode used the console code page."""
-    stdin_kw = {"stdin": _DEVNULL} if input is None else {"input": input}
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout, **stdin_kw)
-        out.seek(0)
-        err.seek(0)
-        o = r.stdout if r.stdout is not None else out.read()
-        e = r.stderr if r.stderr is not None else err.read()
+    rc, o, e = tw.run_captured(cmd, timeout=timeout, input=input)
     if text:
         if isinstance(o, bytes):
             o = o.decode("utf-8", "replace").replace("\r\n", "\n")
         if isinstance(e, bytes):
             e = e.decode("utf-8", "replace").replace("\r\n", "\n")
-    return _CompletedProcess(cmd, r.returncode, o, e)
+    return _CompletedProcess(cmd, rc, o, e)
 
 
 def _run_exiftool(args, timeout, text=False):

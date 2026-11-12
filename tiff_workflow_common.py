@@ -771,7 +771,11 @@ def run_captured(cmd, timeout=None, input=None):
         r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout, **stdin_kw)
         out.seek(0)
         err.seek(0)
-        return r.returncode, out.read(), err.read()
+        # A real run leaves r.stdout None (the output is in the files); a stand-in for
+        # subprocess.run in the wizard's tests hands its output back on the result.
+        o = r.stdout if r.stdout is not None else out.read()
+        e = r.stderr if r.stderr is not None else err.read()
+        return r.returncode, o, e
 
 
 def _text(data):
