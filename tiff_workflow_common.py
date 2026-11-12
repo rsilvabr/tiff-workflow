@@ -22,6 +22,7 @@ Rules this module keeps (docs/bugs_fixed.md has the history of each):
     (move_file_replacing, move_file_into_place).
 """
 
+import argparse
 import ctypes
 import json
 import math
@@ -163,7 +164,82 @@ def _convert_param(p, raw):
     return val
 
 
+def cli_name(name: str) -> str:
+    """The long option of a PARAMS name: SafeMode -> --safe-mode, InputDirFile ->
+    --input-dir-file (v3.1, D3)."""
+    return "--" + re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "-", name).lower()
+
+
+def cli_switch(name: str, on: bool) -> str:
+    """A yes/no on the command line: --safe-mode or --no-safe-mode."""
+    return cli_name(name) if on else "--no-" + cli_name(name)[2:]
+
+
+def cli_value(name: str, value) -> list:
+    """An option and its value: [--input-dir, D:\\x]. A value that starts with '-' goes in one
+    piece, [--exclude-folders=-old]: argparse would read it as an option of its own."""
+    value = str(value)
+    if value.startswith("-"):
+        return [f"{cli_name(name)}={value}"]
+    return [cli_name(name), value]
+
+
+class _ArgParser(argparse.ArgumentParser):
+    """argparse that raises UsageError instead of printing and exiting: the backend says the
+    error its own way and decides the exit code."""
+
+    def error(self, message):
+        raise UsageError(message)
+
+
+def _arg_type(p):
+    """argparse's type for a PARAMS entry: the same checks as the old reader (range, choices
+    matched without case, pattern). argparse names the option itself: "argument --workers:
+    must be from 1 to 64, got 65"."""
+    def convert(raw):
+        try:
+            return _convert_param(p, raw)
+        except UsageError as e:
+            raise argparse.ArgumentTypeError(re.sub(rf"^-{p.name}:? ", "", str(e)))
+    convert.__name__ = p.kind
+    return convert
+
+
+def _new_parser(params) -> argparse.ArgumentParser:
+    """The parser of the new command line: --kebab-case, every yes/no as --x / --no-x, no
+    abbreviation, names with their exact case (T6)."""
+    ap = _ArgParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
+    for p in params:
+        if p.kind in ("bool", "switch"):
+            ap.add_argument(cli_name(p.name), dest=p.name, action=argparse.BooleanOptionalAction,
+                            help=p.help)
+        else:
+            ap.add_argument(cli_name(p.name), dest=p.name, type=_arg_type(p), help=p.help)
+    return ap
+
+
+# An argv of the old form: some token is -Name (one dash and a letter), never --name.
+_LEGACY_TOKEN = re.compile(r"-[A-Za-z]")
+
+
 def parse_args(argv, params):
+    """Bind `argv` to `params`: ({name: value}, {names given on the command line}). The
+    command line is `--kebab-case value`, `--switch` / `--no-switch` (v3.1, D3). Raises
+    UsageError for anything it cannot bind.
+
+    During v3.1 phase 8 an argv of the old form (-Name value, -Name:value) still binds
+    through _parse_legacy, so the callers can move one at a time; the end of the phase
+    removes it."""
+    argv = [str(a) for a in argv]
+    if any(_LEGACY_TOKEN.match(a) for a in argv):
+        return _parse_legacy(argv, params)
+    given = vars(_new_parser(params).parse_args(argv))
+    values = {p.name: p.default for p in params}
+    values.update(given)
+    return values, set(given)
+
+
+def _parse_legacy(argv, params):
     """Bind `argv` the way the PowerShell backends bound theirs, so a command line written
     for a .ps1 (a saved preset, a .bat) still means the same: `-Name value`, `-Name:value`,
     `-Switch`, `-Switch:$false`; names without case; an unambiguous prefix of a name is

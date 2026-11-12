@@ -2552,6 +2552,41 @@ class TestCommandLine:
         opt, _ = tw.parse_args(["-Page", "all", "-Quality", "100"], gt.PARAMS)
         assert opt["Page"] == "all" and opt["Quality"] == "100"
 
+    def test_the_new_command_line_binds_the_same(self):
+        """v3.1 (D3): --kebab-case value, every yes/no as --x / --no-x."""
+        opt, bound = tw.parse_args(["--mode", "9", "--input-dir", r"E:\写真 [x] 50%",
+                                    "--no-safe-mode", "--dry-run", "--no-overwrite", "--workers",
+                                    "3", "--skip-lzw-as-compressed", "--srgb-profile", "",
+                                    "--output-dir=-weird name", "--duplicate-action", "skip"],
+                                   cz.PARAMS)
+        assert opt["Mode"] == 9 and opt["InputDir"] == r"E:\写真 [x] 50%" and opt["Workers"] == 3
+        assert opt["SafeMode"] is False and opt["DryRun"] is True and opt["Overwrite"] is False
+        assert opt["SkipLzwAsCompressed"] is True and opt["SrgbProfile"] == ""
+        assert opt["OutputDir"] == "-weird name" and opt["DuplicateAction"] == "Skip"
+        assert bound == {"Mode", "InputDir", "SafeMode", "DryRun", "Overwrite", "Workers",
+                         "SkipLzwAsCompressed", "SrgbProfile", "OutputDir", "DuplicateAction"}
+        assert opt["ZipSubfolderName"] == "ZIP" and opt["DeleteSource"] is False
+        assert tw.parse_args([], cz.PARAMS) == ({p.name: p.default for p in cz.PARAMS}, set())
+
+    @pytest.mark.parametrize("argv", [
+        ["--mo", "9"], ["--Mode", "9"], ["--MODE", "9"],     # no abbreviation, no other case (T6)
+        ["9"], ["--no-such-thing"], ["--workers", "0"], ["--workers", "65"],
+        ["--workers", "many"], ["--mode"], ["--safe-mode=1"], ["--safe-mode", "$false"],
+        ["--dry-run=perhaps"], ["--no-dry-run=1"], ["--duplicate-action", "Rename"],
+        ["--output-dir", "--dry-run"], ["--worker-memory-fraction", "nan"],
+    ])
+    def test_what_the_new_command_line_cannot_bind_is_refused(self, argv):
+        with pytest.raises(tw.UsageError):
+            tw.parse_args(argv, cz.PARAMS)
+
+    def test_a_refusal_names_the_option_once(self):
+        with pytest.raises(tw.UsageError) as e:
+            tw.parse_args(["--workers", "65"], cz.PARAMS)
+        assert str(e.value) == "argument --workers: must be from 1 to 64, got 65"
+        with pytest.raises(tw.UsageError) as e:
+            tw.parse_args(["--page", "first"], gt.PARAMS)
+        assert str(e.value) == "argument --page: 'first' is not a valid value"
+
     def test_a_bad_command_line_exits_1_before_anything_is_touched(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         for module in (cz, cx, gt):
