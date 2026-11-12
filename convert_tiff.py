@@ -3935,9 +3935,25 @@ def _padded_pixels_status(orig: Path, new8: Path) -> Optional[str]:
     return None
 
 
+@dataclass(frozen=True)
+class PaddedResult:
+    """What _process_single_padded did with one file. Only "ok" lands the 8-bit file `tmp8`
+    (_compress_padded_files does it); any other status leaves the original untouched, and a
+    `tmp8` it wrote is the caller's to drop."""
+    name: str
+    parent: Path
+    status: str
+    size_orig: Optional[int] = None
+    size_zip: Optional[int] = None
+    ratio: Optional[float] = None
+    exif_ok: bool = False
+    error: Optional[str] = None
+    tmp8: Optional[Path] = None
+
+
 @_scoped_magick_aliases
-def _process_single_padded(tiff_path, staging):
-    """Process a single padded file. Returns (name, parent, status, size_orig, size_zip, ratio, exif_ok, error_msg, tmp8_path)."""
+def _process_single_padded(tiff_path, staging) -> PaddedResult:
+    """Convert one padded file to an 8-bit ZIP in `staging`, through every gate in order."""
     name = tiff_path.name
     parent = tiff_path.parent
     unique_id = uuid.uuid4().hex[:8]
@@ -3947,6 +3963,9 @@ def _process_single_padded(tiff_path, staging):
     tmp8 = staging / f"tmp8_{unique_id}_{name.replace('[', '(').replace(']', ')')}"
     status = None
 
+    def res(status, error=None) -> PaddedResult:
+        return PaddedResult(name, parent, status, error=error, tmp8=tmp8)
+
     # _is_real_16bit judges page [0] only, but the conversion below rewrites the WHOLE file.
     # On a scanner RGB+IR scan whose RGB is padded, that would down-convert an IR channel
     # that may hold real 16-bit data and was never diagnosed. Refuse those files; a Capture
@@ -3955,7 +3974,7 @@ def _process_single_padded(tiff_path, staging):
     extras_ok = _tiff_extra_pages_are_thumbnails(tiff_path)
     if extras_ok is not True:
         status = "multi_page_refused" if extras_ok is False else "page_layout_unreadable"
-        return (name, parent, status, None, None, None, False, None, tmp8)
+        return res(status)
 
     # audit round 28: magick reduces an all-neutral RGB page to one gray channel (and writes
     # a neutral RGB+IR scan with half its samples), and the pixel gate below compares through
@@ -3963,7 +3982,7 @@ def _process_single_padded(tiff_path, staging):
     # pin it with -type, and compare it again after the write.
     src_layout = _tiff_sample_layout(tiff_path)
     if src_layout is None:
-        return (name, parent, "layout_unreadable", None, None, None, False, None, tmp8)
+        return res("layout_unreadable")
     type_args = _magick_keep_type_args(src_layout)
 
     try:
@@ -3975,14 +3994,14 @@ def _process_single_padded(tiff_path, staging):
             )
         except FileNotFoundError:
             status = "magick_not_found"
-            return (name, parent, status, None, None, None, False, None, tmp8)
+            return res(status)
         except Exception as e:
             status = "error"
-            return (name, parent, status, None, None, None, False, str(e), tmp8)
+            return res(status, str(e))
 
         if result.returncode != 0:
             status = "magick_error"
-            return (name, parent, status, None, None, None, False, None, tmp8)
+            return res(status)
 
         # A '%' in the name makes exiftool read a DIFFERENT file for -tagsfromfile and still
         # exit 0, so `exif_ok` was true while nothing had been copied -- and this path replaces
@@ -4028,7 +4047,7 @@ def _process_single_padded(tiff_path, staging):
 
         if not tmp8.exists():
             status = "missing"
-            return (name, parent, status, None, None, None, False, None, tmp8)
+            return res(status)
 
         # Integrity check: ensure the compressed file decodes and dimensions match
         try:
@@ -4038,7 +4057,7 @@ def _process_single_padded(tiff_path, staging):
             )
             if verify_result.returncode != 0:
                 status = "integrity_error"
-                return (name, parent, status, None, None, None, False, None, tmp8)
+                return res(status)
 
             # This gate authorises replacing the original with a LOSSY 16 -> 8-bit conversion,
             # so every branch fails CLOSED. Previously an unreadable identify (non-zero exit or
@@ -4060,10 +4079,10 @@ def _process_single_padded(tiff_path, staging):
             orig_dims = _read_dims(tiff_path)
             if new_dims is None or orig_dims is None:
                 status = "dimension_unreadable"
-                return (name, parent, status, None, None, None, False, None, tmp8)
+                return res(status)
             if new_dims != orig_dims:
                 status = "dimension_mismatch"
-                return (name, parent, status, None, None, None, False, None, tmp8)
+                return res(status)
 
             # Page-count parity: -depth 8 on a multi-page TIFF can drop pages, and the
             # dimension check above only looks at page [0].
@@ -4083,13 +4102,13 @@ def _process_single_padded(tiff_path, staging):
             orig_pages = _read_pages(tiff_path)
             if new_pages is None or orig_pages is None or new_pages != orig_pages:
                 status = "page_count_mismatch"
-                return (name, parent, status, None, None, None, False, None, tmp8)
+                return res(status)
 
             # audit round 28: same samples per pixel, colour model and alpha kind on every
             # page (the depth changes on purpose). See _tiff_sample_layout.
             if _sample_layout_diff(src_layout, _tiff_sample_layout(tmp8), compare_bits=False):
                 status = "layout_changed"
-                return (name, parent, status, None, None, None, False, None, tmp8)
+                return res(status)
 
             # The page markers go back BEFORE the pixel gate, so the gate reads the file exactly
             # as it will land (v3.1 phase 6, W-O11, the owner's choice; the backends do the same
@@ -4098,7 +4117,7 @@ def _process_single_padded(tiff_path, staging):
             # still surfaces as their own status.
             if not _restore_subfile_types(tiff_path, tmp8):
                 status = "subfile_restore_failed"
-                return (name, parent, status, None, None, None, False, None, tmp8)
+                return res(status)
 
             # The 8-bit rewrite must hold exactly the pixels of the original. Nothing above
             # looks at pixels: the verdict that called the file "padded" may be a cached one
@@ -4107,16 +4126,16 @@ def _process_single_padded(tiff_path, staging):
             # anything else (different, timeout, unparseable) refuses.
             status = _padded_pixels_status(tiff_path, tmp8)
             if status is not None:
-                return (name, parent, status, None, None, None, False, None, tmp8)
+                return res(status)
         except Exception as e:
             status = "integrity_error"
-            return (name, parent, status, None, None, None, False, str(e), tmp8)
+            return res(status, str(e))
 
         size_orig = tiff_path.stat().st_size
         size_zip = tmp8.stat().st_size
         ratio = (1 - size_zip / size_orig) * 100 if size_orig > 0 else 0
         status = "ok"
-        return (name, parent, status, size_orig, size_zip, ratio, exif_ok, None, tmp8)
+        return PaddedResult(name, parent, status, size_orig, size_zip, ratio, exif_ok, None, tmp8)
     finally:
         if status and status != "ok" and tmp8.exists():
             try:
@@ -4276,7 +4295,9 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     # file held on the staging disk until the end.
     def _finalize(i, result):
         nonlocal converted
-        name, parent, status, size_orig, size_zip, ratio, exif_ok, error_msg, tmp8 = result
+        name, parent, status = result.name, result.parent, result.status
+        size_orig, size_zip, ratio = result.size_orig, result.size_zip, result.ratio
+        exif_ok, error_msg, tmp8 = result.exif_ok, result.error, result.tmp8
         final_dst = parent / name
         if status in _FAILED_STATUSES:
             failed.append((final_dst, status + (f": {error_msg}" if error_msg else "")))
@@ -4414,7 +4435,7 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 f = padded_files[futures[future]]
                 # audit round 16: the last slot is the staging path the result loop may
                 # unlink; putting the SOURCE path there risked deleting the original.
-                result = (f.name, f.parent, "error", None, None, None, False, str(e), None)
+                result = PaddedResult(f.name, f.parent, "error", error=str(e))
             _finalize(done - 1, result)
             if done % 25 == 0 and done < total:
                 spent = time.time() - t_start

@@ -105,7 +105,7 @@ def test_padded_conversion_keeps_rgb_of_a_neutral_real_scan(tmp_path, src, spp):
     staging = tmp_path / "staging"
     staging.mkdir()
     res = ct._process_single_padded(f, staging)
-    status, tmp8 = res[2], res[8]
+    status, tmp8 = res.status, res.tmp8
     assert status == "ok", res
     assert _ifd0_layout(tmp8) == (spp, 2), "the 8-bit file lost its RGB samples"
 
@@ -230,8 +230,8 @@ def test_padded_conversion_keeps_japanese_iptc_through_the_mie_container(tmp_pat
     staging = tmp_path / "staging"
     staging.mkdir()
     res = ct._process_single_padded(f, staging)
-    assert res[2] == "ok" and res[6], res
-    t = _tags(res[8], "-IPTC:Keywords", "-IPTC:Caption-Abstract", "-XMP-dc:Subject")
+    assert res.status == "ok" and res.exif_ok, res
+    t = _tags(res.tmp8, "-IPTC:Keywords", "-IPTC:Caption-Abstract", "-XMP-dc:Subject")
     assert t.get("IPTC:Keywords") == "伊豆沼", t
     assert t.get("IPTC:Caption-Abstract") == "伊豆沼の夏", t
 
@@ -247,7 +247,7 @@ def _fake_padded_result(staging_holder):
     def fake(tiff_path, staging):
         tmp8 = staging / f"tmp8_{tiff_path.name.replace('[', '(').replace(']', ')')}"
         tmp8.write_bytes(b"z" * 100)
-        return (tiff_path.name, tiff_path.parent, "ok", 2000, 100, 95.0, True, None, tmp8)
+        return ct.PaddedResult(tiff_path.name, tiff_path.parent, "ok", 2000, 100, 95.0, True, None, tmp8)
     return fake
 
 
@@ -537,8 +537,8 @@ def test_diagnose_preset_failed_conversion_exits_1_and_names_the_file(home, monk
     before = t["padded"].read_bytes()
 
     def failing(tiff_path, staging):
-        return (tiff_path.name, tiff_path.parent, "integrity_error", None, None, None,
-                False, None, staging / "nothing.tif")
+        return ct.PaddedResult(tiff_path.name, tiff_path.parent, "integrity_error",
+                               tmp8=staging / "nothing.tif")
     monkeypatch.setattr(ct, "_process_single_padded", failing)
     entry = _diag_entry({**_settings(home), "convert_padded": True})
     assert ct._run_journal(_diag_cfg(), entry, "Preset: padded", unattended=True) == 1
@@ -614,7 +614,7 @@ def test_a_temp_folder_with_brackets_works(tmp_path):
     staging = tmp_path / "staging [y]"
     staging.mkdir()
     res = ct._process_single_padded(src, staging)
-    assert res[2] == "ok", res
+    assert res.status == "ok", res
 
 
 
@@ -780,6 +780,6 @@ def test_the_padded_markers_go_back_before_the_pixel_gate(tmp_path, monkeypatch)
     monkeypatch.setattr(ct, "_run_exiftool", exif)
     monkeypatch.setattr(ct, "_TIMEOUT_LOAD", 3)
     res = ct._process_single_padded(src, staging)
-    assert res[2] == "ok", res
+    assert res.status == "ok", res
     assert order == ["markers", "pixels"], order
     assert timeouts and all(t > 30 for t in timeouts), timeouts

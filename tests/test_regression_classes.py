@@ -803,7 +803,8 @@ class TestFailClosedGates:
         staging.mkdir()
         monkeypatch.setattr(subprocess, "run", self._padded_fake(**kwargs))
 
-        _, _, status, _, _, _, _, _, tmp8 = _process_single_padded(src, staging)
+        r = _process_single_padded(src, staging)
+        status, tmp8 = r.status, r.tmp8
 
         assert status == expected
         assert not tmp8.exists(), "the rejected conversion must not be left in staging"
@@ -1377,7 +1378,7 @@ class TestPaddedConversionRespectsPages:
         staging = tmp_path / "stg"
         staging.mkdir()
 
-        status = convert_tiff._process_single_padded(src, staging)[2]
+        status = convert_tiff._process_single_padded(src, staging).status
 
         assert status == "multi_page_refused", status
         assert src.read_bytes() == before
@@ -1389,8 +1390,8 @@ class TestPaddedConversionRespectsPages:
         staging = tmp_path / "stg"
         staging.mkdir()
 
-        name, parent, status, _, _, _, exif_ok, _, tmp8 = \
-            convert_tiff._process_single_padded(src, staging)
+        r = convert_tiff._process_single_padded(src, staging)
+        status, exif_ok, tmp8 = r.status, r.exif_ok, r.tmp8
 
         assert status == "ok", status
         assert exif_ok
@@ -1634,7 +1635,8 @@ class TestPythonSubfileRestoreKeepsExplicitZero:
         staging = tmp_path / "stg"
         staging.mkdir()
 
-        _, _, status, _, _, _, _, _, tmp8 = _process_single_padded(src, staging)
+        r = _process_single_padded(src, staging)
+        status, tmp8 = r.status, r.tmp8
 
         assert status == "ok", status
         assert numeric_subfiletypes(tmp8) == before, (

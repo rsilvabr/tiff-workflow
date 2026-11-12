@@ -481,7 +481,7 @@ class TestBracketAliasesAreReleased:
         src = _padded(tmp_path / "Shoot [FINAL]" / "p.tif")
         staging = tmp_path / "stg"
         staging.mkdir()
-        status = ct._process_single_padded(src, staging)[2]
+        status = ct._process_single_padded(src, staging).status
         assert status == "ok", status
         assert list(alias_dir.iterdir()) == []
 
@@ -773,7 +773,7 @@ def test_conversion_replaces_each_file_as_it_finishes(tmp_path, monkeypatch, cap
             seen_backup_before_next.append(first_backup.exists())
         tmp8 = staging / f"tmp8_{tiff_path.name}"
         tmp8.write_bytes(b"z" * 100)
-        return (tiff_path.name, tiff_path.parent, "ok", 2000, 100, 95.0, True, None, tmp8)
+        return ct.PaddedResult(tiff_path.name, tiff_path.parent, "ok", 2000, 100, 95.0, True, None, tmp8)
     monkeypatch.setattr(ct, "_process_single_padded", fake_single)
 
     done = ct._compress_padded_files(srcs, tmp_path / "staging", workers=1, cfg=_cfg())
