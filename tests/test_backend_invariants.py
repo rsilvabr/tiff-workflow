@@ -524,6 +524,141 @@ class TestThumbnailWrite:
         assert "replace" not in tools.events
 
 
+class TestNothingOfAJobIsLeftBehind:
+    """v3.1 (O6, O8): what a job made for itself -- the metadata container, the output it
+    was writing -- is gone when the job ends in an error, whatever the error. Until v3.0.0
+    a staged file refused by the page gate stayed in -StagingDir, and an exception nobody
+    expected left the temp sibling and the container next to the photo."""
+
+    STAGED = "abcd1234_0123456789ab_p.tif"
+
+    def start(self, shape, photo, tmp_path):
+        """(the job's arguments, the output file it writes) for one of the four ways a job
+        writes: in place (temp sibling), staged, straight to its destination, modes 0/9."""
+        if shape == "in-place":
+            return (compress_run(*IN_PLACE), photo), {}, None
+        if shape == "staged":
+            stg = tmp_path / "stg 一時 [x]"
+            stg.mkdir()
+            out = tmp_path / "ZIP [x]" / photo.name
+            return (compress_run("-Mode", "1", "-StagingDir", str(stg)), photo), \
+                dict(write_dst=stg / self.STAGED, final_dst=out), stg / self.STAGED
+        if shape == "destination":
+            out = tmp_path / "ZIP [x]" / photo.name
+            out.parent.mkdir()
+            return (compress_run("-Mode", "1"), photo), dict(write_dst=out, final_dst=out), out
+        st = os.stat(photo)
+        sibling = Path(str(photo) + ".abcd1234_0123456789ab.tif")
+        return (compress_run("-Mode", "9"), photo), dict(
+            write_dst=sibling, final_dst=photo, comp="Uncompressed", safe_checked=True,
+            keep_dir=str(photo.parent / "OLD_TIFFs"), src_length=st.st_size,
+            src_mtime_ns=st.st_mtime_ns), sibling
+
+    @pytest.mark.parametrize("shape, step", [
+        ("in-place", "tiff_sample_layout_kept"), ("in-place", "restore_tiff_subfile_types"),
+        ("in-place", "add_tiff_history_entry"), ("in-place", "zip_integrity"),
+        ("in-place", "pixel_identical"),
+        ("staged", "tiff_sample_layout_kept"), ("staged", "add_tiff_history_entry"),
+        ("staged", "tiff_page_count"),
+        ("destination", "tiff_sample_layout_kept"), ("destination", "add_tiff_history_entry"),
+        ("modes-0-9", "tiff_sample_layout_kept"), ("modes-0-9", "add_tiff_history_entry"),
+        ("modes-0-9", "zip_integrity"),
+    ])
+    def test_an_unexpected_exception_leaves_nothing(self, tools, photo, tmp_path, monkeypatch,
+                                                    shape, step):
+        answer = getattr(tw, step)
+
+        def boom(*a, **k):
+            # the page count is also asked of the SOURCE before anything is made: that one
+            # answers, the one of the output explodes
+            if step == "tiff_page_count" and str(a[0]) == str(photo):
+                return answer(*a, **k)
+            raise RuntimeError(f"{step} exploded")
+        monkeypatch.setattr(tw, step, boom)
+        container = Path(str(photo) + ".meta")      # the name FakeTools gives it
+        container.write_bytes(b"MIE")
+        args, extra, output = self.start(shape, photo, tmp_path)
+        with pytest.raises(RuntimeError, match="exploded"):
+            job(*args, **extra)
+        assert photo.read_bytes() == b"ORIGINAL" and "replace" not in tools.events
+        assert not container.exists(), "the metadata container stayed"
+        assert leftovers(photo.parent) == [], "the temp sibling stayed"
+        assert output is None or not output.exists(), f"the output stayed: {output}"
+        assert sorted(os.listdir(photo.parent)) == [photo.name]
+
+    @pytest.mark.parametrize("shape", ["in-place", "staged", "destination", "modes-0-9"])
+    def test_a_write_that_dies_half_way_leaves_nothing(self, tools, photo, tmp_path, monkeypatch, shape):
+        """The exception comes out of the write itself, with half a file on disk."""
+        def half_then_dies(args):
+            out = str(args[-1]).replace("%%", "%")
+            with open(out, "wb") as fh:
+                fh.write(b"HALF")
+            raise RuntimeError("magick died")
+        monkeypatch.setattr(tw, "magick_run", half_then_dies)
+        container = Path(str(photo) + ".meta")
+        container.write_bytes(b"MIE")
+        args, extra, output = self.start(shape, photo, tmp_path)
+        with pytest.raises(RuntimeError, match="magick died"):
+            job(*args, **extra)
+        assert photo.read_bytes() == b"ORIGINAL" and not container.exists()
+        assert leftovers(photo.parent) == [] and (output is None or not output.exists())
+        assert sorted(os.listdir(photo.parent)) == [photo.name]
+
+    def test_an_output_of_an_earlier_run_is_not_this_jobs_before_it_is_written(self, tools, photo,
+                                                                              tmp_path):
+        """-Overwrite in a copy mode: until magick has written, the file at the destination
+        is the EARLIER run's output. A failure before the write must not delete it."""
+        out = tmp_path / "ZIP [x]" / photo.name
+        out.parent.mkdir()
+        out.write_bytes(b"EARLIER OUTPUT")
+        container = Path(str(photo) + ".meta")
+        container.write_bytes(b"MIE")
+        tools.magick_plan = [RuntimeError("magick could not start")]
+        with pytest.raises(RuntimeError):
+            job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
+        assert out.read_bytes() == b"EARLIER OUTPUT" and not container.exists()
+
+    def test_once_written_over_the_earlier_output_is_this_jobs(self, tools, photo, tmp_path, monkeypatch):
+        """-Overwrite, and the failure comes AFTER magick wrote: what sits at the destination
+        is this job's output, with nothing verified and maybe no metadata. It goes -- left
+        there, the next run without -Overwrite would skip it as "exists"."""
+        out = tmp_path / "ZIP [x]" / photo.name
+        out.parent.mkdir()
+        out.write_bytes(b"EARLIER OUTPUT")
+
+        def boom(*a, **k):
+            raise RuntimeError("history exploded")
+        monkeypatch.setattr(tw, "add_tiff_history_entry", boom)
+        with pytest.raises(RuntimeError):
+            job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
+        assert not out.exists() and photo.read_bytes() == b"ORIGINAL"
+
+    @pytest.mark.parametrize("mode", ["1", "3", "5", "7"])
+    def test_a_staged_file_the_page_gate_refused_does_not_stay_in_staging(self, tools, photo, tmp_path,
+                                                                         monkeypatch, mode):
+        counts = {str(photo): 2}
+        monkeypatch.setattr(tw, "tiff_page_count",
+                            lambda p, t=30: tw.PageCount(True, counts.get(str(p), 1), ""))
+        monkeypatch.setattr(tw, "tiff_has_only_subfile_pages", lambda *a, **k: True)
+        stg = tmp_path / "stg 一時 [x]"
+        stg.mkdir()
+        out = tmp_path / "ZIP [x]" / photo.name
+        r = job(compress_run("-Mode", mode, "-StagingDir", str(stg)), photo,
+                write_dst=stg / self.STAGED, final_dst=out)
+        assert r.result == f"ERROR (page count shrink) | {photo.name} | 2 -> 1 pages"
+        assert os.listdir(stg) == [] and r.staging_name is None
+        assert photo.read_bytes() == b"ORIGINAL" and not out.exists()
+
+    def test_a_good_staged_file_stays_for_the_caller_to_move(self, tools, photo, tmp_path):
+        """The other side of the rule: success hands the file over, nothing is cleaned."""
+        stg = tmp_path / "stg 一時 [x]"
+        stg.mkdir()
+        r = job(compress_run("-Mode", "1", "-StagingDir", str(stg)), photo,
+                write_dst=stg / self.STAGED, final_dst=tmp_path / "ZIP [x]" / photo.name)
+        assert r.result.startswith("OK (") and r.staging_name == self.STAGED
+        assert (stg / self.STAGED).read_bytes() == b"COMPRESSED"
+
+
 class TestKeepOriginal:
     """Modes 0/9, round 26: the original leaves its place only after the copy is next to
     it, and comes back when the swap fails."""
@@ -780,6 +915,38 @@ class TestCopyExif:
             assert "magick reported success but wrote no file" in r.line
         assert r.staged is None
         assert os.listdir(out) == [], "the copy or the staged file stayed in -OutputDir"
+        assert photo.read_bytes() == b"ORIGINAL"
+        assert sorted(os.listdir(photo.parent)) == [photo.name]
+
+    @pytest.mark.parametrize("step", ["exiftool", "ifd0_compression", "tiff_sample_layout", "magick_run",
+                                      "tiff_sample_layout_kept", "pixel_identical",
+                                      "restore_all_metadata", "restore_tiff_subfile_types"])
+    def test_with_outputdir_an_unexpected_exception_leaves_nothing_either(
+            self, tools, photo, tmp_path, monkeypatch, step):
+        """v3.1 (O8): the same, when the step does not answer "no" but raises: the copy in
+        -OutputDir, the staged ZIP (half written when magick is the one that dies) and the
+        two metadata containers used to stay on disk."""
+        made = []
+
+        def backup(src, dst):                       # a container that really exists
+            container = Path(str(src) + ".meta")
+            container.write_bytes(b"MIE")
+            made.append(container)
+            return True, str(container)
+        monkeypatch.setattr(tw, "backup_tiff_metadata", backup)
+
+        def boom(*a, **k):
+            if step == "magick_run":
+                with open(str(a[0][-1]).replace("%%", "%"), "wb") as fh:
+                    fh.write(b"HALF")
+            raise RuntimeError(f"{step} exploded")
+        monkeypatch.setattr(tw, step, boom)
+        out = tmp_path / "out 伊豆沼 [x] 100%"
+        with pytest.raises(RuntimeError, match="exploded"):
+            self._to_outputdir(photo, tmp_path, "-CompressZip")
+        assert made, "no container was made: the test proves nothing about them"
+        assert os.listdir(out) == [], "the copy, the staged file or a container stayed in -OutputDir"
+        assert not any(c.exists() for c in made)
         assert photo.read_bytes() == b"ORIGINAL"
         assert sorted(os.listdir(photo.parent)) == [photo.name]
 
@@ -1550,7 +1717,7 @@ class TestGroupSteps:
         assert error_lines(run) == [
             f"[1/1] ERROR (unexpected) | {photo.name} | RuntimeError: history exploded"]
         assert outcome.error_srcs == {str(photo).lower()} and run.err == 1
-        assert os.path.exists(sibling), "the worker left its copy behind"
+        assert not os.path.exists(sibling), "v3.1: the worker drops the copy it was writing"
         cz._archive_originals(run, [job], outcome)
         assert photo.read_bytes() == b"ORIGINAL" and not os.path.exists(sibling)
         assert not (photo.parent / "OLD_TIFFs").exists()

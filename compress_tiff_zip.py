@@ -585,7 +585,25 @@ def process_job(run, t, load):
     """Compress one TIFF (`t`, a Job). Runs on a worker thread: it never logs or counts.
     Returns a JobResult.
 
-    `load` = workers running at once (they share the disk; it scales the probe timeouts)."""
+    `load` = workers running at once (they share the disk; it scales the probe timeouts).
+
+    An exception nobody expected (the caller reports it as that file's `ERROR
+    (unexpected)`) must not leave this file's own temporaries behind: the metadata
+    container, and the output that was being written -- a temp sibling, a staged file, or
+    the copy at its destination, which nothing has verified at that point (v3.1; until
+    v3.0.0 they stayed on disk)."""
+    own = []
+    try:
+        return _compress_job(run, t, load, own)
+    except BaseException:
+        for path in own:
+            tw.remove_quietly(path)
+        raise
+
+
+def _compress_job(run, t, load, own):
+    """process_job's work. `own`: the files of this job that exist only while it works, in
+    the order they were made (process_job removes them when this raises)."""
     opt = run.opt
     mode = opt["Mode"]
     src = t.src
@@ -659,6 +677,8 @@ def process_job(run, t, load):
     if needed and not meta_backup:
         # Fail-closed: a write without the container would strip every tag
         return res(f"ERROR (metadata container failed - write refused) | {name}", fd=True)
+    if meta_backup:
+        own.append(meta_backup)
 
     # An in-place write would destroy the only copy of the image if magick died mid-write:
     # compress to a temp sibling, then replace the original with one same-volume rename,
@@ -669,6 +689,12 @@ def process_job(run, t, load):
         in_place_final = write_dst
         write_dst = tw.new_temp_sibling_path(write_dst, run.run_id)
         run.temp_files.add(write_dst)
+    # A temp sibling or a staged file carries this run's id: it is this job's from here on,
+    # also half written. So is an output written straight to a destination where nothing
+    # is yet. A destination that exists (-Overwrite) is the output of an EARLIER run until
+    # magick has written it: it becomes this job's only after the write, below.
+    if not tw.same_path(write_dst, final_dst) or not os.path.exists(write_dst):
+        own.append(write_dst)
 
     no_thumb_note = ""
     thumb_marker_failed = False
@@ -700,6 +726,8 @@ def process_job(run, t, load):
         if not os.path.exists(write_dst):
             tw.remove_quietly(meta_backup)
             return res(f"ERROR (magick reported success but wrote no file) | {name} | expected: {write_dst}", fd=True)
+    if write_dst not in own:
+        own.append(write_dst)
 
     # The written file must have the source's sample layout, page for page (page 0 on the
     # thumbnail path). The output is always this run's own file here.
@@ -735,8 +763,10 @@ def process_job(run, t, load):
         pc_src = tw.tiff_page_count(src, timeout)
         pc_dst = tw.tiff_page_count(write_dst, timeout)
         if not pc_dst.ok or (pc_src.ok and pc_dst.count < pc_src.count):
-            if in_place_final or tw.same_path(write_dst, final_dst):
-                tw.remove_quietly(write_dst)
+            # The output is this run's own file wherever it was written: a temp sibling,
+            # the destination of a copy mode, or a staged file -- which until v3.0.0 stayed
+            # in -StagingDir, refused and never moved.
+            tw.remove_quietly(write_dst)
             detail = (f"output page count unreadable ({pc_dst.error})" if not pc_dst.ok
                       else f"{pc_src.count} -> {pc_dst.count} pages")
             return res(f"ERROR (page count shrink) | {name} | {detail}", fd=True)

@@ -233,11 +233,12 @@ def _jpeg_copy_args(source, tag_source, icc_tag, target):
     return tags
 
 
-def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy):
+def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy, own):
     """The ZIP half of process_pair: write `tiff_target` as ZIP to the staged file
     `write_dst` and prove it. Returns None when the staged file may be registered for the
     move, else the ERROR result line -- by then the staged file is gone, and so is the copy
-    in -OutputDir (`drop_copy`)."""
+    in -OutputDir (`drop_copy`). `own`: see process_pair."""
+    own.append(write_dst)       # a staged name carries this run's id: this pair's, half written too
     # magick turned a neutral RGB TIFF into a 1-channel gray one with the RGB profile still
     # in it, and the pixel gate below cannot see that (audit round 28). The source layout
     # picks the -type that keeps it and is the reference for the layout gate after the write.
@@ -278,6 +279,8 @@ def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_co
 
     # Same '%' trap as the JPEG copy, for a TIFF whose NAME carries one.
     needed, tiff_meta = tw.backup_tiff_metadata(tiff_target, write_dst)
+    if tiff_meta:
+        own.append(tiff_meta)
     restore_ok = False
     if not (needed and not tiff_meta):
         restore_ok = tw.restore_all_metadata(tiff_meta or tiff_target, write_dst)
@@ -294,7 +297,23 @@ def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_co
 def process_pair(run, p, write_dir, final_dir, load_factor):
     """One TIFF: copy the EXIF from its JPEG/RAF and, with -CompressZip, stage a verified
     ZIP copy. `p` is a Pair; returns a PairResult. Runs on a worker thread: it never logs
-    or counts."""
+    or counts.
+
+    An exception nobody expected must not leave this pair's own files behind: the copy in
+    -OutputDir (the next run would skip it as "exists", without EXIF), the metadata
+    containers and the staged ZIP (v3.1; until v3.0.0 they stayed on disk)."""
+    own = []
+    try:
+        return _copy_pair(run, p, write_dir, final_dir, load_factor, own)
+    except BaseException:
+        for path in own:
+            tw.remove_quietly(path)
+        raise
+
+
+def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
+    """process_pair's work. `own`: the files of this pair that exist only while it works
+    (process_pair removes them when this raises)."""
     opt = run.opt
     name = p.tif_name
     tiff = p.tiff
@@ -364,6 +383,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
                 shutil.copy2(tiff, dest_tiff)
                 tiff_target = dest_tiff
                 tiff_copied = True
+                own.append(dest_tiff)
             except OSError as e:
                 # A partial copy must not stay behind: a later run without -Overwrite would
                 # skip it as "exists in OutputDir" and the truncated TIFF persists
@@ -383,6 +403,8 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
     if needed and not jpeg_meta:
         drop_copy()
         return PairResult(f"ERROR (metadata container failed - EXIF copy refused) | {name}")
+    if jpeg_meta:
+        own.append(jpeg_meta)
     jpeg_tag_source = jpeg_meta or p.jpeg
 
     tags = _jpeg_copy_args(p.source, jpeg_tag_source, icc_tag, tiff_target)
@@ -421,7 +443,7 @@ def process_pair(run, p, write_dir, final_dir, load_factor):
 
     # The staged file is registered for the move ONLY after every gate has passed: a staged
     # ZIP whose metadata restore failed was once moved ON TOP of the EXIF-bearing original.
-    error = _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy)
+    error = _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_copy, own)
     if error:
         return PairResult(error)
 
