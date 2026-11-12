@@ -367,7 +367,7 @@ def test_wizard_stranded_scan_keeps_a_stamp_that_is_the_photos_own_name(tmp_path
     real_copy = _put(old / "d_20260803_081300.tif")       # a real collision copy of d.tif
     _put(old / "d.tif")
     _put(cam / "d.tif")
-    got = {b.name: t.name for b, t in ct._stranded_backups([old])}
+    got = {b.name: t.name for b, t in ct._stranded_backups(old.parent)}
     assert got.get(own.name) == own.name, got
     assert got.get(phone.name) == phone.name, got
     assert real_copy.name not in got and "d.tif" not in got, got

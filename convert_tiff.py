@@ -2365,35 +2365,18 @@ def _restore_stranded_only(stranded) -> bool:
     return failed == 0
 
 
-def _stranded_backups(old_dirs) -> list:
-    """(backup, target) for each TIFF in these OLD_TIFFs folders whose original place is
-    EMPTY -- the same rule as compress_tiff_zip.py's find_stranded_originals (round 25):
-    no <stem>.tif / <stem>.tiff in the parent, nor the base stem of a timestamped backup
-    (<stem>_yyyyMMdd_HHmmss[_n]). Target = base stem + the backup's extension. A folder
-    nested in another OLD_TIFFs is a backup of a backup and is skipped.
+#: the backup folder names the backends write and read (compress's TOOL_OUTPUT_NAMES)
+_BACKUP_DIR_NAMES = ("OLD_TIFFs", "OLD_TIFF")
 
-    audit round 28: a timestamped name is a COLLISION COPY only when the backup it collided
-    with -- <base>.tif / <base>.tiff -- is in the same OLD_TIFFs folder; that is the only
-    case in which compress renames. Otherwise the stamp is part of the photo's own name
-    (Scan_20190815_143000.tif, every phone export): it was restored as Scan.tif, or -- with
-    an unrelated Scan.tif next to it -- never reported at all."""
-    out = []
-    for od in old_dirs:
-        od = Path(od)
-        parent = od.parent
-        if parent.name.lower() in ("old_tiffs", "old_tiff"):
-            continue
-        for f in sorted(od.glob("*")):
-            if not f.is_file() or f.suffix.lower() not in (".tif", ".tiff"):
-                continue
-            stems = [f.stem]
-            m = _TIMESTAMPED_BACKUP_RE.match(f.stem)
-            if m and any((od / f"{m.group('base')}{e}").exists() for e in (".tif", ".tiff")):
-                stems.append(m.group("base"))
-            if any((parent / f"{s}{e}").exists() for s in stems for e in (".tif", ".tiff")):
-                continue
-            out.append((f, parent / f"{stems[-1]}{f.suffix}"))
-    return out
+
+def _stranded_backups(root) -> list:
+    """(backup, target) Paths of the originals below `root` left in OLD_TIFFs with nothing in
+    their place: tw.find_stranded_originals, the backend's own rule (round 25, round 28's
+    timestamp rule) -- one rule since v3.1 (W-O5). It never walks INTO a backup folder (a
+    nested one is a backup of a backup), accepts only a FILE in the original's place, and
+    reads past 260 characters. Target = base stem + the backup's extension."""
+    found = tw.find_stranded_originals(str(root), True, _BACKUP_DIR_NAMES, [])
+    return [(Path(x["backup"]), Path(x["target"])) for x in found]
 
 
 def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
@@ -2404,7 +2387,11 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
         return False
 
     # Find all OLD_TIFFs folders recursively
-    old_dirs = sorted([d for d in folder.rglob("*") if d.is_dir() and d.name.lower() == "old_tiffs"])
+    # The backup folders of the backends (OLD_TIFFs, OLD_TIFF), never one nested in another
+    # (a backup of a backup: restoring it would put files into a backup folder).
+    names = {n.lower() for n in _BACKUP_DIR_NAMES}
+    old_dirs = sorted([d for d in folder.rglob("*") if d.is_dir() and d.name.lower() in names
+                       and not tw.path_excluded(str(d.parent), str(folder), _BACKUP_DIR_NAMES)])
     if not old_dirs:
         if RICH_AVAILABLE and console:
             console.print("[yellow]No OLD_TIFFs folders found.[/yellow]")
@@ -2434,7 +2421,7 @@ def run_undo_old_tiffs(cfg: "ConfigManager") -> bool:
     # EVERYTHING also brings back the originals of files that were compressed fine (and,
     # with overwrite, puts them over the compressed copies); restoring only the stranded
     # ones -- nothing in their place -- is what such a run needs.
-    stranded = _stranded_backups(old_dirs)
+    stranded = _stranded_backups(folder)
     if stranded:
         msg = (f"{len(stranded)} of them have NOTHING in their place (left by an interrupted "
                f"run): restore only those?")

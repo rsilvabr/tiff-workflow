@@ -2,6 +2,7 @@
 OLD_TIFFs/, the wizard offers -RestoreStranded (interactive runs only), and menu 5
 (Restore OLD_TIFFs) can restore ONLY the stranded ones. Hostile folder names."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -95,7 +96,7 @@ def test_stranded_backups_use_the_compress_rule(tmp_path):
     put(old / "f_20260803_081300.tif"); put(cam / "f.tif")    # its OWN name: stranded
     put(old / "OLD_TIFFs" / "z.tif")                     # backup of a backup: ignored
     put(old / "notes.txt")
-    res = ct._stranded_backups([old, old / "OLD_TIFFs"])
+    res = ct._stranded_backups(cam)
     assert sorted((f.name, t.name) for f, t in res) == [
         ("a.tif", "a.tif"), ("e.tif", "e.tif"), ("e_20260803_081300_1.tif", "e.tif"),
         ("f_20260803_081300.tif", "f_20260803_081300.tif")]
@@ -107,10 +108,28 @@ def test_restore_stranded_only_never_overwrites_and_leaves_ambiguity(tmp_path):
     put(old / "a.tif", b"A")
     put(old / "c.tif", b"C1"); put(old / "c_20260803_081300.tif", b"C2")   # both claim c.tif
     put(old / "b.tif", b"B")
-    res = ct._stranded_backups([old])
+    res = ct._stranded_backups(cam)
     put(cam / "b.tif", b"NEW")                           # appeared after the scan
     assert ct._restore_stranded_only(res) is True
     assert (cam / "a.tif").read_bytes() == b"A" and not (old / "a.tif").exists()
     assert (old / "c.tif").exists() and (old / "c_20260803_081300.tif").exists()
     assert not (cam / "c.tif").exists()
     assert (cam / "b.tif").read_bytes() == b"NEW" and (old / "b.tif").exists()
+
+
+def test_the_wizard_and_the_backend_agree_on_what_is_stranded(tmp_path):
+    """v3.1 phase 6 (W-O5): the wizard had its own copy of the rule. It walked INTO backup
+    folders (OLD_TIFFs/sub/OLD_TIFFs/deep.tif was "stranded" and would have been restored
+    into OLD_TIFFs/sub/), and missed the singular OLD_TIFF. One rule now:
+    tiff_workflow_common.find_stranded_originals."""
+    cam = tmp_path / HOSTILE / "01_D810"
+    put(cam / "OLD_TIFFs" / "sub" / "OLD_TIFFs" / "deep.tif")      # a backup of a backup
+    put(cam / "OLD_TIFF" / "single.tif")                           # the singular folder name
+    put(cam / "OLD_TIFFs" / "a.tif")
+    got = sorted((b.relative_to(cam).as_posix(), t.relative_to(cam).as_posix())
+                 for b, t in ct._stranded_backups(cam))
+    assert got == [("OLD_TIFF/single.tif", "single.tif"), ("OLD_TIFFs/a.tif", "a.tif")], got
+    import compress_tiff_zip as cz
+    backend = sorted((os.path.relpath(x["backup"], cam).replace("\\", "/"))
+                     for x in cz.find_stranded_originals(str(cam), True, cz.TOOL_OUTPUT_NAMES, []))
+    assert backend == [b for b, _t in got], "the wizard and the backend answer the same"

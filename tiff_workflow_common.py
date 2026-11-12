@@ -656,6 +656,84 @@ def resolve_output(f, mode, input_root, opt):
     return None
 
 
+def find_stranded_originals(root, recurse, backup_names, exclude_names):
+    """Backups in OLD_TIFFs/ whose original place is EMPTY: the only copy of that image.
+
+    Modes 0/9 once moved every original of a folder to OLD_TIFFs/ before its compressed
+    copy was written; a run that died in between left those originals there with nothing in
+    the parent folder, and every later run walks past them because discovery excludes
+    OLD_TIFFs/ (audit round 25: 365 originals on 2026-08-03).
+
+    A backup counts as stranded when none of its possible counterparts exists in the parent
+    folder: <stem>.tif / <stem>.tiff (a .tiff source is written as .tif), and for a
+    timestamped backup (<stem>_yyyyMMdd_HHmmss[_n], made when the name was taken) the same
+    for the base stem -- but only when OLD_TIFFs/ also holds <base> itself: otherwise the
+    stamp is part of the photo's own name (Scan_20190815_143000.tif). Returns
+    [{"backup", "target"}]; target = where a restore puts it (that stem with the backup's
+    extension).
+
+    Folders only are walked, never INTO a backup folder (a nested one is a backup of a
+    backup), links are not followed, and every file call goes through the long-path prefix:
+    past 260 characters "no original here" was once said about a file that was there.
+
+    The wizard's Restore asks here too (v3.1 phase 6, W-O5: its own copy walked INTO backup
+    folders and would have restored OLD_TIFFs\\sub\\OLD_TIFFs\\deep.tif into OLD_TIFFs\\sub\\)."""
+    found = []
+    full = full_path(root)
+    backup_lower = {n.lower() for n in backup_names}
+    backup_dirs = []
+    stack = [full]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(long_path(cur)) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if not e.is_dir():
+                    continue
+            except OSError:
+                continue
+            plain = os.path.join(cur, e.name)
+            if e.name.lower() in backup_lower:
+                backup_dirs.append(plain)
+                continue
+            if not recurse:
+                continue
+            if entry_flags(e)[1]:
+                continue
+            stack.append(plain)
+    backup_dirs.sort(key=str.lower)
+
+    def is_file(directory, name):
+        return os.path.isfile(long_path(os.path.join(directory, name)))
+
+    for d in backup_dirs:
+        parent = os.path.dirname(d)
+        if exclude_names and path_excluded(parent, root, exclude_names):
+            continue
+        try:
+            with os.scandir(long_path(d)) as it:
+                names = sorted((e.name for e in it if e.is_file()), key=str.lower)
+        except OSError:
+            continue
+        for b_name in names:
+            stem, ext = os.path.splitext(b_name)
+            if not TIFF_EXT_RE.match(ext):
+                continue
+            stems = [stem]
+            m = re.fullmatch(r"(.+)_\d{8}_\d{6}(_\d+)?", stem)
+            if m and any(is_file(d, m.group(1) + e) for e in (".tif", ".tiff")):
+                stems.append(m.group(1))
+            present = any(is_file(parent, s + e) for s in stems for e in (".tif", ".tiff"))
+            if not present:
+                found.append({"backup": os.path.join(d, b_name),
+                              "target": os.path.join(parent, stems[-1] + ext)})
+    return found
+
+
 def parse_exclude_folders(text):
     """The ';'-separated folder NAMES of -ExcludeFolders, or raises UsageError for a path."""
     names = []
