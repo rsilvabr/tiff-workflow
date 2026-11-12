@@ -1637,6 +1637,17 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         )
         assert (folder / "img.tif").exists()
 
+    def test_the_two_totals_say_what_they_count(self, tmp_path, monkeypatch, capsys):
+        """v3.1 phase 6 (F2 of phase 2): "Total size in OLD_TIFFs" showed the to-delete sum,
+        as if the kept backup were not there. It counts every file there; "Total to delete"
+        counts the verified ones."""
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        self._run_purge(tmp_path, monkeypatch, answers=False)
+        out = capsys.readouterr().out
+        size = convert_tiff._format_size
+        assert f"Total size in OLD_TIFFs: {size(len(b'tiffdata') + len(b'orphan'))}" in out, out
+        assert f"Total to delete: {size(len(b'tiffdata'))}" in out, out
+
 
 class TestGenerateThumbnailSaysWhyItSkipped:
     """The already-compressed SKIP runs before the thumbnail step, so -GenerateThumbnail on

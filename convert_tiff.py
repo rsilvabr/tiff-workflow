@@ -4467,14 +4467,17 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
 
     # Display results
     total_old_size = sum(s for _, _, s in deletable)
+    # Everything in the backup folders, the files kept below included (v3.1 phase 6, F2: this
+    # line showed the to-delete sum, so it read as if the kept backups were not there).
+    total_in_old = sum(s for _, _, s in items)
 
     if RICH_AVAILABLE and console:
         console.print(f"\n[cyan]OLD_TIFFs review -- {len(items)} file(s) in {len(old_dirs)} folder(s)[/cyan]")
-        console.print(f"[dim]Total size in OLD_TIFFs: {_format_size(total_old_size)}[/dim]\n")
+        console.print(f"[dim]Total size in OLD_TIFFs: {_format_size(total_in_old)}[/dim]\n")
         console.print("[bold]File comparison (OLD_TIFFs vs parent):[/bold]")
     else:
         print(f"\nOLD_TIFFs review -- {len(items)} file(s) in {len(old_dirs)} folder(s)")
-        print(f"Total size in OLD_TIFFs: {_format_size(total_old_size)}\n")
+        print(f"Total size in OLD_TIFFs: {_format_size(total_in_old)}\n")
         print("File comparison (OLD_TIFFs vs parent):")
 
     mismatch_set = {(m[0], m[1]) for m in mismatches}
