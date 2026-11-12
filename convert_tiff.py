@@ -5622,51 +5622,107 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
     if entry.get("kind") == "diagnose":
         return _run_diagnose_journal(cfg, entry, title, unattended=unattended,
                                      dry_run=dry_run)
-
     if entry.get("kind") == "manifest":
-        manifest_path = entry.get("manifest_path")
-        if not manifest_path or not Path(manifest_path).exists():
-            _say(f"Manifest CSV no longer available: {manifest_path or '(not saved)'}",
-                 "yellow")
-            return 1
-        entries = load_manifest_entries(manifest_path)
-        if entries is None:
-            return 1
-        workflow = entry.get("manifest_workflow")
-        old_manifest_msg = ("This repeat was saved by an older version without the run's "
-                            "settings -- run the manifest once more from menu 3, then "
-                            "repeat or save it as a preset.")
-        if workflow is None:
+        return _run_manifest_journal(cfg, entry, title, unattended, dry_run)
+    return _run_command_journal(entry, title, unattended, dry_run)
+
+
+def _run_manifest_journal(cfg, entry: Dict, title: str, unattended: bool, dry_run: bool) -> int:
+    """A manifest repeat/preset: the CSV read again, run with the settings and the default
+    mode the run saved. 0 = ran cleanly, 1 = failed, refused or cancelled."""
+    manifest_path = entry.get("manifest_path")
+    if not manifest_path or not Path(manifest_path).exists():
+        _say(f"Manifest CSV no longer available: {manifest_path or '(not saved)'}",
+             "yellow")
+        return 1
+    entries = load_manifest_entries(manifest_path)
+    if entries is None:
+        return 1
+    workflow = entry.get("manifest_workflow")
+    old_manifest_msg = ("This repeat was saved by an older version without the run's "
+                        "settings -- run the manifest once more from menu 3, then "
+                        "repeat or save it as a preset.")
+    if workflow is None:
+        _say(old_manifest_msg, "red")
+        return 1
+    default_mode = entry.get("manifest_default_mode")
+    if any(m is None for _, _, m in entries):
+        if default_mode is None:
             _say(old_manifest_msg, "red")
             return 1
-        default_mode = entry.get("manifest_default_mode")
-        if any(m is None for _, _, m in entries):
-            if default_mode is None:
-                _say(old_manifest_msg, "red")
-                return 1
-            entries = [(s, d, m if m is not None else default_mode) for s, d, m in entries]
-        workflow = dict(workflow)
-        workflow["dry_run"] = dry_run
-        deletes = (not dry_run) and any(m == 8 for _, _, m in entries)
-        if unattended and deletes:
-            _say("Refused: this preset deletes source files (mode 8). That needs a "
-                 "confirmation, which cannot be given unattended -- run it from the "
-                 "menu, or pass --dry-run.", "red")
+        entries = [(s, d, m if m is not None else default_mode) for s, d, m in entries]
+    workflow = dict(workflow)
+    workflow["dry_run"] = dry_run
+    deletes = (not dry_run) and any(m == 8 for _, _, m in entries)
+    if unattended and deletes:
+        _say("Refused: this preset deletes source files (mode 8). That needs a "
+             "confirmation, which cannot be given unattended -- run it from the "
+             "menu, or pass --dry-run.", "red")
+        return 1
+    if not unattended:
+        _say(["\n", (title, "bold cyan"), f": {Path(manifest_path).name}"])
+        _say(f"  {len(entries)} entry(ies)")
+        if any(m == 8 for _, _, m in entries):
+            _say("WARNING: manifest contains mode-8 entries (DELETES sources).", "red")
+        if not _ask_yes_no("Run it now?", False):
+            _say("Cancelled.", "dim")
             return 1
-        if not unattended:
-            _say(["\n", (title, "bold cyan"), f": {Path(manifest_path).name}"])
-            _say(f"  {len(entries)} entry(ies)")
-            if any(m == 8 for _, _, m in entries):
-                _say("WARNING: manifest contains mode-8 entries (DELETES sources).", "red")
-            if not _ask_yes_no("Run it now?", False):
-                _say("Cancelled.", "dim")
-                return 1
-        ok = execute_manifest_workflow(cfg, entries, workflow, unattended=unattended)
-        return 0 if ok else 1
+    ok = execute_manifest_workflow(cfg, entries, workflow, unattended=unattended)
+    return 0 if ok else 1
 
-    # Command-driven journals (1-4, 8): rebuilt from their [script, *args] for this
-    # Python and the backends next to this wizard -- the journal may have been written
-    # by another copy (see _journal_parts).
+
+def _redo_autofind(entry: Dict, parts_list: List[list]) -> Optional[int]:
+    """AutoFind is redone on every Fuji journal run: the root and the patterns were saved
+    with it, so a scheduled preset sees the sessions added since it was saved (a journal from
+    an older version has no such data and replays what it saved). Only the Fuji workflows
+    (2/3/4) search; their labels all start with "Fuji:". Menu 1 also journals kind "compress"
+    but has a fixed folder and no AutoFind. The found sessions replace each -InputDir in
+    `parts_list`; returns the exit code to stop with (1: the root is gone, 0: nothing found),
+    or None to go on."""
+    af = entry.get("autofind")
+    is_fuji = (entry.get("kind") in ("copy_exif", "compress", "both")
+               and str(entry.get("label") or "").startswith("Fuji:"))
+    if not is_fuji:
+        return None
+    if not af:
+        _say(f"Folders as saved on {entry.get('time')} (saved by an older version: "
+             f"sessions added since are not included)", "yellow")
+        return None
+    root = Path(af["root"])
+    if not root.is_dir():
+        _say(f"AutoFind root is gone: {root}", "red")
+        return 1
+    folders = list(find_folders_by_pattern(root, af["patterns"]))     # its own order
+    if not folders:
+        _say(f"AutoFind: no matching folders under {root} -- nothing to do.", "yellow")
+        return 0
+    folder_str = ";".join(str(f) for f in folders)
+    for parts in parts_list:
+        if "-InputDir" in parts:
+            i = parts.index("-InputDir")
+            if i + 1 < len(parts):
+                parts[i + 1] = folder_str
+    _say(f"AutoFind: {len(folders)} session(s) under {root}")
+    return None
+
+
+def _run_journal_steps(run_cmds: List[List[str]], unattended: bool) -> int:
+    """The saved commands in order; a step that fails stops the rest (Copy EXIF must land
+    before compress runs). 0 = every step exited 0."""
+    for i, c in enumerate(run_cmds):
+        if len(run_cmds) > 1:
+            _say(f"\n=== Step {i + 1}/{len(run_cmds)} ===", "cyan")
+        result = run_subprocess(c, stdin=subprocess.DEVNULL) if unattended else run_subprocess(c)
+        if result != 0:
+            _say(f"Step {i + 1} failed (exit {result}). Remaining steps skipped.", "red")
+            return 1
+    return 0
+
+
+def _run_command_journal(entry: Dict, title: str, unattended: bool, dry_run: bool) -> int:
+    """A journal of backend command lines (workflows 1-4 and 8), rebuilt from their
+    [script, *args] for this Python and the backends next to this wizard -- the journal may
+    have been written by another copy (see _journal_parts)."""
     parts_list = [_journal_parts([str(a) for a in c]) for c in entry["commands"]]
     if any(p is None for p in parts_list):
         _say("Saved workflow cannot be replayed: its command line was recorded in a "
@@ -5674,35 +5730,9 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
              "menu -- replaying it as-is could bind switches the wrong way.", "red")
         return 1
 
-    # AutoFind is redone on every Fuji journal run: the root and the patterns were
-    # saved with it, so a scheduled preset sees the sessions added since it was saved
-    # (a journal from an older version has no such data and replays what it saved).
-    # Only the Fuji workflows (2/3/4) search; their labels all start with "Fuji:".
-    # Menu 1 also journals kind "compress" but has a fixed folder and no AutoFind.
-    af = entry.get("autofind")
-    is_fuji = (entry.get("kind") in ("copy_exif", "compress", "both")
-               and str(entry.get("label") or "").startswith("Fuji:"))
-    if is_fuji:
-        if af:
-            root = Path(af["root"])
-            if not root.is_dir():
-                _say(f"AutoFind root is gone: {root}", "red")
-                return 1
-            folders = list(find_folders_by_pattern(root, af["patterns"]))     # its own order
-            if not folders:
-                _say(f"AutoFind: no matching folders under {root} -- nothing to do.",
-                     "yellow")
-                return 0
-            folder_str = ";".join(str(f) for f in folders)
-            for parts in parts_list:
-                if "-InputDir" in parts:
-                    i = parts.index("-InputDir")
-                    if i + 1 < len(parts):
-                        parts[i + 1] = folder_str
-            _say(f"AutoFind: {len(folders)} session(s) under {root}")
-        else:
-            _say(f"Folders as saved on {entry.get('time')} (saved by an older version: "
-                 f"sessions added since are not included)", "yellow")
+    stop = _redo_autofind(entry, parts_list)
+    if stop is not None:
+        return stop
 
     for parts in parts_list:
         # The script that will actually run: one of this wizard's backends, the copy next
@@ -5740,15 +5770,7 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
     if not unattended and not _ask_yes_no("Run it now?", False):
         _say("Cancelled.", "dim")
         return 1
-
-    for i, c in enumerate(run_cmds):
-        if len(run_cmds) > 1:
-            _say(f"\n=== Step {i + 1}/{len(run_cmds)} ===", "cyan")
-        result = run_subprocess(c, stdin=subprocess.DEVNULL) if unattended else run_subprocess(c)
-        if result != 0:
-            _say(f"Step {i + 1} failed (exit {result}). Remaining steps skipped.", "red")
-            return 1
-    return 0
+    return _run_journal_steps(run_cmds, unattended)
 
 
 def run_repeat_last(cfg) -> bool:
