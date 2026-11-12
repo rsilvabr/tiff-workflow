@@ -704,6 +704,12 @@ def run_main(argv, state):
         tw.say(f"ERROR: Required tools not found in PATH: {', '.join(missing)}")
         tw.say("Please install the missing tools and try again.")
         return 1
+    # Only the ZIP step writes through exiftool_commands; the EXIF copy alone works with an
+    # older exiftool as before.
+    problem = tw.exiftool_status_problem() if opt["CompressZip"] else None
+    if problem:
+        tw.say(f"ERROR: {problem}")
+        return 1
 
     log = tw.RunLog(LOG_NAME)
     run = Run(opt, log)

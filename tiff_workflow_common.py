@@ -895,6 +895,23 @@ def exiftool_commands(commands):
     return results
 
 
+def exiftool_status_problem():
+    """None when exiftool reports the exit status of each command of one run -- what
+    exiftool_commands, and so every write after a conversion, reads (`${status}` in -echo3,
+    exiftool 12.15 or later). Else the sentence the run stops with, before any file: an
+    older exiftool would make every write look failed (every file an ERROR or a WARN) although
+    the writes were done. Asked once per run: one exiftool start."""
+    try:
+        r = exiftool_commands([["-ver"]])[0]
+    except ToolError as e:
+        return f"exiftool could not be started: {one_line(e.output)}"
+    if r.status == 0:
+        return None
+    version = one_line(r.output).split(" ")[0] or "(version unknown)"
+    return (f"exiftool {version} does not report the result of each command it runs; "
+            f"update it to 12.15 or later (https://exiftool.org)")
+
+
 def _split_by_marker(text, tag, n):
     """[(status, text)] of `n` commands from one stream of exiftool_commands."""
     parts = [(-1, "") for _ in range(n)]

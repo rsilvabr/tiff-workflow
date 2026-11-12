@@ -1596,6 +1596,10 @@ def run_main(argv, state):
         tw.say(f"ERROR: Required tools not found in PATH: {', '.join(missing)}")
         tw.say("Please install the missing tools and try again.")
         return 1
+    problem = tw.exiftool_status_problem()
+    if problem:
+        tw.say(f"ERROR: {problem}")
+        return 1
 
     log = tw.RunLog(SCRIPT_NAME)
     run = Run(opt, log, overlay["applied"])

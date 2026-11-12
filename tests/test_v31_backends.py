@@ -6,13 +6,16 @@ plain name and moved into a hostile folder (Japanese, [ ], a space, a %): the fi
 tool calls read their command line in the ANSI code page.
 """
 
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
 
 import tiff_workflow_common as tw  # noqa: E402
 from backends import LANES  # noqa: E402
@@ -194,3 +197,46 @@ def test_mode5_never_replaces_a_photo_living_in_zip(tmp_path, lane):
     assert read_compression(root / "ZIP" / "x.tif").lower() == "zip", "compressed in its own place"
     assert (root / "sub [1]" / "x.tif").read_bytes() == blue_before
     assert sorted(p.name for p in (root / "ZIP").iterdir()) == ["x.tif"], "no x_v2.tif either"
+
+
+#: an exiftool older than 12.15: the -echo3/-echo4 text comes back without the exit status
+_OLD_EXIFTOOL = r"""import os, subprocess, sys
+data = sys.stdin.buffer.read() if "-" in sys.argv[1:] else None
+if data:
+    data = data.replace(b"${status}", b"")
+r = subprocess.run([os.environ["TW_REAL_EXIFTOOL"]] + sys.argv[1:], input=data, capture_output=True)
+sys.stdout.buffer.write(r.stdout)
+sys.stderr.buffer.write(r.stderr)
+sys.exit(r.returncode)
+"""
+
+
+@requires_tools
+@pytest.mark.skipif(os.name != "nt", reason="the old exiftool stand-in is a .cmd")
+@pytest.mark.parametrize("script, args", [
+    ("compress_tiff_zip.py", ["-Mode", "9"]),
+    ("copy_exif_to_tiff.py", ["-CompressZip"]),
+], ids=["compress", "copy_exif-zip"])
+def test_an_exiftool_without_the_status_of_each_command_is_refused(tmp_path, hostile, script, args):
+    """Review of v3.1 phases 3+4, V1: the writes after a conversion read each command's exit
+    status from `${status}`; an older exiftool prints the marker without it and every file
+    would end as an ERROR or a WARN although the writes were done. The run stops first, with
+    a sentence, and touches nothing."""
+    plain, land = hostile
+    photo = land(make_multipage_tiff(plain / "x 50%.tif", [None]))
+    before = photo.read_bytes()
+    shim = tmp_path / "old exiftool"
+    shim.mkdir()
+    (shim / "old_exiftool.py").write_text(_OLD_EXIFTOOL, encoding="utf-8")
+    (shim / "exiftool.cmd").write_text(
+        '@echo off\r\n"' + sys.executable + '" "%~dp0old_exiftool.py" %*\r\nexit /b %ERRORLEVEL%\r\n',
+        encoding="ascii", newline="")
+    env = dict(os.environ, TW_REAL_EXIFTOOL=shutil.which("exiftool"), TIFFWORKFLOW_SETTINGS="")
+    env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+    r = subprocess.run([sys.executable, str(REPO / script), "-InputDir", str(photo.parent)] + args,
+                       cwd=str(tmp_path), env=env, capture_output=True, timeout=300)
+    out = r.stdout.decode("utf-8", "replace")
+    assert r.returncode == 1, out
+    assert "does not report the result of each command it runs; update it to 12.15 or later" in out, out
+    assert photo.read_bytes() == before
+    assert sorted(x.name for x in photo.parent.iterdir()) == ["x 50%.tif"], "nothing written"

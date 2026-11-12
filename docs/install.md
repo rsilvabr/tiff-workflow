@@ -8,7 +8,7 @@
 | Tool | Download URL | What to Download | Extract to |
 |------|-------------|------------------|------------|
 | **ImageMagick 7** | https://imagemagick.org/script/download.php | Installer `.exe` (Q16-HDRI x64) | Default location |
-| **exiftool** | https://exiftool.org | `exiftool-XX.XX_64.zip` **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
+| **exiftool** (12.15 or later) | https://exiftool.org | `exiftool-XX.XX_64.zip` **(Windows .zip, NOT .tar.gz)** | `C:\tools\exiftool\` or your choice |
 
 #### Common Download Mistakes
 
