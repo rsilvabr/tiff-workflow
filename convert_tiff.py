@@ -725,12 +725,13 @@ def truncate_path(p: Path, max_len: int = 50) -> str:
 MAX_WORKERS = 64
 
 
-def clamp_workers(value: int, default: int = 8) -> int:
-    """Keep -Workers inside the range the backends accept."""
+def clamp_workers(value: int, default: Optional[int] = None) -> int:
+    """Keep -Workers inside the range the backends accept. A value that is no number gives
+    `default`, or the config's default_workers (ToolConfig) -- never a second literal."""
     try:
         n = int(value)
     except (TypeError, ValueError):
-        return default
+        return ToolConfig.default_workers if default is None else default
     if n < 1:
         return 1
     if n > MAX_WORKERS:
@@ -1692,7 +1693,7 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
         else:
             table.add_row("Folder:", escape(str(workflow.get("folders", [workflow.get("input_dir")])[0].name if workflow.get("folders") else workflow.get("input_dir", "?"))))
 
-        table.add_row("Workers:", str(workflow.get("workers", 8)))
+        table.add_row("Workers:", str(workflow.get("workers", cfg.config.default_workers)))
         if workflow.get("cap_workers"):
             table.add_row("Cap workers:", str(workflow["cap_workers"]))
         if workflow.get("exclude_folders"):
@@ -1720,7 +1721,7 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
         else:
             print(f"  Pattern: {workflow.get('pattern', '?')}")
             print(f"  Sessions: {folders_count} folder(s)")
-        print(f"  Workers: {workflow.get('workers', 8)}")
+        print(f"  Workers: {workflow.get('workers', cfg.config.default_workers)}")
         if workflow.get("cap_workers"):
             print(f"  Cap workers: {workflow['cap_workers']}")
         if workflow.get("exclude_folders"):

@@ -541,6 +541,13 @@ def test_rich_prints_a_folder_name_with_markup_as_it_is(tmp_path, monkeypatch):
     workflow = {"origin": "free_compress", "dest": "zip", "mode": 1,
                 "input_dir": "E:\\" + name, "staging": str(tmp_path / "[red]stg"),
                 "exclude_folders": "[/i]RAW", "workers": 2}
-    assert ct.step_confirm(workflow, ct.ToolConfig()) is False
+    assert ct.step_confirm(workflow, SimpleNamespace(config=ct.ToolConfig())) is False
     text = out.getvalue()
     assert name in text and "[red]stg" in text and "[/i]RAW" in text, text
+
+
+def test_the_worker_fallback_is_the_configs(monkeypatch):
+    """v3.1 phase 6 (W-O18): a worker count that is no number falls back to the config's
+    default_workers, never to a second literal."""
+    monkeypatch.setattr(ct.ToolConfig, "default_workers", 5)
+    assert ct.clamp_workers("x") == 5 and ct.clamp_workers(None, 3) == 3 and ct.clamp_workers(2) == 2
