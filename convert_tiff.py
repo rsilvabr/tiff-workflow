@@ -5150,7 +5150,7 @@ def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -
     return None
 
 
-def manifest_output_collisions(entries: List[Tuple]) -> List[Tuple]:
+def manifest_output_collisions(entries: List[Tuple], exclude_names=()) -> List[Tuple]:
     """Find files that would be written to the same output folder with the
     same stem -- across different manifest entries OR within a single entry
     (mode 2 flattens recursively, so <src>/a/foto.tif and <src>/b/foto.tif
@@ -5162,7 +5162,12 @@ def manifest_output_collisions(entries: List[Tuple]) -> List[Tuple]:
     own tree (and overlapping Sources were already refused/warned by
     manifest_source_overlaps).
 
+    The walk skips what the backend never reads: the tool folders (OLD_TIFFs, ZIP, ...)
+    and the run's -ExcludeFolders names, at any level below the Source (v3.1 phase 6, W-O3:
+    a.tif beside OLD_TIFFs\\a.tif aborted a mode 2 run as a collision).
+
     Returns a list of (file_a, file_b, dest_folder) tuples."""
+    skip = set(_TOOL_OUTPUT_PARTS) | {str(n).lower() for n in exclude_names}
     by_dest: Dict[str, Dict[str, Path]] = {}
     collisions = []
     for source, dest_path, mode in entries:
@@ -5189,6 +5194,8 @@ def manifest_output_collisions(entries: List[Tuple]) -> List[Tuple]:
                 if not f.is_file() or f.suffix.lower() not in TIFF_EXTS:
                     continue
             except OSError:
+                continue
+            if tw.path_excluded(str(f.parent), str(src_root), skip):
                 continue
             out_folder = _resolve_output_folder(f, mode, src_root, dest_path)
             if out_folder is None:
@@ -5297,7 +5304,8 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
     # compressing only one of the two sources.
     entry_modes = {m for _, _, m in entries}
     if entry_modes & _COLLISION_SCAN_MODES:
-        collisions = manifest_output_collisions(entries)
+        collisions = manifest_output_collisions(
+            entries, tw.parse_exclude_folders(workflow.get("exclude_folders") or ""))
         if collisions:
             _manifest_error(
                 "Aborting: manifest entries would write different files to the same output.")

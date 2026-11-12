@@ -284,6 +284,18 @@ class TestOutputCollisions:
         assert collisions, "two entries flattening foto.tif into the same Destination must collide"
         assert {collisions[0][0], collisions[0][1]} == {fa, fb}
 
+    def test_backups_and_excluded_folders_are_not_sources(self, tmp_path):
+        """v3.1 phase 6 (W-O3): the walk saw OLD_TIFFs and the run's excluded folders, which the
+        backend never reads: a.tif beside OLD_TIFFs/a.tif aborted a mode 2 run."""
+        src = tmp_path / "伊豆沼 [x] 50%"
+        for rel in ("a.tif", "OLD_TIFFs/a.tif", "RAW/b.tif", "b.tif"):
+            (src / rel).parent.mkdir(parents=True, exist_ok=True)
+            (src / rel).write_bytes(b"x")
+        entries = [(str(src), str(tmp_path / "out"), 2)]
+        assert manifest_output_collisions(entries, ["RAW"]) == []
+        clash = manifest_output_collisions(entries)
+        assert [sorted([c[0].name, c[1].name]) for c in clash] == [["b.tif", "b.tif"]],             "RAW is not excluded in this run: its b.tif does collide"
+
     def test_mode2_distinct_stems_do_not_collide(self, tmp_path):
         a = tmp_path / "a"
         b = tmp_path / "b"
