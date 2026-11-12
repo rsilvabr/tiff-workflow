@@ -833,7 +833,8 @@ def _is_tool_output_path(path: Path, root: Path) -> bool:
     return any(part.lower() in _TOOL_OUTPUT_PARTS for part in rel.parts)
 
 
-# Captured at import: some tests replace this module's `subprocess` with a stub.
+# Captured at import. The wizard's tests replace subprocess.run (the module is shared with
+# tiff_workflow_common, whose run_captured the wizard's _run_captured calls).
 _CompletedProcess = subprocess.CompletedProcess
 
 
