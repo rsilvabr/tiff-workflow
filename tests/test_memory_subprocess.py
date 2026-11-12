@@ -357,7 +357,14 @@ def test_compress_memory_estimate_reads_non_ascii_paths(tmp_path):
                    capture_output=True, check=True, timeout=120)
 
     cmd_file = tmp_path / "run_compress.cmd"
-    script = REPO / "compress_tiff_zip.py"
+    # The .cmd is cp850: a repository in a folder with characters outside it (a Japanese
+    # name) cannot be written there. The script runs from a copy in tmp_path instead, with
+    # the module it imports (review of v3.1 phases 3+4, V3).
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("compress_tiff_zip.py", "tiff_workflow_common.py"):
+        shutil.copy2(REPO / name, scripts / name)
+    script = scripts / "compress_tiff_zip.py"
     cmd_file.write_bytes(("\r\n".join([
         "@echo off",
         "chcp 850 >nul",
