@@ -2039,9 +2039,10 @@ class TestGatesFailClosed:
         import convert_tiff as ct
         phys, commit = tw.memory_readings()
         assert phys and commit and phys > 0 and commit > 0, "this machine's memory reads"
-        if tw.IS_WINDOWS:
-            assert tw.available_memory_bytes() == min(phys, commit)
+        # the free memory moves between two readings: compare on fixed numbers
         monkeypatch.setattr(tw, "memory_readings", lambda: (7 * 2**30, 5 * 2**30))
+        if tw.IS_WINDOWS:
+            assert tw.available_memory_bytes() == 5 * 2**30
         assert (ct._available_physical_bytes(), ct._available_commit_bytes()) == (7 * 2**30, 5 * 2**30)
         monkeypatch.setattr(tw, "memory_readings", lambda: (None, None))
         assert ct._available_memory_bytes() == (None, None)
