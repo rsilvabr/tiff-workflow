@@ -1473,6 +1473,37 @@ def _supports_cap_workers(workflow: Dict) -> bool:
     return workflow.get("origin") in ("free_compress", "compress", "both")
 
 
+def _read_workers(text: str, cfg: "ConfigManager") -> int:
+    """The Workers answer, the same on both screens (v3.1 phase 6, T4): Enter or a text that is
+    no number = the value shown ([last used or the config's default]); a number is kept inside
+    the range the backends accept, and a clamp is said."""
+    shown = cfg.config.last_workers or cfg.config.default_workers
+    try:
+        raw = int(text) if text.strip() else shown
+    except ValueError:
+        _say(f"Not a number: {text!r} -- using {shown}.", "yellow")
+        raw = shown
+    workers = clamp_workers(raw, cfg.config.default_workers)
+    if workers != raw:
+        _say(f"Workers clamped to {workers} (backend accepts 1-{MAX_WORKERS}).", "yellow")
+    return workers
+
+
+def _staging_default(cfg: "ConfigManager") -> str:
+    """The staging folder Enter keeps: the last one used, else the config's staging_dir."""
+    return cfg.config.last_staging or cfg.config.staging_dir or ""
+
+
+def _read_staging(text: str, cfg: "ConfigManager") -> str:
+    """The Staging answer, the same on both screens (T4): Enter keeps the shown folder, '-'
+    (or none) turns staging off. The Rich screen had no way to turn a remembered one off; the
+    plain screen forgot it on Enter."""
+    t = text.strip()
+    if t.lower() in ("-", "none"):
+        return ""
+    return t or _staging_default(cfg)
+
+
 def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
     """Workers, DryRun, Staging -- then the per-run Advanced options screen, here so that no
     workflow can ask the first without the second."""
@@ -1488,24 +1519,14 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
             "[cyan]Workers[/cyan]",
             default=str(cfg.config.last_workers or cfg.config.default_workers)
         ).strip()
-        try:
-            workers = int(workers_str)
-            if workers < 1:
-                raise ValueError()
-            clamped = clamp_workers(workers, cfg.config.default_workers)
-            if clamped != workers:
-                console.print(f"[yellow]Workers clamped to {clamped} (backend accepts 1-{MAX_WORKERS}).[/yellow]")
-            workflow["workers"] = clamped
-        except ValueError:
-            console.print("[red]Invalid, using default.[/red]")
-            workflow["workers"] = clamp_workers(cfg.config.default_workers)
+        workflow["workers"] = _read_workers(workers_str, cfg)
 
         staging = Prompt.ask(
-            "[cyan]Staging folder (SSD for faster I/O)[/cyan]",
-            default=cfg.config.last_staging or cfg.config.staging_dir or ""
+            "[cyan]Staging folder (SSD for faster I/O; '-' = none)[/cyan]",
+            default=_staging_default(cfg) or "-"
         ).strip()
-        workflow["staging"] = staging
-        cfg.config.last_staging = staging
+        workflow["staging"] = _read_staging(staging, cfg)
+        cfg.config.last_staging = workflow["staging"]
 
         workflow["dry_run"] = Confirm.ask("Dry-run mode?", default=False)
         
@@ -1540,16 +1561,10 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
             workflow["force_sequential"] = True
     else:
         workers_str = input(f"Workers [{(cfg.config.last_workers or cfg.config.default_workers)}]: ").strip()
-        try:
-            raw_workers = int(workers_str) if workers_str else (cfg.config.last_workers or cfg.config.default_workers)
-        except ValueError:
-            raw_workers = cfg.config.last_workers or cfg.config.default_workers
-        workflow["workers"] = clamp_workers(raw_workers, cfg.config.default_workers)
-        if workflow["workers"] != raw_workers:
-            print(f"Workers clamped to {workflow['workers']} (backend accepts 1-{MAX_WORKERS}).")
-        staging = input(f"Staging folder (empty=disabled) []: ").strip()
-        workflow["staging"] = staging
-        cfg.config.last_staging = staging
+        workflow["workers"] = _read_workers(workers_str, cfg)
+        staging = input(f"Staging folder (SSD for faster I/O; '-' = none) [{_staging_default(cfg) or '-'}]: ").strip()
+        workflow["staging"] = _read_staging(staging, cfg)
+        cfg.config.last_staging = workflow["staging"]
         dry = input("Dry-run? [y/N]: ").strip().lower()
         workflow["dry_run"] = _yes(dry, False)
         safe = input(f"Safe mode? (skip multi-page TIFFs) [{'Y/n' if safe_default else 'y/N'}]: ").strip().lower()

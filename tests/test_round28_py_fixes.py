@@ -658,3 +658,36 @@ def test_diagnose_temp_folder_is_one_question(tmp_path, monkeypatch, rich):
     assert not (tmp_path / "y").exists() and not (tmp_path / "sim").exists()
     got = ask("rel 50%")
     assert got == tmp_path / "rel 50%" and got.is_absolute() and got.is_dir()
+
+
+
+@pytest.mark.parametrize("rich", [False, True], ids=["plain", "rich"])
+@pytest.mark.parametrize("workers, staging, want_workers, want_staging", [
+    ("", "", 6, r"D:\stg [x]"),          # Enter keeps the shown values
+    ("abc", "-", 6, ""),                  # no number: the shown one; '-' turns staging off
+    ("0", r"E:\new 伊豆沼", 1, r"E:\new 伊豆沼"),
+    ("999", "none", ct.MAX_WORKERS, ""),
+])
+def test_basic_params_read_the_same_on_both_screens(monkeypatch, rich, workers, staging,
+                                                    want_workers, want_staging):
+    """v3.1 phase 6 (T4): the Rich screen kept a remembered staging folder on Enter with no way
+    to turn it off, the plain one forgot it; a Workers answer that is no number gave the
+    config's default on one screen and the last value on the other; 0 was 'invalid' on one
+    and 1 on the other. One reading now, on both screens."""
+    if rich and not ct.RICH_AVAILABLE:
+        pytest.skip("the Rich screen")
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", rich)
+    monkeypatch.setattr(ct, "step_advanced_options", lambda cfg, wf: True)
+    cfg = SimpleNamespace(config=ct.ToolConfig(last_workers=6, last_staging=r"D:\stg [x]"),
+                          save_config=lambda: None)
+    # workers, staging, then every other question answered with Enter
+    answers = iter([workers, staging] + [""] * 10)
+    if rich:
+        monkeypatch.setattr(ct.Prompt, "ask", classmethod(
+            lambda cls, *a, **k: (lambda v: v if v else str(k.get("default", "")))(next(answers))))
+        monkeypatch.setattr(ct.Confirm, "ask", classmethod(lambda cls, *a, **k: k.get("default", False)))
+    else:
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+    wf = {"origin": "free_compress", "dest": "zip"}
+    assert ct.step_basic_params(cfg, wf) is True
+    assert (wf["workers"], wf["staging"]) == (want_workers, want_staging), wf
