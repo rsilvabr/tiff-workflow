@@ -952,6 +952,34 @@ class TestPaddedOutcome:
         assert convert_tiff._padded_outcome("ok", None) is None
 
 
+class TestPurgeVerdict:
+    """v3.1 phase 7 (W10): Delete OLD_TIFFs in phases; the verdict on one backup is a
+    function of its own. A sidecar (not a TIFF) may only go when the parent holds the same
+    bytes; a backup with nothing in the parent is kept as an orphan, never deleted."""
+
+    def test_a_sidecar_needs_the_same_bytes(self, tmp_path):
+        folder = tmp_path / "190815_Film_伊豆沼 [FINAL] 50%"
+        old = folder / "OLD_TIFFs"
+        old.mkdir(parents=True)
+        cases = {"same.xmp": (b"<x/>", b"<x/>", None),
+                 "size.xmp": (b"<x/>", b"<xx/>", "sidecar differs from parent copy (size)"),
+                 "bytes.xmp": (b"<x/>", b"<y/>", "sidecar differs from parent copy (content)"),
+                 "gone 50%.xmp": (b"<x/>", None, convert_tiff._MISSING_PARENT)}
+        for name, (backup, parent, want) in cases.items():
+            (old / name).write_bytes(backup)
+            if parent is not None:
+                (folder / name).write_bytes(parent)
+            verdict = convert_tiff._purge_verdict((old / name, folder / name, len(backup)))
+            assert (verdict and verdict[2]) == want, (name, verdict)
+
+    def test_a_tiff_without_its_copy_is_an_orphan(self, tmp_path):
+        old = tmp_path / "OLD_TIFFs"
+        old.mkdir()
+        (old / "a.tif").write_bytes(b"II*\x00")
+        v = convert_tiff._purge_verdict((old / "a.tif", tmp_path / "a.tif", 4))
+        assert v == (old / "a.tif", tmp_path / "a.tif", convert_tiff._MISSING_PARENT)
+
+
 class TestWorkflow4TwoSteps:
     """Workflow 4 (Copy EXIF, then compress): compress runs only when Copy EXIF exited 0 --
     it would ZIP TIFFs whose metadata never landed. v3.1 phase 7 (W7) wrote the two passes

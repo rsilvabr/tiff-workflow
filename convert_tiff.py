@@ -4301,95 +4301,72 @@ def _size_and_time(path: Path):
     return st.st_size, st.st_mtime_ns
 
 
-def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
-    """
-    Verify and delete OLD_TIFFs/ folders.
-    Compares each file in OLD_TIFFs with the equivalent in the parent folder
-    (same filename), confirming content matches (ignoring compression).
-    Shows sizes and asks for time confirmation before deleting.
-    """
-    folder = step_folder(cfg, "Root folder to scan for OLD_TIFFs")
-    if folder is None:
-        return False
+_MISSING_PARENT = "parent file missing"
 
+
+def _purge_collect(folder: Path) -> Tuple[List[Path], List[Tuple[Path, Path, int]]]:
+    """(the OLD_TIFFs folders below `folder`, every file in them as (backup, the file of that
+    name in the parent folder, backup size))."""
     # Find all OLD_TIFFs folders recursively (case-insensitive for Unix)
     old_dirs = sorted([d for d in folder.rglob("*") if d.is_dir() and d.name.lower() == "old_tiffs"])
-    if not old_dirs:
-        _say("No OLD_TIFFs folders found.", "yellow")
-        return True
-
-    # Collect all files in OLD_TIFFs with their parent-equivalent paths
-    items = []  # list of (old_file Path, new_file Path, old_size)
-    mismatches = []
-
+    items = []
     for od in old_dirs:
         parent = od.parent
         for f in sorted(od.glob("*")):
             if not f.is_file():
                 continue
-            new_file = parent / f.name
-            old_size = f.stat().st_size
-            items.append((f, new_file, old_size))
+            items.append((f, parent / f.name, f.stat().st_size))
+    return old_dirs, items
 
-    if not items:
-        _say("No files found in OLD_TIFFs folders.", "yellow")
-        return True
 
+def _purge_verdict(item) -> Optional[Tuple[Path, Path, str]]:
+    """Why the backup must be KEPT, as (backup, parent copy, reason); None = its copy in the
+    parent folder verified and it may go. A TIFF goes through _compare_tiff_metadata; a
+    sidecar needs an identical copy. No copy at all is _MISSING_PARENT: nothing to compare,
+    nothing that may be deleted."""
+    old_file, new_file, _ = item
+    if not tw.is_tiff_name(old_file.name):
+        if not new_file.exists():
+            return (old_file, new_file, _MISSING_PARENT)
+        # Compare content, not just size: this gate authorises permanent deletion, and a
+        # same-size sidecar with different content used to pass.
+        try:
+            if new_file.stat().st_size != old_file.stat().st_size:
+                return (old_file, new_file, "sidecar differs from parent copy (size)")
+            if _file_digest(old_file) != _file_digest(new_file):
+                return (old_file, new_file, "sidecar differs from parent copy (content)")
+        except OSError as e:
+            return (old_file, new_file, f"read failed: {e}")
+        return None
+    if not new_file.exists():
+        return (old_file, new_file, _MISSING_PARENT)
+    match, detail = _compare_tiff_metadata(old_file, new_file)
+    if not match:
+        return (old_file, new_file, detail)
+    return None
+
+
+def _purge_verify(items: list, cfg) -> Tuple[list, list]:
+    """(orphans, mismatches): the backups with no copy in the parent, and the ones whose copy
+    did not verify -- both are KEPT. The workers are capped for the memory a compare takes."""
     # A backup whose parent counterpart is simply ABSENT is not a mismatch: there is nothing
     # to compare and nothing that may be deleted, so it is kept and reported. It used to be
     # lumped in with real mismatches and blocked the whole purge -- which a healthy folder
     # reaches routinely, because modes 0/9 rename a backup when one of that name already
     # exists (photo_20260805_101500.tif) and a photo.tiff source produces a photo.tif output.
-    orphans = []
-    MISSING_PARENT = "parent file missing"
-
-    # Verify each image file; non-TIFF sidecars must at least have an identical-size copy in the parent
-    def _verify(item):
-        old_file, new_file, _ = item
-        if not tw.is_tiff_name(old_file.name):
-            if not new_file.exists():
-                return (old_file, new_file, MISSING_PARENT)
-            # Compare content, not just size: this gate authorises permanent deletion, and a
-            # same-size sidecar with different content used to pass.
-            try:
-                if new_file.stat().st_size != old_file.stat().st_size:
-                    return (old_file, new_file, "sidecar differs from parent copy (size)")
-                if _file_digest(old_file) != _file_digest(new_file):
-                    return (old_file, new_file, "sidecar differs from parent copy (content)")
-            except OSError as e:
-                return (old_file, new_file, f"read failed: {e}")
-            return None
-        if not new_file.exists():
-            return (old_file, new_file, MISSING_PARENT)
-        match, detail = _compare_tiff_metadata(old_file, new_file)
-        if not match:
-            return (old_file, new_file, detail)
-        return None
-
+    orphans, mismatches = [], []
     workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
     workers = _memory_capped_pool_workers(workers, [it[0] for it in items if tw.is_tiff_name(str(it[0]))], tw.COMPARE_BYTES_PER_PIXEL, "copy verification")
     with _timeout_load(workers), \
             concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        for result in executor.map(_verify, items):
+        for result in executor.map(_purge_verdict, items):
             if result:
-                (orphans if result[2] == MISSING_PARENT else mismatches).append(result)
+                (orphans if result[2] == _MISSING_PARENT else mismatches).append(result)
+    return orphans, mismatches
 
-    orphan_keys = {(o[0], o[1]) for o in orphans}
-    # A file that does not verify is KEPT -- and only that file. One mismatch used to abort
-    # the purge for the entire tree, so a single bad conversion (or, before the thumbnail
-    # rule above, any file compressed with -GenerateThumbnail) left the user with no way to
-    # clean up the backups except deleting them by hand, which is exactly what this gate
-    # exists to prevent. Same shape as the orphan handling right above.
-    mismatch_keys = {(m[0], m[1]) for m in mismatches}
-    deletable = [it for it in items
-                 if (it[0], it[1]) not in orphan_keys and (it[0], it[1]) not in mismatch_keys]
-    # What each verified pair looked like when it was checked: the deletion below comes after
-    # the questions -- minutes later, or at the end of a big tree -- and re-checks this first
-    # (v3.1 phase 6, W-O16, the owner's choice: size and write time, not a second full compare).
-    checked_as = {(it[0], it[1]): (_size_and_time(it[0]), _size_and_time(it[1])) for it in deletable}
 
-    # Display results
-    total_old_size = sum(s for _, _, s in deletable)
+def _purge_report(folder: Path, old_dirs: list, items: list, orphans: list, mismatches: list) -> None:
+    """Every backup with its verdict, then the ones kept and why."""
     # Everything in the backup folders, the files kept below included (v3.1 phase 6, F2: this
     # line showed the to-delete sum, so it read as if the kept backups were not there).
     total_in_old = sum(s for _, _, s in items)
@@ -4398,22 +4375,19 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     _say(f"Total size in OLD_TIFFs: {_format_size(total_in_old)}\n", "dim")
     _say("File comparison (OLD_TIFFs vs parent):", "bold")
 
-    mismatch_set = {(m[0], m[1]) for m in mismatches}
+    orphan_keys = {(o[0], o[1]) for o in orphans}
     mismatch_detail = {(m[0], m[1]): m[2] for m in mismatches}
-
     for old_file, new_file, old_size in items:
-        is_mismatch = (old_file, new_file) in mismatch_set
-        is_orphan = (old_file, new_file) in orphan_keys
         if new_file.exists():
             new_size = new_file.stat().st_size
             size_info = f"{_format_size(old_size)} -> {_format_size(new_size)}"
         else:
             size_info = f"{_format_size(old_size)} (parent missing)"
         detail = ""
-        if is_mismatch:
+        if (old_file, new_file) in mismatch_detail:
             status = ("MISMATCH", "red")
             detail = "  <- " + mismatch_detail.get((old_file, new_file), "")
-        elif is_orphan:
+        elif (old_file, new_file) in orphan_keys:
             status = ("KEPT", "yellow")
             detail = "  <- no counterpart in the parent folder, nothing to verify against"
         else:
@@ -4435,23 +4409,14 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         for old_file, _new_file, _reason in orphans:
             _say(f"  = {old_file.relative_to(folder)}", "yellow")
 
-    if not deletable:
-        _say("\nNothing can be purged: no OLD_TIFFs file has a verified copy in its parent folder.",
-             "yellow")
-        return not mismatches
 
-    # Summary
-    _say(f"\n{len(deletable)} of {len(items)} file(s) verified OK.", "green")
-    _say(f"Total to delete: {_format_size(total_old_size)}", "dim")
-
-    # Confirm
+def _purge_confirm() -> bool:
+    """The question (default no) and the current time typed back, within a minute."""
     if not _ask_yes_no("\nDelete ALL OLD_TIFFs content? THIS CANNOT BE UNDONE.", False, "red"):
         _say("Cancelled.", "dim")
         return False
     # Time confirmation (like mode 8)
     time_str = _ask("Type current time (HH:MM) to confirm deletion", style="red")
-
-    # Delete files
     try:
         now = datetime.now()
         current_time = now.strftime("%H:%M")
@@ -4469,9 +4434,15 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     except Exception as e:
         _error(f"Error validating time: {e}")
         return False
+    return True
 
-    # `deletable`, never `items`: an orphaned backup is the only copy of that image left,
-    # so it is kept even when everything else in the folder verified clean.
+
+def _purge_delete(folder: Path, old_dirs: list, deletable: list, checked_as: Dict) -> Tuple[int, list]:
+    """Delete the verified backups -- `deletable`, never every file: an orphaned backup is the
+    only copy of that image left, so it is kept even when everything else in the folder
+    verified clean -- then the OLD_TIFFs folders left empty. A pair that changed since it was
+    checked (size or write time of either file, `checked_as`) is kept and listed (v3.1 phase
+    6, W-O16). (deleted, the backups kept for that)."""
     deleted = 0
     changed = []
     for old_file, new_file, _ in deletable:
@@ -4498,15 +4469,61 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
                 _say(f"  Removed folder: {od.relative_to(folder)}", "green")
         except Exception:
             pass
+    return deleted, changed
 
+
+def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
+    """
+    Verify and delete OLD_TIFFs/ folders.
+    Compares each file in OLD_TIFFs with the equivalent in the parent folder
+    (same filename), confirming content matches (ignoring compression).
+    Shows sizes and asks for time confirmation before deleting.
+    False when something did not verify: those backups were deliberately kept, and the
+    caller should not read the run as "everything checked out".
+    """
+    folder = step_folder(cfg, "Root folder to scan for OLD_TIFFs")
+    if folder is None:
+        return False
+
+    old_dirs, items = _purge_collect(folder)
+    if not old_dirs:
+        _say("No OLD_TIFFs folders found.", "yellow")
+        return True
+    if not items:
+        _say("No files found in OLD_TIFFs folders.", "yellow")
+        return True
+
+    orphans, mismatches = _purge_verify(items, cfg)
+    # A file that does not verify is KEPT -- and only that file. One mismatch used to abort
+    # the purge for the entire tree, so a single bad conversion (or, before the thumbnail
+    # rule above, any file compressed with -GenerateThumbnail) left the user with no way to
+    # clean up the backups except deleting them by hand, which is exactly what this gate
+    # exists to prevent.
+    kept = {(k[0], k[1]) for k in orphans + mismatches}
+    deletable = [it for it in items if (it[0], it[1]) not in kept]
+    # What each verified pair looked like when it was checked: the deletion below comes after
+    # the questions -- minutes later, or at the end of a big tree -- and re-checks this first
+    # (v3.1 phase 6, W-O16, the owner's choice: size and write time, not a second full compare).
+    checked_as = {(it[0], it[1]): (_size_and_time(it[0]), _size_and_time(it[1])) for it in deletable}
+
+    _purge_report(folder, old_dirs, items, orphans, mismatches)
+    if not deletable:
+        _say("\nNothing can be purged: no OLD_TIFFs file has a verified copy in its parent folder.",
+             "yellow")
+        return not mismatches
+
+    _say(f"\n{len(deletable)} of {len(items)} file(s) verified OK.", "green")
+    _say(f"Total to delete: {_format_size(sum(size for _, _, size in deletable))}", "dim")
+    if not _purge_confirm():
+        return False
+
+    deleted, changed = _purge_delete(folder, old_dirs, deletable, checked_as)
     _say(f"\nDone. Deleted {deleted} file(s).", "green")
     if changed:
         _say(f"{len(changed)} kept: they changed after the check -- run Delete OLD_TIFFs again to "
              "check them anew.", "yellow")
-
-    # False when something did not verify: those backups were deliberately kept, and the
-    # caller should not read the run as "everything checked out".
     return not mismatches
+
 
 
 def _format_size(size_bytes: int) -> str:
