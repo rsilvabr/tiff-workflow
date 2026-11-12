@@ -590,7 +590,10 @@ def test_T11_dash_removes_a_key_and_an_empty_section_goes_with_it(tmp_path, monk
     assert ov.read_bytes() == before
 
 
-@pytest.mark.parametrize("raw", [b"{ nope", b"[1, 2]", b'"text"', b"\xff\xfe\x00\x01", b""])
+@pytest.mark.parametrize("raw", [b"{ nope", b"[1, 2]", b'"text"', b"\xff\xfe\x00\x01", b"",
+                                 # v3.1 phase 6 (W-O6): what the scripts refuse, the menu refuses
+                                 b'{"compress_tiff_zip": {"ThumbSize": 64, "thumbsize": 128}}',
+                                 b'{"compress_tiff_zip": {"": 1}}'])
 def test_T11_a_file_that_cannot_be_read_is_refused_and_left_byte_for_byte(tmp_path, monkeypatch, raw):
     ov, said = _go(monkeypatch, tmp_path, [], raw=raw)        # no answer scripted: it must not ask
     assert ov.read_bytes() == raw

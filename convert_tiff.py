@@ -6432,7 +6432,9 @@ def _read_overlay_data(path: Path):
     if not path.is_file():
         return {}, None
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig"))
+        # The same hook as the scripts' reader: a file they refuse (keys that differ only in
+        # case, an empty key) is refused here too, never opened for editing (v3.1, W-O6).
+        data = json.loads(path.read_text(encoding="utf-8-sig"), object_pairs_hook=_overlay_object_pairs)
     except (OSError, ValueError) as e:
         return {}, str(e)
     if not isinstance(data, dict):
