@@ -175,6 +175,24 @@ class TestTargets:
 
 
 class TestJournal:
+    def test_workflow_7_journals_the_root_as_typed(self, tmp_path, monkeypatch):
+        """v3.1 phase 6 (W-O12; sweep Q5): the root went into the journal through resolve(),
+        which turns a mapped or SUBST drive into its network path."""
+        monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+        t = _tree(tmp_path)
+        for p in t.values():
+            _touch(p)
+        real_resolve = ct.Path.resolve
+        monkeypatch.setattr(ct.Path, "resolve", lambda self, strict=False: (
+            ct.Path(r"\\server\share\elsewhere") if str(self) == str(tmp_path) else real_resolve(self, strict)))
+        monkeypatch.setattr(ct, "_memory_capped_pool_workers", lambda req, *a, **k: req)
+        monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real 16-bit"))
+        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "1", "n"])
+        monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
+        cfg = _cfg()
+        assert ct.run_diagnose_tiffs(cfg) is True
+        assert ct._journal_snapshot(cfg)["diagnose"]["roots"] == [str(tmp_path)]
+
     def test_workflow_7_journals_its_settings(self, tmp_path, monkeypatch):
         monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
         t = _tree(tmp_path)

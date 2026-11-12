@@ -82,6 +82,13 @@ def test_a_save_that_dies_half_way_keeps_the_presets(tmp_path, monkeypatch, caps
     monkeypatch.setattr(convert_tiff.json, "dump", real_dump)
     assert cfg.config_path.read_bytes() == before, "the presets file was cut in half"
     assert [p.name for p in cfg.config_path.parent.iterdir() if p.suffix == ".tmp"] == []
+    # sweep Q9: in the config's own folder -- the swap is a rename, which needs one volume
+    made = []
+    real_mkstemp = convert_tiff.tempfile.mkstemp
+    monkeypatch.setattr(convert_tiff.tempfile, "mkstemp",
+                        lambda *a, **k: made.append(k.get("dir")) or real_mkstemp(*a, **k))
+    cfg.save_config()
+    assert made == [str(cfg.config_path.parent)], made
 
 
 def _write_manifest(path, rows):

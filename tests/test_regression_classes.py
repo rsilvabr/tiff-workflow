@@ -960,6 +960,8 @@ class TestUndoOldTiffsResilience:
         (cam / "ZIP").mkdir()
         (cam / "ZIP" / "y.tif").write_bytes(b"AN EARLIER MODE 1 COPY")
         (old / "z.tif").write_bytes(b"ORIGINAL Z")             # a .tif original: nothing to move
+        (old / "w.tiff").write_bytes(b"ORIGINAL W")
+        (cam / "w.tif").mkdir()                                # a FOLDER of that name: not a copy
         monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a, **k: cam)
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         it = iter(["n", "n", "y", "n"])       # not stranded-only, no overwrite, move, keep dirs
@@ -973,6 +975,8 @@ class TestUndoOldTiffsResilience:
         assert (cam / "ZIP" / "y.tif").read_bytes() == b"AN EARLIER MODE 1 COPY"
         assert (cam / "z.tif").read_bytes() == b"ORIGINAL Z"
         assert not (cam / "x 50%.tif").exists() and not (cam / "y.tif").exists()
+        assert (cam / "w.tif").is_dir() and not (cam / "ZIP" / "w.tif").exists(), \
+            "sweep Q1: a folder named like the copy is not a compressed copy"
         assert "MOVED ASIDE: x 50%.tif -> ZIP" in capsys.readouterr().out
 
     def test_a_failed_restore_never_moves_the_compressed_copy_away(self, tmp_path, monkeypatch):
@@ -1729,7 +1733,7 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         assert f"Total to delete: {size(len(b'tiffdata'))}" in out, out
 
 
-    @pytest.mark.parametrize("what", ["edited", "removed"])
+    @pytest.mark.parametrize("what", ["edited", "same-size edit", "removed"])
     def test_a_copy_that_changes_during_the_questions_keeps_its_backup(self, tmp_path, monkeypatch,
                                                                        capsys, what):
         """v3.1 phase 6 (W-O16, the owner's choice): the copy is checked BEFORE the questions
@@ -1743,6 +1747,10 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
                 target = folder / "img.tif"            # changed while the question is open
                 if what == "edited":
                     target.write_bytes(b"tiffdata EDITED AFTER THE CHECK")
+                elif what == "same-size edit":               # sweep Q2: the write time counts
+                    st = target.stat()
+                    target.write_bytes(b"TIFFDATA")
+                    os.utime(target, ns=(st.st_atime_ns, st.st_mtime_ns + 5_000_000_000))
                 else:
                     target.unlink()
                 return "y"

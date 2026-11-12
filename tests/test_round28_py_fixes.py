@@ -634,6 +634,8 @@ def test_one_yes_no_reader_for_both_screens(monkeypatch):
         assert ct.Confirm.ask("Proceed?", console=console) is True
         answers = iter(["não"])
         assert ct.Confirm.ask("Proceed?", console=console, default=True) is False
+        answers = iter(["SIM"])                                  # sweep Q3: without case
+        assert ct.Confirm.ask("Proceed?", console=console) is True
 
 
 
@@ -652,7 +654,8 @@ def test_diagnose_temp_folder_is_one_question(tmp_path, monkeypatch, rich):
         return ct._ask_temp_dir()
 
     assert ask("") is None and ask("n") is None and ask("não") is None
-    assert not (tmp_path / "n").exists() and not (tmp_path / "não").exists()
+    assert ask("N") is None and ask("Não") is None              # sweep Q4: without case
+    assert not any((tmp_path / n).exists() for n in ("n", "não", "N", "Não"))
     assert ask("y", "tmp [x] 伊豆沼") == tmp_path / "tmp [x] 伊豆沼"
     assert ask("sim", "") is None
     assert not (tmp_path / "y").exists() and not (tmp_path / "sim").exists()
