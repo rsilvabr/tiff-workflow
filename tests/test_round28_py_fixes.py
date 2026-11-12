@@ -526,3 +526,21 @@ def test_diagnose_preset_with_an_unusable_temp_dir_does_not_crash(home, monkeypa
     entry = _diag_entry({**_settings(home), "convert_padded": True,
                          "temp_dir": str(blocker / "tmp")})
     assert ct._run_journal(_diag_cfg(), entry, "Preset: padded", unattended=True) == 0
+
+
+@pytest.mark.skipif(not ct.RICH_AVAILABLE, reason="the Rich screen")
+def test_rich_prints_a_folder_name_with_markup_as_it_is(tmp_path, monkeypatch):
+    """v3.1 phase 6 (W-O7): a folder named like Rich markup -- [bold] vanished from the
+    summary, [/b] raised MarkupError right before the run. Every user text is escaped."""
+    import io
+    from rich.console import Console
+    out = io.StringIO()
+    monkeypatch.setattr(ct, "console", Console(file=out, force_terminal=False, width=300))
+    monkeypatch.setattr(ct.Confirm, "ask", staticmethod(lambda *a, **k: False))
+    name = "伊豆沼 [bold]x[/bold] [/b] 50%"
+    workflow = {"origin": "free_compress", "dest": "zip", "mode": 1,
+                "input_dir": "E:\\" + name, "staging": str(tmp_path / "[red]stg"),
+                "exclude_folders": "[/i]RAW", "workers": 2}
+    assert ct.step_confirm(workflow, ct.ToolConfig()) is False
+    text = out.getvalue()
+    assert name in text and "[red]stg" in text and "[/i]RAW" in text, text

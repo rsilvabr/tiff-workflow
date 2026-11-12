@@ -1281,7 +1281,7 @@ def step_pattern(cfg: ToolConfig) -> Optional[str]:
 def step_autofind(cfg: ToolConfig, patterns: List[str], root: Path) -> Optional[List[Path]]:
     """Scan folders matching pattern, let user confirm."""
     if RICH_AVAILABLE and console:
-        console.print(f"\n[cyan]Scanning for folders matching:[/cyan] {', '.join(patterns)}")
+        console.print(f"\n[cyan]Scanning for folders matching:[/cyan] {escape(', '.join(patterns))}")
     else:
         print(f"\nScanning for folders matching: {', '.join(patterns)}")
 
@@ -1300,7 +1300,7 @@ def step_autofind(cfg: ToolConfig, patterns: List[str], root: Path) -> Optional[
         table.add_column("TIFFs", justify="center", style="yellow", width=6)
         table.add_column("Path", style="dim")
         for i, (folder, count) in enumerate(found.items(), 1):
-            table.add_row(str(i), folder.name, str(count), truncate_path(folder, 40))
+            table.add_row(str(i), escape(folder.name), str(count), escape(truncate_path(folder, 40)))
         console.print(Panel(table, border_style="green"))
     else:
         print(f"\nFound {len(found)} session(s):")
@@ -1684,20 +1684,20 @@ def step_confirm(workflow: Dict, cfg: ToolConfig) -> bool:
         if origin != "free_compress" and folders_count > 1:
             pattern_val = workflow.get("pattern", [])
             pattern_str = ", ".join(pattern_val) if isinstance(pattern_val, list) else str(pattern_val)
-            table.add_row("Pattern:", pattern_str or "?")
+            table.add_row("Pattern:", escape(pattern_str or "?"))
             table.add_row("Sessions:", f"{folders_count} folder(s)")
         elif origin == "free_compress":
             table.add_row("Mode:", f"{mode} - {MODE_NAMES.get(mode, '?')}")
-            table.add_row("Folder:", workflow.get("input_dir", "?")[:60])
+            table.add_row("Folder:", escape(str(workflow.get("input_dir", "?"))[:60]))
         else:
-            table.add_row("Folder:", workflow.get("folders", [workflow.get("input_dir")])[0].name if workflow.get("folders") else workflow.get("input_dir", "?"))
+            table.add_row("Folder:", escape(str(workflow.get("folders", [workflow.get("input_dir")])[0].name if workflow.get("folders") else workflow.get("input_dir", "?"))))
 
         table.add_row("Workers:", str(workflow.get("workers", 8)))
         if workflow.get("cap_workers"):
             table.add_row("Cap workers:", str(workflow["cap_workers"]))
         if workflow.get("exclude_folders"):
-            table.add_row("[yellow]Excluding:[/yellow]", workflow["exclude_folders"])
-        table.add_row("Staging:", workflow.get("staging") or "disabled")
+            table.add_row("[yellow]Excluding:[/yellow]", escape(workflow["exclude_folders"]))
+        table.add_row("Staging:", escape(str(workflow.get("staging") or "disabled")))
         table.add_row("Dry-run:", dry)
         if workflow.get("force_parallel"):
             table.add_row("[yellow]Parallelism:[/yellow]", "FORCED ON (-ForceParallel)")
@@ -3278,7 +3278,7 @@ def run_diagnose_tiffs(cfg: ToolConfig) -> bool:
                     console.print(f"[red]Cannot use temp dir {escape(str(temp_dir))}: {escape(str(e))} -- using system temp.[/red]")
                     temp_dir = None
             if temp_dir is not None:
-                console.print(f"[dim]Using temp dir: {temp_dir}[/dim]")
+                console.print(f"[dim]Using temp dir: {escape(str(temp_dir))}[/dim]")
     else:
         resp = input("\nUse a specific temp directory? (leave empty for system temp): ").strip()
         if resp:
@@ -5055,7 +5055,7 @@ def pick_manifest() -> Optional[str]:
     if RICH_AVAILABLE and console:
         console.print("[bold]Available manifests (newest first):[/bold]")
         for i, m in enumerate(shown, 1):
-            console.print(f"  [{i}] {m.name}")
+            console.print(f"  [{i}] {escape(m.name)}")
         choice = Prompt.ask("Which manifest?",
                             choices=[str(i) for i in range(1, len(shown) + 1)], default="1")
         return str(shown[int(choice) - 1])
@@ -5115,7 +5115,7 @@ def view_manifest(manifest_path) -> None:
         table.add_column("Mode", style="magenta")
         for i, (src, dst, mode) in enumerate(entries, 1):
             table.add_row(str(i), truncate_path(Path(src)), truncate_path(Path(dst)), mode)
-        console.print(Panel(table, title=f"[bold]Manifest[/bold] -- {manifest_path}", border_style="blue"))
+        console.print(Panel(table, title=f"[bold]Manifest[/bold] -- {escape(str(manifest_path))}", border_style="blue"))
         console.print(f"[dim]Total: {len(entries)} entry(ies)[/dim]")
     else:
         print(f"\n=== Manifest: {manifest_path} ===")
@@ -5752,7 +5752,7 @@ def run_free_compress(cfg: ToolConfig) -> bool:
         label += " [DELETES SOURCES]"
     _save_last_run(cfg, "compress", label, [journal_cmd])
     if RICH_AVAILABLE and console:
-        console.print(f"\n[dim]Running: {' '.join(cmd)}[/dim]\n")
+        console.print(f"\n[dim]Running: {escape(' '.join(str(a) for a in cmd))}[/dim]\n")
     else:
         print(f"\nRunning: {' '.join(cmd)}\n")
 
@@ -5836,7 +5836,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
 
     def run_and_prompt(cmd_list, folders):
         if RICH_AVAILABLE and console:
-            console.print(f"\n[dim]Running: {' '.join(cmd_list)}[/dim]\n")
+            console.print(f"\n[dim]Running: {escape(' '.join(str(a) for a in cmd_list))}[/dim]\n")
         else:
             print(f"\nRunning: {' '.join(cmd_list)}\n")
         run_result = run_subprocess(cmd_list)
@@ -5897,7 +5897,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
         cmd_copy = build_copy_exif_command(step1_workflow, folders=found_folders)
         if RICH_AVAILABLE and console:
             console.print(f"\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
-            console.print(f"[dim]Running: {' '.join(cmd_copy)}[/dim]\n")
+            console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_copy))}[/dim]\n")
         else:
             print(f"\n=== Step 1/2: Copy EXIF ===")
             print(f"Running: {' '.join(cmd_copy)}\n")
@@ -5913,7 +5913,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
         cmd = build_compress_command(workflow, folders=found_folders)
         if RICH_AVAILABLE and console:
             console.print(f"\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
-            console.print(f"[dim]Running: {' '.join(cmd)}[/dim]\n")
+            console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd))}[/dim]\n")
         else:
             print(f"\n=== Step 2/2: Fuji: Compress ===")
             print(f"Running: {' '.join(cmd)}\n")
@@ -5935,7 +5935,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                     cmd_real = build_compress_command(workflow, folders=found_folders)
                     if RICH_AVAILABLE and console:
                         console.print(f"\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
-                        console.print(f"[dim]Running: {' '.join(cmd_copy_real)}[/dim]\n")
+                        console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_copy_real))}[/dim]\n")
                     else:
                         print(f"\n=== Step 1/2: Copy EXIF ===")
                         print(f"Running: {' '.join(cmd_copy_real)}\n")
@@ -5946,7 +5946,7 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
                         return False
                     if RICH_AVAILABLE and console:
                         console.print(f"\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
-                        console.print(f"[dim]Running: {' '.join(cmd_real)}[/dim]\n")
+                        console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_real))}[/dim]\n")
                     else:
                         print(f"\n=== Step 2/2: Fuji: Compress ===")
                         print(f"Running: {' '.join(cmd_real)}\n")
@@ -6655,7 +6655,7 @@ def presets_menu(cfg) -> None:
                 continue
             name = names[int(target) - 1]
             if RICH_AVAILABLE and console:
-                sure = Confirm.ask(f"Delete preset '{name}'?", default=False)
+                sure = Confirm.ask(f"Delete preset '{escape(name)}'?", default=False)
             else:
                 sure = input(f"Delete preset '{name}'? [y/N]: ").strip().lower().startswith("y")
             if sure:
