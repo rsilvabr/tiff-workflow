@@ -551,3 +551,19 @@ def test_the_worker_fallback_is_the_configs(monkeypatch):
     default_workers, never to a second literal."""
     monkeypatch.setattr(ct.ToolConfig, "default_workers", 5)
     assert ct.clamp_workers("x") == 5 and ct.clamp_workers(None, 3) == 3 and ct.clamp_workers(2) == 2
+
+
+def test_autofind_never_takes_a_backup_folder_for_a_session(tmp_path):
+    """v3.1 phase 6 (W-O1): the wizard checked only the folder's own name; a session inside
+    OLD_TIFFs came back as a session to process. copy_exif's AutoFind matches every level
+    below the root; so does the wizard's now."""
+    root = tmp_path / "190815_伊豆沼 [FINAL] 50%"
+    for rel in ("S5pro 01", "S5pro 01/OLD_TIFFs/S5pro bak", "OLD_TIFFs/S5pro 02", "x/ZIP/S5pro 03"):
+        d = root / rel
+        d.mkdir(parents=True)
+        (d / "a.tif").write_bytes(b"TIFF")
+    found = ct.find_folders_by_pattern(root, ["S5pro"])
+    assert sorted(p.relative_to(root).as_posix() for p in found) == ["S5pro 01"], found
+    # pointing AT a folder named like a tool output still works: only levels below count
+    inside = ct.find_folders_by_pattern(root / "OLD_TIFFs", ["S5pro"])
+    assert sorted(p.name for p in inside) == ["S5pro 02"]

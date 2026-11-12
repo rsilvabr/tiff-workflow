@@ -679,7 +679,10 @@ def find_folders_by_pattern(root: Path, patterns: List[str]) -> Dict[Path, int]:
             continue  # Python < 3.11: rglob("*/") also yields files
         if path.name.startswith("."):
             continue
-        if path.name.lower() in exclude_names:
+        # Every folder level below the root counts, as in copy_exif's AutoFind: a session
+        # INSIDE OLD_TIFFs (S5pro 01\OLD_TIFFs\S5pro bak\) came back as a session to process
+        # when only the folder's own name was checked (v3.1 phase 6, W-O1).
+        if tw.path_excluded(str(path), str(root), exclude_names):
             continue
         for pat in patterns:
             if pat.lower() in path.name.lower():
