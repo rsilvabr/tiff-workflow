@@ -61,12 +61,13 @@ def test_fallbacks_match_the_scripts():
 
 def test_the_table_the_wizard_reads_is_the_one_the_script_runs_with():
     """T1b: read with `ast`, never imported -- and still exactly the script's own table."""
+    slots = ct.tw.P.__slots__
     for script in ct.BACKEND_SCRIPTS:
         module = __import__(script[:-3])
-        mine = [(n, k, d, h) for n, k, d, h in ct._backend_tables(script)[0]]
-        theirs = [(p.name, p.kind, None if p.kind == "switch" else p.default, p.help)
-                  for p in module.PARAMS]
+        mine = [tuple(getattr(p, s) for s in slots) for p in ct._backend_tables(script)[0]]
+        theirs = [tuple(getattr(p, s) for s in slots) for p in module.PARAMS]
         assert mine == theirs, script
+        assert all(isinstance(p, ct.tw.P) for p in ct._backend_tables(script)[0])
         assert ct._backend_param_names(script) == tuple(p.name for p in module.PARAMS)
 
 

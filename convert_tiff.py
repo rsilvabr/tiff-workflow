@@ -383,16 +383,17 @@ def _parse_setting_text(spec: str, text: str):
 # edited default (a user's own setting) is read exactly as written.
 
 @functools.lru_cache(maxsize=None)
-def _backend_tables(script_name: str) -> Tuple[Tuple[Tuple, ...], Tuple[Tuple[str, str], ...]]:
-    """(params, overlay specs) of a backend next to this file: params as
-    ((name, kind, default, help), ...) in the script's order, specs as ((name, spec), ...).
-    ((), ()) when the file cannot be read or parsed."""
+def _backend_tables(script_name: str) -> Tuple[Tuple["tw.P", ...], Tuple[Tuple[str, str], ...]]:
+    """(params, overlay specs) of a backend next to this file: params as tw.P in the script's
+    order -- the very table the backend binds its command line with (it is written with
+    literals only) --, specs as ((name, spec), ...). ((), ()) when the file cannot be read or
+    parsed; an entry that does not make a tw.P is left out."""
     try:
         text = (SCRIPT_DIR / script_name).read_text(encoding="utf-8", errors="replace")
         tree = ast.parse(text)
     except (OSError, SyntaxError, ValueError):
         return (), ()
-    params: List[Tuple] = []
+    params: List["tw.P"] = []
     specs: List[Tuple[str, str]] = []
     for node in tree.body:
         if not isinstance(node, ast.Assign):
@@ -404,14 +405,13 @@ def _backend_tables(script_name: str) -> Tuple[Tuple[Tuple, ...], Tuple[Tuple[st
                         and call.func.id == "P"):
                     continue
                 try:
-                    args = [ast.literal_eval(a) for a in call.args]
-                    kw = {k.arg: ast.literal_eval(k.value) for k in call.keywords if k.arg}
-                except (ValueError, SyntaxError):
+                    p = tw.P(*[ast.literal_eval(a) for a in call.args],
+                             **{k.arg: ast.literal_eval(k.value) for k in call.keywords if k.arg})
+                except (ValueError, SyntaxError, TypeError):
                     continue
-                if len(args) < 2 or not isinstance(args[0], str):
-                    continue
-                default = args[2] if len(args) > 2 else kw.get("default")
-                params.append((args[0], args[1], default, str(kw.get("help") or "")))
+                if isinstance(p.name, str) and isinstance(p.kind, str):
+                    p.help = str(p.help or "")
+                    params.append(p)
         elif "OVERLAY_SPECS" in names:
             try:
                 table = ast.literal_eval(node.value)
@@ -952,20 +952,20 @@ _BACKEND_PARAM_FALLBACKS = {
 def _backend_param_defaults(script_name: str) -> Dict[str, object]:
     """name -> default of every parameter of the script's PARAMS table that takes a value
     (a switch has none). {} when the file cannot be read."""
-    return {name: default for name, kind, default, _help in _backend_tables(script_name)[0]
-            if kind != "switch" and default is not None}
+    return {p.name: p.default for p in _backend_tables(script_name)[0]
+            if p.kind != "switch" and p.default is not None}
 
 
 def _backend_param_names(script_name: str) -> Tuple[str, ...]:
     """Every parameter name of the script's PARAMS table, in order -- the switches too.
     () when the file cannot be read."""
-    return tuple(name for name, _kind, _default, _help in _backend_tables(script_name)[0])
+    return tuple(p.name for p in _backend_tables(script_name)[0])
 
 
 def _backend_param_help(script_name: str) -> Dict[str, str]:
     """name -> the `help` text of the parameter in the PARAMS table (the one-line help the
     Script settings screen shows); {} when the file cannot be read."""
-    return {name: text for name, _kind, _default, text in _backend_tables(script_name)[0] if text}
+    return {p.name: p.help for p in _backend_tables(script_name)[0] if p.help}
 
 
 def _backend_default(script_name: str, param: str):
