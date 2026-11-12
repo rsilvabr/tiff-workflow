@@ -240,3 +240,23 @@ def test_an_exiftool_without_the_status_of_each_command_is_refused(tmp_path, hos
     assert "does not report the result of each command it runs; update it to 12.15 or later" in out, out
     assert photo.read_bytes() == before
     assert sorted(x.name for x in photo.parent.iterdir()) == ["x 50%.tif"], "nothing written"
+
+
+@requires_tools
+@pytest.mark.parametrize("lane", LANES)
+def test_a_new_thumbnail_is_marked_even_when_the_old_preview_was_not(tmp_path, hostile, lane):
+    """Review of v3.1 phases 3+4, V2: -GenerateThumbnail on a source whose second page is a
+    smaller preview WITHOUT a marker. The new thumbnail page must come out REDUCEDIMAGE (1);
+    putting the SOURCE's markers back (none) would leave it unmarked -- a page that every
+    later run takes for a second image."""
+    plain, land = hostile
+    src = make_multipage_tiff(plain / "scan.tif", [0, None], sizes=["64x48", "16x12"])
+    assert numeric_subfiletypes(src) == ["[IFD0] SubfileType: 0"], "the preview has no marker"
+    photo = land(src, "scan 50%.tif")
+    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", "1", "-InputDir", str(photo.parent),
+                                                   "-GenerateThumbnail", "-ThumbSize", "16"], tmp_path)
+    assert result.returncode == 0, result.stdout
+    assert "OK (" in result.stdout and "[thumb replaced]" in result.stdout, result.stdout
+    probe = tmp_path / "probe.tif"
+    probe.write_bytes((photo.parent / "ZIP" / photo.name).read_bytes())
+    assert numeric_subfiletypes(probe) == ["[IFD0] SubfileType: 0", "[IFD1] SubfileType: 1"]

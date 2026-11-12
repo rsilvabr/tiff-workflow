@@ -631,19 +631,22 @@ class TestNothingOfAJobIsLeftBehind:
         assert output is None or not output.exists(), f"the output stayed: {output}"
         assert sorted(os.listdir(photo.parent)) == [photo.name]
 
+    @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt], ids=["error", "ctrl-c"])
     @pytest.mark.parametrize("shape", ["in-place", "staged", "destination", "modes-0-9"])
-    def test_a_write_that_dies_half_way_leaves_nothing(self, tools, photo, tmp_path, monkeypatch, shape):
-        """The exception comes out of the write itself, with half a file on disk."""
+    def test_a_write_that_dies_half_way_leaves_nothing(self, tools, photo, tmp_path, monkeypatch, shape,
+                                                       error):
+        """The exception comes out of the write itself, with half a file on disk. Ctrl+C too
+        (review V2): in the sequential lane it is raised inside the job."""
         def half_then_dies(args):
             out = str(args[-1]).replace("%%", "%")
             with open(out, "wb") as fh:
                 fh.write(b"HALF")
-            raise RuntimeError("magick died")
+            raise error("magick died")
         monkeypatch.setattr(tw, "magick_run", half_then_dies)
         container = Path(str(photo) + ".meta")
         container.write_bytes(b"MIE")
         args, extra, output = self.start(shape, photo, tmp_path)
-        with pytest.raises(RuntimeError, match="magick died"):
+        with pytest.raises(error, match="magick died"):
             job(*args, **extra)
         assert photo.read_bytes() == b"ORIGINAL" and not container.exists()
         assert leftovers(photo.parent) == [] and (output is None or not output.exists())
@@ -861,6 +864,22 @@ class TestCopyExif:
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith("ERROR (exiftool EXIF check)")
         assert len(tools.exif_calls) == 1
+
+    def test_an_icc_probe_that_cannot_run_never_copies_a_profile_over_the_tiffs(self, tools, photo,
+                                                                                monkeypatch):
+        """Review V2: -IccPolicy preserve_tiff copies the JPEG's profile only when the TIFF has
+        none. When the probe cannot run, the TIFF may have one: never copy over it."""
+        def exiftool(args, merge_stderr=False, check=True):
+            tools.exif_calls.append([str(a) for a in args])
+            if "-ICC_Profile:all" in args:
+                raise tw.ToolError("exiftool could not be started", "", -1)
+            return ""
+        monkeypatch.setattr(tw, "exiftool", exiftool)
+        r = cx.process_pair(exif_run("-IccPolicy", "preserve_tiff"), pair(photo, photo.with_suffix(".jpg")),
+                            str(photo.parent), str(photo.parent), 1.0)
+        assert r.line.startswith("OK |"), r.line
+        copy = next(c for c in tools.exif_calls if "-tagsfromfile" in c)
+        assert "-ICC_Profile" not in copy, copy
 
     def test_no_compression_tag_is_not_uncompressed(self, tools, photo):
         """v3.1 phase 4: tiff_facts read the file but IFD0 has no compression: refused as
@@ -2588,6 +2607,14 @@ class TestCommandLine:
         assert res[1] == tw.ExifResult(1, "b\nWarning: Error opening file - x\n"), \
             "the warning is the second command's, not the first's"
         assert res[2].status == -1, "a marker without a number is a failure"
+
+        def disagree(cmd, timeout=None, input=None):
+            lines = input.decode("utf-8").split("\n")
+            tag = lines[lines.index("-echo3") + 1].split(" ")[0]
+            return 0, f"{tag} 0 0}}\n".encode(), f"{tag} 0 1}}\n".encode()
+        monkeypatch.setattr(tw, "run_captured", disagree)
+        assert tw.exiftool_commands([["a.tif"]])[0].status == -1, \
+            "review V2: the two markers of one command disagree: a failure, not the stdout one"
 
         def not_started(cmd, timeout=None, input=None):
             raise FileNotFoundError(2, "no exiftool")
