@@ -37,8 +37,8 @@ AGENT = f"{convert_tiff.TOOLKIT_NAME} {convert_tiff.TOOLKIT_VERSION} ({convert_t
 PATHS = [
     ("mode-sequential", "sequential", [], False),
     ("inplace-sequential", "sequential", [], True),
-    ("mode-parallel", "parallel", ["-Workers", "3"], False),
-    ("inplace-parallel", "parallel", ["-Workers", "3"], True),
+    ("mode-parallel", "parallel", ["--workers", "3"], False),
+    ("inplace-parallel", "parallel", ["--workers", "3"], True),
 ]
 PATH_IDS = [p[0] for p in PATHS]
 
@@ -84,7 +84,7 @@ def convert(lane, extra, in_place, src):
     """Run one worker path: mode 1 writes ZIP/<name>; mode 2 without -OutputDir has the
     input root as its flat output, so it writes over each file that is directly in that
     folder (a temp sibling, the gates, then the rename). `src` has no subfolders."""
-    return run(lane, ["-Mode", 2 if in_place else 1, "-InputDir", src, *extra], src.parent)
+    return run(lane, ["--mode", 2 if in_place else 1, "--input-dir", src, *extra], src.parent)
 
 
 def output_of(src, name, in_place):
@@ -141,11 +141,11 @@ def test_h3_mode0_second_run_adds_nothing(tmp_path, lane):
     ZIP file: no new entry, same bytes."""
     src = tmp_path / HOSTILE / "S5pro 01"
     f = make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(lane, ["-Mode", 0, "-InputDir", src], tmp_path)
+    rc, out = run(lane, ["--mode", 0, "--input-dir", src], tmp_path)
     assert rc == 0, out[-3000:]
     assert len(history(f)) == 1
     h1 = md5(f)
-    rc, out = run(lane, ["-Mode", 0, "-InputDir", src], tmp_path)
+    rc, out = run(lane, ["--mode", 0, "--input-dir", src], tmp_path)
     assert rc == 0, out[-3000:]
     assert len(history(f)) == 1, "run 2 appended another entry"
     assert md5(f) == h1, "run 2 rewrote the file"
@@ -157,14 +157,14 @@ def test_h4_mode8_delete_source_and_thumbnail(tmp_path, lane):
     -GenerateThumbnail says so in Parameters and keeps the page markers."""
     src = tmp_path / HOSTILE / "mode8"
     f = make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(lane, ["-Mode", 8, "-InputDir", src, "-DeleteSource"], tmp_path)
+    rc, out = run(lane, ["--mode", 8, "--input-dir", src, "--delete-source"], tmp_path)
     assert rc == 0, out[-3000:]
     entries = history(f)
     assert len(entries) == 1 and entries[0]["Parameters"] == "compress_tiff_zip mode 8: ZIP (Deflate)"
 
     src = tmp_path / HOSTILE / "thumb"
     make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(lane, ["-Mode", 1, "-InputDir", src, "-GenerateThumbnail"], tmp_path)
+    rc, out = run(lane, ["--mode", 1, "--input-dir", src, "--generate-thumbnail"], tmp_path)
     assert rc == 0, out[-3000:]
     dst = src / "ZIP" / "DSCF 50%off (2).tif"
     entries = history(dst)
@@ -181,7 +181,7 @@ def test_h5_the_purge_gate_still_accepts_the_pair(tmp_path, lane):
     not pixels, not SubfileType/EXIF presence) must not make the gate refuse."""
     src = tmp_path / HOSTILE / "S5pro 01"
     f = make_tiff_named(src, "DSCF 50%off (2)")
-    rc, out = run(lane, ["-Mode", 0, "-InputDir", src], tmp_path)
+    rc, out = run(lane, ["--mode", 0, "--input-dir", src], tmp_path)
     assert rc == 0, out[-3000:]
     old = src / "OLD_TIFFs" / f.name
     assert old.exists()

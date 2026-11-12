@@ -89,9 +89,9 @@ def ae_pages(path_a, path_b, page):
 
 
 def backend_args(lane, folder):
-    args = ["-InputDir", str(folder)]
+    args = ["--input-dir", str(folder)]
     if lane == "parallel":
-        args += ["-Workers", "4"]
+        args += ["--workers", "4"]
     return args
 
 

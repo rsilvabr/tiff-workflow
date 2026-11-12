@@ -166,9 +166,9 @@ def test_compress_mode9_interrupted_leaves_every_original_and_nothing_else(tmp_p
     work, fast, slow = photos(tmp_path)
     before = {p.name: p.read_bytes() for p in (fast, slow)}
     stg = tmp_path / "stg [x] 一時"
-    args = ["-Mode", "9", "-InputDir", work, "-ForceSequential"]
+    args = ["--mode", "9", "--input-dir", work, "--force-sequential"]
     if staging == "staging":
-        args += ["-StagingDir", stg]
+        args += ["--staging-dir", stg]
 
     rc, out = interrupted_run("compress_tiff_zip.py", args, tmp_path, env, mark, tmp_path)
 
@@ -186,8 +186,8 @@ def test_compress_mode9_interrupted_leaves_every_original_and_nothing_else(tmp_p
     assert sorted(p.name for p in work.iterdir() if p.is_file()) == [fast.name, slow.name]
 
     # and the next run, with the real magick, finds a folder it can work on
-    again = subprocess.run([sys.executable, str(REPO / "compress_tiff_zip.py"), "-Mode", "9",
-                            "-InputDir", str(work)], cwd=str(tmp_path), stdin=subprocess.DEVNULL,
+    again = subprocess.run([sys.executable, str(REPO / "compress_tiff_zip.py"), "--mode", "9",
+                            "--input-dir", str(work)], cwd=str(tmp_path), stdin=subprocess.DEVNULL,
                            capture_output=True, text=True, encoding="utf-8", errors="replace",
                            env=dict(os.environ, TIFFWORKFLOW_SETTINGS=""), timeout=300)
     assert again.returncode == 0, again.stdout
@@ -205,7 +205,7 @@ def test_compress_mode8_interrupted_deletes_nothing(tmp_path, slow_magick):
     before = slow.read_bytes()
 
     rc, out = interrupted_run("compress_tiff_zip.py",
-                              ["-Mode", "8", "-InputDir", work, "-DeleteSource", "-ForceSequential"],
+                              ["--mode", "8", "--input-dir", work, "--delete-source", "--force-sequential"],
                               tmp_path, env, mark, tmp_path)
 
     assert rc == 130, out

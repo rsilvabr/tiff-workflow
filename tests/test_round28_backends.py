@@ -104,10 +104,10 @@ def color_rgb(path: Path, h=40, w=56):
 # mode 2 without -OutputDir: the input root is the flat output, so each file directly in it
 # is written over (the in-place replace). The fixtures here have no subfolders.
 MODE_ARGS = {
-    "mode2": ["-Mode", 2],
-    "mode1": ["-Mode", 1],
-    "mode8": ["-Mode", 8, "-DeleteSource"],
-    "mode9": ["-Mode", 9],
+    "mode2": ["--mode", 2],
+    "mode1": ["--mode", 1],
+    "mode8": ["--mode", 8, "--delete-source"],
+    "mode9": ["--mode", 9],
 }
 
 
@@ -126,7 +126,7 @@ class TestNeutralRgbStaysRgb:
         src = neutral_rgb(cam / "0014_14 (2).tif")
         ref = tifffile.imread(str(src))
         args = MODE_ARGS[key]
-        r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *args], tmp_path)
+        r, out = run(lane, COMPRESS, ["--input-dir", cam, "--workers", 2, *args], tmp_path)
         assert r.returncode == 0, out[-3000:]
         dst = _output(root, cam, "0014_14 (2).tif", key)
         assert layout(dst) == [("3", "2", "")], (layout(dst), out[-2000:])
@@ -147,7 +147,7 @@ class TestRealNeutralScans:
         shutil.copy(FIXTURES / fixture, src)
         ref = tifffile.imread(str(src))
         before = layout(src)
-        r, out = run(lane, COMPRESS, ["-InputDir", tmp_path / "root", "-Mode", 9, "-Workers", 2],
+        r, out = run(lane, COMPRESS, ["--input-dir", tmp_path / "root", "--mode", 9, "--workers", 2],
                      tmp_path)
         assert r.returncode == 0, out[-3000:]
         got = tifffile.imread(str(src))
@@ -171,8 +171,8 @@ class TestLayoutGate:
             w.write(np.stack([g, g, g], -1), photometric="rgb")
             w.write(g, photometric="minisblack")
         orig = src.read_bytes()
-        r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 9, "-SafeMode:$false",
-                                       "-Workers", 2], tmp_path)
+        r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 9, "--no-safe-mode",
+                                       "--workers", 2], tmp_path)
         assert r.returncode == 1, out[-3000:]
         assert "sample layout changed" in out, out[-3000:]
         assert src.read_bytes() == orig
@@ -187,7 +187,7 @@ class TestLayoutGate:
         a = np.full((40, 56), 65535, dtype=np.uint16)
         tifffile.imwrite(str(src), np.dstack([c, a]), photometric="rgb", extrasamples=[1])
         ref = tifffile.imread(str(src))
-        r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 9, "-Workers", 2], tmp_path)
+        r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 9, "--workers", 2], tmp_path)
         assert r.returncode == 0, out[-3000:]
         assert layout(src) == [("4", "2", "1")], layout(src)
         assert np.array_equal(tifffile.imread(str(src)), ref)
@@ -204,7 +204,7 @@ class TestLayoutGate:
         c = (rng.integers(0, 65535, size=(40, 56, 3)) * (a[..., None] / 65535)).astype(np.uint16)
         tifffile.imwrite(str(src), np.dstack([c, a]), photometric="rgb", extrasamples=[1])
         orig = src.read_bytes()
-        r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 9, "-Workers", 2], tmp_path)
+        r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 9, "--workers", 2], tmp_path)
         assert r.returncode == 1, out[-3000:]
         assert "associated alpha that is not opaque" in out
         assert src.read_bytes() == orig
@@ -232,7 +232,7 @@ class TestIptcSurvivesTheMieContainer:
         root = tmp_path / "root"
         cam = root / f"{HOSTILE} 50%" / "NORITSU"
         src = _with_iptc(cam / "0014_14 (2).tif")
-        r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 9, "-Workers", 2], tmp_path)
+        r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 9, "--workers", 2], tmp_path)
         assert r.returncode == 0, out[-3000:]
         assert exif(src, "-s3", "-IPTC:Keywords") == "伊豆沼", out[-2000:]
         assert exif(src, "-s3", "-IPTC:Caption-Abstract") == "伊豆沼の夏"
@@ -240,7 +240,7 @@ class TestIptcSurvivesTheMieContainer:
     def test_mode2_in_place_without_percent(self, tmp_path, lane):
         cam = tmp_path / HOSTILE / "NORITSU"
         src = _with_iptc(cam / "0014_14 (2).tif")
-        r, out = run(lane, COMPRESS, ["-Mode", 2, "-InputDir", cam], tmp_path)
+        r, out = run(lane, COMPRESS, ["--mode", 2, "--input-dir", cam], tmp_path)
         assert r.returncode == 0, out[-3000:]
         assert exif(src, "-s3", "-IPTC:Keywords") == "伊豆沼", out[-2000:]
         assert exif(src, "-s3", "-EXIF:Make") == "FUJIFILM"
@@ -265,7 +265,7 @@ def test_copy_exif_keeps_utf8_iptc_of_the_jpeg(tmp_path, lane, folder):
     exif(jpg, "-q", "-overwrite_original", "-Make=FUJIFILM", "-Model=FinePix S5Pro",
          "-IPTC:CodedCharacterSet=UTF8", "-IPTC:Keywords=伊豆沼", "-IPTC:Caption-Abstract=伊豆沼の夏")
     assert exif(jpg, "-s3", "-IPTC:Keywords") == "伊豆沼"
-    r, out = run(lane, REPO / script, ["-InputDir", cam, "-Workers", 2], tmp_path)
+    r, out = run(lane, REPO / script, ["--input-dir", cam, "--workers", 2], tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert exif(tif, "-s3", "-EXIF:Model") == "FinePix S5Pro", out[-2000:]
     assert exif(tif, "-s3", "-IPTC:Keywords") == "伊豆沼", out[-2000:]
@@ -284,7 +284,7 @@ def test_copy_exif_creates_no_iptc_when_neither_file_has_one(tmp_path, lane):
                    check=True, capture_output=True)
     shutil.move(str(tmp_path / "j.jpg"), str(jpg))
     exif(jpg, "-q", "-overwrite_original", "-Make=FUJIFILM", "-Model=FinePix S5Pro")
-    r, out = run(lane, REPO / script, ["-InputDir", cam, "-Workers", 2], tmp_path)
+    r, out = run(lane, REPO / script, ["--input-dir", cam, "--workers", 2], tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert "] OK |" in out and "WARN" not in out, out[-3000:]
     assert exif(tif, "-s3", "-EXIF:Model") == "FinePix S5Pro"
@@ -302,7 +302,7 @@ def test_mode2_in_place_with_staging_replaces_through_the_gate(tmp_path, lane):
     src = color_rgb(cam / "0014_14 (2).tif")
     ref = tifffile.imread(str(src))
     stg = tmp_path / "stg [x]"
-    r, out = run(lane, COMPRESS, ["-Mode", 2, "-InputDir", cam, "-StagingDir", stg], tmp_path)
+    r, out = run(lane, COMPRESS, ["--mode", 2, "--input-dir", cam, "--staging-dir", stg], tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert "Moved 1 file(s)" in out and os.listdir(stg) == [], out[-2000:]
     assert exif(src, "-s3", "-IFD0:Compression") in ("Adobe Deflate", "Deflate")
@@ -350,7 +350,7 @@ def test_a_failed_metadata_restore_never_replaces_the_original(tmp_path, lane, k
     exif(src, "-q", "-overwrite_original", "-EXIF:Make=FUJIFILM")
     orig = src.read_bytes()
     env = _failing_restore_env(tmp_path)
-    r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
+    r, out = run(lane, COMPRESS, ["--input-dir", cam, "--workers", 2, *MODE_ARGS[key]],
                  tmp_path, env=env)
     if key == "mode9":
         # the original is kept in OLD_TIFFs, so this stays a warning (and exit 0)
@@ -460,7 +460,7 @@ def test_a_read_only_original_is_still_replaced(tmp_path, lane, key):
     ref = tifffile.imread(str(src))
     os.chmod(src, stat.S_IREAD)
     try:
-        r, out = run(lane, COMPRESS, ["-InputDir", cam, "-Workers", 2, *MODE_ARGS[key]],
+        r, out = run(lane, COMPRESS, ["--input-dir", cam, "--workers", 2, *MODE_ARGS[key]],
                      tmp_path)
         assert r.returncode == 0, out[-3000:]
         assert exif(src, "-s3", "-IFD0:Compression") in ("Adobe Deflate", "Deflate"), out[-2000:]
@@ -484,7 +484,7 @@ def test_overlay_export_name_cannot_make_mode7_overwrite(tmp_path, lane):
     orig = src.read_bytes()
     ov = tmp_path / "ov [x].json"
     ov.write_text(json.dumps({"compress_tiff_zip": {"ExportZipSubfolder": "TIFF"}}), encoding="utf-8")
-    r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 7, "-Workers", 1], tmp_path,
+    r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 7, "--workers", 1], tmp_path,
                  env=env_off(TIFFWORKFLOW_SETTINGS=str(ov)))
     assert "ExportZipSubfolder" in out
     assert r.returncode == 1, out[-3000:]
@@ -556,7 +556,7 @@ def test_stranded_backup_with_a_date_stamped_name_keeps_its_name(tmp_path, lane)
     b = color_rgb(old / "Scan_20190815_143000.tif")
     orig = b.read_bytes()
     ref = tifffile.imread(str(b))
-    r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 9, "-RestoreStranded"], tmp_path)
+    r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 9, "--restore-stranded"], tmp_path)
     restored = [ln for ln in out.splitlines() if "RESTORED (stranded original)" in ln]
     assert restored and restored[0].endswith("Scan_20190815_143000.tif"), out[-3000:]
     # restored under its own name -- and then compressed by the same mode 9 run, the
@@ -575,7 +575,7 @@ def test_a_real_collision_copy_still_restores_to_the_base_name(tmp_path, lane):
     old = root / HOSTILE / "OLD_TIFFs"
     color_rgb(old / "photo.tif")
     color_rgb(old / "photo_20190815_143000.tif")
-    r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 9], tmp_path)
+    r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 9], tmp_path)
     assert "STRANDED" in out
     assert "photo.tif" in out
 
@@ -591,7 +591,7 @@ def test_mode8_tiff_source_second_run_skips(tmp_path, lane):
     cam = root / HOSTILE
     color_rgb(cam / "0014_14 (2).tiff")
     for _ in range(3):
-        r, out = run(lane, COMPRESS, ["-InputDir", root, "-Mode", 8, "-Workers", 1], tmp_path)
+        r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 8, "--workers", 1], tmp_path)
         assert r.returncode == 0, out[-3000:]
     names = sorted(p.name for p in cam.iterdir() if p.is_file())
     assert names == ["0014_14 (2).tif", "0014_14 (2).tiff"], names
@@ -608,7 +608,7 @@ def test_remove_keeps_a_photo_named_like_a_thumbnail(tmp_path, lane):
     big = color_rgb(d / "hitchhiker_thumb.tif", h=800, w=1200)
     small = color_rgb(d / "photo_thumb.tif", h=100, w=150)
     orig = big.read_bytes()
-    r, out = run(lane, THUMBS, ["-InputDir", d, "-Remove"], tmp_path)
+    r, out = run(lane, THUMBS, ["--input-dir", d, "--remove"], tmp_path)
     assert big.read_bytes() == orig, out[-2000:]
     assert not small.exists(), out[-2000:]
     assert "not a thumbnail this script wrote" in out

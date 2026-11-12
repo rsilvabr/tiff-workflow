@@ -215,7 +215,7 @@ def test_T6_the_overlay_is_applied_before_anything_reads_a_parameter(
     ov = _write(root / "settings.json", {section: {key: value}})
     monkeypatch.setenv(ENV, str(ov))
     monkeypatch.chdir(root)
-    argv = (["-Mode", "1"] if section == "compress_tiff_zip" else []) + ["-InputDir", str(src), "-DryRun"]
+    argv = (["--mode", "1"] if section == "compress_tiff_zip" else []) + ["--input-dir", str(src), "--dry-run"]
     module.main(argv)
     assert applied == [section]
     assert not early, f"{script}: read before the overlay was applied: {early}"
@@ -244,7 +244,7 @@ class TestEndToEnd:
     @staticmethod
     def _mode1(lane, src, root, env, *extra):
         return _run(lane, "compress_tiff_zip.py",
-                    ["-Mode", "1", "-InputDir", src, "-Workers", "1", *extra], root, env)
+                    ["--mode", "1", "--input-dir", src, "--workers", "1", *extra], root, env)
 
     @pytest.mark.parametrize("lane", LANES)
     def test_T7_a_value_from_the_file_is_what_the_run_does(self, tmp_path, lane):
@@ -273,7 +273,7 @@ class TestEndToEnd:
     def test_T7_a_param_on_the_command_line_beats_the_file(self, tmp_path, lane):
         root, src = self._layout(tmp_path)
         ov = _write(root / "settings.json", {"compress_tiff_zip": {"ZipSubfolderName": "FROM_FILE"}})
-        rc, out = self._mode1(lane, src, root, _env(ov), "-ZipSubfolderName", "FROM_CMDLINE")
+        rc, out = self._mode1(lane, src, root, _env(ov), "--zip-subfolder-name", "FROM_CMDLINE")
         assert rc == 0, out[-3000:]
         assert (src / "FROM_CMDLINE" / "DSCF0001 (2).tif").is_file()
         assert not (src / "FROM_FILE").exists()
@@ -343,9 +343,9 @@ class TestEndToEnd:
         turns an error into a pass nor a pass into an error."""
         root, _src = self._layout(tmp_path)
         ov = _write(root / "settings.json", None, raw=b"{ not json")
-        rc_bad, out_bad = _run(lane, "compress_tiff_zip.py", ["-Mode", "1", "-InputDir", root / "missing"],
+        rc_bad, out_bad = _run(lane, "compress_tiff_zip.py", ["--mode", "1", "--input-dir", root / "missing"],
                                root, _env(ov))
-        rc_none, _ = _run(lane, "compress_tiff_zip.py", ["-Mode", "1", "-InputDir", root / "missing"],
+        rc_none, _ = _run(lane, "compress_tiff_zip.py", ["--mode", "1", "--input-dir", root / "missing"],
                           root, _env(tmp_path / "absent.json"))
         assert rc_bad == rc_none
         assert "WARNING: settings overlay" in out_bad
@@ -358,14 +358,14 @@ class TestEndToEnd:
     def test_T7_every_script_applies_its_own_section(self, tmp_path, lane, script, section, key, value):
         root, src = self._layout(tmp_path)
         ov = _write(root / "settings.json", {section: {key: value, "SafeMode": False}})
-        rc, out = _run(lane, script, ["-InputDir", src, "-DryRun"], root, _env(ov))
+        rc, out = _run(lane, script, ["--input-dir", src, "--dry-run"], root, _env(ov))
         assert rc == 0, out[-3000:]
         assert f"Script settings overlay: {ov}: 1 value(s): {key}" in out
         assert "SafeMode is not a setting the overlay can change" in out
         # the other section's script does not see this one's entries
         other = {"generate_thumbnails": "compress_tiff_zip"}.get(section, "generate_thumbnails")
         ov2 = _write(root / "other.json", {other: {"Size": 9}})
-        rc, out = _run(lane, script, ["-InputDir", src, "-DryRun"], root, _env(ov2))
+        rc, out = _run(lane, script, ["--input-dir", src, "--dry-run"], root, _env(ov2))
         assert rc == 0 and "settings overlay" not in out.lower()
 
 
@@ -407,7 +407,7 @@ def test_T9_backend_discovery_order(tmp_path, lane):
     explicit = _write(tmp_path / "explicit.json", {"generate_thumbnails": {"Size": 111}})
 
     def run(env):
-        return _run(lane, "generate_thumbnails.py", ["-InputDir", empty, "-DryRun"], tmp_path, env,
+        return _run(lane, "generate_thumbnails.py", ["--input-dir", empty, "--dry-run"], tmp_path, env,
                     script_dir=scripts)
 
     base = dict(USERPROFILE=home, HOME=home)

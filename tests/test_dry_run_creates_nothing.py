@@ -32,17 +32,17 @@ def _copy_exif(lane):
 # (id, script for a lane, extra args as a function of the missing folder)
 ROWS = [
     ("compress-mode1-missing-staging", lambda sh: "compress_tiff_zip.py",
-     lambda miss: ["-Mode", "1", "-DryRun", "-StagingDir", miss]),
+     lambda miss: ["--mode", "1", "--dry-run", "--staging-dir", miss]),
     ("compress-mode2-missing-output", lambda sh: "compress_tiff_zip.py",
-     lambda miss: ["-Mode", "2", "-DryRun", "-OutputDir", miss]),
+     lambda miss: ["--mode", "2", "--dry-run", "--output-dir", miss]),
     ("compress-mode8-no-staging", lambda sh: "compress_tiff_zip.py",
-     lambda miss: ["-Mode", "8", "-DryRun"]),
+     lambda miss: ["--mode", "8", "--dry-run"]),
     ("copy-exif-compresszip-missing-staging", _copy_exif,
-     lambda miss: ["-DryRun", "-CompressZip", "-StagingDir", miss]),
+     lambda miss: ["--dry-run", "--compress-zip", "--staging-dir", miss]),
     ("copy-exif-compresszip-missing-output", _copy_exif,
-     lambda miss: ["-DryRun", "-CompressZip", "-OutputDir", miss]),
+     lambda miss: ["--dry-run", "--compress-zip", "--output-dir", miss]),
     ("thumbnails-missing-output", lambda sh: "generate_thumbnails.py",
-     lambda miss: ["-DryRun", "-OutputDir", miss]),
+     lambda miss: ["--dry-run", "--output-dir", miss]),
 ]
 
 
@@ -74,7 +74,7 @@ def test_dry_run_creates_nothing(tmp_path, lane, row):
     _build_fixture(src)
     missing = tmp_path / "does not exist [yet]"
     before = _snapshot(root)
-    cmd = backend_cmd(lane, REPO / script_for(lane), ["-InputDir", str(src), *[str(a) for a in args_for(str(missing))]])
+    cmd = backend_cmd(lane, REPO / script_for(lane), ["--input-dir", str(src), *[str(a) for a in args_for(str(missing))]])
     r = subprocess.run(cmd, cwd=str(tmp_path), capture_output=True, timeout=600)
     out = (r.stdout + r.stderr).decode("utf-8", "replace")
     assert r.returncode == 0, out[-3000:]

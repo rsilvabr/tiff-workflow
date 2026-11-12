@@ -134,7 +134,7 @@ def _fixture(tmp_path, names=("DSCF0001 (2)",)):
 class TestCompressUnderNonAnsiTemp:
     def test_mode1_writes_a_deflate_copy(self, tmp_path, lane):
         src, _ = _fixture(tmp_path)
-        rc, out = run_ps(lane, COMPRESS, ["-Mode", 1, "-InputDir", src], tmp_path,
+        rc, out = run_ps(lane, COMPRESS, ["--mode", 1, "--input-dir", src], tmp_path,
                          _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         assert "exiftool check" not in out, out[-2000:]
@@ -142,7 +142,7 @@ class TestCompressUnderNonAnsiTemp:
 
     def test_mode8_delete_source_lands_in_place(self, tmp_path, lane):
         src, arrays = _fixture(tmp_path)
-        rc, out = run_ps(lane, COMPRESS, ["-Mode", 8, "-InputDir", src, "-DeleteSource"],
+        rc, out = run_ps(lane, COMPRESS, ["--mode", 8, "--input-dir", src, "--delete-source"],
                          tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         f = src / "DSCF0001 (2).tif"
@@ -153,7 +153,7 @@ class TestCompressUnderNonAnsiTemp:
         import hashlib
         src, _ = _fixture(tmp_path)
         before = hashlib.md5((src / "DSCF0001 (2).tif").read_bytes()).hexdigest()
-        rc, out = run_ps(lane, COMPRESS, ["-Mode", 0, "-InputDir", src], tmp_path,
+        rc, out = run_ps(lane, COMPRESS, ["--mode", 0, "--input-dir", src], tmp_path,
                          _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         kept = src / "OLD_TIFFs" / "DSCF0001 (2).tif"
@@ -165,8 +165,8 @@ class TestCompressUnderNonAnsiTemp:
             pytest.skip("three workers at once: the parallel lane")
         names = ("DSCF0001 (2)", "DSCF0002 (3)", "DSCF0003 (4)")
         src, _ = _fixture(tmp_path, names)
-        rc, out = run_ps(lane, COMPRESS, ["-Mode", 1, "-InputDir", src, "-ForceParallel",
-                                           "-Workers", 3], tmp_path, _hostile_env(tmp_path))
+        rc, out = run_ps(lane, COMPRESS, ["--mode", 1, "--input-dir", src, "--force-parallel",
+                                           "--workers", 3], tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         for n in names:
             assert compression(src / "ZIP" / f"{n}.tif") == "Adobe Deflate", out[-2000:]
@@ -183,7 +183,7 @@ class TestCopyExifUnderNonAnsiTemp:
     def test_compress_zip_copies_exif_and_compresses(self, tmp_path, lane):
         src = tmp_path / HOSTILE / "S5pro 01"
         self._pair(src, "DSCF0001 (2)", 1)
-        rc, out = run_ps(lane, COPY_EXIF, ["-InputDir", src, "-CompressZip"],
+        rc, out = run_ps(lane, COPY_EXIF, ["--input-dir", src, "--compress-zip"],
                          tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         f = src / "DSCF0001 (2).tif"
@@ -198,7 +198,7 @@ class TestCopyExifUnderNonAnsiTemp:
         for i, n in enumerate(names):
             self._pair(src, n, i + 1)
         rc, out = run_ps(lane, COPY_EXIF,
-                         ["-InputDir", src, "-CompressZip", "-Workers", 3],
+                         ["--input-dir", src, "--compress-zip", "--workers", 3],
                          tmp_path, _hostile_env(tmp_path))
         assert rc == 0, out[-3000:]
         for n in names:

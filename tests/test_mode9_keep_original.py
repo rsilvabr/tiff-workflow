@@ -46,7 +46,7 @@ def pixels(path: Path):
 
 
 def cmd(lane, root, *args):
-    return backend_cmd(lane, SCRIPT, ["-InputDir", str(root),
+    return backend_cmd(lane, SCRIPT, ["--input-dir", str(root),
             *[str(a) for a in args]])
 
 
@@ -69,9 +69,9 @@ def test_mode9_lands_copies_and_keeps_originals(tmp_path, lane, staging):
     srcs = {n: tiff(cam / n, seed=i) for i, n in enumerate(["a.tif", "b (2).tif"])}
     srcs["c.tiff"] = tiff(cam / "c.tiff", seed=9)          # a .tiff source -> c.tif
     orig = {n: p.read_bytes() for n, p in srcs.items()}
-    args = ["-Mode", 9]
+    args = ["--mode", 9]
     if staging:
-        args += ["-StagingDir", tmp_path / "staging"]
+        args += ["--staging-dir", tmp_path / "staging"]
     r, out = run(lane, tmp_path / "root", *args, cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     old = cam / "OLD_TIFFs"
@@ -102,7 +102,7 @@ def test_a_killed_mode9_run_never_leaves_a_place_empty(tmp_path, lane):
     for i, n in enumerate(names):
         tiff(cam / n, h=1500, w=2000, seed=i, ext_bits=16)     # ~18 MB of noise each
     orig = {n: (cam / n).read_bytes() for n in names}
-    args = ["-Mode", 9, "-Workers", 2]      # two at once in the parallel lane, one in the other
+    args = ["--mode", 9, "--workers", 2]      # two at once in the parallel lane, one in the other
     p = subprocess.Popen(cmd(lane, root, *args), cwd=str(tmp_path),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     empty_streak = {n: 0 for n in names}
@@ -150,7 +150,7 @@ def test_a_killed_mode9_run_never_leaves_a_place_empty(tmp_path, lane):
         else:
             assert (cam / n).read_bytes() == orig[n]
     # the next run finishes the job and finds nothing stranded
-    r, out = run(lane, root, "-Mode", 9, cwd=tmp_path)
+    r, out = run(lane, root, "--mode", 9, cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert "STRANDED" not in out
     for n in names:
@@ -167,7 +167,7 @@ def test_an_original_edited_during_the_run_is_never_archived(tmp_path, lane):
     cam = root / HOSTILE / "01_D810"
     a = tiff(cam / "a.tif", h=200, w=200, seed=1)
     tiff(cam / "b.tif", h=2500, w=3000, seed=2, ext_bits=16)  # keeps the group busy
-    p = subprocess.Popen(cmd(lane, root, "-Mode", 9), cwd=str(tmp_path),
+    p = subprocess.Popen(cmd(lane, root, "--mode", 9), cwd=str(tmp_path),
                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     lines = []
     edited = False

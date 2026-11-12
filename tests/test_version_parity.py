@@ -64,14 +64,14 @@ def _fixture(tmp_path):
 @pytest.mark.skipif(not TOOLS, reason="ImageMagick and exiftool required")
 @pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize("backend,extra", [
-    ("compress_tiff_zip.py", ["-Mode", "1", "-DryRun"]),
-    ("copy_exif_to_tiff.py", ["-DryRun"]),
-    ("generate_thumbnails.py", ["-DryRun"]),
+    ("compress_tiff_zip.py", ["--mode", "1", "--dry-run"]),
+    ("copy_exif_to_tiff.py", ["--dry-run"]),
+    ("generate_thumbnails.py", ["--dry-run"]),
 ])
 def test_every_backend_logs_the_release(tmp_path, lane, backend, extra):
     src = _fixture(tmp_path)
     script = backend
-    r = subprocess.run(backend_cmd(lane, script, ["-InputDir", str(src), *extra]),
+    r = subprocess.run(backend_cmd(lane, script, ["--input-dir", str(src), *extra]),
                        cwd=str(tmp_path), capture_output=True, timeout=600)
     out = (r.stdout + r.stderr).decode("utf-8", "replace")
     assert r.returncode == 0, out[-3000:]

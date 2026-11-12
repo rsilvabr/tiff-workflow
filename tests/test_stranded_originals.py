@@ -39,7 +39,7 @@ def compression(path: Path) -> int:
 
 
 def run(lane, root: Path, *args, cwd: Path):
-    cmd = backend_cmd(lane, REPO / "compress_tiff_zip.py", ["-InputDir", str(root), *[str(a) for a in args]])
+    cmd = backend_cmd(lane, REPO / "compress_tiff_zip.py", ["--input-dir", str(root), *[str(a) for a in args]])
     r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True,
                        encoding="utf-8", errors="replace", timeout=600)
     return r, r.stdout + r.stderr
@@ -82,7 +82,7 @@ def test_stranded_originals_are_reported_in_every_mode(tree, tmp_path, lane):
     root, cam, old = tree
     before = {p: p.read_bytes() for p in old.rglob("*.tif*")}
     for mode in (8, 9):
-        r, out = run(lane, root, "-Mode", mode, "-DryRun", cwd=tmp_path)
+        r, out = run(lane, root, "--mode", mode, "--dry-run", cwd=tmp_path)
         assert r.returncode == 0, out[-3000:]
         names = sorted(Path(ln.split("| ", 1)[1].strip()).name for ln in stranded_lines(out))
         assert names == ["a.tif", "c.tif", "c_20260803_081300.tif"], out[-3000:]
@@ -96,8 +96,8 @@ def test_stranded_originals_are_reported_in_every_mode(tree, tmp_path, lane):
 def test_restore_puts_them_back_and_this_run_compresses_them(tree, tmp_path, lane):
     root, cam, old = tree
     original_a = (old / "a.tif").read_bytes()
-    r, out = run(lane, root, "-Mode", 8, "-RestoreStranded",
-                 "-StagingDir", tmp_path / "staging", cwd=tmp_path)
+    r, out = run(lane, root, "--mode", 8, "--restore-stranded",
+                 "--staging-dir", tmp_path / "staging", cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     # a.tif: back in place, compressed by this very run (mode 8: verified, in place)
     assert (cam / "a.tif").exists() and not (old / "a.tif").exists()
@@ -119,7 +119,7 @@ def test_restore_puts_them_back_and_this_run_compresses_them(tree, tmp_path, lan
 @pytest.mark.parametrize("lane", LANES)
 def test_restore_in_a_dry_run_moves_nothing(tree, tmp_path, lane):
     root, cam, old = tree
-    r, out = run(lane, root, "-Mode", 9, "-RestoreStranded", "-DryRun", cwd=tmp_path)
+    r, out = run(lane, root, "--mode", 9, "--restore-stranded", "--dry-run", cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert "DRY: would restore to" in out
     assert (old / "a.tif").exists() and not (cam / "a.tif").exists()
@@ -148,12 +148,12 @@ def test_long_paths_are_seen_and_restored(tmp_path, lane):
     put(deep / "healthy.tif", 1)                       # its original place is NOT empty
     put(deep / "OLD_TIFFs" / "lost.tif", 2)            # nothing in its place
     assert len(str(deep / "OLD_TIFFs" / "healthy.tif")) > 260
-    r, out = run(lane, root, "-Mode", 8, "-DryRun", cwd=tmp_path)
+    r, out = run(lane, root, "--mode", 8, "--dry-run", cwd=tmp_path)
     names = sorted(Path(ln.split("| ", 1)[1].strip()).name for ln in stranded_lines(out))
     assert names == ["lost.tif"], out[-3000:]
-    r, out = run(lane, root, "-Mode", 8, "-DryRun", "-RestoreStranded", cwd=tmp_path)
+    r, out = run(lane, root, "--mode", 8, "--dry-run", "--restore-stranded", cwd=tmp_path)
     assert "DRY: would restore" in out
-    r, out = run(lane, root, "-Mode", 9, "-RestoreStranded", cwd=tmp_path)
+    r, out = run(lane, root, "--mode", 9, "--restore-stranded", cwd=tmp_path)
     assert os.path.exists(lp(deep / "lost.tif")), out[-3000:]
     assert not os.path.exists(lp(deep / "OLD_TIFFs" / "lost.tif"))
     assert "1 restored" in out
@@ -163,12 +163,12 @@ def test_long_paths_are_seen_and_restored(tmp_path, lane):
 def test_excluded_folders_and_mode0_depth(tree, tmp_path, lane):
     root, cam, old = tree
     # an excluded folder's backups are not looked at
-    r, out = run(lane, root, "-Mode", 9, "-DryRun", "-ExcludeFolders", "01_D810",
+    r, out = run(lane, root, "--mode", 9, "--dry-run", "--exclude-folders", "01_D810",
                  cwd=tmp_path)
     assert r.returncode == 0, out[-3000:]
     assert stranded_lines(out) == []
     # mode 0 is not recursive: only <root>\OLD_TIFFs is its business
-    r, out = run(lane, root, "-Mode", 0, "-DryRun", cwd=tmp_path)
+    r, out = run(lane, root, "--mode", 0, "--dry-run", cwd=tmp_path)
     assert stranded_lines(out) == []
-    r, out = run(lane, cam, "-Mode", 0, "-DryRun", cwd=tmp_path)
+    r, out = run(lane, cam, "--mode", 0, "--dry-run", cwd=tmp_path)
     assert len(stranded_lines(out)) == 3, out[-3000:]

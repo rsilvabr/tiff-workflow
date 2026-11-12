@@ -173,21 +173,45 @@ def test_the_last_of_a_repeated_parameter_wins_in_both():
 
 
 @pytest.mark.parametrize("old", [
-    ["9"],                          # a value without its -Parameter
+    ["9"], ["stray"],               # a value without its -Parameter
     ["-Mode"],                      # a parameter without its value
-    ["-Nonexistent", "1"],
-    ["-Inp", "x"],                  # ambiguous: -InputDir, -InputDirFile
+    ["-Nonexistent", "1"], ["-NoSuchThing"],
+    ["-Inp", "x"], ["-D"],          # ambiguous: -InputDir, -InputDirFile / -DryRun, -DeleteSource...
     ["-DryRun:maybe"],
     ["-SafeMode", "maybe"],
     ["-Mode", "x"],
-    ["-Workers", "65"],             # out of its range
+    ["-Workers", "0"], ["-Workers", "65"],          # out of its range
+    ["-Workers", "many"], ["-WorkerMemoryFraction", "nan"],
     ["-DuplicateAction", "Rename"],
-    ["-InputDir", "-DryRun"],       # a parameter where its value should be
+    ["-InputDir", "-DryRun"], ["-OutputDir", "-DryRun"],    # a parameter where its value should be
     ["--mode", "9"],                # already the new form: not a line of v3.0.0
 ])
 def test_what_v3_0_0_refused_is_refused(old):
     with pytest.raises(tw.UsageError):
         legacy_args.translate(old, _params("compress"))
+
+
+# --- the old reader itself: what the translation stands on -----------------------------------
+
+def test_the_old_reader_binds_the_way_powershell_did():
+    """What a preset or .bat of v2.x / v3.0.0 meant (until v3.0.0 this was tw.parse_args)."""
+    opt, bound = _old(["-mode", "9", "-InputDir", r"E:\a b", "-SafeMode:$false", "-DryRun",
+                       "-Overwrite:$false", "-workers", "3", "-SkipLzwAsCompressed:$true",
+                       "-SrgbProfile", ""], _params("compress"))
+    assert opt["Mode"] == 9 and opt["InputDir"] == r"E:\a b" and opt["Workers"] == 3
+    assert opt["SafeMode"] is False and opt["DryRun"] is True and opt["Overwrite"] is False
+    assert opt["SkipLzwAsCompressed"] is True and opt["SrgbProfile"] == ""
+    assert bound == {"Mode", "InputDir", "SafeMode", "DryRun", "Overwrite", "Workers",
+                     "SkipLzwAsCompressed", "SrgbProfile"}
+    assert opt["ZipSubfolderName"] == "ZIP" and opt["DeleteSource"] is False
+
+
+def test_the_old_reader_takes_prefixes_and_values():
+    opt, _ = _old(["-DeleteS", "-Mo", "8", "-Mode:8", "-SafeMode", "$true", "-DuplicateAction",
+                   "skip", "-OutputDir", "-weird name"], _params("compress"))
+    assert opt["DeleteSource"] is True and opt["Mode"] == 8
+    assert opt["DuplicateAction"] == "Skip", "a choice is matched without case"
+    assert opt["OutputDir"] == "-weird name"
 
 
 # --- the command-line tool -----------------------------------------------------------------

@@ -105,7 +105,7 @@ def first_pixel(path):
 
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
-@pytest.mark.parametrize("extra", [["-Overwrite"], ["-DuplicateAction", "Overwrite", "-Overwrite"]],
+@pytest.mark.parametrize("extra", [["--overwrite"], ["--duplicate-action", "Overwrite", "--overwrite"]],
                          ids=["overwrite", "duplicates-overwrite"])
 def test_mode2_never_replaces_a_photo_with_another_one(tmp_path, lane, extra):
     """Mode 2 without -OutputDir flattens into the input folder itself. With -Overwrite the
@@ -124,7 +124,7 @@ def test_mode2_never_replaces_a_photo_with_another_one(tmp_path, lane, extra):
     blue_before = (sub / "a.tif").read_bytes()
     assert first_pixel_plain(root / "a.tif", tmp_path) == RED
 
-    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", "2", "-InputDir", root] + extra, tmp_path)
+    result = run_ps(lane, "compress_tiff_zip.py", ["--mode", "2", "--input-dir", root] + extra, tmp_path)
 
     out = result.stdout
     assert result.returncode == 1, out
@@ -165,7 +165,7 @@ def test_copy_exif_zip_keeps_the_page_markers(tmp_path, hostile, lane):
     assert before == ["[IFD0] SubfileType: 0", "[IFD1] SubfileType: 1"]
     tif = land(src)
     land(jpg)
-    result = run_ps(lane, "copy_exif_to_tiff.py", ["-InputDir", str(tif.parent), "-CompressZip"], tmp_path)
+    result = run_ps(lane, "copy_exif_to_tiff.py", ["--input-dir", str(tif.parent), "--compress-zip"], tmp_path)
     assert result.returncode == 0, result.stdout
     assert "OK+ZIP | DSCF0001 (2).tif" in result.stdout, result.stdout
     probe = tmp_path / "probe.tif"
@@ -188,7 +188,7 @@ def test_mode5_never_replaces_a_photo_living_in_zip(tmp_path, lane):
     root = tmp_path / HOSTILE
     plain.rename(root)
     blue_before = (root / "sub [1]" / "x.tif").read_bytes()
-    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", "5", "-InputDir", root, "-Overwrite"], tmp_path)
+    result = run_ps(lane, "compress_tiff_zip.py", ["--mode", "5", "--input-dir", root, "--overwrite"], tmp_path)
     out = result.stdout
     assert result.returncode == 1, out
     assert ("ERROR (mode 5 would replace another source file of this run - refused) | x.tif | "
@@ -214,8 +214,8 @@ sys.exit(r.returncode)
 @requires_tools
 @pytest.mark.skipif(os.name != "nt", reason="the old exiftool stand-in is a .cmd")
 @pytest.mark.parametrize("script, args", [
-    ("compress_tiff_zip.py", ["-Mode", "9"]),
-    ("copy_exif_to_tiff.py", ["-CompressZip"]),
+    ("compress_tiff_zip.py", ["--mode", "9"]),
+    ("copy_exif_to_tiff.py", ["--compress-zip"]),
 ], ids=["compress", "copy_exif-zip"])
 def test_an_exiftool_without_the_status_of_each_command_is_refused(tmp_path, hostile, script, args):
     """Review of v3.1 phases 3+4, V1: the writes after a conversion read each command's exit
@@ -233,7 +233,7 @@ def test_an_exiftool_without_the_status_of_each_command_is_refused(tmp_path, hos
         encoding="ascii", newline="")
     env = dict(os.environ, TW_REAL_EXIFTOOL=shutil.which("exiftool"), TIFFWORKFLOW_SETTINGS="")
     env["PATH"] = str(shim) + os.pathsep + env["PATH"]
-    r = subprocess.run([sys.executable, str(REPO / script), "-InputDir", str(photo.parent)] + args,
+    r = subprocess.run([sys.executable, str(REPO / script), "--input-dir", str(photo.parent)] + args,
                        cwd=str(tmp_path), env=env, capture_output=True, timeout=300)
     out = r.stdout.decode("utf-8", "replace")
     assert r.returncode == 1, out
@@ -253,8 +253,8 @@ def test_a_new_thumbnail_is_marked_even_when_the_old_preview_was_not(tmp_path, h
     src = make_multipage_tiff(plain / "scan.tif", [0, None], sizes=["64x48", "16x12"])
     assert numeric_subfiletypes(src) == ["[IFD0] SubfileType: 0"], "the preview has no marker"
     photo = land(src, "scan 50%.tif")
-    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", "1", "-InputDir", str(photo.parent),
-                                                   "-GenerateThumbnail", "-ThumbSize", "16"], tmp_path)
+    result = run_ps(lane, "compress_tiff_zip.py", ["--mode", "1", "--input-dir", str(photo.parent),
+                                                   "--generate-thumbnail", "--thumb-size", "16"], tmp_path)
     assert result.returncode == 0, result.stdout
     assert "OK (" in result.stdout and "[thumb replaced]" in result.stdout, result.stdout
     probe = tmp_path / "probe.tif"

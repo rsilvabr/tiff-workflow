@@ -40,8 +40,8 @@ def test_compress_streams_japanese_folder_names(tmp_path, lane):
     stage = tmp_path.parent / (tmp_path.name + "_stage")  # outside the scanned tree
     stage.mkdir()
     # the owner's preset: mode 8 with staging, which prints a "-- Group: <folder>" line
-    r = subprocess.run(backend_cmd(lane, REPO / "compress_tiff_zip.py", ["-Mode", "8", "-InputDir",
-                        str(tmp_path), "-StagingDir", str(stage), "-Workers", "1"]),
+    r = subprocess.run(backend_cmd(lane, REPO / "compress_tiff_zip.py", ["--mode", "8", "--input-dir",
+                        str(tmp_path), "--staging-dir", str(stage), "--workers", "1"]),
                        cwd=str(tmp_path), capture_output=True, stdin=subprocess.DEVNULL,
                        timeout=300)
     out = r.stdout.decode("utf-8", "replace")
@@ -56,8 +56,8 @@ def test_the_first_line_already_carries_utf8(tmp_path, lane):
     backend's plain output is UTF-8 -- run it from a Japanese folder."""
     cwd = tmp_path / NAME
     cwd.mkdir()
-    r = subprocess.run(backend_cmd(lane, REPO / "compress_tiff_zip.py", ["-Mode", "1", "-InputDir",
-                        str(cwd), "-Workers", "1", "-DryRun"]),
+    r = subprocess.run(backend_cmd(lane, REPO / "compress_tiff_zip.py", ["--mode", "1", "--input-dir",
+                        str(cwd), "--workers", "1", "--dry-run"]),
                        cwd=str(cwd), capture_output=True, stdin=subprocess.DEVNULL, timeout=300)
     lines = r.stdout.decode("utf-8", "replace").splitlines()
     first_log = next((ln for ln in lines if "| Log:" in ln), "")

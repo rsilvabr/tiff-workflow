@@ -133,7 +133,7 @@ def read_compression(path):
 @pytest.mark.parametrize("lane", LANES)
 @pytest.mark.parametrize(
     "script,extra",
-    [("compress_tiff_zip.py", ["-Mode", "0"]), ("generate_thumbnails.py", [])],
+    [("compress_tiff_zip.py", ["--mode", "0"]), ("generate_thumbnails.py", [])],
 )
 class TestExitCodeContract:
     """
@@ -146,7 +146,7 @@ class TestExitCodeContract:
         good.mkdir()
         missing = tmp_path / "nope"
 
-        result = run_ps(lane, script, extra + ["-InputDir", f"{good};{missing}"], tmp_path)
+        result = run_ps(lane, script, extra + ["--input-dir", f"{good};{missing}"], tmp_path)
         assert result.returncode == 1, (
             f"bad path in a ';' list must exit 1\n{result.stdout}\n{result.stderr}"
         )
@@ -155,7 +155,7 @@ class TestExitCodeContract:
         good = tmp_path / "good"
         good.mkdir()
 
-        result = run_ps(lane, script, extra + ["-InputDir", str(good)], tmp_path)
+        result = run_ps(lane, script, extra + ["--input-dir", str(good)], tmp_path)
         assert result.returncode == 0, (
             f"a valid folder with no TIFFs is not an error\n{result.stdout}\n{result.stderr}"
         )
@@ -172,7 +172,7 @@ def test_all_files_failing_precheck_exits_1(tmp_path, lane):
     work.mkdir()
     (work / "broken.tif").write_text("not a tiff at all")
 
-    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", "0", "-InputDir", str(work)], tmp_path)
+    result = run_ps(lane, "compress_tiff_zip.py", ["--mode", "0", "--input-dir", str(work)], tmp_path)
     assert "No tasks to process" in result.stdout, result.stdout  # the early-exit site
     assert result.returncode == 1, f"errors were logged, exit must be 1\n{result.stdout}"
 
@@ -191,7 +191,7 @@ class TestCopyExifExitCodeContract:
     """
 
     def test_missing_dir_exits_1(self, tmp_path, script, lane):
-        result = run_ps(lane, script, ["-InputDir", str(tmp_path / "nope")], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(tmp_path / "nope")], tmp_path)
         assert result.returncode == 1, (
             f"a path that does not exist is an error, not an empty folder\n{result.stdout}"
         )
@@ -201,14 +201,14 @@ class TestCopyExifExitCodeContract:
         good = tmp_path / "good"
         good.mkdir()
         result = run_ps(
-            lane, script, ["-InputDir", f"{good};{tmp_path / 'nope'}"], tmp_path
+            lane, script, ["--input-dir", f"{good};{tmp_path / 'nope'}"], tmp_path
         )
         assert result.returncode == 1, result.stdout
 
     def test_valid_empty_dir_exits_0(self, tmp_path, script, lane):
         good = tmp_path / "good"
         good.mkdir()
-        result = run_ps(lane, script, ["-InputDir", str(good)], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(good)], tmp_path)
         assert result.returncode == 0, (
             f"a valid folder with no TIFFs is not an error\n{result.stdout}"
         )
@@ -229,8 +229,8 @@ class TestInPlaceExifPreservation:
     # (label, lane-independent args): mode 2 without -OutputDir has the input root as its flat
     # output, so it writes over each file that is directly in that folder.
     WORKERS = [
-        ("mode2-sequential", ["-Mode", "2", "-InputDir", "work", "-ForceSequential"]),
-        ("mode2-parallel", ["-Mode", "2", "-InputDir", "work", "-ForceParallel"]),
+        ("mode2-sequential", ["--mode", "2", "--input-dir", "work", "--force-sequential"]),
+        ("mode2-parallel", ["--mode", "2", "--input-dir", "work", "--force-parallel"]),
     ]
 
     @pytest.mark.parametrize("lane", LANES)
@@ -249,7 +249,7 @@ class TestInPlaceExifPreservation:
         )
 
     @pytest.mark.parametrize("lane", LANES)
-    @pytest.mark.parametrize("parallel", ["-ForceSequential", "-ForceParallel"])
+    @pytest.mark.parametrize("parallel", ["--force-sequential", "--force-parallel"])
     def test_no_thumb_fallback_keeps_exif(self, tmp_path, lane, parallel):
         """
         CLASS 3 too: a failed thumbnail made the parallel worker return early, skipping the
@@ -262,8 +262,8 @@ class TestInPlaceExifPreservation:
 
         result = run_ps(
             lane, "compress_tiff_zip.py",
-            ["-Mode", "2", "-InputDir", "work", parallel, "-GenerateThumbnail",
-             "-ThumbFormat", "notaformat"], tmp_path,
+            ["--mode", "2", "--input-dir", "work", parallel, "--generate-thumbnail",
+             "--thumb-format", "notaformat"], tmp_path,
         )
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
@@ -356,7 +356,7 @@ class TestMultiPageCompressE2E:
         scan = make_multipage_tiff(tmp_path / "scan_ir.tif", [None, 1, 4])
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+                        ["--mode", "0", "--input-dir", str(tmp_path)], tmp_path)
 
         assert "MULTI" in result.stdout, result.stdout
         assert scan.exists(), "skipped multi-page TIFF vanished from its folder"
@@ -370,7 +370,7 @@ class TestMultiPageCompressE2E:
         make_multipage_tiff(tmp_path / "c1_style.tif", [None, 1])
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+                        ["--mode", "0", "--input-dir", str(tmp_path)], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "OK" in result.stdout
@@ -389,7 +389,7 @@ class TestMultiPageCompressE2E:
         make_multipage_tiff(tmp_path / "rewritten_c1.tif", [2, 2], sizes=["64x48", "16x12"])
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+                        ["--mode", "0", "--input-dir", str(tmp_path)], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "OK" in result.stdout, result.stdout
@@ -402,7 +402,7 @@ class TestMultiPageCompressE2E:
         make_multipage_tiff(tmp_path / "two_photos.tif", [None, None], sizes=["64x48", "64x48"])
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "0", "-InputDir", str(tmp_path)], tmp_path)
+                        ["--mode", "0", "--input-dir", str(tmp_path)], tmp_path)
 
         assert "MULTI" in result.stdout, result.stdout
         assert not (tmp_path / "OLD_TIFFs").exists(), \
@@ -422,8 +422,8 @@ class TestMode8DeleteE2E:
         shutil.copy2(src, reference)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
-                         "-StagingDir", str(tmp_path / "staging")], tmp_path)
+                        ["--mode", "8", "--input-dir", str(work), "--delete-source",
+                         "--staging-dir", str(tmp_path / "staging")], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert not src.exists(), ".tiff source was not deleted"
@@ -454,8 +454,8 @@ class TestExcludeFoldersE2E:
         photoset = self._tree(tmp_path)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "9", "-InputDir", str(photoset),
-                         "-ExcludeFolders", "_EXPORT"], tmp_path)
+                        ["--mode", "9", "--input-dir", str(photoset),
+                         "--exclude-folders", "_EXPORT"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "Excluded" in result.stdout
@@ -473,8 +473,8 @@ class TestExcludeFoldersE2E:
         make_tiff(lookalike / "keep.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "9", "-InputDir", str(photoset),
-                         "-ExcludeFolders", "_EXPORT"], tmp_path)
+                        ["--mode", "9", "--input-dir", str(photoset),
+                         "--exclude-folders", "_EXPORT"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert read_compression(lookalike / "keep.tif").lower() in ("zip", "adobe deflate"), (
@@ -483,8 +483,8 @@ class TestExcludeFoldersE2E:
 
     def test_path_entry_rejected_with_exit_1(self, tmp_path, lane):
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "9", "-InputDir", str(tmp_path),
-                         "-ExcludeFolders", r"foo\bar"], tmp_path)
+                        ["--mode", "9", "--input-dir", str(tmp_path),
+                         "--exclude-folders", r"foo\bar"], tmp_path)
         assert result.returncode == 1
         assert "not paths" in result.stdout
 
@@ -509,7 +509,7 @@ class TestCopyExifE2E:
             capture_output=True, check=True, timeout=120,
         )
 
-        result = run_ps(lane, script, ["-InputDir", str(work)], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work)], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert read_tag(work / "photo.tif", "EXIF:Make") == "FUJIFILM"
@@ -523,10 +523,10 @@ class TestCopyExifE2E:
         work.mkdir()
         make_tiff(work / "lonely.tif")
 
-        ok = run_ps(lane, script, ["-InputDir", str(work)], tmp_path)
+        ok = run_ps(lane, script, ["--input-dir", str(work)], tmp_path)
         assert ok.returncode == 0, f"{ok.stdout}\n{ok.stderr}"
 
-        strict = run_ps(lane, script, ["-InputDir", str(work), "-FailOnWarn"], tmp_path)
+        strict = run_ps(lane, script, ["--input-dir", str(work), "--fail-on-warn"], tmp_path)
         assert strict.returncode == 1, f"{strict.stdout}\n{strict.stderr}"
 
 
@@ -551,7 +551,7 @@ class TestCopyExifVariantAndHeuristicNames:
         make_tiff(work / "foto_1.tif")
         self._make_fuji_jpeg(work / "foto.jpg")
 
-        result = run_ps(lane, script, ["-InputDir", str(work)], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work)], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "OK | foto_1.tif <= foto.jpg" in result.stdout, result.stdout
@@ -564,7 +564,7 @@ class TestCopyExifVariantAndHeuristicNames:
         make_tiff(work / "foto_2024.tif")
         self._make_fuji_jpeg(work / "foto.jpg")
 
-        result = run_ps(lane, script, ["-InputDir", str(work)], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work)], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "WARN (heuristic JPEG match)" in result.stdout, result.stdout
@@ -583,7 +583,7 @@ class TestCopyExifVariantAndHeuristicNames:
                        capture_output=True, check=True, timeout=120)
         self._make_fuji_jpeg(work / "foto.jpg")
 
-        result = run_ps(lane, script, ["-InputDir", str(work), "-CompressZip"], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work), "--compress-zip"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "OK+SKIP-ZIP" in result.stdout, result.stdout
@@ -610,14 +610,14 @@ class TestThumbnailLifecycle:
 
     def test_remove_finds_what_generate_created(self, tmp_path):
         root = self._two_colliding_tiffs(tmp_path)
-        args = ["-InputDir", str(root), "-OutputDir", "thumbs", "-Recursive"]
+        args = ["--input-dir", str(root), "--output-dir", "thumbs", "--recursive"]
 
         gen = run_ps("parallel", "generate_thumbnails.py", args, tmp_path)
         assert gen.returncode == 0, gen.stdout
         created = sorted(root.rglob("*_thumb*"))
         assert len(created) == 2, f"setup failed: {created}"
 
-        rem = run_ps("parallel", "generate_thumbnails.py", args + ["-Remove"], tmp_path)
+        rem = run_ps("parallel", "generate_thumbnails.py", args + ["--remove"], tmp_path)
         assert rem.returncode == 0, rem.stdout
         assert not list(root.rglob("*_thumb*")), (
             "-Remove with the flags that created them found nothing:\n" + rem.stdout
@@ -627,7 +627,7 @@ class TestThumbnailLifecycle:
         root = self._two_colliding_tiffs(tmp_path)
         out = tmp_path / "out"
         out.mkdir()
-        args = ["-InputDir", str(root), "-OutputDir", str(out), "-Recursive", "-Format", "tif"]
+        args = ["--input-dir", str(root), "--output-dir", str(out), "--recursive", "--format", "tif"]
 
         gen = run_ps("parallel", "generate_thumbnails.py", args, tmp_path)
         assert gen.returncode == 0, gen.stdout
@@ -636,7 +636,7 @@ class TestThumbnailLifecycle:
         # Second pass over the output folder: both thumbnails must be recognised as thumbnails
         again = run_ps(
             "parallel", "generate_thumbnails.py",
-            ["-InputDir", str(out), "-Format", "tif"], tmp_path,
+            ["--input-dir", str(out), "--format", "tif"], tmp_path,
         )
         assert again.returncode == 0, again.stdout
         assert not (out / "photo_thumb_v2_thumb.tif").exists(), (
@@ -649,14 +649,14 @@ class TestThumbnailLifecycle:
         out.mkdir()
         run_ps(
             "parallel", "generate_thumbnails.py",
-            ["-InputDir", str(root), "-OutputDir", str(out), "-Recursive", "-Format", "tif"],
+            ["--input-dir", str(root), "--output-dir", str(out), "--recursive", "--format", "tif"],
             tmp_path,
         )
         assert (out / "photo_thumb_v2.tif").exists()
 
         rem = run_ps(
             "parallel", "generate_thumbnails.py",
-            ["-InputDir", str(out), "-Format", "tif", "-Remove"], tmp_path,
+            ["--input-dir", str(out), "--format", "tif", "--remove"], tmp_path,
         )
         assert rem.returncode == 0, rem.stdout
         assert not list(out.glob("*_thumb*")), f"_v2 survived -Remove:\n{rem.stdout}"
@@ -1087,8 +1087,8 @@ class TestThumbnailNeverDropsPages:
         before = src.read_bytes()
 
         result = run_ps_switched(lane, "compress_tiff_zip.py",
-                                 ["-Mode", "3", "-InputDir", str(work), "-SafeMode:$false",
-                                  "-GenerateThumbnail", "-Workers", "1"], work)
+                                 ["--mode", "3", "--input-dir", str(work), "--no-safe-mode",
+                                  "--generate-thumbnail", "--workers", "1"], work)
 
         assert "-GenerateThumbnail refused" in result.stdout, result.stdout
         assert result.returncode == 1, "a refusal must be an error, not a silent success"
@@ -1108,8 +1108,8 @@ class TestThumbnailNeverDropsPages:
         assert pages_before == 3
 
         result = run_ps_switched(lane, "compress_tiff_zip.py",
-                                 ["-Mode", "2", "-InputDir", str(work), "-SafeMode:$false",
-                                  "-GenerateThumbnail"], work)
+                                 ["--mode", "2", "--input-dir", str(work), "--no-safe-mode",
+                                  "--generate-thumbnail"], work)
 
         assert "-GenerateThumbnail refused" in result.stdout, result.stdout
         assert len(read_subfiletypes(src)) == 3, (
@@ -1127,8 +1127,8 @@ class TestThumbnailNeverDropsPages:
         make_multipage_tiff(src, [None, 1])
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "3", "-InputDir", str(work), "-GenerateThumbnail",
-                         "-Workers", "1"], work)
+                        ["--mode", "3", "--input-dir", str(work), "--generate-thumbnail",
+                         "--workers", "1"], work)
 
         out = work / "ZIP" / "photo.tif"
         assert out.exists(), result.stdout
@@ -1160,8 +1160,8 @@ class TestCopyExifSafeModeMatchesCompress:
                        capture_output=True, check=True, timeout=120)
         before = src.read_bytes()
 
-        result = run_ps(lane, script, ["-InputDir", str(work), "-CompressZip",
-                                        "-Workers", "1"], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work), "--compress-zip",
+                                        "--workers", "1"], tmp_path)
 
         assert "MULTI" in result.stdout, result.stdout
         assert src.read_bytes() == before, "scanner IR file was rewritten anyway"
@@ -1190,7 +1190,7 @@ class TestCopyExifZipIsPixelVerified:
         subprocess.run(["magick", "-size", "64x48", "gradient:", str(work / "photo.jpg")],
                        capture_output=True, check=True, timeout=120)
 
-        run_ps(lane, script, ["-InputDir", str(work), "-CompressZip", "-Workers", "1"], tmp_path)
+        run_ps(lane, script, ["--input-dir", str(work), "--compress-zip", "--workers", "1"], tmp_path)
 
         assert read_ifd0_compression(src).lower().startswith(("zip", "deflate", "adobe"))
         for page in range(2):
@@ -1220,7 +1220,7 @@ class TestMode5PathSeparator:
             build(root)
             arg = str(root) if label == "back" else str(root).replace("\\", "/")
             run_ps(lane, "compress_tiff_zip.py",
-                   ["-Mode", "5", "-InputDir", arg, "-Workers", "1"], tmp_path)
+                   ["--mode", "5", "--input-dir", arg, "--workers", "1"], tmp_path)
             results[label] = sorted(
                 p.relative_to(root).as_posix() for p in root.rglob("*.tif")
             )
@@ -1279,7 +1279,7 @@ class TestThumbnailColorManagement:
         shutil.copy(tagged, work / "tagged.tif")
 
         run_ps("parallel", "generate_thumbnails.py",
-               ["-InputDir", str(work), "-Size", "64"], tmp_path)
+               ["--input-dir", str(work), "--size", "64"], tmp_path)
 
         a = (work / "plain_thumb.jpg").read_bytes()
         b = (work / "tagged_thumb.jpg").read_bytes()
@@ -1314,7 +1314,7 @@ class TestSubfileTypeZeroIsPreserved:
         assert "[IFD0] SubfileType: 0" in before
 
         run_ps_switched(lane, "compress_tiff_zip.py",
-                        ["-Mode", "3", "-InputDir", str(work), "-SafeMode:$false", "-Workers", "1"], work)
+                        ["--mode", "3", "--input-dir", str(work), "--no-safe-mode", "--workers", "1"], work)
 
         after = numeric_markers(work / "ZIP" / "scan.tif")
         assert after == before, f"markers changed: {before} -> {after}"
@@ -1337,7 +1337,7 @@ class TestRunSummaryAlwaysPrinted:
                        capture_output=True, check=True, timeout=120)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "9", "-InputDir", str(work), "-Workers", "1"], work)
+                        ["--mode", "9", "--input-dir", str(work), "--workers", "1"], work)
 
         assert "Done:" in result.stdout, result.stdout
         assert "1 skipped" in result.stdout
@@ -1356,7 +1356,7 @@ class TestRunSummaryAlwaysPrinted:
         make_tiff(work / "plain.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "9", "-InputDir", str(work), "-Workers", "1"], work)
+                        ["--mode", "9", "--input-dir", str(work), "--workers", "1"], work)
 
         multi = [ln for ln in result.stdout.splitlines() if "MULTI (" in ln]
         assert multi, result.stdout
@@ -1457,8 +1457,8 @@ class TestCopyExifExcludeFolders:
                            capture_output=True, check=True, timeout=120)
 
         result = run_ps(lane, script,
-                        ["-InputDir", f"{keep};{drop}", "-DryRun",
-                         "-ExcludeFolders", "_EXPORT"], tmp_path)
+                        ["--input-dir", f"{keep};{drop}", "--dry-run",
+                         "--exclude-folders", "_EXPORT"], tmp_path)
 
         # Both roots were named explicitly, so both are processed: neither has an excluded
         # folder BELOW it. The old absolute match dropped b.tif here.
@@ -1486,8 +1486,8 @@ class TestCopyExifExcludeFolders:
 
         for name in ("S5pro", tmp_path.name):
             result = run_ps(lane, script,
-                            ["-InputDir", str(root), "-DryRun",
-                             "-ExcludeFolders", name], tmp_path)
+                            ["--input-dir", str(root), "--dry-run",
+                             "--exclude-folders", name], tmp_path)
             assert "a.tif" in result.stdout, (
                 f"-ExcludeFolders {name!r} excluded the whole run:\n{result.stdout}"
             )
@@ -1523,8 +1523,8 @@ class TestThumbnailPathKeepsPageMarkers:
         assert "[IFD0] SubfileType: 0" in numeric_subfiletypes(src)
 
         run_ps_switched(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
-                         "-SafeMode:$false", "-GenerateThumbnail", "-ThumbSize", "16"], work)
+                        ["--mode", "1", "--input-dir", str(work), "--workers", "1",
+                         "--no-safe-mode", "--generate-thumbnail", "--thumb-size", "16"], work)
 
         after = numeric_subfiletypes(work / "ZIP" / "scan.tif")
         assert "[IFD0] SubfileType: 0" in after, f"main page lost its marker: {after}"
@@ -1539,8 +1539,8 @@ class TestThumbnailPathKeepsPageMarkers:
         make_tiff(work / "photo.tif")
 
         run_ps(lane, "compress_tiff_zip.py",
-               ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
-                "-GenerateThumbnail", "-ThumbSize", "16"], work)
+               ["--mode", "1", "--input-dir", str(work), "--workers", "1",
+                "--generate-thumbnail", "--thumb-size", "16"], work)
 
         after = numeric_subfiletypes(work / "ZIP" / "photo.tif")
         assert not any(ln.startswith("[IFD0]") for ln in after), (
@@ -1557,15 +1557,15 @@ class TestThumbnailPathKeepsPageMarkers:
         work.mkdir()
         make_tiff(work / "photo.tif")
         run_ps(lane, "compress_tiff_zip.py",
-               ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
-                "-GenerateThumbnail", "-ThumbSize", "16"], work)
+               ["--mode", "1", "--input-dir", str(work), "--workers", "1",
+                "--generate-thumbnail", "--thumb-size", "16"], work)
 
         second = work / "second"
         second.mkdir()
         shutil.copy2(work / "ZIP" / "photo.tif", second / "photo.tif")
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(second), "-Workers", "1",
-                         "-SkipCompressedWithThumb"], second)
+                        ["--mode", "1", "--input-dir", str(second), "--workers", "1",
+                         "--skip-compressed-with-thumb"], second)
 
         assert "MULTI" not in result.stdout, (
             "SafeMode classified our own thumbnail output as a real multi-page file:\n"
@@ -1582,8 +1582,8 @@ class TestThumbnailPathKeepsPageMarkers:
         make_tiff(work / "photo.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
-                         "-GenerateThumbnail", "-ThumbPage", "0"], work)
+                        ["--mode", "1", "--input-dir", str(work), "--workers", "1",
+                         "--generate-thumbnail", "--thumb-page", "0"], work)
 
         assert result.returncode == 1, result.stdout
         assert "-ThumbPage 0 is not supported" in result.stdout
@@ -1609,8 +1609,8 @@ class TestLongPathsAreRefusedLoudly:
         long_out = str(tmp_path / ("d" * 200))
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "2", "-InputDir", str(work), "-Workers", "1",
-                         "-OutputDir", long_out], work)
+                        ["--mode", "2", "--input-dir", str(work), "--workers", "1",
+                         "--output-dir", long_out], work)
 
         assert "path too long" in result.stdout, result.stdout
         assert result.returncode == 1
@@ -1781,8 +1781,8 @@ class TestGenerateThumbnailSaysWhyItSkipped:
                        capture_output=True, check=True, timeout=120)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
-                         "-GenerateThumbnail", "-ThumbSize", "16"], work)
+                        ["--mode", "1", "--input-dir", str(work), "--workers", "1",
+                         "--generate-thumbnail", "--thumb-size", "16"], work)
 
         assert "no thumbnail added" in result.stdout, result.stdout
         assert "SkipCompressedWithThumb" in result.stdout
@@ -1803,8 +1803,8 @@ class TestGroupHeaderNamesTheOutputFolder:
         staging.mkdir()
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1",
-                         "-StagingDir", str(staging)], work)
+                        ["--mode", "1", "--input-dir", str(work), "--workers", "1",
+                         "--staging-dir", str(staging)], work)
 
         moved = [ln for ln in result.stdout.splitlines() if "-> Moved" in ln]
         assert moved, result.stdout
@@ -1841,9 +1841,9 @@ class TestExcludeFoldersIsRelativeToTheScanRoot:
         names = ("a.tif", "b.tif", "c.tif")
 
         def kept(exclude):
-            args = ["-Mode", "3", "-InputDir", str(root), "-Workers", "1", "-DryRun"]
+            args = ["--mode", "3", "--input-dir", str(root), "--workers", "1", "--dry-run"]
             if exclude is not None:
-                args += ["-ExcludeFolders", exclude]
+                args += ["--exclude-folders", exclude]
             out = run_ps(lane, "compress_tiff_zip.py", args, tmp_path).stdout
             return sorted(n for n in names if f"| {n}" in out)
 
@@ -1875,8 +1875,8 @@ class TestExcludeFoldersIsRelativeToTheScanRoot:
 
         def out_for(exclude):
             return run_ps(lane, "compress_tiff_zip.py",
-                          ["-Mode", "3", "-InputDir", slashed, "-Workers", "1",
-                           "-DryRun", "-ExcludeFolders", exclude], tmp_path).stdout
+                          ["--mode", "3", "--input-dir", slashed, "--workers", "1",
+                           "--dry-run", "--exclude-folders", exclude], tmp_path).stdout
 
         out = out_for("_EXPORT")
         assert "| keep.tif" in out, out
@@ -1948,9 +1948,9 @@ class TestMode8ThumbnailGate:
         shutil.copy2(src, reference)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
-                         "-GenerateThumbnail", "-ThumbSize", "16",
-                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "1"], tmp_path)
+                        ["--mode", "8", "--input-dir", str(work), "--delete-source",
+                         "--generate-thumbnail", "--thumb-size", "16",
+                         "--staging-dir", str(tmp_path / "staging"), "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "integrity check failed" not in result.stdout, result.stdout
@@ -1972,9 +1972,9 @@ class TestMode8ThumbnailGate:
         shutil.copy2(src, reference)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
-                         "-GenerateThumbnail", "-ThumbFormat", "notaformat",
-                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "1"], tmp_path)
+                        ["--mode", "8", "--input-dir", str(work), "--delete-source",
+                         "--generate-thumbnail", "--thumb-format", "notaformat",
+                         "--staging-dir", str(tmp_path / "staging"), "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "[no thumb]" in result.stdout, result.stdout
@@ -2001,7 +2001,7 @@ class TestPercentInFileNames:
     def test_mode9_writes_every_name_verbatim(self, tmp_path, lane):
         work = self._tree(tmp_path)
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "9", "-InputDir", str(work), "-Workers", "2"], tmp_path)
+                        ["--mode", "9", "--input-dir", str(work), "--workers", "2"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         produced = sorted(p.name for p in work.glob("*.tif"))
@@ -2020,8 +2020,8 @@ class TestPercentInFileNames:
         no output at the expected path means no delete."""
         work = self._tree(tmp_path)
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
-                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "2"], tmp_path)
+                        ["--mode", "8", "--input-dir", str(work), "--delete-source",
+                         "--staging-dir", str(tmp_path / "staging"), "--workers", "2"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         for name in PERCENT_NAMES:
@@ -2032,7 +2032,7 @@ class TestPercentInFileNames:
     def test_thumbnail_generator_writes_the_name_it_reports(self, tmp_path, lane):
         work = self._tree(tmp_path)
         result = run_ps(lane, "generate_thumbnails.py",
-                        ["-InputDir", str(work), "-Size", "32"], tmp_path)
+                        ["--input-dir", str(work), "--size", "32"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         for name in PERCENT_NAMES:
@@ -2047,8 +2047,8 @@ class TestPercentInFileNames:
         make_tiff_named(work, "50%off")
         make_tiff_named(work, "50%off", ".jpg")
 
-        result = run_ps(lane, script, ["-InputDir", str(work), "-CompressZip",
-                                        "-Workers", "1"], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work), "--compress-zip",
+                                        "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         out = work / "50%off.tif"
@@ -2074,7 +2074,7 @@ class TestToolOutputExclusionIsRelative:
         make_tiff(zipdir / "a.tif")
 
         result = run_ps(lane, "generate_thumbnails.py",
-                        ["-InputDir", str(zipdir), "-Size", "32"], tmp_path)
+                        ["--input-dir", str(zipdir), "--size", "32"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert (zipdir / "a_thumb.jpg").exists(), (
@@ -2089,7 +2089,7 @@ class TestToolOutputExclusionIsRelative:
         make_tiff(root / "keep" / "source.tif")
 
         result = run_ps(lane, "generate_thumbnails.py",
-                        ["-InputDir", str(root), "-Recursive", "-Size", "32"], tmp_path)
+                        ["--input-dir", str(root), "--recursive", "--size", "32"], tmp_path)
 
         assert result.returncode == 0, result.stdout
         assert (root / "keep" / "source_thumb.jpg").exists(), result.stdout
@@ -2108,7 +2108,7 @@ class TestToolOutputExclusionIsRelative:
         make_tiff(root / "_EXPORT" / "exported.tif")
 
         result = run_ps(lane, "generate_thumbnails.py",
-                        ["-InputDir", str(root), "-Recursive", "-Size", "32"], tmp_path)
+                        ["--input-dir", str(root), "--recursive", "--size", "32"], tmp_path)
 
         assert result.returncode == 0, result.stdout
         assert (root / "ZIP" / "compressed_thumb.jpg").exists(), result.stdout
@@ -2122,8 +2122,8 @@ class TestToolOutputExclusionIsRelative:
         make_tiff(root / "keep" / "source.tif")
 
         result = run_ps(lane, "generate_thumbnails.py",
-                        ["-InputDir", str(root), "-Recursive", "-Size", "32",
-                         "-ExcludeFolders", "ZIP"], tmp_path)
+                        ["--input-dir", str(root), "--recursive", "--size", "32",
+                         "--exclude-folders", "ZIP"], tmp_path)
 
         assert result.returncode == 0, result.stdout
         assert (root / "keep" / "source_thumb.jpg").exists(), result.stdout
@@ -2174,14 +2174,14 @@ class TestThumbnailFrameMatching:
         safe.rename(work / "br[1].tif")
 
         first = run_ps(lane, "generate_thumbnails.py",
-                       ["-InputDir", str(work), "-Page", "all", "-Size", "32"], tmp_path)
+                       ["--input-dir", str(work), "--page", "all", "--size", "32"], tmp_path)
         assert first.returncode == 0, f"{first.stdout}\n{first.stderr}"
         assert "output not created" not in first.stdout, first.stdout
         frames = sorted(p.name for p in work.glob("br[[]1[]]_thumb-*.jpg"))
         assert len(frames) == 2, f"expected two frames, got {frames}\n{first.stdout}"
 
         second = run_ps(lane, "generate_thumbnails.py",
-                        ["-InputDir", str(work), "-Page", "all", "-Size", "32"], tmp_path)
+                        ["--input-dir", str(work), "--page", "all", "--size", "32"], tmp_path)
         assert second.returncode == 0, second.stdout
         assert "SKIP (exists)" in second.stdout, (
             f"existing frames were not detected on the second run\n{second.stdout}"
@@ -2290,8 +2290,8 @@ class TestRound15Reporting:
         make_tiff(work / "a.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-GenerateThumbnail",
-                         "-ThumbPage", "3", "-ThumbSize", "16", "-Workers", "1"], tmp_path)
+                        ["--mode", "1", "--input-dir", str(work), "--generate-thumbnail",
+                         "--thumb-page", "3", "--thumb-size", "16", "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, result.stdout
         assert "-ThumbPage 3 is not implemented" in result.stdout, result.stdout
@@ -2305,7 +2305,7 @@ class TestRound15Reporting:
         make_tiff(work / "b.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-DryRun"], tmp_path)
+                        ["--mode", "1", "--input-dir", str(work), "--dry-run"], tmp_path)
 
         assert result.returncode == 0, result.stdout
         assert "2 dry-run" in result.stdout, result.stdout
@@ -2320,9 +2320,9 @@ class TestRound15Reporting:
         make_tiff(work / "b" / "photo.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "2", "-InputDir", str(work),
-                         "-OutputDir", str(tmp_path / "flat"),
-                         "-DuplicateAction", "Overwrite", "-Workers", "1"], tmp_path)
+                        ["--mode", "2", "--input-dir", str(work),
+                         "--output-dir", str(tmp_path / "flat"),
+                         "--duplicate-action", "Overwrite", "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, result.stdout
         assert "superseded by a later duplicate" in result.stdout, result.stdout
@@ -2344,8 +2344,8 @@ class TestInPlaceGuardCoversEveryMode:
         shutil.copy2(src, reference)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "2", "-InputDir", str(work), "-OutputDir", str(work),
-                         "-Workers", "1"], tmp_path)
+                        ["--mode", "2", "--input-dir", str(work), "--output-dir", str(work),
+                         "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert read_ifd0_compression(src).lower() in ("deflate", "adobe deflate")
@@ -2363,7 +2363,7 @@ class TestInPlaceGuardCoversEveryMode:
         shutil.copy2(src, reference)
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "5", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+                        ["--mode", "5", "--input-dir", str(work), "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert read_ifd0_compression(src).lower() in ("deflate", "adobe deflate")
@@ -2391,7 +2391,7 @@ class TestPercentSurvivesExiftool:
         make_tiff_named(work, "plain")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "9", "-InputDir", str(work), "-Workers", "2"], tmp_path)
+                        ["--mode", "9", "--input-dir", str(work), "--workers", "2"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         for name in ("50%off", "plain"):
@@ -2408,8 +2408,8 @@ class TestPercentSurvivesExiftool:
         make_tiff_named(work, "50%off", ".tiff")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "8", "-InputDir", str(work), "-DeleteSource",
-                         "-StagingDir", str(tmp_path / "staging"), "-Workers", "1"], tmp_path)
+                        ["--mode", "8", "--input-dir", str(work), "--delete-source",
+                         "--staging-dir", str(tmp_path / "staging"), "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         out = work / "50%off.tif"
@@ -2426,8 +2426,8 @@ class TestPercentSurvivesExiftool:
         make_tiff_named(work, "50%off")
         make_tiff_named(work, "50%off", ".jpg")
 
-        result = run_ps(lane, script, ["-InputDir", str(work), "-CompressZip",
-                                        "-Workers", "1"], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work), "--compress-zip",
+                                        "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         out = work / "50%off.tif"
@@ -2452,14 +2452,14 @@ class TestBackupsAreNeverInput:
         work.mkdir()
         make_tiff(work / "a.tif")
         run_ps(lane, "compress_tiff_zip.py",
-               ["-Mode", "9", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+               ["--mode", "9", "--input-dir", str(work), "--workers", "1"], tmp_path)
         backup = work / "OLD_TIFFs" / "a.tif"
         assert backup.exists(), "mode 9 did not archive the original"
         before = backup.read_bytes()
 
-        args = ["-Mode", mode, "-InputDir", str(work), "-Workers", "1"]
+        args = ["--mode", mode, "--input-dir", str(work), "--workers", "1"]
         if mode == "2":
-            args += ["-OutputDir", str(tmp_path / "flat")]
+            args += ["--output-dir", str(tmp_path / "flat")]
         result = run_ps(lane, "compress_tiff_zip.py", args, tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
@@ -2487,7 +2487,7 @@ class TestBackupsAreNeverInput:
         before = backup.read_bytes()
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", mode, "-InputDir", str(work), "-Workers", "1"], tmp_path)
+                        ["--mode", mode, "--input-dir", str(work), "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         out = work / "ZIP" / "photo.tif" if mode == "3" else photo
@@ -2506,7 +2506,7 @@ class TestBackupsAreNeverInput:
         make_tiff(work / "a.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+                        ["--mode", "1", "--input-dir", str(work), "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert (work / "ZIP" / "a.tif").exists(), (
@@ -2523,7 +2523,7 @@ class TestBackupsAreNeverInput:
         make_tiff(work / "a.tif.deadbeef_cafe12345678.tif")
 
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "1", "-InputDir", str(work), "-Workers", "1"], tmp_path)
+                        ["--mode", "1", "--input-dir", str(work), "--workers", "1"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "Skipped 2 staged/temp file(s)" in result.stdout, result.stdout
@@ -2546,12 +2546,12 @@ class TestThumbnailPageSwitch:
         make_multipage_tiff(work / "scan.tif", [None, 1])
 
         first = run_ps(lane, "generate_thumbnails.py",
-                       ["-InputDir", str(work), "-Size", "32", "-Page", "all"], tmp_path)
+                       ["--input-dir", str(work), "--size", "32", "--page", "all"], tmp_path)
         assert first.returncode == 0, first.stdout
         assert (work / "scan_thumb-0.jpg").exists(), first.stdout
 
         second = run_ps(lane, "generate_thumbnails.py",
-                        ["-InputDir", str(work), "-Size", "32", "-Page", "0"], tmp_path)
+                        ["--input-dir", str(work), "--size", "32", "--page", "0"], tmp_path)
         assert second.returncode == 0, second.stdout
         assert (work / "scan_thumb.jpg").exists(), (
             f"-Page 0 was skipped because the -Page all frames existed\n{second.stdout}"
@@ -2563,9 +2563,9 @@ class TestThumbnailPageSwitch:
         make_multipage_tiff(work / "scan.tif", [None, 1])
 
         run_ps(lane, "generate_thumbnails.py",
-               ["-InputDir", str(work), "-Size", "32", "-Page", "all"], tmp_path)
+               ["--input-dir", str(work), "--size", "32", "--page", "all"], tmp_path)
         again = run_ps(lane, "generate_thumbnails.py",
-                       ["-InputDir", str(work), "-Size", "32", "-Page", "all"], tmp_path)
+                       ["--input-dir", str(work), "--size", "32", "--page", "all"], tmp_path)
 
         assert again.returncode == 0, again.stdout
         assert "SKIP (exists)" in again.stdout, (
@@ -2753,7 +2753,7 @@ class TestCopyExifSkipIfTiffHasExif:
         work = tmp_path / "伊豆沼 [S5pro] 100%"
         safe.rename(work)
 
-        result = run_ps(lane, script, ["-InputDir", str(work), "-SkipIfTiffHasExif"], tmp_path)
+        result = run_ps(lane, script, ["--input-dir", str(work), "--skip-if-tiff-has-exif"], tmp_path)
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "OK | _DSF0311.tif <= _DSF0311.jpg" in result.stdout, result.stdout

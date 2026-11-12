@@ -215,7 +215,7 @@ class NoLog:
 #: The mode of a job whose final_dst is its own source: mode 2 with the output on the
 #: input root writes a file of that folder in place (a temp sibling, the gates, then the
 #: rename).
-IN_PLACE = ("-Mode", "2")
+IN_PLACE = ("--mode", "2")
 
 
 def compress_run(*argv):
@@ -256,7 +256,7 @@ class TestInPlaceReplace:
     sibling, proven (metadata restored, decodes, pixel-identical) and only then renamed onto
     the original -- in every mode that can resolve final_dst == src (rounds 15, 28)."""
 
-    @pytest.mark.parametrize("argv", [["-Mode", "2"], ["-Mode", "5"]], ids=["mode2", "mode5"])
+    @pytest.mark.parametrize("argv", [["--mode", "2"], ["--mode", "5"]], ids=["mode2", "mode5"])
     def test_the_original_is_replaced_only_after_every_gate(self, tools, photo, argv):
         r = job(compress_run(*argv), photo)
         assert r.result.startswith("OK (Uncompressed -> ZIP)"), r.result
@@ -301,7 +301,7 @@ class TestInPlaceReplace:
         stg = tmp_path / "stg"
         stg.mkdir()
         tools.pixels = False
-        r = job(compress_run("-Mode", "2"), photo, write_dst=stg / "abcd1234_0123456789ab_photo.tif",
+        r = job(compress_run("--mode", "2"), photo, write_dst=stg / "abcd1234_0123456789ab_photo.tif",
                 final_dst=photo)
         assert r.result.startswith("ERROR (in-place verification failed"), r.result
         assert r.staging_name is None, "a refused file must never reach the staging move"
@@ -329,7 +329,7 @@ class TestMagickArguments:
         """'%' is expanded in every OUTPUT name; a plain input is opened literally (round 13)."""
         out = tmp_path / "out 100%dpi" / "photo 50%off.tif"
         out.parent.mkdir()
-        job(compress_run("-Mode", "1"), photo, write_dst=out, final_dst=out)
+        job(compress_run("--mode", "1"), photo, write_dst=out, final_dst=out)
         call = tools.magick_calls[0]
         assert call[1] == str(photo), "the input must stay unescaped"
         assert call[-1] == str(out).replace("%", "%%")
@@ -344,21 +344,21 @@ class TestMagickArguments:
     def test_exit_zero_without_a_file_is_an_error(self, tools, photo, tmp_path):
         out = tmp_path / "o.tif"
         tools.magick_writes = False
-        r = job(compress_run("-Mode", "1"), photo, write_dst=out, final_dst=out)
+        r = job(compress_run("--mode", "1"), photo, write_dst=out, final_dst=out)
         assert r.result.startswith("ERROR (magick reported success but wrote no file)"), r.result
 
     def test_a_failed_conversion_drops_its_partial_output(self, tools, photo, tmp_path):
         out = tmp_path / "o.tif"
         out.write_bytes(b"PARTIAL")
         tools.magick_rc = 1
-        r = job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
+        r = job(compress_run("--mode", "1", "--overwrite"), photo, write_dst=out, final_dst=out)
         assert r.result == f"ERROR (magick) | {photo.name} | magick: boom", r.result
         assert not out.exists()
 
     def test_a_changed_layout_drops_the_output(self, tools, photo, tmp_path):
         out = tmp_path / "o.tif"
         tools.layout_kept = False
-        r = job(compress_run("-Mode", "1"), photo, write_dst=out, final_dst=out)
+        r = job(compress_run("--mode", "1"), photo, write_dst=out, final_dst=out)
         assert r.result.startswith("ERROR (sample layout changed: rgb/3/8,8,8/ - output dropped"), r.result
         assert not out.exists()
         assert photo.read_bytes() == b"ORIGINAL"
@@ -378,7 +378,7 @@ class TestSafeModeAndSkips:
         file was accepted and rewritten (round 9)."""
         tools.pages = 3
         tools.only_subfile = False
-        r = job(compress_run("-Mode", "1"), photo, final_dst=photo.with_name("o.tif"))
+        r = job(compress_run("--mode", "1"), photo, final_dst=photo.with_name("o.tif"))
         assert r.result == f"MULTI (3 pages - skipped) | {photo.name}"
         assert r.multi == str(photo)
         assert tools.allowed_seen == [("REDUCEDIMAGE", "REDUCED")]
@@ -389,15 +389,15 @@ class TestSafeModeAndSkips:
         assert job(compress_run(*IN_PLACE), photo).result == f"SKIP (Adobe Deflate) | {photo.name}"
         tools.comp = "LZW"
         assert job(compress_run(*IN_PLACE), photo).result.startswith("OK (LZW -> ZIP)")
-        assert job(compress_run(*IN_PLACE, "-SkipLzwAsCompressed:$true"), photo).result.startswith("SKIP (")
+        assert job(compress_run(*IN_PLACE, "--skip-lzw-as-compressed"), photo).result.startswith("SKIP (")
 
     def test_a_refused_thumbnail_is_reported_by_a_dry_run_too(self, tools, photo):
         tools.thumb_safe = tw.ThumbSafe(False, 3, "would drop 2 extra page(s)")
-        r = job(compress_run(*IN_PLACE, "-GenerateThumbnail", "-DryRun"), photo)
+        r = job(compress_run(*IN_PLACE, "--generate-thumbnail", "--dry-run"), photo)
         assert r.result.startswith("ERROR (-GenerateThumbnail refused)"), r.result
 
     def test_dry_run_writes_nothing(self, tools, photo):
-        r = job(compress_run(*IN_PLACE, "-DryRun"), photo)
+        r = job(compress_run(*IN_PLACE, "--dry-run"), photo)
         assert r.result == f"DRY (Uncompressed -> ZIP) | {photo.name}"
         assert tools.magick_calls == [] and tools.exif_calls == []
 
@@ -407,7 +407,7 @@ class TestGatesPerMode:
         """Round 12: a decode check cannot see a missing page. Round 28: nor a lost EXIF."""
         stg = tmp_path / "stg"
         stg.mkdir()
-        run = compress_run("-Mode", "8", "-DeleteSource")
+        run = compress_run("--mode", "8", "--delete-source")
         ok = job(run, photo, write_dst=stg / "a.tif")
         assert ok.can_delete is True and "[SOURCE DELETED]" in ok.result
         assert not ok.integrity_failed
@@ -421,12 +421,12 @@ class TestGatesPerMode:
         assert noexif.can_delete is False
 
     def test_mode8_without_delete_source_never_asks_for_a_delete(self, tools, photo, tmp_path):
-        r = job(compress_run("-Mode", "8"), photo, write_dst=tmp_path / "a.tif")
+        r = job(compress_run("--mode", "8"), photo, write_dst=tmp_path / "a.tif")
         assert r.can_delete is False and "[SOURCE DELETED]" not in r.result
 
     def test_mode8_thumbnail_output_is_checked_on_page_zero(self, tools, photo, tmp_path):
         """Round 15: whole-file identity refused EVERY -GenerateThumbnail file in mode 8."""
-        r = job(compress_run("-Mode", "8", "-GenerateThumbnail"), photo, write_dst=tmp_path / "a.tif")
+        r = job(compress_run("--mode", "8", "--generate-thumbnail"), photo, write_dst=tmp_path / "a.tif")
         assert "thumb_match" in tools.events and "pixels" not in tools.events
         assert tools.thumb_expected == 2
         assert not r.integrity_failed
@@ -438,7 +438,7 @@ class TestGatesPerMode:
         """Round 26: a copy that does not decode must never cause the archive."""
         tools.integrity = False
         sibling = str(photo) + ".abcd1234_0123456789ab.tif"
-        r = job(compress_run("-Mode", mode), photo, write_dst=sibling, keep_dir=str(photo.parent / "OLD_TIFFs"))
+        r = job(compress_run("--mode", mode), photo, write_dst=sibling, keep_dir=str(photo.parent / "OLD_TIFFs"))
         assert r.integrity_failed is True
         assert photo.read_bytes() == b"ORIGINAL", "the worker never touches the original in modes 0/9"
 
@@ -450,7 +450,7 @@ class TestGatesPerMode:
                             lambda p, t=30: tw.PageCount(True, counts.get(str(p), 1), ""))
         monkeypatch.setattr(tw, "tiff_has_only_subfile_pages", lambda *a, **k: True)
         out = tmp_path / "o.tif"
-        r = job(compress_run("-Mode", mode), photo, write_dst=out, final_dst=out)
+        r = job(compress_run("--mode", mode), photo, write_dst=out, final_dst=out)
         assert r.result == f"ERROR (page count shrink) | {photo.name} | 2 -> 1 pages"
         assert not out.exists()
 
@@ -460,13 +460,13 @@ class TestGatesPerMode:
         out = tmp_path / "o.tif"
         tools.subfile_restore = False
         tools.history = False
-        r = job(compress_run("-Mode", "1"), photo, write_dst=out, final_dst=out)
+        r = job(compress_run("--mode", "1"), photo, write_dst=out, final_dst=out)
         assert r.result == (f"WARN (exiftool failed, ZIP ok) [subfiletype restore failed]"
                                f" [history not written] | {photo.name}")
         assert r.staging_name == "o.tif"
 
     def test_history_names_the_mode(self, tools, photo, tmp_path):
-        job(compress_run("-Mode", "9"), photo, write_dst=str(photo) + ".abcd1234_0123456789ab.tif")
+        job(compress_run("--mode", "9"), photo, write_dst=str(photo) + ".abcd1234_0123456789ab.tif")
         assert tools.history_params == "compress_tiff_zip mode 9: ZIP (Deflate)"
         job(compress_run(*IN_PLACE), photo)
         assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate)"
@@ -495,7 +495,7 @@ class TestThumbnailWrite:
         tools.magick_plan = list(plan)
         self.container = Path(str(photo) + ".meta")
         self.container.write_bytes(b"MIE")
-        return job(compress_run(*IN_PLACE, "-GenerateThumbnail"), photo)
+        return job(compress_run(*IN_PLACE, "--generate-thumbnail"), photo)
 
     def nothing_left(self, photo, tmp):
         return (leftovers(photo.parent) == [] and not self.container.exists()
@@ -556,7 +556,7 @@ class TestThumbnailWrite:
         tools.magick_plan = ["ok", "fail"]
         out = tmp_path / "out [x]" / photo.name
         out.parent.mkdir()
-        r = job(compress_run("-Mode", "1", "-GenerateThumbnail"), photo, write_dst=out, final_dst=out)
+        r = job(compress_run("--mode", "1", "--generate-thumbnail"), photo, write_dst=out, final_dst=out)
         assert r.result.startswith("ERROR (magick compress)")
         assert not out.exists(), "the half-written output would be a SKIP (exists) on the next run"
         assert os.listdir(tmp) == []
@@ -586,15 +586,15 @@ class TestNothingOfAJobIsLeftBehind:
             stg = tmp_path / "stg 一時 [x]"
             stg.mkdir()
             out = tmp_path / "ZIP [x]" / photo.name
-            return (compress_run("-Mode", "1", "-StagingDir", str(stg)), photo), \
+            return (compress_run("--mode", "1", "--staging-dir", str(stg)), photo), \
                 dict(write_dst=stg / self.STAGED, final_dst=out), stg / self.STAGED
         if shape == "destination":
             out = tmp_path / "ZIP [x]" / photo.name
             out.parent.mkdir()
-            return (compress_run("-Mode", "1"), photo), dict(write_dst=out, final_dst=out), out
+            return (compress_run("--mode", "1"), photo), dict(write_dst=out, final_dst=out), out
         st = os.stat(photo)
         sibling = Path(str(photo) + ".abcd1234_0123456789ab.tif")
-        return (compress_run("-Mode", "9"), photo), dict(
+        return (compress_run("--mode", "9"), photo), dict(
             write_dst=sibling, final_dst=photo, comp="Uncompressed", safe_checked=True,
             keep_dir=str(photo.parent / "OLD_TIFFs"), src_length=st.st_size,
             src_mtime_ns=st.st_mtime_ns), sibling
@@ -663,7 +663,7 @@ class TestNothingOfAJobIsLeftBehind:
         container.write_bytes(b"MIE")
         tools.magick_plan = [RuntimeError("magick could not start")]
         with pytest.raises(RuntimeError):
-            job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
+            job(compress_run("--mode", "1", "--overwrite"), photo, write_dst=out, final_dst=out)
         assert out.read_bytes() == b"EARLIER OUTPUT" and not container.exists()
 
     def test_once_written_over_the_earlier_output_is_this_jobs(self, tools, photo, tmp_path, monkeypatch):
@@ -678,7 +678,7 @@ class TestNothingOfAJobIsLeftBehind:
             raise RuntimeError("history exploded")
         monkeypatch.setattr(tw, "finish_written_tiff", boom)
         with pytest.raises(RuntimeError):
-            job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
+            job(compress_run("--mode", "1", "--overwrite"), photo, write_dst=out, final_dst=out)
         assert not out.exists() and photo.read_bytes() == b"ORIGINAL"
 
     @pytest.mark.parametrize("mode", ["1", "3", "5", "7"])
@@ -691,7 +691,7 @@ class TestNothingOfAJobIsLeftBehind:
         stg = tmp_path / "stg 一時 [x]"
         stg.mkdir()
         out = tmp_path / "ZIP [x]" / photo.name
-        r = job(compress_run("-Mode", mode, "-StagingDir", str(stg)), photo,
+        r = job(compress_run("--mode", mode, "--staging-dir", str(stg)), photo,
                 write_dst=stg / self.STAGED, final_dst=out)
         assert r.result == f"ERROR (page count shrink) | {photo.name} | 2 -> 1 pages"
         assert os.listdir(stg) == [] and r.staging_name is None
@@ -701,7 +701,7 @@ class TestNothingOfAJobIsLeftBehind:
         """The other side of the rule: success hands the file over, nothing is cleaned."""
         stg = tmp_path / "stg 一時 [x]"
         stg.mkdir()
-        r = job(compress_run("-Mode", "1", "-StagingDir", str(stg)), photo,
+        r = job(compress_run("--mode", "1", "--staging-dir", str(stg)), photo,
                 write_dst=stg / self.STAGED, final_dst=tmp_path / "ZIP [x]" / photo.name)
         assert r.result.startswith("OK (") and r.staging_name == self.STAGED
         assert (stg / self.STAGED).read_bytes() == b"COMPRESSED"
@@ -723,7 +723,7 @@ class TestKeepOriginal:
 
     def test_lands_the_copy_then_archives(self, tmp_path):
         d, src, written, st = self._setup(tmp_path)
-        run = compress_run("-Mode", "9")
+        run = compress_run("--mode", "9")
         err = cz.complete_keep_original(run, str(written), str(src), str(src), str(d / "OLD_TIFFs"),
                                         st.st_size, st.st_mtime_ns)
         assert err is None
@@ -734,7 +734,7 @@ class TestKeepOriginal:
     def test_an_original_edited_during_the_run_is_not_archived(self, tmp_path):
         d, src, written, st = self._setup(tmp_path)
         src.write_bytes(b"EDITED MEANWHILE")
-        err = cz.complete_keep_original(compress_run("-Mode", "9"), str(written), str(src), str(src),
+        err = cz.complete_keep_original(compress_run("--mode", "9"), str(written), str(src), str(src),
                                         str(d / "OLD_TIFFs"), st.st_size, st.st_mtime_ns)
         assert err and "changed or vanished" in err
         assert src.read_bytes() == b"EDITED MEANWHILE"
@@ -751,7 +751,7 @@ class TestKeepOriginal:
                 raise OSError("locked")
             return real(a, b)
         monkeypatch.setattr(tw, "move_file_replacing", failing)
-        run = compress_run("-Mode", "9")
+        run = compress_run("--mode", "9")
         err = cz.complete_keep_original(run, str(written), str(src), str(src), str(d / "OLD_TIFFs"),
                                         st.st_size, st.st_mtime_ns)
         assert err and err.endswith("original restored"), err
@@ -763,7 +763,7 @@ class TestKeepOriginal:
         d, src, written, st = self._setup(tmp_path)
         (d / "OLD_TIFFs").mkdir()
         (d / "OLD_TIFFs" / "p.tif").write_bytes(b"EARLIER BACKUP")
-        err = cz.complete_keep_original(compress_run("-Mode", "9"), str(written), str(src), str(src),
+        err = cz.complete_keep_original(compress_run("--mode", "9"), str(written), str(src), str(src),
                                         str(d / "OLD_TIFFs"), st.st_size, st.st_mtime_ns)
         assert err is None
         names = sorted(os.listdir(d / "OLD_TIFFs"))
@@ -776,7 +776,7 @@ class TestKeepOriginal:
         (d / "OLD_TIFFs").mkdir()
         backup = d / "OLD_TIFFs" / "p.tif"
         os.rename(src, backup)
-        run = compress_run("-Mode", "9")
+        run = compress_run("--mode", "9")
         run.moved_originals.append({"backup": str(backup), "original": str(src), "final_dst": str(src)})
         run.temp_files.add(str(written))
         src.write_bytes(b"PARTIAL OUTPUT")
@@ -791,7 +791,7 @@ class TestKeepOriginal:
         backup = d / "OLD_TIFFs" / "p.tif"
         os.rename(src, backup)
         src.write_bytes(b"GOOD COPY")
-        run = compress_run("-Mode", "9")
+        run = compress_run("--mode", "9")
         run.moved_originals.append({"backup": str(backup), "original": str(src), "final_dst": str(src)})
         monkeypatch.setattr(tw, "zip_integrity", lambda *a, **k: True)
         cz.cleanup_after_stop(run)
@@ -832,7 +832,7 @@ class TestCopyExif:
 
     def test_a_raf_never_gives_its_focal_plane_resolution_or_icc(self, tools, photo):
         raf = photo.with_suffix(".RAF")
-        r = cx.process_pair(exif_run("-IccPolicy", "always"), pair(photo, raf, source="RAF"),
+        r = cx.process_pair(exif_run("--icc-policy", "always"), pair(photo, raf, source="RAF"),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.endswith("[EXIF from RAW]")
         call = next(c for c in tools.exif_calls if "-EXIF:All" in c)
@@ -860,7 +860,7 @@ class TestCopyExif:
     def test_an_unreadable_tiff_is_never_overwritten(self, tools, photo):
         """-SkipIfTiffHasExif: the probe's exit code decides, fail closed."""
         tools.exif_result = (1, "")
-        r = cx.process_pair(exif_run("-SkipIfTiffHasExif"), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--skip-if-tiff-has-exif"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith("ERROR (exiftool EXIF check)")
         assert len(tools.exif_calls) == 1
@@ -875,7 +875,7 @@ class TestCopyExif:
                 raise tw.ToolError("exiftool could not be started", "", -1)
             return ""
         monkeypatch.setattr(tw, "exiftool", exiftool)
-        r = cx.process_pair(exif_run("-IccPolicy", "preserve_tiff"), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--icc-policy", "preserve_tiff"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith("OK |"), r.line
         copy = next(c for c in tools.exif_calls if "-tagsfromfile" in c)
@@ -885,7 +885,7 @@ class TestCopyExif:
         """v3.1 phase 4: tiff_facts read the file but IFD0 has no compression: refused as
         before (the ZIP step never rewrites a file whose compression it cannot name)."""
         tools.comp = ""
-        r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--compress-zip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line == f"ERROR (exiftool check) | {photo.name} | cannot detect compression", r.line
         assert tools.magick_calls == []
@@ -899,7 +899,7 @@ class TestCopyExif:
     def test_safe_mode_passes_the_restricted_list(self, tools, photo):
         tools.pages = 3
         tools.only_subfile = False
-        r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--compress-zip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith("MULTI (3 IFDs") and r.multi == str(photo)
         assert tools.allowed_seen == [("REDUCEDIMAGE", "REDUCED")]
@@ -914,7 +914,7 @@ class TestCopyExif:
         """Round 16: the staged ZIP is moved ON TOP of the TIFF; a file registered before
         its gates was moved over the EXIF-bearing original."""
         setattr(tools, failing, False)
-        r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--compress-zip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith(text), r.line
         assert r.staged is None
@@ -929,14 +929,14 @@ class TestCopyExif:
                 return 0, "Warning: Error opening file"
             return 0, ""
         monkeypatch.setattr(tw, "exiftool", fake_exiftool(exiftool))
-        r = cx.process_pair(exif_run("-CompressZip"), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--compress-zip"), pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith("ERROR (exiftool metadata restore failed - original untouched)")
         assert r.staged is None
         assert sorted(os.listdir(photo.parent)) == [photo.name]
 
     def test_success_registers_the_staged_file_under_this_runs_id(self, tools, photo):
-        run = exif_run("-CompressZip")
+        run = exif_run("--compress-zip")
         r = cx.process_pair(run, pair(photo, photo.with_suffix(".jpg")),
                             str(photo.parent), str(photo.parent), 1.0)
         assert r.line.startswith("OK+ZIP |"), r.line
@@ -947,7 +947,7 @@ class TestCopyExif:
 
     def _to_outputdir(self, photo, tmp_path, *argv):
         out = tmp_path / "out 伊豆沼 [x] 100%"
-        r = cx.process_pair(exif_run("-OutputDir", str(out), *argv), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--output-dir", str(out), *argv), pair(photo, photo.with_suffix(".jpg")),
                             str(out), str(out), 1.0)
         return out, r
 
@@ -989,7 +989,7 @@ class TestCopyExif:
                 (0, "Warning: Error opening file") if "-all:all" in args else (0, ""))))
         else:
             setattr(tools, failing, False)
-        out, r = self._to_outputdir(photo, tmp_path, "-CompressZip")
+        out, r = self._to_outputdir(photo, tmp_path, "--compress-zip")
         assert r.line.startswith(text), r.line
         if failing == "magick_writes":
             assert "magick reported success but wrote no file" in r.line
@@ -1025,7 +1025,7 @@ class TestCopyExif:
         monkeypatch.setattr(tw, step, boom)
         out = tmp_path / "out 伊豆沼 [x] 100%"
         with pytest.raises(RuntimeError, match="exploded"):
-            self._to_outputdir(photo, tmp_path, "-CompressZip")
+            self._to_outputdir(photo, tmp_path, "--compress-zip")
         assert made, "no container was made: the test proves nothing about them"
         assert os.listdir(out) == [], "the copy, the staged file or a container stayed in -OutputDir"
         assert not any(c.exists() for c in made)
@@ -1035,7 +1035,7 @@ class TestCopyExif:
     def test_with_outputdir_success_leaves_only_the_staged_zip(self, tools, photo, tmp_path):
         """The copy has served (EXIF written to it, the ZIP made from it): the staged ZIP
         takes its name in the move that follows."""
-        out, r = self._to_outputdir(photo, tmp_path, "-CompressZip")
+        out, r = self._to_outputdir(photo, tmp_path, "--compress-zip")
         assert r.line.startswith("OK+ZIP |"), r.line
         assert os.listdir(out) == [r.staged]
         assert photo.read_bytes() == b"ORIGINAL"
@@ -1059,7 +1059,7 @@ class TestCopyExif:
             Path(dst).write_bytes(b"PART")
             raise OSError("disk full")
         monkeypatch.setattr(cx.shutil, "copy2", broken_copy)
-        r = cx.process_pair(exif_run("-OutputDir", str(out)), pair(photo, photo.with_suffix(".jpg")),
+        r = cx.process_pair(exif_run("--output-dir", str(out)), pair(photo, photo.with_suffix(".jpg")),
                             str(out), str(out), 1.0)
         assert r.line.startswith("ERROR (copy to OutputDir failed)")
         assert not (out / photo.name).exists()
@@ -1132,7 +1132,7 @@ class TestCopyExifOutputNames:
 
     def run_all(self, tmp_path, folders, *argv):
         out = tmp_path / "out 伊豆沼 [x] 100%"
-        run = exif_run("-OutputDir", str(out), "-Workers", "1", *argv)
+        run = exif_run("--output-dir", str(out), "--workers", "1", *argv)
         for f in folders:
             cx.process_folder(run, str(f))
         return run, out
@@ -1140,7 +1140,7 @@ class TestCopyExifOutputNames:
     def renames(self, run):
         return [m for level, m in run.log.lines if "RENAME" in m]
 
-    @pytest.mark.parametrize("extra", [[], ["-Overwrite"]], ids=["plain", "overwrite"])
+    @pytest.mark.parametrize("extra", [[], ["--overwrite"]], ids=["plain", "overwrite"])
     def test_the_second_session_gets_v2(self, tools, tmp_path, extra):
         run, out = self.run_all(tmp_path, self.sessions(tmp_path), *extra)
         assert sorted(os.listdir(out)) == ["DSCF0001 50%.tif", "DSCF0001 50%_v2.tif"]
@@ -1166,7 +1166,7 @@ class TestCopyExifOutputNames:
     def test_a_dry_run_gives_each_session_its_own_name(self, tools, tmp_path):
         """Nothing is written in a dry run, so only the claims of this run keep the third
         session off the name the second one was given."""
-        run, out = self.run_all(tmp_path, self.sessions(tmp_path, 3), "-DryRun")
+        run, out = self.run_all(tmp_path, self.sessions(tmp_path, 3), "--dry-run")
         assert [r.split(" -> ")[1] for r in self.renames(run)] == ["DSCF0001 50%_v2.tif", "DSCF0001 50%_v3.tif"]
         assert not out.exists()
         assert len([m for _lv, m in run.log.lines if "] DRY (" in m]) == 3, run.log.lines
@@ -1180,14 +1180,14 @@ class TestCopyExifOutputNames:
 
     def test_without_outputdir_nothing_is_renamed(self, tools, tmp_path):
         folders = self.sessions(tmp_path)
-        run = exif_run("-Workers", "1")
+        run = exif_run("--workers", "1")
         for f in folders:
             cx.process_folder(run, str(f))
         assert self.renames(run) == [] and run.claimed_dest == {}
         assert all(sorted(os.listdir(f)) == ["DSCF0001 50%.jpg", "DSCF0001 50%.tif"] for f in folders)
 
     def test_the_zip_path_lands_under_the_new_name_too(self, tools, tmp_path):
-        run, out = self.run_all(tmp_path, self.sessions(tmp_path), "-CompressZip")
+        run, out = self.run_all(tmp_path, self.sessions(tmp_path), "--compress-zip")
         assert sorted(os.listdir(out)) == ["DSCF0001 50%.tif", "DSCF0001 50%_v2.tif"]
         assert (run.ok, run.err) == (2, 0), run.log.lines
         assert len(self.renames(run)) == 1
@@ -1234,8 +1234,8 @@ class TestCopyExifAutoFind:
                                                                      capsys):
         monkeypatch.chdir(lib)
         monkeypatch.setattr(tw, "find_tool", lambda n: n)
-        rc = cx.main(["-InputDir", str(lib), "-AutoFind", "-FolderPattern", "S5pro",
-                      "-ExcludeFolders", "temp 一時", "-DryRun", "-Workers", "1"])
+        rc = cx.main(["--input-dir", str(lib), "--auto-find", "--folder-pattern", "S5pro",
+                      "--exclude-folders", "temp 一時", "--dry-run", "--workers", "1"])
         out = capsys.readouterr().out
         assert rc == 0, out
         assert "Excluded 1 folder(s) under: temp 一時" in out and "Folders found: 2" in out
@@ -1245,8 +1245,8 @@ class TestCopyExifAutoFind:
     def test_every_session_excluded_is_a_warning_not_a_crash(self, tools, lib, monkeypatch, capsys):
         monkeypatch.chdir(lib)
         monkeypatch.setattr(tw, "find_tool", lambda n: n)
-        rc = cx.main(["-InputDir", str(lib / "temp 一時"), "-AutoFind", "-FolderPattern", "S5pro",
-                      "-ExcludeFolders", "070102 S5pro", "-DryRun"])
+        rc = cx.main(["--input-dir", str(lib / "temp 一時"), "--auto-find", "--folder-pattern", "S5pro",
+                      "--exclude-folders", "070102 S5pro", "--dry-run"])
         out = capsys.readouterr().out
         assert rc == 0 and "Excluded 1 folder(s)" in out and "No folders matching 'S5pro'" in out
         assert "] DRY (" not in out
@@ -1269,8 +1269,8 @@ class TestStagedMoveFailures:
     ])
     def test_modes(self, tools, photo, tmp_path, monkeypatch, kind, text):
         monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
-        run = compress_run("-Mode", "1", "-InputDir", str(photo.parent),
-                           "-StagingDir", str(tmp_path / "stg"), "-ForceSequential")
+        run = compress_run("--mode", "1", "--input-dir", str(photo.parent),
+                           "--staging-dir", str(tmp_path / "stg"), "--force-sequential")
         assert cz.run_modes(run, {"Mode", "InputDir", "StagingDir", "ForceSequential"}) == 1
         assert error_lines(run) == [text]
         assert (run.err, run.ok) == (1, 1)
@@ -1285,7 +1285,7 @@ class TestStagedMoveFailures:
     def test_copy_exif(self, tools, photo, tmp_path, monkeypatch, kind, text):
         photo.with_suffix(".jpg").write_bytes(b"JPEG")
         monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
-        run = exif_run("-CompressZip", "-OutputDir", str(tmp_path / "out [x]"), "-Workers", "1")
+        run = exif_run("--compress-zip", "--output-dir", str(tmp_path / "out [x]"), "--workers", "1")
         cx.process_folder(run, str(photo.parent))
         assert error_lines(run) == [text]
         assert (run.err, run.ok) == (1, 1)
@@ -1294,8 +1294,8 @@ class TestStagedMoveFailures:
 
     def test_modes_land_the_staged_file(self, tools, photo, tmp_path):
         stg = tmp_path / "stg"
-        run = compress_run("-Mode", "1", "-InputDir", str(photo.parent), "-StagingDir", str(stg),
-                           "-ForceSequential")
+        run = compress_run("--mode", "1", "--input-dir", str(photo.parent), "--staging-dir", str(stg),
+                           "--force-sequential")
         assert cz.run_modes(run, {"Mode", "InputDir", "StagingDir", "ForceSequential"}) == 0
         out = photo.parent / "ZIP"
         assert (out / self.NAME).read_bytes() == b"COMPRESSED" and os.listdir(stg) == []
@@ -1309,7 +1309,7 @@ class TestStagedMoveFailures:
         old = 1_200_000_000_000_000_000
         os.utime(photo, ns=(old, old))
         stg = tmp_path / "stg [x]"
-        run = exif_run("-CompressZip", "-StagingDir", str(stg), "-Workers", "1")
+        run = exif_run("--compress-zip", "--staging-dir", str(stg), "--workers", "1")
         cx.process_folder(run, str(photo.parent))
         assert photo.read_bytes() == b"COMPRESSED" and os.listdir(stg) == []
         assert os.stat(photo).st_mtime_ns == old
@@ -1319,7 +1319,7 @@ class TestStagedMoveFailures:
 
 def modes(*argv):
     """run_modes on the command line `argv` (one file at a time): (run, exit code)."""
-    opt, bound = tw.parse_args(list(argv) + ["-ForceSequential"], cz.PARAMS)
+    opt, bound = tw.parse_args(list(argv) + ["--force-sequential"], cz.PARAMS)
     run = cz.Run(opt, NoLog(), [])
     return run, cz.run_modes(run, bound)
 
@@ -1343,7 +1343,7 @@ class TestPlan:
 
     def test_mode2_numbered_gives_the_second_claimant_v2(self, tools, flat):
         root, out = flat
-        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(out))
+        run, rc = modes("--mode", "2", "--input-dir", str(root), "--output-dir", str(out))
         assert rc == 0 and sorted(os.listdir(out)) == ["x 50%.tif", "x 50%_v2.tif"]
         assert len(tools.magick_calls) == 2 and (run.ok, run.counter, run.total) == (2, 2, 2)
 
@@ -1352,8 +1352,8 @@ class TestPlan:
         there: whoever reads the job list afterwards must read the new one, or both files
         are written to the same name."""
         root, out = flat
-        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(out),
-                        "-DuplicateAction", "Overwrite")
+        run, rc = modes("--mode", "2", "--input-dir", str(root), "--output-dir", str(out),
+                        "--duplicate-action", "Overwrite")
         assert rc == 0 and os.listdir(out) == ["x 50%.tif"]
         assert [c[1] for c in tools.magick_calls] == [str(root / "b" / "x 50%.tif")], \
             "only the last claimant is compressed"
@@ -1363,8 +1363,8 @@ class TestPlan:
 
     def test_mode2_skip_leaves_the_later_claimant_out(self, tools, flat):
         root, out = flat
-        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(out),
-                        "-DuplicateAction", "Skip")
+        run, rc = modes("--mode", "2", "--input-dir", str(root), "--output-dir", str(out),
+                        "--duplicate-action", "Skip")
         assert rc == 0 and os.listdir(out) == ["x 50%.tif"]
         assert [c[1] for c in tools.magick_calls] == [str(root / "a" / "x 50%.tif")]
         # v3.1: counted through Run.count like every other result, so it has its [n/total]
@@ -1379,15 +1379,15 @@ class TestPlan:
         ... [no thumbnail added: pass -SkipCompressedWithThumb]` -- the option that WAS passed."""
         tools.comp = "Adobe Deflate"
         monkeypatch.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: True)
-        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-GenerateThumbnail",
-                        "-SkipCompressedWithThumb")
+        run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--generate-thumbnail",
+                        "--skip-compressed-with-thumb")
         assert rc == 0 and tools.magick_calls == []
         assert said(run, "SKIP") == [f"[1/1] SKIP (compressed+thumb) | {photo.name}"]
 
     @pytest.mark.parametrize("mode", ["1", "0", "9"])
     def test_without_the_switch_the_skip_says_how_to_get_the_thumbnail(self, tools, photo, mode):
         tools.comp = "Adobe Deflate"
-        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-GenerateThumbnail")
+        run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--generate-thumbnail")
         assert said(run, "SKIP") == [f"[1/1] SKIP (Adobe Deflate) | {photo.name} "
                                      "[no thumbnail added: pass -SkipCompressedWithThumb]"]
 
@@ -1397,8 +1397,8 @@ class TestPlan:
         """-SkipCompressedWithThumb skips ONLY the files that have their thumbnail."""
         tools.comp = "Adobe Deflate"
         monkeypatch.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: False)
-        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-GenerateThumbnail",
-                        "-SkipCompressedWithThumb")
+        run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--generate-thumbnail",
+                        "--skip-compressed-with-thumb")
         assert said(run, "SKIP") == [] and tools.magick_calls
 
     @pytest.mark.parametrize("memory_for, runs, reduced", [(4, 2, False), (1, 1, True), (8, 2, False)])
@@ -1406,7 +1406,7 @@ class TestPlan:
                                                              memory_for, runs, reduced):
         """v3.1 (O5): -Workers 8 -CapWorkers 2 with memory for 4 logged `Workers reduced
         from 8 to 4` while 2 ran."""
-        run = compress_run("-Mode", "1", "-Workers", "8", "-CapWorkers", "2")
+        run = compress_run("--mode", "1", "--workers", "8", "--cap-workers", "2")
         run.parallel = True
         monkeypatch.setattr(tw, "available_memory_bytes", lambda: memory_for * 1000)
         monkeypatch.setattr(tw, "max_image_pixels", lambda paths, chunk_size=400: 1000 / 75)
@@ -1424,7 +1424,7 @@ class TestPlan:
         """SafeMode: the file is reported and NOT queued -- queued, the worker would
         compress it and the original would go to OLD_TIFFs."""
         tools.pages, tools.only_subfile = 2, False
-        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent))
+        run, rc = modes("--mode", mode, "--input-dir", str(photo.parent))
         assert said(run, f"MULTI (2 pages - skipped, original untouched) | {photo.name}")
         assert tools.magick_calls == [] and run.multi_paths == [str(photo)] and run.multi == 1
         assert os.listdir(photo.parent) == [photo.name] and photo.read_bytes() == b"ORIGINAL"
@@ -1432,7 +1432,7 @@ class TestPlan:
     @pytest.mark.parametrize("mode", ["0", "9"])
     def test_modes_0_and_9_write_a_temp_sibling_never_the_file_itself(self, tools, photo, mode):
         """The worker's output path for a .tif source would BE the original."""
-        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent))
+        run, rc = modes("--mode", mode, "--input-dir", str(photo.parent))
         assert rc == 0, run.log.lines
         written = tools.magick_calls[0][-1].replace("%%", "%")
         assert written != str(photo) and os.path.dirname(written) == str(photo.parent)
@@ -1443,7 +1443,7 @@ class TestPlan:
 
     def test_mode9_with_staging_writes_there_and_leaves_it_empty(self, tools, photo, tmp_path):
         stg = tmp_path / "stg [x]"
-        run, rc = modes("-Mode", "9", "-InputDir", str(photo.parent), "-StagingDir", str(stg))
+        run, rc = modes("--mode", "9", "--input-dir", str(photo.parent), "--staging-dir", str(stg))
         assert rc == 0, run.log.lines
         assert os.path.dirname(tools.magick_calls[0][-1].replace("%%", "%")) == str(stg)
         assert os.listdir(stg) == [] and photo.read_bytes() == b"COMPRESSED"
@@ -1452,7 +1452,7 @@ class TestPlan:
     @pytest.mark.parametrize("mode", ["1", "8", "9"])
     def test_a_dry_run_plans_without_the_staging_folder(self, tools, photo, tmp_path, mode):
         stg = tmp_path / "stg [x]"
-        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-StagingDir", str(stg), "-DryRun")
+        run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--staging-dir", str(stg), "--dry-run")
         assert rc == 0 and run.dry == 1 and said(run, f"DRY (Uncompressed -> ZIP) | {photo.name}")
         assert not stg.exists(), "a dry run created the staging folder"
         assert os.listdir(photo.parent) == [photo.name] and tools.magick_calls == []
@@ -1460,14 +1460,14 @@ class TestPlan:
 
     @pytest.mark.parametrize("mode", ["0", "9"])
     def test_a_dry_run_of_modes_0_and_9_has_nothing_to_clean_or_archive(self, tools, photo, mode):
-        run, rc = modes("-Mode", mode, "-InputDir", str(photo.parent), "-DryRun")
+        run, rc = modes("--mode", mode, "--input-dir", str(photo.parent), "--dry-run")
         assert rc == 0 and run.dry == 1 and not run.temp_files and not run.moved_originals
         assert os.listdir(photo.parent) == [photo.name] and photo.read_bytes() == b"ORIGINAL"
 
     def test_a_failed_archive_is_a_counted_error(self, tools, photo, monkeypatch):
         """Modes 0/9: complete_keep_original said no -- the run must end with exit code 1."""
         monkeypatch.setattr(cz, "complete_keep_original", lambda *a, **k: "boom")
-        run, rc = modes("-Mode", "9", "-InputDir", str(photo.parent))
+        run, rc = modes("--mode", "9", "--input-dir", str(photo.parent))
         assert rc == 1 and run.err == 1
         assert error_lines(run) == [f"ERROR (keep original) | {photo.name} | boom"]
 
@@ -1477,14 +1477,14 @@ class TestPlan:
         d = tmp_path / "伊豆沼 [x]" / "shots_TIFF"
         d.mkdir(parents=True)
         (d / "p.tif").write_bytes(b"ORIGINAL")
-        run, rc = modes("-Mode", "4", "-InputDir", str(d.parent), "-ZipSuffix", "_TIFF")
+        run, rc = modes("--mode", "4", "--input-dir", str(d.parent), "--zip-suffix", "_TIFF")
         assert rc == 1 and tools.magick_calls == [] and (d / "p.tif").read_bytes() == b"ORIGINAL"
         assert said(run, "ERROR (mode 4 would write over its own source - refused;")
 
     def test_mode5_never_climbs_above_the_input_root(self, tmp_path):
         """A TIFF directly in the root has its grandparent OUTSIDE the chosen tree."""
         root = str(tmp_path / "data")
-        opt, _b = tw.parse_args(["-Mode", "5"], cz.PARAMS)
+        opt, _b = tw.parse_args(["--mode", "5"], cz.PARAMS)
 
         def out(directory):
             f = SimpleNamespace(dir=directory, stem="p", name="p.tif", path=directory + "\\p.tif")
@@ -1515,12 +1515,12 @@ class TestMode2InTheInputFolder:
     def converted(self, tools):
         return sorted(c[1] for c in tools.magick_calls)
 
-    @pytest.mark.parametrize("extra", [["-Overwrite"], ["-DuplicateAction", "Overwrite", "-Overwrite"],
-                                       ["-DuplicateAction", "Skip", "-Overwrite"]],
+    @pytest.mark.parametrize("extra", [["--overwrite"], ["--duplicate-action", "Overwrite", "--overwrite"],
+                                       ["--duplicate-action", "Skip", "--overwrite"]],
                              ids=["overwrite", "duplicates-overwrite", "duplicates-skip"])
     def test_a_photo_is_never_replaced_by_another_source(self, tools, lib, extra):
         root, sub = lib
-        run, rc = modes("-Mode", "2", "-InputDir", str(root), *extra)
+        run, rc = modes("--mode", "2", "--input-dir", str(root), *extra)
         assert rc == 1, run.log.lines
         refused = said(run, "ERROR (mode 2 would replace another source file of this run - refused; "
                             "pass -OutputDir) | a 50%.tif | " + str(root / "a 50%.tif"))
@@ -1535,7 +1535,7 @@ class TestMode2InTheInputFolder:
     def test_without_overwrite_the_other_photo_gets_its_own_name(self, tools, lib):
         """As before: nothing is written over a source; the copy is numbered."""
         root, sub = lib
-        run, rc = modes("-Mode", "2", "-InputDir", str(root))
+        run, rc = modes("--mode", "2", "--input-dir", str(root))
         assert rc == 0 and run.err == 0, run.log.lines
         assert not said(run, "would replace another source")
         assert sorted(os.listdir(root)) == sorted(["a 50%.tif", "a 50%_v2.tif", "c.tif", sub.name])
@@ -1543,9 +1543,9 @@ class TestMode2InTheInputFolder:
 
     def test_the_copies_into_the_input_folder_are_announced_once(self, tools, lib):
         root, sub = lib
-        for argv in (["-InputDir", str(root)], ["-InputDir", str(root), "-OutputDir", str(root)],
-                     ["-InputDir", str(root), "-DryRun"]):
-            run, rc = modes("-Mode", "2", *argv)
+        for argv in (["--input-dir", str(root)], ["--input-dir", str(root), "--output-dir", str(root)],
+                     ["--input-dir", str(root), "--dry-run"]):
+            run, rc = modes("--mode", "2", *argv)
             lines = said(run, "Mode 2 writes into the input folder itself")
             assert len(lines) == 1, (argv, run.log.lines)
             assert lines[0].startswith(f"Mode 2 writes into the input folder itself: 2 file(s) from its "
@@ -1554,15 +1554,15 @@ class TestMode2InTheInputFolder:
 
     def test_an_output_folder_of_its_own_is_not_announced(self, tools, lib, tmp_path):
         root, sub = lib
-        run, rc = modes("-Mode", "2", "-InputDir", str(root), "-OutputDir", str(tmp_path / "out [x]"),
-                        "-Overwrite")
+        run, rc = modes("--mode", "2", "--input-dir", str(root), "--output-dir", str(tmp_path / "out [x]"),
+                        "--overwrite")
         assert rc == 0, run.log.lines
         assert not said(run, "Mode 2 writes into the input folder itself")
         assert not said(run, "would replace another source"), "the root photo is not a destination here"
 
     def test_a_folder_without_subfolders_is_not_announced(self, tools, photo):
         """The mode 2 "in place" of one flat folder: every file is its own destination."""
-        run, rc = modes("-Mode", "2", "-InputDir", str(photo.parent), "-Overwrite")
+        run, rc = modes("--mode", "2", "--input-dir", str(photo.parent), "--overwrite")
         assert rc == 0 and photo.read_bytes() == b"COMPRESSED", run.log.lines
         assert not said(run, "Mode 2 writes into the input folder itself")
         assert not said(run, "would replace another source")
@@ -1597,7 +1597,7 @@ class TestCopyModesNeverReplaceASource:
 
     def test_a_photo_is_never_replaced_by_another_source(self, tools, lib):
         mode, root, red, blue = lib
-        run, rc = modes("-Mode", mode, "-InputDir", str(root), "-Overwrite")
+        run, rc = modes("--mode", mode, "--input-dir", str(root), "--overwrite")
         refused = said(run, f"ERROR (mode {mode} would replace another source file of this run - refused) "
                             f"| x 50%.tif | {red}")
         assert len(refused) == 1 and run.err == 1 and rc == 1, run.log.lines
@@ -1610,7 +1610,7 @@ class TestCopyModesNeverReplaceASource:
     def test_without_overwrite_nothing_is_written_over_it(self, tools, lib):
         """As before: the other photo is skipped (its destination exists)."""
         mode, root, red, blue = lib
-        run, rc = modes("-Mode", mode, "-InputDir", str(root))
+        run, rc = modes("--mode", mode, "--input-dir", str(root))
         assert not said(run, "would replace another source"), run.log.lines
         assert blue.read_bytes() == b"BLUE PHOTO" and red.read_bytes() in (b"RED PHOTO", b"COMPRESSED")
 
@@ -1644,7 +1644,7 @@ class TestMode8DefaultStaging:
             raise AssertionError("an unattended run was asked a question")
         monkeypatch.setattr(cz, "_is_interactive", lambda: False)
         monkeypatch.setattr("builtins.input", no_input)
-        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        run, rc = modes("--mode", "8", "--input-dir", str(photo.parent))
         assert rc == 0, run.log.lines
         staged = tools.magick_calls[0][-1].replace("%%", "%")
         assert os.path.dirname(os.path.dirname(staged)) == str(photo.parent)
@@ -1656,14 +1656,14 @@ class TestMode8DefaultStaging:
     @pytest.mark.parametrize("answer", ["", "y", "Y", "yes", "s", " "])
     def test_yes_or_enter_uses_the_default_folder(self, tools, photo, console, answer):
         console.answers.append(answer)
-        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        run, rc = modes("--mode", "8", "--input-dir", str(photo.parent))
         assert rc == 0 and console.asked == ["Use default temporary staging? [Y/n]: "]
         assert photo.read_bytes() == b"COMPRESSED" and os.listdir(photo.parent) == [photo.name]
 
     @pytest.mark.parametrize("answer", ["n", "N", "no", " nao", "Não"])
     def test_no_stops_the_run_before_anything_is_made(self, tools, photo, console, answer):
         console.answers.append(answer)
-        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        run, rc = modes("--mode", "8", "--input-dir", str(photo.parent))
         assert rc == 1
         assert error_lines(run) == ["Mode 8 aborted: no staging directory selected."]
         assert tools.magick_calls == [] and photo.read_bytes() == b"ORIGINAL"
@@ -1672,14 +1672,14 @@ class TestMode8DefaultStaging:
 
     def test_end_of_input_counts_as_enter(self, tools, photo, console):
         """As it is today: Ctrl+Z at the question goes on with the default folder."""
-        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent))
+        run, rc = modes("--mode", "8", "--input-dir", str(photo.parent))
         assert rc == 0 and len(console.asked) == 1 and photo.read_bytes() == b"COMPRESSED"
 
     def test_with_staging_given_or_in_a_dry_run_there_is_no_question(self, tools, photo, console, tmp_path):
-        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent), "-StagingDir", str(tmp_path / "stg"))
+        run, rc = modes("--mode", "8", "--input-dir", str(photo.parent), "--staging-dir", str(tmp_path / "stg"))
         assert rc == 0 and console.asked == []
         photo.write_bytes(b"ORIGINAL")
-        run, rc = modes("-Mode", "8", "-InputDir", str(photo.parent), "-DryRun")
+        run, rc = modes("--mode", "8", "--input-dir", str(photo.parent), "--dry-run")
         assert rc == 0 and console.asked == [] and os.listdir(photo.parent) == [photo.name]
         assert not said(run, "Default temporary staging")
 
@@ -1691,7 +1691,7 @@ class TestMode8DefaultStaging:
         temp.mkdir()
         monkeypatch.setattr(cz.tempfile, "gettempdir", lambda: str(temp))
         monkeypatch.setattr(cz, "_is_interactive", lambda: False)
-        run, rc = modes("-Mode", "8", "-InputDir", f"{photo.parent};{other}")
+        run, rc = modes("--mode", "8", "--input-dir", f"{photo.parent};{other}")
         assert rc == 0, run.log.lines
         for call in tools.magick_calls:
             assert os.path.dirname(os.path.dirname(call[-1].replace("%%", "%"))) == str(temp)
@@ -1724,7 +1724,7 @@ class TestGroupSteps:
         """Round 12: the pixel gate ran on the STAGED file. The .tiff source goes only after
         the .tif that replaces it decodes at its destination."""
         src, dst, job, result = self._tiff_and_tif(tmp_path)
-        run = compress_run("-Mode", "8", "-DeleteSource")
+        run = compress_run("--mode", "8", "--delete-source")
         checked, verdict = [], [False]
 
         def integrity(path, timeout=30, load_factor=1.0):
@@ -1747,7 +1747,7 @@ class TestGroupSteps:
         src, dst, job, result = self._tiff_and_tif(tmp_path)
         checked = []
         monkeypatch.setattr(tw, "zip_integrity", lambda p, t=30, load_factor=1.0: checked.append(p) or True)
-        run = compress_run("-Mode", "8", "-DeleteSource")
+        run = compress_run("--mode", "8", "--delete-source")
         os.remove(dst)
         cz._delete_sources(run, self._outcome(results=[(job, result)]))
         assert error_lines(run) == [f"ERROR (final destination missing, source preserved) | {src.name}"]
@@ -1755,9 +1755,9 @@ class TestGroupSteps:
         dst.write_bytes(b"COMPRESSED")
         refused = cz.JobResult("ERROR (x) | p", src.name, str(src), can_delete=False)
         cz._delete_sources(run, self._outcome(results=[(job, refused)]))
-        dry = compress_run("-Mode", "8", "-DeleteSource", "-DryRun")
+        dry = compress_run("--mode", "8", "--delete-source", "--dry-run")
         cz._delete_sources(dry, self._outcome(results=[(job, result)]))
-        other_mode = compress_run("-Mode", "1", "-DeleteSource")
+        other_mode = compress_run("--mode", "1", "--delete-source")
         cz._delete_sources(other_mode, self._outcome(results=[(job, result)]))
         in_place = cz.Job(src=str(dst), write_dst=job.write_dst, final_dst=str(dst), name=dst.name)
         replaced = cz.JobResult("OK (Uncompressed -> ZIP) | p 50%.tif", dst.name, str(dst), can_delete=True)
@@ -1787,7 +1787,7 @@ class TestGroupSteps:
             moves.append(os.path.basename(dst))
             return real(src, dst, run_id)
         monkeypatch.setattr(tw, "move_file_into_place", spy)
-        run = compress_run("-Mode", "8", "-StagingDir", str(stg))
+        run = compress_run("--mode", "8", "--staging-dir", str(stg))
         outcome = self._outcome(staging_map=staging_map, integrity_failed_dst={str(lib / "b.tif").lower()})
         cz._move_staged(run, jobs, str(lib), outcome)
         assert (lib / "a.tif").read_bytes() == b"COMPRESSED a.tif"
@@ -1797,7 +1797,7 @@ class TestGroupSteps:
         assert os.listdir(stg) == ["abcd1234_0123456789ab_c.tif"], "the failed file is dropped, c.tif waits"
         assert ("INFO", f"  -> Moved 1 file(s) -> {lib}") in run.log.lines and run.err == 0
         (stg / "abcd1234_0123456789ab_a.tif").write_bytes(b"SECOND")
-        dry = compress_run("-Mode", "8", "-StagingDir", str(stg), "-DryRun")
+        dry = compress_run("--mode", "8", "--staging-dir", str(stg), "--dry-run")
         cz._move_staged(dry, jobs[:1], str(lib), self._outcome(staging_map=staging_map))
         assert (lib / "a.tif").read_bytes() == b"COMPRESSED a.tif" and moves == ["a.tif"], \
             "a dry run moves nothing"
@@ -1814,7 +1814,7 @@ class TestGroupSteps:
             tools.exif_result = (0, "Warning: Error opening file - x.mie")
         else:
             tools.pixels = False
-        run = compress_run("-Mode", "8", "-DeleteSource", "-StagingDir", str(stg), "-ForceSequential")
+        run = compress_run("--mode", "8", "--delete-source", "--staging-dir", str(stg), "--force-sequential")
         run.total = 1
         staged = stg / "abcd1234_0123456789ab_photo.tif"
         job = cz.Job(src=str(photo), write_dst=str(staged), final_dst=str(photo), name=photo.name,
@@ -1835,7 +1835,7 @@ class TestGroupSteps:
         def boom(*a, **k):
             raise RuntimeError("history exploded")
         monkeypatch.setattr(tw, "finish_written_tiff", boom)
-        run = compress_run("-Mode", "9", "-ForceSequential")
+        run = compress_run("--mode", "9", "--force-sequential")
         run.total = 1
         st = os.stat(photo)
         sibling = str(photo) + ".abcd1234_0123456789ab.tif"
@@ -1864,7 +1864,7 @@ class TestGroupSteps:
         st = os.stat(src)
         job = cz.Job(src=str(src), write_dst=str(written), final_dst=str(src), name=src.name,
                      keep_dir=str(d / "OLD_TIFFs"), src_length=st.st_size, src_mtime_ns=st.st_mtime_ns)
-        run = compress_run("-Mode", "9")
+        run = compress_run("--mode", "9")
         failed = (self._outcome(error_srcs={str(src).lower()}) if why == "error"
                   else self._outcome(integrity_failed_dst={str(src).lower()}))
         cz._archive_originals(run, [job], failed)
@@ -2218,7 +2218,7 @@ class TestResultKinds:
         assert [k.level for k in K] == ["INFO", "INFO", "WARN", "WARN", "WARN", "INFO", "ERROR"]
 
     def test_compress_tally(self):
-        run = compress_run("-Mode", "1")
+        run = compress_run("--mode", "1")
         run.total = 8
         for line in ("OK (LZW -> ZIP) | a.tif", "SKIP (exists) | b.tif", "MULTI (2 pages) | c.tif",
                      "ERROR (magick) | d.tif | x", "WARN (exiftool failed, ZIP ok) | e.tif",
@@ -2286,9 +2286,9 @@ class TestPathsAndMoves:
         monkeypatch.setattr(tw, "find_tool", lambda n: n)
         nope = str(lib / "nope")
         dirs = f"{nope};{nope};{lib / 'ok'};{nope.upper()}"
-        rc = {"compress": lambda: cz.main(["-Mode", "1", "-InputDir", dirs, "-DryRun"]),
-              "copy_exif": lambda: cx.main(["-InputDir", dirs, "-DryRun"]),
-              "thumbnails": lambda: gt.main(["-InputDir", dirs, "-DryRun"])}[backend]()
+        rc = {"compress": lambda: cz.main(["--mode", "1", "--input-dir", dirs, "--dry-run"]),
+              "copy_exif": lambda: cx.main(["--input-dir", dirs, "--dry-run"]),
+              "thumbnails": lambda: gt.main(["--input-dir", dirs, "--dry-run"])}[backend]()
         out = capsys.readouterr().out
         assert rc == 1, out
         assert sum("input directory not found" in ln for ln in out.splitlines()) == 1, out
@@ -2308,8 +2308,8 @@ class TestPathsAndMoves:
         not_a_folder.write_bytes(b"MINE")
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(tw, "find_tool", lambda n: None)        # not even looked for
-        args = ["-InputDir", str(lib), "-OutputDir", str(not_a_folder)]
-        rc = {"compress": lambda: cz.main(["-Mode", "2"] + args),
+        args = ["--input-dir", str(lib), "--output-dir", str(not_a_folder)]
+        rc = {"compress": lambda: cz.main(["--mode", "2"] + args),
               "copy_exif": lambda: cx.main(args),
               "thumbnails": lambda: gt.main(args)}[backend]()
         out = capsys.readouterr().out
@@ -2516,44 +2516,18 @@ class TestPathsAndMoves:
 
 
 class TestCommandLine:
-    """The command line the .ps1 backends had: a preset saved by v2.x must mean the same."""
-
-    def test_binding(self):
-        opt, bound = tw.parse_args(["-mode", "9", "-InputDir", r"E:\a b", "-SafeMode:$false",
-                                    "-DryRun", "-Overwrite:$false", "-workers", "3",
-                                    "-SkipLzwAsCompressed:$true", "-SrgbProfile", ""], cz.PARAMS)
-        assert opt["Mode"] == 9 and opt["InputDir"] == r"E:\a b" and opt["Workers"] == 3
-        assert opt["SafeMode"] is False and opt["DryRun"] is True and opt["Overwrite"] is False
-        assert opt["SkipLzwAsCompressed"] is True and opt["SrgbProfile"] == ""
-        assert bound == {"Mode", "InputDir", "SafeMode", "DryRun", "Overwrite", "Workers",
-                         "SkipLzwAsCompressed", "SrgbProfile"}
-        assert opt["ZipSubfolderName"] == "ZIP" and opt["DeleteSource"] is False
-
-    def test_prefixes_and_values(self):
-        opt, _ = tw.parse_args(["-DeleteS", "-Mo", "8", "-Mode:8", "-SafeMode", "$true",
-                                "-DuplicateAction", "skip", "-OutputDir", "-weird name"], cz.PARAMS)
-        assert opt["DeleteSource"] is True and opt["Mode"] == 8
-        assert opt["DuplicateAction"] == "Skip", "a choice is matched without case"
-        assert opt["OutputDir"] == "-weird name"
-
-    @pytest.mark.parametrize("argv", [
-        ["-D"], ["-NoSuchThing"], ["stray"], ["-Workers", "0"], ["-Workers", "65"],
-        ["-Workers", "many"], ["-Mode"], ["-SafeMode", "maybe"], ["-DryRun:perhaps"],
-        ["-DuplicateAction", "Rename"], ["-OutputDir", "-DryRun"], ["-WorkerMemoryFraction", "nan"],
-    ])
-    def test_what_cannot_be_bound_is_refused(self, argv):
-        with pytest.raises(tw.UsageError):
-            tw.parse_args(argv, cz.PARAMS)
+    """The command line of v3.1 (D3): --kebab-case value, every yes/no as --x / --no-x, no
+    abbreviation, names with their exact case (T6). The one of v3.0.0 and the .ps1 backends
+    (-Name value, a prefix, any case) is tools/legacy_args.py's: tests/test_legacy_args.py."""
 
     def test_thumbnail_patterns(self):
-        for bad in (["-Page", "first"], ["-Quality", "0"], ["-Quality", "101"]):
+        for bad in (["--page", "first"], ["--quality", "0"], ["--quality", "101"]):
             with pytest.raises(tw.UsageError):
                 tw.parse_args(bad, gt.PARAMS)
-        opt, _ = tw.parse_args(["-Page", "all", "-Quality", "100"], gt.PARAMS)
+        opt, _ = tw.parse_args(["--page", "all", "--quality", "100"], gt.PARAMS)
         assert opt["Page"] == "all" and opt["Quality"] == "100"
 
-    def test_the_new_command_line_binds_the_same(self):
-        """v3.1 (D3): --kebab-case value, every yes/no as --x / --no-x."""
+    def test_binding(self):
         opt, bound = tw.parse_args(["--mode", "9", "--input-dir", r"E:\写真 [x] 50%",
                                     "--no-safe-mode", "--dry-run", "--no-overwrite", "--workers",
                                     "3", "--skip-lzw-as-compressed", "--srgb-profile", "",
@@ -2575,7 +2549,7 @@ class TestCommandLine:
         ["--dry-run=perhaps"], ["--no-dry-run=1"], ["--duplicate-action", "Rename"],
         ["--output-dir", "--dry-run"], ["--worker-memory-fraction", "nan"],
     ])
-    def test_what_the_new_command_line_cannot_bind_is_refused(self, argv):
+    def test_what_cannot_be_bound_is_refused(self, argv):
         with pytest.raises(tw.UsageError):
             tw.parse_args(argv, cz.PARAMS)
 
@@ -2590,8 +2564,8 @@ class TestCommandLine:
     def test_a_bad_command_line_exits_1_before_anything_is_touched(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         for module in (cz, cx, gt):
-            assert module.main(["-NoSuchThing"]) == 1
-        assert "ERROR: unknown parameter -NoSuchThing" in capsys.readouterr().out
+            assert module.main(["--no-such-thing"]) == 1
+        assert "ERROR: unrecognized arguments: --no-such-thing" in capsys.readouterr().out
         assert os.listdir(tmp_path) == [], "not even a log folder"
 
     def test_exiftool_gets_its_arguments_on_stdin(self, monkeypatch):
@@ -2701,7 +2675,7 @@ class TestThumbnails:
         real = tw.run_tasks
         monkeypatch.setattr(tw, "run_tasks", lambda tasks, worker, workers: ran_with.append(workers)
                             or real(tasks, worker, workers))
-        rc = gt.main(["-InputDir", str(lib), "-Workers", asked, "-DryRun"])
+        rc = gt.main(["--input-dir", str(lib), "--workers", asked, "--dry-run"])
         out = capsys.readouterr().out
         assert rc == 0 and ran_with == [used], out
         line = f"Workers: {asked} asked, {gt.MAX_PARALLEL} used"

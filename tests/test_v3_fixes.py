@@ -51,13 +51,13 @@ def hostile_folder(tmp_path, *names):
 @pytest.mark.parametrize("lane", LANES)
 class TestRootsAndOutputDirAreResolvedOnce:
     @pytest.mark.parametrize("script,extra", [
-        ("compress_tiff_zip.py", ["-Mode", "9", "-DryRun"]),        # round 16
-        ("generate_thumbnails.py", ["-Recursive", "-DryRun"]),      # 1
-        ("copy_exif_to_tiff.py", ["-DryRun"]),                      # 1
+        ("compress_tiff_zip.py", ["--mode", "9", "--dry-run"]),        # round 16
+        ("generate_thumbnails.py", ["--recursive", "--dry-run"]),      # 1
+        ("copy_exif_to_tiff.py", ["--dry-run"]),                      # 1
     ])
     def test_dot_root_is_normalised_before_the_exclusion(self, tmp_path, lane, script, extra):
         work = hostile_folder(tmp_path, "a.tif", "a.jpg")
-        result = run_ps(lane, script, extra + ["-InputDir", ".", "-ExcludeFolders", work.name], work)
+        result = run_ps(lane, script, extra + ["--input-dir", ".", "--exclude-folders", work.name], work)
         assert result.returncode == 0, result.stdout
         assert "| a.tif" in result.stdout and "DRY" in result.stdout, result.stdout
 
@@ -68,8 +68,8 @@ class TestRootsAndOutputDirAreResolvedOnce:
             (tmp_path / sub).mkdir()
             make_tiff(tmp_path / sub / "x.tif")
         result = run_ps(lane, "compress_tiff_zip.py",
-                        ["-Mode", "2", "-InputDir", f"{tmp_path / 'A'};{tmp_path / 'B'}",
-                         "-OutputDir", "out"], tmp_path)
+                        ["--mode", "2", "--input-dir", f"{tmp_path / 'A'};{tmp_path / 'B'}",
+                         "--output-dir", "out"], tmp_path)
         assert result.returncode == 0, result.stdout
         assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["x.tif", "x_v2.tif"]
         assert not (tmp_path / "A" / "out").exists() and not (tmp_path / "B" / "out").exists()
@@ -83,8 +83,8 @@ def test_copy_exif_dry_run_creates_no_output_folder(tmp_path, lane):
     out_dir = tmp_path / "out [not yet]"
     stage = tmp_path / "stage [not yet]"
     result = run_ps(lane, "copy_exif_to_tiff.py",
-                    ["-InputDir", work, "-DryRun", "-CompressZip", "-OutputDir", out_dir,
-                     "-StagingDir", stage], tmp_path)
+                    ["--input-dir", work, "--dry-run", "--compress-zip", "--output-dir", out_dir,
+                     "--staging-dir", stage], tmp_path)
     assert result.returncode == 0, result.stdout
     assert "DRY (EXIF + ZIP) | a.tif <= a.jpg" in result.stdout, result.stdout
     assert not out_dir.exists() and not stage.exists()
@@ -93,7 +93,7 @@ def test_copy_exif_dry_run_creates_no_output_folder(tmp_path, lane):
 
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
-@pytest.mark.parametrize("flag", ["-StagingDir", "-OutputDir"])
+@pytest.mark.parametrize("flag", ["--staging-dir", "--output-dir"])
 def test_a_file_where_a_folder_is_needed_exits_1(tmp_path, lane, flag):
     """3. Nothing was compressed: that is a failed run, not a clean one. (Found in the
     legacy mode, which left with v3.1; the same question for mode 2, in place.)"""
@@ -102,9 +102,9 @@ def test_a_file_where_a_folder_is_needed_exits_1(tmp_path, lane, flag):
     not_a_folder = tmp_path / "a file.txt"
     not_a_folder.write_text("x")
     result = run_ps(lane, "compress_tiff_zip.py",
-                    ["-Mode", "2", "-InputDir", work, flag, not_a_folder], tmp_path)
+                    ["--mode", "2", "--input-dir", work, flag, not_a_folder], tmp_path)
     assert result.returncode == 1, result.stdout
-    if flag == "-StagingDir":
+    if flag == "--staging-dir":
         assert "ERROR (StagingDir exists as a file) | a.tif" in result.stdout, result.stdout
     else:
         # v3.1: said before anything starts. Until v3.0.0 os.makedirs raised in the middle of
@@ -122,7 +122,7 @@ def test_a_mode_that_does_not_exist_is_refused(tmp_path, lane, mode):
     """4. A typo in -Mode must not read as "nothing to do"."""
     if shutil.which("magick") is None or shutil.which("exiftool") is None:
         pytest.skip("ImageMagick and exiftool required")
-    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", mode, "-InputDir", tmp_path], tmp_path)
+    result = run_ps(lane, "compress_tiff_zip.py", ["--mode", mode, "--input-dir", tmp_path], tmp_path)
     assert result.returncode == 1, result.stdout
     assert f"-Mode {mode} does not exist" in result.stdout
     assert not (tmp_path / "Logs").exists(), "refused before anything is created"
@@ -130,8 +130,8 @@ def test_a_mode_that_does_not_exist_is_refused(tmp_path, lane, mode):
 
 @requires_tools
 @pytest.mark.parametrize("lane", LANES)
-@pytest.mark.parametrize("args", [[], ["-InputDir", "."], ["-RestoreStranded"],
-                                  ["-StagingDir", "stg", "-GenerateThumbnail"]],
+@pytest.mark.parametrize("args", [[], ["--input-dir", "."], ["--restore-stranded"],
+                                  ["--staging-dir", "stg", "--generate-thumbnail"]],
                          ids=["nothing", "inputdir", "restore-stranded", "other-options"])
 def test_compress_without_a_mode_is_refused(tmp_path, lane, args):
     """v3.1: until v3.0.0 a run without -Mode was the "legacy" mode -- it compressed every

@@ -269,8 +269,8 @@ def test_compress_caps_workers_by_memory(tmp_path):
     make_tiff(in_dir / "b.tif")
 
     result = run_ps("parallel", "compress_tiff_zip.py",
-                    ["-Mode", "3", "-InputDir", str(in_dir), "-Workers", "8",
-                     "-WorkerMemoryFraction", "0.000001"], tmp_path)
+                    ["--mode", "3", "--input-dir", str(in_dir), "--workers", "8",
+                     "--worker-memory-fraction", "0.000001"], tmp_path)
 
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     log = _logs(tmp_path, "compress_tiff_zip", result)
@@ -297,8 +297,8 @@ def test_copy_exif_caps_workers_by_memory(tmp_path):
     )
 
     result = run_ps("parallel", "copy_exif_to_tiff.py",
-                    ["-InputDir", str(work), "-Workers", "8",
-                     "-WorkerMemoryFraction", "0.000001"], tmp_path)
+                    ["--input-dir", str(work), "--workers", "8",
+                     "--worker-memory-fraction", "0.000001"], tmp_path)
 
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
     log = _logs(tmp_path, "Copy-S5Pro-Exif", result)
@@ -324,10 +324,10 @@ def test_one_worker_accepts_the_memory_fraction(tmp_path):
         capture_output=True, check=True, timeout=120,
     )
 
-    base = ["-InputDir", str(work)]
+    base = ["--input-dir", str(work)]
     without = run_ps("sequential", "copy_exif_to_tiff.py", base, tmp_path)
     with_param = run_ps("sequential", "copy_exif_to_tiff.py",
-                        base + ["-WorkerMemoryFraction", "0.5"], tmp_path)
+                        base + ["--worker-memory-fraction", "0.5"], tmp_path)
 
     assert with_param.returncode == without.returncode, (
         f"without: {without.returncode}\n{without.stdout}\n{without.stderr}\n"
@@ -369,8 +369,8 @@ def test_compress_memory_estimate_reads_non_ascii_paths(tmp_path):
         "@echo off",
         "chcp 850 >nul",
         f'cd /d "{tmp_path}"',
-        f'"{sys.executable}" "{script}" -Mode 3 '
-        f'-InputDir "{in_dir}" -Workers 4 -WorkerMemoryFraction 0.8',
+        f'"{sys.executable}" "{script}" --mode 3 '
+        f'--input-dir "{in_dir}" --workers 4 --worker-memory-fraction 0.8',
         "exit /b %ERRORLEVEL%",
     ]) + "\r\n").encode("cp850"))
 

@@ -13,8 +13,12 @@ on disk afterwards.
 Options: --scratch <dir>, --keep, --lanes parallel,sequential.
 
 Every check runs once per lane: "parallel" (the backends' default) and "sequential"
-(compress: -ForceSequential; copy_exif and generate_thumbnails: -Workers 1) -- what the
+(compress: --force-sequential; copy_exif and generate_thumbnails: --workers 1) -- what the
 two PowerShell shells were until v2.9.1.
+
+The backends are run with v3.1's command line (--mode 9 --no-safe-mode). The scripts of an
+older release (tiff-workflow-exe's battery runs a package's own scripts) are refused at the
+start: run the battery of their release (TIFFWORKFLOW_REPO=<a checkout of that tag>).
 
 Fixtures (never modified -- everything is copied to a scratch folder first):
     <fixtures>/TIFF16/*.tif    >= 2 single-image 16-bit RGB TIFFs with ICC + EXIF
@@ -94,12 +98,11 @@ def backend_cmd(script, args):
     """The command line of one backend run in the current lane."""
     args = [str(a) for a in args]
     if CURRENT_LANE == "sequential":
-        lowered = [a.lower() for a in args]
         if script == "compress_tiff_zip.py":
-            if "-forcesequential" not in lowered and "-forceparallel" not in lowered:
-                args.append("-ForceSequential")
-        elif "-workers" not in lowered:
-            args += ["-Workers", "1"]
+            if "--force-sequential" not in args and "--force-parallel" not in args:
+                args.append("--force-sequential")
+        elif "--workers" not in args:
+            args += ["--workers", "1"]
     return RUNNER + [str(REPO / script)] + args
 
 
@@ -355,7 +358,7 @@ def c1(A1, A2):
     before_hist = {f.name: tw_history_count(f) for f in files}
 
     rc, _ = run("c1_run1", "compress_tiff_zip.py",
-                ["-Mode", "0", "-InputDir", str(m0), "-Workers", "2"])
+                ["--mode", "0", "--input-dir", str(m0), "--workers", "2"])
     check("C1: first run rc == 0", rc == 0, f"rc={rc}")
     for f in files:
         comp = compression(f)
@@ -376,7 +379,7 @@ def c1(A1, A2):
     old_list1 = sorted(p.name for p in (m0 / "OLD_TIFFs").glob("*"))
     md5_1 = {f.name: md5(f) for f in files}
     rc, _ = run("c1_run2", "compress_tiff_zip.py",
-                ["-Mode", "0", "-InputDir", str(m0), "-Workers", "2"])
+                ["--mode", "0", "--input-dir", str(m0), "--workers", "2"])
     check("C1: second run rc == 0", rc == 0, f"rc={rc}")
     check("C1: second run: output md5 unchanged",
           {f.name: md5(f) for f in files} == md5_1)
@@ -395,7 +398,7 @@ def c2(A1, A2):
     src_hist = {f.name: tw_history_count(f) for f in files}
 
     rc, _ = run("c2_run1", "compress_tiff_zip.py",
-                ["-Mode", "1", "-InputDir", str(m1), "-Workers", "2"])
+                ["--mode", "1", "--input-dir", str(m1), "--workers", "2"])
     check("C2: first run rc == 0", rc == 0, f"rc={rc}")
     for f in files:
         out = m1 / "ZIP" / f.name
@@ -418,7 +421,7 @@ def c2(A1, A2):
 
     state = _out_state()
     rc, _ = run("c2_run2", "compress_tiff_zip.py",
-                ["-Mode", "1", "-InputDir", str(m1), "-Workers", "2"])
+                ["--mode", "1", "--input-dir", str(m1), "--workers", "2"])
     check("C2: second run rc == 0", rc == 0, f"rc={rc}")
     check("C2: second run: outputs md5/mtime unchanged", _out_state() == state)
 
@@ -429,8 +432,8 @@ def c3(A1, A2):
     a = small(A1, m2 / "in" / "a" / "x.tif")
     b = small(A2, m2 / "in" / "b" / "x.tif")
     rc, _ = run("c3", "compress_tiff_zip.py",
-                ["-Mode", "2", "-InputDir", str(m2 / "in"),
-                 "-OutputDir", str(m2 / "out"), "-Workers", "2"])
+                ["--mode", "2", "--input-dir", str(m2 / "in"),
+                 "--output-dir", str(m2 / "out"), "--workers", "2"])
     check("C3: rc == 0", rc == 0, f"rc={rc}")
     out = m2 / "out"
     names = sorted(p.name for p in out.iterdir() if p.is_file()) if out.is_dir() else []
@@ -455,8 +458,8 @@ def c4(A1, A2):
         ref = small(src, ref8 / src.name)
         pairs.append((ref, cp(ref, m8 / src.name)))
     rc, _ = run("c4", "compress_tiff_zip.py",
-                ["-Mode", "8", "-InputDir", str(m8), "-DeleteSource",
-                 "-StagingDir", str(LANE_DIR / "stage8"), "-Workers", "2"])
+                ["--mode", "8", "--input-dir", str(m8), "--delete-source",
+                 "--staging-dir", str(LANE_DIR / "stage8"), "--workers", "2"])
     check("C4: rc == 0", rc == 0, f"rc={rc}")
     for ref, f in pairs:
         comp = compression(f)
@@ -477,7 +480,7 @@ def c5(A1):
     ref = small(A1, LANE_DIR / "ref8b" / A1.name)
     f = cp(ref, m8b / A1.name)
     rc, _ = run("c5", "compress_tiff_zip.py",
-                ["-Mode", "8", "-InputDir", str(m8b), "-DeleteSource", "-Workers", "1"],
+                ["--mode", "8", "--input-dir", str(m8b), "--delete-source", "--workers", "1"],
                 timeout=300)
     check("C5: run did not hang (timeout not hit)", rc is not None,
           "" if rc is not None else "timeout hit")
@@ -506,7 +509,7 @@ def c6(raw_scan):
     _check_layout("C6", raw_scan, f)
     before = md5(f)
     rc, out = run("c6", "compress_tiff_zip.py",
-                  ["-Mode", "0", "-InputDir", str(mp), "-Workers", "1"])
+                  ["--mode", "0", "--input-dir", str(mp), "--workers", "1"])
     check("C6: rc == 0", rc == 0, f"rc={rc}")
     check("C6: multi-page md5 unchanged", md5(f) == before)
     check("C6: no OLD_TIFFs backup was created", not (mp / "OLD_TIFFs" / f.name).exists())
@@ -521,7 +524,7 @@ def c7(raw_scan):
     n_pages = pages(src)
     last = n_pages - 1
     rc, _ = run("c7", "compress_tiff_zip.py",
-                ["-Mode", "1", "-InputDir", str(mp), "-SafeMode:$false", "-Workers", "1"])
+                ["--mode", "1", "--input-dir", str(mp), "--no-safe-mode", "--workers", "1"])
     check("C7: rc == 0", rc == 0, f"rc={rc}")
     out = mp / "ZIP" / src.name
     check("C7: ZIP output exists", out.is_file())
@@ -542,7 +545,7 @@ def c8(tiff_scan):
     _check_layout("C8", tiff_scan, src)
     n_pages = pages(src)
     rc, _ = run("c8", "compress_tiff_zip.py",
-                ["-Mode", "1", "-InputDir", str(sc), "-Workers", "1"])
+                ["--mode", "1", "--input-dir", str(sc), "--workers", "1"])
     check("C8: rc == 0", rc == 0, f"rc={rc}")
     out = sc / "ZIP" / src.name
     check("C8: output exists", out.is_file())
@@ -559,7 +562,7 @@ def c9(A1):
     safe = small(A1, pct / "tmpsmall.tif")
     f = safe.rename(pct / "50%off.tif")
     rc, _ = run("c9", "compress_tiff_zip.py",
-                ["-Mode", "0", "-InputDir", str(pct), "-Workers", "1"])
+                ["--mode", "0", "--input-dir", str(pct), "--workers", "1"])
     check("C9: rc == 0", rc == 0, f"rc={rc}")
     comp = compression(f)
     check("C9: file is Deflate", comp in ("Deflate", "Adobe Deflate"), comp)
@@ -576,7 +579,7 @@ def c10(A1):
     assert len(str(f)) == 240
     before = md5(f)
     rc, _ = run("c10", "compress_tiff_zip.py",
-                ["-Mode", "0", "-InputDir", str(deep), "-Workers", "1"])
+                ["--mode", "0", "--input-dir", str(deep), "--workers", "1"])
     comp = compression(f)
     ok_a = (rc == 0 and comp in ("Deflate", "Adobe Deflate")
             and pixels_equal(deep / "OLD_TIFFs" / "p.tif", f))
@@ -594,16 +597,16 @@ def c11(A1, A2):
     small(A2, ex / "_EXPORT" / "b.tif")
     small(A1, ex / "My_EXPORT_photos" / "c.tif")
     rc, _ = run("c11a", "compress_tiff_zip.py",
-                ["-Mode", "3", "-InputDir", str(ex), "-ExcludeFolders", "_EXPORT",
-                 "-Workers", "2"])
+                ["--mode", "3", "--input-dir", str(ex), "--exclude-folders", "_EXPORT",
+                 "--workers", "2"])
     check("C11: rc == 0", rc == 0, f"rc={rc}")
     check("C11: ex\\ZIP\\a.tif exists", (ex / "ZIP" / "a.tif").is_file())
     check("C11: My_EXPORT_photos processed",
           (ex / "My_EXPORT_photos" / "ZIP" / "c.tif").is_file())
     check("C11: _EXPORT skipped", not (ex / "_EXPORT" / "ZIP" / "b.tif").exists())
     rc, _ = run("c11b", "compress_tiff_zip.py",
-                ["-Mode", "3", "-InputDir", str(ex / "_EXPORT"),
-                 "-ExcludeFolders", "_EXPORT", "-Workers", "1"])
+                ["--mode", "3", "--input-dir", str(ex / "_EXPORT"),
+                 "--exclude-folders", "_EXPORT", "--workers", "1"])
     check("C11: pointing AT the name rc == 0", rc == 0, f"rc={rc}")
     check("C11: pointing AT the name processes it",
           (ex / "_EXPORT" / "ZIP" / "b.tif").is_file())
@@ -614,7 +617,7 @@ def c12(A1):
     th = LANE_DIR / "th"
     src = small(A1, th / A1.name)
     rc, _ = run("c12a", "compress_tiff_zip.py",
-                ["-Mode", "1", "-InputDir", str(th), "-GenerateThumbnail", "-Workers", "1"])
+                ["--mode", "1", "--input-dir", str(th), "--generate-thumbnail", "--workers", "1"])
     check("C12: add rc == 0", rc == 0, f"rc={rc}")
     out = th / "ZIP" / src.name
     if out.is_file():
@@ -629,7 +632,7 @@ def c12(A1):
     # a TIFF, so the embedded thumbnail page above must survive it untouched.
     embedded_md5 = md5(out) if out.is_file() else None
     rc, _ = run("c12b", "generate_thumbnails.py",
-                ["-InputDir", str(th / "ZIP"), "-Remove"])
+                ["--input-dir", str(th / "ZIP"), "--remove"])
     check("C12: -Remove over embedded thumbnails rc == 0", rc == 0, f"rc={rc}")
     if embedded_md5:
         check("C12: -Remove leaves the TIFF with an embedded thumbnail untouched",
@@ -638,11 +641,11 @@ def c12(A1):
     th2 = LANE_DIR / "th2"
     src2 = small(A1, th2 / A1.name)
     src2_md5 = md5(src2)
-    rc, _ = run("c12c", "generate_thumbnails.py", ["-InputDir", str(th2)])
+    rc, _ = run("c12c", "generate_thumbnails.py", ["--input-dir", str(th2)])
     check("C12: standalone add rc == 0", rc == 0, f"rc={rc}")
     thumbs = sorted(p.name for p in th2.glob(f"{src2.stem}_thumb*"))
     check("C12: a standalone thumbnail file was written", bool(thumbs), str(thumbs))
-    rc, _ = run("c12d", "generate_thumbnails.py", ["-InputDir", str(th2), "-Remove"])
+    rc, _ = run("c12d", "generate_thumbnails.py", ["--input-dir", str(th2), "--remove"])
     check("C12: standalone remove rc == 0", rc == 0, f"rc={rc}")
     left = sorted(p.name for p in th2.glob(f"{src2.stem}_thumb*"))
     check("C12: -Remove deleted the standalone thumbnail", not left, str(left))
@@ -704,7 +707,7 @@ def c14(fixtures):
 
     backend = "copy_exif_to_tiff.py"
     input_arg = ";".join(str(fj / s.name) for s in sessions)
-    rc, _ = run("c14_run1", backend, ["-InputDir", input_arg, "-Workers", "2"])
+    rc, _ = run("c14_run1", backend, ["--input-dir", input_arg, "--workers", "2"])
     check("C14: first run rc == 0", rc == 0, f"rc={rc}")
     for tif in tifs:
         rel = tif.relative_to(fj)
@@ -720,7 +723,7 @@ def c14(fixtures):
 
     after1 = {t.relative_to(fj): md5(t) for t in tifs}
     rc, _ = run("c14_run2", backend,
-                ["-InputDir", input_arg, "-SkipIfTiffHasExif", "-Workers", "2"])
+                ["--input-dir", input_arg, "--skip-if-tiff-has-exif", "--workers", "2"])
     check("C14: second run (-SkipIfTiffHasExif) rc == 0", rc == 0, f"rc={rc}")
     check("C14: second run: every TIF md5 unchanged",
           {t.relative_to(fj): md5(t) for t in tifs} == after1)
@@ -731,7 +734,7 @@ def c14(fixtures):
     list_file = LANE_DIR / "fj2_dirs.txt"
     list_file.write_text("".join(str(fj2 / s.name) + "\n" for s in sessions),
                          encoding="utf-8", newline="\n")
-    rc, _ = run("c14_run3", backend, ["-InputDirFile", str(list_file), "-Workers", "2"])
+    rc, _ = run("c14_run3", backend, ["--input-dir-file", str(list_file), "--workers", "2"])
     check("C14: third run (-InputDirFile) rc == 0", rc == 0, f"rc={rc}")
     for tif in sorted(p for p in fj2.rglob("*")
                       if p.is_file() and p.suffix.lower() in (".tif", ".tiff")):
@@ -752,8 +755,8 @@ def c14(fixtures):
     fj3 = LANE_DIR / "fj3"
     for s in sessions:
         shutil.copytree(s, fj3 / s.name)
-    rc, _ = run("c14_run4", backend, ["-InputDir", ";".join(str(fj3 / s.name) for s in sessions),
-                                      "-SkipIfTiffHasExif", "-Workers", "2"])
+    rc, _ = run("c14_run4", backend, ["--input-dir", ";".join(str(fj3 / s.name) for s in sessions),
+                                      "--skip-if-tiff-has-exif", "--workers", "2"])
     check("C14: fresh exports with -SkipIfTiffHasExif: rc == 0", rc == 0, f"rc={rc}")
     for tif in sorted(p for p in fj3.rglob("*")
                       if p.is_file() and p.suffix.lower() in (".tif", ".tiff")):
@@ -774,8 +777,8 @@ def c14(fixtures):
         return
     ft = LANE_DIR / "ft" / "S5Pro"
     shutil.copytree(tagless, ft)
-    rc, _ = run("c14_tagless", backend, ["-InputDir", str(ft), "-SkipIfTiffHasExif",
-                                         "-Workers", "2"])
+    rc, _ = run("c14_tagless", backend, ["--input-dir", str(ft), "--skip-if-tiff-has-exif",
+                                         "--workers", "2"])
     check("C14: tagless S5 Pro TIFFs: rc == 0", rc == 0, f"rc={rc}")
     for tif in sorted(p for p in ft.iterdir() if p.suffix.lower() in (".tif", ".tiff")):
         pair = find_pair(tif)
@@ -795,7 +798,7 @@ def c15(A1, A2):
     files = [uncompressed(s, k / f"P{i:02d} ({i}) {s.stem}.tif") for i, s in enumerate(srcs)]
     before = {f.name: md5(f) for f in files}
     cmd = backend_cmd("compress_tiff_zip.py",
-                      ["-Mode", "9", "-InputDir", str(k), "-ForceSequential"])
+                      ["--mode", "9", "--input-dir", str(k), "--force-sequential"])
     p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                          stderr=subprocess.STDOUT, cwd=str(LANE_DIR))
     empty_seen = set()
@@ -838,7 +841,7 @@ def c15(A1, A2):
             or (not b.exists() and md5(f) == before[f.name]))
         check(f"C15: after the kill {f.name}: original or verified copy in place", ok)
     rc, out = run("c15_rerun", "compress_tiff_zip.py",
-                  ["-Mode", "9", "-InputDir", str(k), "-Workers", "2"])
+                  ["--mode", "9", "--input-dir", str(k), "--workers", "2"])
     check("C15: rerun rc == 0", rc == 0, f"rc={rc}")
     check("C15: rerun finds nothing stranded", "STRANDED" not in out)
     for f in files:
@@ -859,7 +862,7 @@ def c15(A1, A2):
     for f in f8:
         cp(f, keep / f.name)
     rc, out = run("c15_mode8_xvol", "compress_tiff_zip.py",
-                  ["-Mode", "8", "-InputDir", str(m8), "-StagingDir", str(stage)])
+                  ["--mode", "8", "--input-dir", str(m8), "--staging-dir", str(stage)])
     check("C15: mode 8, staging on another drive: rc == 0"
           + (" (NOTE: staging is on the same drive here)" if same_drive else ""),
           rc == 0, f"rc={rc}")
@@ -948,6 +951,12 @@ def main():
         if shutil.which(tool) is None:
             print(f"{tool} is not on PATH")
             sys.exit(2)
+    common = REPO / "tiff_workflow_common.py"
+    if "def cli_value(" not in common.read_text(encoding="utf-8", errors="replace"):
+        print(f"The scripts in {REPO} take the command line of v3.0.x or older; this battery "
+              f"runs v3.1's. Run the battery of their release (TIFFWORKFLOW_REPO=<a checkout "
+              f"of that tag>).")
+        sys.exit(2)
 
     A1, A2 = pick_tiff16(args.fixtures)
     raw_scan = first_tif(args.fixtures / "raw_scan")

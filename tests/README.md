@@ -40,7 +40,7 @@ pytest tests --cov=..
 
 ### `backends.py` -- how a test starts a backend
 - `backend_cmd(lane, script, args)` builds the command line of one backend run: the Python that runs the tests (`sys.executable`), the script, the arguments. `run_backend(...)` runs it as an unattended subprocess (stdin closed) and decodes the output as UTF-8
-- `LANES = ["parallel", "sequential"]`. `parallel` is the backend's default (`-Workers` as the script has it). `sequential` adds `-ForceSequential` for compress and `-Workers 1` for copy_exif and generate_thumbnails, unless the test already chose
+- `LANES = ["parallel", "sequential"]`. `parallel` is the backend's default (`--workers` as the script has it). `sequential` adds `--force-sequential` for compress and `--workers 1` for copy_exif and generate_thumbnails, unless the test already chose
 - **Every end-to-end test runs once per lane.** This replaces "both shells" (Windows PowerShell 5.1 = sequential, PowerShell 7 = parallel) of the PowerShell edition. The per-file work is one implementation now; what is left of that axis is whether it runs on the caller's thread or on a thread pool
 
 ### `test_backend_invariants.py` covers
