@@ -4128,6 +4128,113 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
     return None, "(no hard link on this drive: the original was renamed into OLD_PADDED/)"
 
 
+# A conversion that should have replaced the file and did not: listed as failed. A refusal
+# (real 16-bit data, a multi-page scan, a bigger ZIP) is the gate doing its job, not a failure.
+_PADDED_FAILED_STATUSES = ("magick_not_found", "error", "magick_error", "missing",
+                           "page_layout_unreadable", "subfile_restore_failed",
+                           "integrity_error", "dimension_mismatch", "dimension_unreadable",
+                           "page_count_mismatch", "pixel_compare_failed",
+                           "layout_unreadable", "layout_changed")
+
+
+def _padded_outcome(status: str, error: Optional[str]) -> Optional[Tuple[str, str]]:
+    """(line, style) for a conversion that replaced nothing; None for "ok" and for a status
+    with no line of its own."""
+    if status == "magick_not_found":
+        return "    FAILED: magick not found", "red"
+    if status == "error":
+        return f"    FAILED: {error}", "red"
+    if status == "magick_error":
+        return "    FAILED: magick error", "red"
+    if status == "missing":
+        return "    FAILED: output missing", "red"
+    if status in ("multi_page_refused", "page_layout_unreadable"):
+        reason = ("multi-page TIFF with non-thumbnail pages (scanner IR / layers): the "
+                  "diagnosis only looked at page 0, so converting the whole file could "
+                  "down-convert pages that were never checked"
+                  if status == "multi_page_refused"
+                  else "page layout unreadable")
+        return f"    SKIPPED: {reason} -- original preserved", "yellow"
+    if status == "subfile_restore_failed":
+        # audit round 16: _restore_subfile_types said the markers could not be
+        # restored, so the rewrite's metadata is not trustworthy -- degraded, not OK.
+        return "    WARN: could not restore per-page SubfileType markers -- original preserved", "yellow"
+    if status == "pixel_mismatch":
+        return ("    SKIPPED: the 8-bit version is not pixel-identical -- this file holds "
+                "real 16-bit data; original preserved", "yellow")
+    if status in ("integrity_error", "dimension_mismatch",
+                  "dimension_unreadable", "page_count_mismatch",
+                  "pixel_compare_failed", "layout_unreadable", "layout_changed"):
+        return f"    FAILED: {status}", "red"
+    return None
+
+
+def _finalize_padded(n: int, total: int, result: PaddedResult, failed: list) -> bool:
+    """One file of the padded conversion, on the caller's thread: its line, then, for an
+    "ok" whose ZIP is smaller, the original to OLD_PADDED/ and the 8-bit file into its place
+    (_land_padded_conversion). A conversion that should have landed and did not is appended
+    to `failed` as (path, why). True = the file was replaced."""
+    name, parent, status = result.name, result.parent, result.status
+    size_orig, size_zip, ratio = result.size_orig, result.size_zip, result.ratio
+    exif_ok, error_msg, tmp8 = result.exif_ok, result.error, result.tmp8
+    final_dst = parent / name
+    if status in _PADDED_FAILED_STATUSES:
+        failed.append((final_dst, status + (f": {error_msg}" if error_msg else "")))
+
+    _say(f"  [{n}/{total}] {parent.name}{os.sep}{name}")
+
+    if status != "ok":
+        line = _padded_outcome(status, error_msg)
+        if line:
+            _say(*line)
+        return False
+    if not exif_ok:
+        # Do NOT overwrite original if EXIF was lost
+        _say("    FAILED: EXIF copy or History entry failed — original preserved", "red")
+        failed.append((final_dst, "EXIF copy or History entry failed"))
+        tmp8.unlink(missing_ok=True)
+        return False
+
+    _say(["    ", ("OK", "green"), f" {_format_size(size_orig)} -> {_format_size(size_zip)} "
+          f"({ratio:.1f}% smaller, EXIF preserved)"])
+
+    if size_zip >= size_orig:
+        _say("    SKIPPED (ZIP larger than original)", "dim")
+        tmp8.unlink(missing_ok=True)
+        return False
+
+    # Back up the original to OLD_PADDED/ and replace it (lossy 16 -> 8-bit).
+    # audit round 28: the irreversible step comes last. The original used to go
+    # to OLD_PADDED/ FIRST and the converted file was then moved in from the
+    # staging folder -- across volumes a copy straight into the photo's name, so
+    # a kill left the place empty or holding a truncated file, and nothing
+    # reported it. Now: see _land_padded_conversion.
+    backup_dir = parent / "OLD_PADDED"
+    try:
+        backup_dir.mkdir(exist_ok=True)
+        backup_path = backup_dir / name
+        if backup_path.exists():
+            v = 2
+            while (backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}").exists():
+                v += 1
+            backup_path = backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}"
+    except Exception as e:
+        _say(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved", "red")
+        failed.append((final_dst, f"backup to OLD_PADDED failed ({e})"))
+        tmp8.unlink(missing_ok=True)
+        return False
+    err, note = _land_padded_conversion(tmp8, final_dst, backup_path)
+    if err:
+        _say(f"    FAILED: {err}", "red")
+        failed.append((final_dst, err))
+        tmp8.unlink(missing_ok=True)
+        return False
+    if note:
+        _say(f"    {note}", "yellow")
+    _say(f"    Original backed up: OLD_PADDED/{backup_path.name}", "dim")
+    return True
+
+
 def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg: "ConfigManager"):
     """
     Compress padded 8-bit TIFFs to 8-bit ZIP.
@@ -4140,11 +4247,6 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     """
     converted = 0
     failed = []
-    _FAILED_STATUSES = ("magick_not_found", "error", "magick_error", "missing",
-                        "page_layout_unreadable", "subfile_restore_failed",
-                        "integrity_error", "dimension_mismatch", "dimension_unreadable",
-                        "page_count_mismatch", "pixel_compare_failed",
-                        "layout_unreadable", "layout_changed")
     if temp_dir is None:
         temp_dir = Path(tempfile.gettempdir())
     # Run-scoped staging dir. A shared "compress_staging" meant the cleanup below wiped
@@ -4173,94 +4275,14 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     # conversion is done. The pool used to convert every file first and only then print
     # and replace them all: an hour of blank screen on a large batch, and every staged
     # file held on the staging disk until the end.
-    def _finalize(i, result):
+    def _finalize(done, result):
         nonlocal converted
-        name, parent, status = result.name, result.parent, result.status
-        size_orig, size_zip, ratio = result.size_orig, result.size_zip, result.ratio
-        exif_ok, error_msg, tmp8 = result.exif_ok, result.error, result.tmp8
-        final_dst = parent / name
-        if status in _FAILED_STATUSES:
-            failed.append((final_dst, status + (f": {error_msg}" if error_msg else "")))
-
-        _say(f"  [{i+1}/{len(padded_files)}] {parent.name}{os.sep}{name}")
-
-        if status == "magick_not_found":
-            _say("    FAILED: magick not found", "red")
-        elif status == "error":
-            _say(f"    FAILED: {error_msg}", "red")
-        elif status == "magick_error":
-            _say("    FAILED: magick error", "red")
-        elif status == "missing":
-            _say("    FAILED: output missing", "red")
-        elif status in ("multi_page_refused", "page_layout_unreadable"):
-            reason = ("multi-page TIFF with non-thumbnail pages (scanner IR / layers): the "
-                      "diagnosis only looked at page 0, so converting the whole file could "
-                      "down-convert pages that were never checked"
-                      if status == "multi_page_refused"
-                      else "page layout unreadable")
-            _say(f"    SKIPPED: {reason} -- original preserved", "yellow")
-        elif status == "subfile_restore_failed":
-            # audit round 16: _restore_subfile_types said the markers could not be
-            # restored, so the rewrite's metadata is not trustworthy -- degraded, not OK.
-            _say("    WARN: could not restore per-page SubfileType markers -- original preserved",
-                 "yellow")
-        elif status == "pixel_mismatch":
-            _say("    SKIPPED: the 8-bit version is not pixel-identical -- this file holds "
-                 "real 16-bit data; original preserved", "yellow")
-        elif status in ("integrity_error", "dimension_mismatch",
-                        "dimension_unreadable", "page_count_mismatch",
-                        "pixel_compare_failed", "layout_unreadable", "layout_changed"):
-            _say(f"    FAILED: {status}", "red")
-        elif status == "ok":
-            if not exif_ok:
-                # Do NOT overwrite original if EXIF was lost
-                _say("    FAILED: EXIF copy or History entry failed — original preserved", "red")
-                failed.append((final_dst, "EXIF copy or History entry failed"))
-                tmp8.unlink(missing_ok=True)
-                return
-
-            _say(["    ", ("OK", "green"), f" {_format_size(size_orig)} -> {_format_size(size_zip)} "
-                  f"({ratio:.1f}% smaller, EXIF preserved)"])
-
-            if size_zip < size_orig:
-                # Back up the original to OLD_PADDED/ and replace it (lossy 16 -> 8-bit).
-                # audit round 28: the irreversible step comes last. The original used to go
-                # to OLD_PADDED/ FIRST and the converted file was then moved in from the
-                # staging folder -- across volumes a copy straight into the photo's name, so
-                # a kill left the place empty or holding a truncated file, and nothing
-                # reported it. Now: see _land_padded_conversion.
-                backup_dir = parent / "OLD_PADDED"
-                try:
-                    backup_dir.mkdir(exist_ok=True)
-                    backup_path = backup_dir / name
-                    if backup_path.exists():
-                        v = 2
-                        while (backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}").exists():
-                            v += 1
-                        backup_path = backup_dir / f"{final_dst.stem}_v{v}{final_dst.suffix}"
-                except Exception as e:
-                    _say(f"    FAILED: backup to OLD_PADDED failed ({e}) — original preserved", "red")
-                    failed.append((final_dst, f"backup to OLD_PADDED failed ({e})"))
-                    tmp8.unlink(missing_ok=True)
-                    return
-                err, note = _land_padded_conversion(tmp8, final_dst, backup_path)
-                if err:
-                    _say(f"    FAILED: {err}", "red")
-                    failed.append((final_dst, err))
-                    tmp8.unlink(missing_ok=True)
-                    return
-                if note:
-                    _say(f"    {note}", "yellow")
-                converted += 1
-                _say(f"    Original backed up: OLD_PADDED/{backup_path.name}", "dim")
-            else:
-                _say("    SKIPPED (ZIP larger than original)", "dim")
-                tmp8.unlink(missing_ok=True)
-
+        if _finalize_padded(done, len(padded_files), result, failed):
+            converted += 1
 
     # audit round 16: a worker that raised gets no tmp8 -- _finalize may unlink that slot,
     # and the SOURCE path there risked deleting the original.
-    _run_pool(padded_files, _process_one, workers, lambda done, r: _finalize(done - 1, r),
+    _run_pool(padded_files, _process_one, workers, _finalize,
               lambda f, e: PaddedResult(f.name, f.parent, "error", error=str(e)), "done")
 
     # Safe to wipe wholesale: the directory belongs to this run only.

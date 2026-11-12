@@ -912,6 +912,46 @@ class TestMenuDispatch:
                        "run_generate_thumbnails"], ran
 
 
+class TestPaddedOutcome:
+    """v3.1 phase 7 (W10): the padded conversion's line for a file it did not replace is a
+    pure function. Every status the gates can return has one -- a status without a line left
+    its file with no word on the screen."""
+
+    @staticmethod
+    def _statuses():
+        import ast
+        tree = ast.parse(Path(convert_tiff.__file__).read_text(encoding="utf-8"))
+        found = set()
+        for fn in tree.body:
+            if not isinstance(fn, ast.FunctionDef):
+                continue
+            if fn.name == "_process_single_padded":
+                for n in ast.walk(fn):
+                    if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "status"
+                                                         for t in n.targets):
+                        found |= {c.value for c in ast.walk(n.value)
+                                  if isinstance(c, ast.Constant) and isinstance(c.value, str)}
+                    elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "res"
+                          and n.args and isinstance(n.args[0], ast.Constant)):
+                        found.add(n.args[0].value)
+            elif fn.name == "_padded_pixels_status":
+                found |= {r.value.value for r in ast.walk(fn) if isinstance(r, ast.Return)
+                          and isinstance(r.value, ast.Constant) and isinstance(r.value.value, str)}
+        return found
+
+    def test_every_status_the_gates_return_has_a_line(self):
+        statuses = self._statuses() | set(convert_tiff._PADDED_FAILED_STATUSES)
+        assert {"multi_page_refused", "pixel_mismatch", "layout_changed"} <= statuses, statuses
+        for status in sorted(statuses - {"ok"}):
+            line = convert_tiff._padded_outcome(status, "boom 伊豆沼")
+            assert line, f"{status}: the file would get no line"
+            text, style = line
+            assert text.startswith("    ") and style in ("red", "yellow"), (status, line)
+            assert ("FAILED" in text) == (style == "red"), (status, line)
+        assert convert_tiff._padded_outcome("error", "boom 伊豆沼") == ("    FAILED: boom 伊豆沼", "red")
+        assert convert_tiff._padded_outcome("ok", None) is None
+
+
 class TestWorkflow4TwoSteps:
     """Workflow 4 (Copy EXIF, then compress): compress runs only when Copy EXIF exited 0 --
     it would ZIP TIFFs whose metadata never landed. v3.1 phase 7 (W7) wrote the two passes
