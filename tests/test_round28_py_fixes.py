@@ -125,6 +125,27 @@ def test_layout_gate_refuses_a_collapsed_page():
                                                 "-define", "tiff:alpha=associated"]
 
 
+def test_the_wizards_layout_read(monkeypatch):
+    """v3.1 phase 5: the wizard reads the layout with its own exiftool run (a timeout scaled
+    by size) and the common parser, into its dictionaries. Each case below is a mutation of
+    the phase-5 sweep that no test caught."""
+    said = {}
+    monkeypatch.setattr(ct, "_run_exiftool", lambda args, timeout, text=False: SimpleNamespace(
+        returncode=said.get("rc", 0), stdout=said["out"], stderr=""))
+    said["out"] = ("[IFD0] SamplesPerPixel: 4\n[IFD0] PhotometricInterpretation: 2\n"
+                   "[IFD0] ExtraSamples: 2\n[IFD0] BitsPerSample: 16 16 16 16\n"
+                   "[IFD1] PhotometricInterpretation: 5\n")
+    assert ct._tiff_sample_layout("x.tif") == [
+        {"cls": "rgb", "spp": 4, "alpha": ("2",), "bits": "16 16 16 16"},   # the alpha is kept
+        {"cls": "5", "spp": 1, "alpha": (), "bits": "1"}]                   # "5", as the reasons said
+    said["out"] = "[IFD0] SamplesPerPixel: 3\n"
+    assert ct._tiff_sample_layout("x.tif") is None, "no Photometric: unreadable, never a file of no pages"
+    said["out"] = "[IFD0] PhotometricInterpretation: 2\n[IFD2] PhotometricInterpretation: 2\n"
+    assert ct._tiff_sample_layout("x.tif") is None, "a gap in the IFDs"
+    said.update(rc=1, out="[IFD0] PhotometricInterpretation: 2\n")
+    assert ct._tiff_sample_layout("x.tif") is None, "exiftool failed"
+
+
 # --- #1 + #11: the Delete OLD_TIFFs gate --------------------------------------------
 
 

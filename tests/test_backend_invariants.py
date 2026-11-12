@@ -2156,6 +2156,9 @@ class TestGatesFailClosed:
         assert tw.subfile_marker_args("a", None) == []
         monkeypatch.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(True, 3, ""))
         assert tw.subfile_marker_args("a", None) is None, "markers unread: failed"
+        assert tw.subfile_marker_list(1, {0: 0}) == [] and tw.subfile_marker_list(0, {}) == [], \
+            "one page: nothing (the wizard's padded restore relies on it; an absent tag cleared " \
+            "on a one-page file makes exiftool exit 1)"
         assert tw.subfile_marker_args("a", {0: 0, 2: 4}) == [
             "-IFD0:SubfileType#=0",     # an explicit 0 is kept, not deleted (round 11)
             "-IFD1:SubfileType=",       # a page without the tag gets magick's stamp cleared
