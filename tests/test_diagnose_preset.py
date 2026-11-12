@@ -639,7 +639,7 @@ def test_small_files_use_every_worker_and_a_huge_one_runs_alone(tmp_path, monkey
     small = [tmp_path / f"s{i}.tif" for i in range(12)]
     big = tmp_path / "big.tif"
     files = small[:6] + [big] + small[6:]
-    bpp = ct._COMPARE_BYTES_PER_PIXEL
+    bpp = ct.tw.COMPARE_BYTES_PER_PIXEL
     pixels = {os.path.normcase(os.path.abspath(f)): 30_000_000 for f in small}
     pixels[os.path.normcase(os.path.abspath(big))] = 220_000_000
     # room for 4 small checks at once, but not for the big one next to anything
@@ -670,7 +670,7 @@ def test_budget_line_names_typical_and_largest(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ct, "_available_memory_bytes", lambda: (40 * 2**30, "commit"))
     sizes = {"a": 30_000_000, "b": 32_000_000, "c": 220_000_000}
     monkeypatch.setattr(ct, "_image_pixels", lambda paths: dict(sizes))
-    budget, pixels = ct._memory_budget(["a", "b", "c"], ct._COMPARE_BYTES_PER_PIXEL, "16-bit check")
+    budget, pixels = ct._memory_budget(["a", "b", "c"], ct.tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
     out = capsys.readouterr().out
     assert budget.total == int(40 * 2**30 * ct.WORKER_MEMORY_FRACTION)
     assert pixels == sizes

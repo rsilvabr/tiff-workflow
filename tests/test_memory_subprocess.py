@@ -165,7 +165,7 @@ def test_pool_cap_arithmetic(monkeypatch):
 @requires_tools
 def test_max_image_pixels_real(tmp_path):
     """T5: the largest IFD0 area wins (a non-ASCII name included), and a file
-    exiftool does not report counts as _UNKNOWN_IMAGE_PIXELS -- never smaller."""
+    exiftool does not report counts as tw.UNKNOWN_IMAGE_PIXELS -- never smaller."""
     a = tmp_path / "a.tif"
     b = tmp_path / "foto \u00e7.tif"
     subprocess.run(["magick", "-size", "400x300", "xc:gray", "-depth", "16", str(a)],
@@ -174,7 +174,7 @@ def test_max_image_pixels_real(tmp_path):
                    capture_output=True, check=True, timeout=120)
 
     assert ct._max_image_pixels([a, b]) == 120000
-    assert ct._max_image_pixels([a, b, tmp_path / "missing.tif"]) == ct._UNKNOWN_IMAGE_PIXELS
+    assert ct._max_image_pixels([a, b, tmp_path / "missing.tif"]) == ct.tw.UNKNOWN_IMAGE_PIXELS
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ def test_diagnose_uses_a_memory_budget(tmp_path, monkeypatch):
 
     assert calls, "the memory budget was never consulted"
     paths, bpp, what = calls[0]
-    assert bpp == ct._COMPARE_BYTES_PER_PIXEL
+    assert bpp == ct.tw.COMPARE_BYTES_PER_PIXEL
     assert sorted(Path(p).name for p in paths) == ["a.tif", "b.tif"]
     assert seen_workers == [4], "the pool must keep the requested workers"
 
@@ -385,6 +385,6 @@ def test_compress_memory_estimate_reads_non_ascii_paths(tmp_path):
     assert mem_lines, f"the memory estimate was never logged:\n{text}"
     assert "150 MP" not in mem_lines[0], (
         "the accented path did not match exiftool's output: every file was counted "
-        f"as {ct._UNKNOWN_IMAGE_PIXELS} px:\n{mem_lines[0]}")
+        f"as {ct.tw.UNKNOWN_IMAGE_PIXELS} px:\n{mem_lines[0]}")
     assert "(0 MP)" in mem_lines[0], (
         f"400x300 = 0.12 MP must format as (0 MP):\n{mem_lines[0]}")

@@ -64,8 +64,10 @@ TIMEOUT_S_PER_MB = 0.25
 
 import argparse
 import ast
+import atexit
 import concurrent.futures
 import csv
+import fnmatch
 import functools
 import hashlib
 import io
@@ -82,7 +84,9 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -587,7 +591,6 @@ def _update_check_start(cfg):
     Already asked today: no thread."""
     if _update_check_off(cfg):
         return lambda wait=0.0: None
-    from datetime import date
     today = date.today().isoformat()
     if cfg.config.update_checked_on == today:
         notice = _kept_update_notice(cfg, checked_before=True)
@@ -620,7 +623,6 @@ def _update_check_now(cfg) -> Tuple[str, Optional[Tuple[str, str]]]:
     if _update_check_off(cfg):
         return ("Release check: off (check_for_updates in the config file, or "
                 f"{_UPDATE_ENV}).", None)
-    from datetime import date
     tag = _latest_release_tag(_update_repo())
     if not tag:
         return (f"Release check: GitHub did not answer (this copy is {TOOLKIT_VERSION}).", None)
@@ -955,9 +957,6 @@ def _available_memory_bytes():
 # Peak private memory of one ImageMagick process, in bytes per pixel of the image's
 # main page, measured on an 84 MP 16-bit scan (ImageMagick 7.1.2 Q16-HDRI; plan
 # AI_tools/261010_Claude_plan_memory-subprocess.md), +~10% margin.
-_COMPARE_BYTES_PER_PIXEL = 75     # magick compare (68 measured)
-_CONVERT_BYTES_PER_PIXEL = 15     # depth/format conversion, decode (12.7 measured)
-_UNKNOWN_IMAGE_PIXELS = 150_000_000
 
 
 def _say(msg: str, style: str = "") -> None:
@@ -976,7 +975,7 @@ def _max_image_pixels(paths) -> int:
 def _image_pixels(paths) -> Dict[str, int]:
     """{normcased absolute path: IFD0 width*height} for `paths`, read in batches of 400
     by exiftool (-j). A file exiftool does not report, or reports without a size,
-    counts as _UNKNOWN_IMAGE_PIXELS -- an unknown size must never shrink the estimate."""
+    counts as tw.UNKNOWN_IMAGE_PIXELS -- an unknown size must never shrink the estimate."""
     paths = [str(p) for p in paths]
     sizes: Dict[str, int] = {}
     # On a hard disk each batch of 400 can take a minute: say what is happening and how
@@ -1006,7 +1005,7 @@ def _image_pixels(paths) -> Dict[str, int]:
         for p in chunk:
             key = os.path.normcase(os.path.abspath(p))
             px = seen.get(key, 0)
-            sizes[key] = px if px > 0 else _UNKNOWN_IMAGE_PIXELS
+            sizes[key] = px if px > 0 else tw.UNKNOWN_IMAGE_PIXELS
     return sizes
 
 
@@ -1132,7 +1131,6 @@ def _bracket_free_alias(path: Path) -> Optional[Path]:
         with _magick_alias_lock:
             if _magick_alias_dir is None:
                 _magick_alias_dir = Path(tempfile.mkdtemp(prefix="magick_alias_"))
-                import atexit
                 atexit.register(shutil.rmtree, str(_magick_alias_dir), True)
         alias = _magick_alias_dir / (
             f"{uuid.uuid4().hex}_{path.name.replace('[', '(').replace(']', ')')}")
@@ -1725,7 +1723,7 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
         if origin in ("copy_exif",):
             table.add_row("Workflow:", f"Copy EXIF ({origin})")
         elif origin == "free_compress":
-            table.add_row("Workflow:", f"Compress TIFFs")
+            table.add_row("Workflow:", "Compress TIFFs")
         elif origin in ("compress", "both"):
             table.add_row("Workflow:", f"Fuji: Compress ({origin})")
 
@@ -1776,9 +1774,9 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
         print(f"  Staging: {workflow.get('staging') or 'disabled'}")
         print(f"  Dry-run: {dry}")
         if workflow.get("force_parallel"):
-            print(f"  Parallelism: FORCED ON (-ForceParallel)")
+            print("  Parallelism: FORCED ON (-ForceParallel)")
         elif workflow.get("force_sequential"):
-            print(f"  Parallelism: FORCED OFF (-ForceSequential)")
+            print("  Parallelism: FORCED OFF (-ForceSequential)")
         confirm = input("Proceed? [Y/n]: ").strip().lower()
         if not _yes(confirm, True):
             print("Cancelled.")
@@ -2381,7 +2379,6 @@ _TIMESTAMPED_BACKUP_RE = re.compile(r"^(?P<base>.+)_\d{8}_\d{6}(?:_\d+)?$")
 def _restore_stranded_only(stranded) -> bool:
     """Move each stranded backup to its target, never over a file; two backups claiming
     one target (an original and its timestamped namesake) are both left alone."""
-    from collections import Counter
     claims = Counter(str(t).lower() for _, t in stranded)
     moved = kept = failed = 0
     for f, target in stranded:
@@ -2881,7 +2878,6 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
                 if result.returncode not in (0, 1):
                     return False, f"compare failed on page {old_page}: {output}"
 
-                import re
                 output = _strip_magick_noise(output).strip()
                 # Same pattern as _is_real_16bit: magick prints RMSE in scientific notation for
                 # large values ("1.23457e+06 (0.0188)"), which the old pattern mis-parsed --
@@ -3130,7 +3126,6 @@ def _diagnose_targets(roots, scope: str = "", skip_names: str = "") -> List[Path
     want = _scope_parts(scope)
     skip_dirs = _TOOL_OUTPUT_PARTS - set(want)
     patterns = [p.lower() for p in _split_semicolons(skip_names)]
-    import fnmatch
     found = []
     roots = list(roots)
     # A photo library on a hard disk takes minutes to walk: report every few seconds.
@@ -3212,14 +3207,14 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
     [(path, is_real, rmse, detail)] in completion order. `on_result` is called with
     each result as it arrives (the Diagnose cache saves from it). On Ctrl+C the files
     not started yet are cancelled instead of all being run first. With `budget`, each
-    check first reserves its own estimate (`pixels` x _COMPARE_BYTES_PER_PIXEL)."""
+    check first reserves its own estimate (`pixels` x tw.COMPARE_BYTES_PER_PIXEL)."""
     global _TIMEOUT_LOAD
 
     def process_one(tiff_path):
         if budget is None:
             return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
         key = os.path.normcase(os.path.abspath(tiff_path))
-        need = (pixels or {}).get(key, _UNKNOWN_IMAGE_PIXELS) * _COMPARE_BYTES_PER_PIXEL
+        need = (pixels or {}).get(key, tw.UNKNOWN_IMAGE_PIXELS) * tw.COMPARE_BYTES_PER_PIXEL
         held = budget.acquire(need)
         try:
             return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
@@ -3329,7 +3324,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
 
     workers = cfg.config.last_workers or cfg.config.default_workers
     if RICH_AVAILABLE and console:
-        workers_input = Prompt.ask(f"\n[cyan]Workers[/cyan]", default=str(workers))
+        workers_input = Prompt.ask("\n[cyan]Workers[/cyan]", default=str(workers))
         if workers_input:
             try:
                 workers = int(workers_input)
@@ -3390,7 +3385,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
 
     total_start = time.time() if DEBUG_TIMING else None
     if todo:
-        budget, pixels = _memory_budget(todo, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
+        budget, pixels = _memory_budget(todo, tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
         if RICH_AVAILABLE and console:
             console.print(f"\n[cyan]Diagnosing {len(todo)} TIFF file(s) with {workers} workers...[/cyan]")
         else:
@@ -3409,7 +3404,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     error_count = statuses.count("error")
 
     if RICH_AVAILABLE and console:
-        console.print(f"\n[bold]Results:[/bold]")
+        console.print("\n[bold]Results:[/bold]")
         summary_table = Table(box=BOX_SIMPLE)
         summary_table.add_column("Type", style="cyan")
         summary_table.add_column("Count", style="green")
@@ -3435,7 +3430,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
                 console.print(f"[cyan]Compressing {len(padded_files)} file(s)...[/cyan]")
                 _compress_padded_files(padded_files, temp_dir, workers, cfg)
     else:
-        print(f"\nResults:")
+        print("\nResults:")
         print(f"  Real 16-bit: {real_count}")
         print(f"  Padded 8-bit: {padded_count}")
         if other_count > 0:
@@ -3606,7 +3601,7 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
                 temp_dir = None
         workers = clamp_workers(d.get("workers") or cfg.config.default_workers,
                                 cfg.config.default_workers)
-        budget, pixels = _memory_budget(todo, _COMPARE_BYTES_PER_PIXEL, "16-bit check")
+        budget, pixels = _memory_budget(todo, tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
         _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
         compress_tmp = d.get("compress_tmp") or "none"
         if DIAGNOSE_CACHE:
@@ -3905,7 +3900,6 @@ def _padded_history_arg() -> str:
     format jxl-photo writes: Action, When, SoftwareAgent (tool, version, link),
     Parameters. Earlier entries (Capture One, ...) are kept. Values are kept free of
     the struct syntax characters (, { } [ ] |) instead of escaping them."""
-    from datetime import datetime
     when = datetime.now().astimezone().isoformat(timespec="seconds")
     agent = f"{TOOLKIT_NAME} {TOOLKIT_VERSION} ({TOOLKIT_URL})"
     params = "convert_tiff: 16-bit padded -> 8-bit ZIP (pixel-identical)"
@@ -4267,13 +4261,13 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
 
     # Same per-file memory budget as Diagnose: the workers asked for run, and a huge scan
     # waits for room instead of sizing every worker for itself.
-    budget, pixels = _memory_budget(padded_files, _COMPARE_BYTES_PER_PIXEL, "8-bit conversion")
+    budget, pixels = _memory_budget(padded_files, tw.COMPARE_BYTES_PER_PIXEL, "8-bit conversion")
 
     def _process_one(tiff_path):
         if budget is None:
             return _process_single_padded(tiff_path, staging)
         need = pixels.get(os.path.normcase(os.path.abspath(tiff_path)),
-                          _UNKNOWN_IMAGE_PIXELS) * _COMPARE_BYTES_PER_PIXEL
+                          tw.UNKNOWN_IMAGE_PIXELS) * tw.COMPARE_BYTES_PER_PIXEL
         held = budget.acquire(need)
         try:
             return _process_single_padded(tiff_path, staging)
@@ -4302,9 +4296,9 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
 
         if status == "magick_not_found":
             if RICH_AVAILABLE and console:
-                console.print(f"    [red]FAILED: magick not found[/red]")
+                console.print("    [red]FAILED: magick not found[/red]")
             else:
-                print(f"    FAILED: magick not found")
+                print("    FAILED: magick not found")
         elif status == "error":
             if RICH_AVAILABLE and console:
                 console.print(f"    [red]FAILED: {escape(str(error_msg))}[/red]")
@@ -4312,14 +4306,14 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 print(f"    FAILED: {error_msg}")
         elif status == "magick_error":
             if RICH_AVAILABLE and console:
-                console.print(f"    [red]FAILED: magick error[/red]")
+                console.print("    [red]FAILED: magick error[/red]")
             else:
-                print(f"    FAILED: magick error")
+                print("    FAILED: magick error")
         elif status == "missing":
             if RICH_AVAILABLE and console:
-                console.print(f"    [red]FAILED: output missing[/red]")
+                console.print("    [red]FAILED: output missing[/red]")
             else:
-                print(f"    FAILED: output missing")
+                print("    FAILED: output missing")
         elif status in ("multi_page_refused", "page_layout_unreadable"):
             reason = ("multi-page TIFF with non-thumbnail pages (scanner IR / layers): the "
                       "diagnosis only looked at page 0, so converting the whole file could "
@@ -4356,9 +4350,9 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
             if not exif_ok:
                 # Do NOT overwrite original if EXIF was lost
                 if RICH_AVAILABLE and console:
-                    console.print(f"    [red]FAILED: EXIF copy or History entry failed — original preserved[/red]")
+                    console.print("    [red]FAILED: EXIF copy or History entry failed — original preserved[/red]")
                 else:
-                    print(f"    FAILED: EXIF copy or History entry failed — original preserved")
+                    print("    FAILED: EXIF copy or History entry failed — original preserved")
                 failed.append((final_dst, "EXIF copy or History entry failed"))
                 tmp8.unlink(missing_ok=True)
                 return
@@ -4410,9 +4404,9 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                     print(f"    Original backed up: OLD_PADDED/{backup_path.name}")
             else:
                 if RICH_AVAILABLE and console:
-                    console.print(f"    [dim]SKIPPED (ZIP larger than original)[/dim]")
+                    console.print("    [dim]SKIPPED (ZIP larger than original)[/dim]")
                 else:
-                    print(f"    SKIPPED (ZIP larger than original)")
+                    print("    SKIPPED (ZIP larger than original)")
                 tmp8.unlink(missing_ok=True)
 
 
@@ -4530,7 +4524,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         return None
 
     workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
-    workers = _memory_capped_pool_workers(workers, [it[0] for it in items if Path(it[0]).suffix.lower() in (".tif", ".tiff")], _COMPARE_BYTES_PER_PIXEL, "copy verification")
+    workers = _memory_capped_pool_workers(workers, [it[0] for it in items if Path(it[0]).suffix.lower() in (".tif", ".tiff")], tw.COMPARE_BYTES_PER_PIXEL, "copy verification")
     _TIMEOUT_LOAD = workers
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -4651,7 +4645,6 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         time_str = input("Type current time (HH:MM) to confirm: ").strip()
 
     # Delete files
-    from datetime import datetime
     try:
         now = datetime.now()
         current_time = now.strftime("%H:%M")
@@ -5084,7 +5077,6 @@ def generate_manifest(root: Path, mode: int) -> Optional[str]:
     the Destination column with <root>/ZIP_flat; every other mode writes
     Destination == Source (ignored by the backend, edited by hand if needed).
     """
-    from datetime import datetime
 
     root = Path(root)
     tiff_dirs = set()
@@ -5489,7 +5481,6 @@ def _render_manifest_summary(entry_reports: List[Dict], ok_count: int,
     A manifest can run for hours and the user walks away -- coming back to a
     single "3 OK" line meant opening N child logs to learn whether anything
     broke in the middle."""
-    from datetime import datetime
 
     width = 75
     rule = "-" * width
@@ -5922,10 +5913,10 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
         step1_workflow["compress_zip"] = False
         cmd_copy = build_copy_exif_command(step1_workflow, folders=found_folders)
         if RICH_AVAILABLE and console:
-            console.print(f"\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
+            console.print("\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
             console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_copy))}[/dim]\n")
         else:
-            print(f"\n=== Step 1/2: Copy EXIF ===")
+            print("\n=== Step 1/2: Copy EXIF ===")
             print(f"Running: {' '.join(cmd_copy)}\n")
         step1_result = run_subprocess(cmd_copy)
 
@@ -5938,10 +5929,10 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
 
         cmd = build_compress_command(workflow, folders=found_folders)
         if RICH_AVAILABLE and console:
-            console.print(f"\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
+            console.print("\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
             console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd))}[/dim]\n")
         else:
-            print(f"\n=== Step 2/2: Fuji: Compress ===")
+            print("\n=== Step 2/2: Fuji: Compress ===")
             print(f"Running: {' '.join(cmd)}\n")
         step2_result = run_subprocess(cmd)
 
@@ -5960,10 +5951,10 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
                     cmd_copy_real = build_copy_exif_command(copy_workflow, folders=found_folders)
                     cmd_real = build_compress_command(workflow, folders=found_folders)
                     if RICH_AVAILABLE and console:
-                        console.print(f"\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
+                        console.print("\n[cyan]=== Step 1/2: Copy EXIF ===[/cyan]")
                         console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_copy_real))}[/dim]\n")
                     else:
-                        print(f"\n=== Step 1/2: Copy EXIF ===")
+                        print("\n=== Step 1/2: Copy EXIF ===")
                         print(f"Running: {' '.join(cmd_copy_real)}\n")
                     # Same gate as the first pass above: a failed Copy EXIF must not fall
                     # through to Compress, which would ZIP TIFFs whose metadata never landed.
@@ -5971,10 +5962,10 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
                         console.print("[red]Step 1 (Copy EXIF) failed. Skipping Step 2 (Compress).[/red]")
                         return False
                     if RICH_AVAILABLE and console:
-                        console.print(f"\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
+                        console.print("\n[cyan]=== Step 2/2: Fuji: Compress ===[/cyan]")
                         console.print(f"[dim]Running: {escape(' '.join(str(a) for a in cmd_real))}[/dim]\n")
                     else:
-                        print(f"\n=== Step 2/2: Fuji: Compress ===")
+                        print("\n=== Step 2/2: Fuji: Compress ===")
                         print(f"Running: {' '.join(cmd_real)}\n")
                     run_subprocess(cmd_real)
                 else:
