@@ -2604,6 +2604,18 @@ class TestSourceRules:
         assert "subprocess" not in imported
         assert not [1 for _n, owner, _f in _calls(tree) if owner == "subprocess"]
 
+    def test_the_staging_folder_is_read_from_one_place(self):
+        """v3.1 (B5): -StagingDir is read once, into run.staging, which mode 8's default
+        folder replaces. A step reading the option itself would look in another folder
+        than the plan wrote to, and the move skips a file it does not find."""
+        readers = set()
+        for fn in [n for n in ast.walk(_tree("compress_tiff_zip.py")) if isinstance(n, ast.FunctionDef)]:
+            for node in ast.walk(fn):
+                if (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+                        and node.slice.value == "StagingDir"):
+                    readers.add(fn.name)
+        assert readers == {"__init__"}, readers
+
     def test_one_place_runs_subprocess(self):
         tree = _tree("tiff_workflow_common.py")
         sites = []

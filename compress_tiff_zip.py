@@ -130,6 +130,10 @@ class Run:
         self.srgb_profile = None
         self.exclude_names = []
         self.parallel = not opt["ForceSequential"]
+        # The staging folder of this run: -StagingDir, or mode 8's own folder
+        # (_default_mode8_staging). Every step reads it HERE: the plan writing into one
+        # folder and the move looking in another skipped every file without a word.
+        self.staging = opt["StagingDir"]
         self.counter = self.total = 0
         self.ok = self.skip = self.multi = self.warn = self.err = self.dry = 0
         self.stranded = self.restored = 0
@@ -945,7 +949,7 @@ def _claimed_destination(run, plan, f, final_dst, claimed):
     return final_dst
 
 
-def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging):
+def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map):
     """Modes 0/9: the Job for `f`, or None when the file is refused or skipped (reported
     here). `pre_comp`: its compression from the batch probe ("" when unknown);
     `comp_map`: that probe's result, to tell "not probed" from "probed, nothing read"."""
@@ -1000,7 +1004,7 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging
         # has been written, decoded and put next to it (complete_keep_original).
         # Without -StagingDir the worker writes a temp sibling of final_dst, never
         # final_dst itself: for a .tif source that IS the original.
-        if not staging:
+        if not run.staging:
             write_dst = tw.new_temp_sibling_path(final_dst, run.run_id)
             run.temp_files.add(write_dst)
         try:
@@ -1038,12 +1042,13 @@ def _warn_flat_output_in_the_input(run, files):
                 "WARN")
 
 
-def _plan_jobs(run, files, comp_map, staging):
+def _plan_jobs(run, files, comp_map):
     """The Job of every file `mode` can work on: a _Plan. A file with no place to go, or
     refused before any work (a path too long, an output onto its own source, in modes
     0/9 an already compressed or multi-page file), is reported here, in file order, and
     not queued. Creates the output folders (not in a dry run)."""
     opt = run.opt
+    staging = run.staging
     mode = opt["Mode"]
     dry = opt["DryRun"]
     plan = _Plan(jobs=[], collision_notes={})
@@ -1130,7 +1135,7 @@ def _plan_jobs(run, files, comp_map, staging):
             pre_comp = ""
 
         if mode in (0, 9):
-            job = _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging)
+            job = _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map)
             if job is None:
                 continue
             plan.jobs.append(job)
@@ -1181,7 +1186,7 @@ def _move_staged(run, group_tasks, group_dir, outcome):
     """Move the staged files of a group to their final destination (modes 0/9 land in
     _archive_originals). A staged file whose gate failed is dropped, never moved."""
     log = run.log
-    staging = run.opt["StagingDir"]
+    staging = run.staging
     dry = run.opt["DryRun"]
     staging_map = outcome.staging_map
     error_srcs = outcome.error_srcs
@@ -1224,7 +1229,7 @@ def _archive_originals(run, group_tasks, outcome):
     whose worker failed, skipped or wrote a copy that does not decode never touches
     its original; its leftover is dropped."""
     log = run.log
-    staging = run.opt["StagingDir"]
+    staging = run.staging
     dry = run.opt["DryRun"]
     staging_map = outcome.staging_map
     error_srcs = outcome.error_srcs
@@ -1393,7 +1398,7 @@ def _default_mode8_staging(run, input_roots):
             log("Mode 8 aborted: no staging directory selected.", "ERROR")
             return None
     staging = default_staging
-    opt["StagingDir"] = staging
+    run.staging = staging
     os.makedirs(staging, exist_ok=True)
     run.cleanup_dirs.append(staging)
     run.created_default_staging = True
@@ -1416,7 +1421,6 @@ def run_modes(run, bound):
     # input root it scattered one flat output across A\out and B\out.
     if opt["OutputDir"] and not os.path.isabs(opt["OutputDir"]):
         opt["OutputDir"] = tw.full_path(opt["OutputDir"])
-    staging = opt["StagingDir"]
 
     # a bad path in a ';' list still yields exit code 1
     run.err += len(missing_roots)
@@ -1428,7 +1432,7 @@ def run_modes(run, bound):
         log("NOTE: mode 8 replaces each original in place (verified pixel-identical first). "
             "-DeleteSource additionally removes a .tiff source whose output is written as .tif.", "WARN")
     log(f"Mode: {mode} | Workers: {opt['Workers']} | "
-        f"OutputDir: {opt['OutputDir'] or '(in-place/flat)'} | Staging: {staging or 'disabled'} | "
+        f"OutputDir: {opt['OutputDir'] or '(in-place/flat)'} | Staging: {run.staging or 'disabled'} | "
         f"DryRun: {dry} | SafeMode: {opt['SafeMode']} | SkipLzw: {opt['SkipLzwAsCompressed']} | "
         f"Overwrite: {overwrite} | DeleteSource: {'ON' if opt['DeleteSource'] else 'OFF'}")
 
@@ -1453,12 +1457,11 @@ def run_modes(run, bound):
         f"{int((time.time() - probe_start) * 1000)}ms")
 
     # Mode 8 always stages: the original stays until its replacement is verified.
-    if mode == 8 and not dry and not staging.strip():
-        staging = _default_mode8_staging(run, input_roots)
-        if staging is None:
+    if mode == 8 and not dry and not run.staging.strip():
+        if _default_mode8_staging(run, input_roots) is None:
             return 1
 
-    plan = _plan_jobs(run, files, comp_map, staging)
+    plan = _plan_jobs(run, files, comp_map)
     tasks = plan.jobs
 
     if not tasks:
@@ -1514,7 +1517,7 @@ def _is_interactive():
 def _remove_default_staging(run):
     """Remove the default staging folder only when this run created it (mode 8) and it is
     empty; one that still holds staged files is kept, with a pointer to it."""
-    staging = run.opt["StagingDir"]
+    staging = run.staging
     if not run.created_default_staging or not os.path.isdir(staging):
         return
     try:
@@ -1600,8 +1603,8 @@ def run_main(argv, state):
     run.srgb_profile = srgb
     run.exclude_names = exclude_names
     state["run"] = run
-    if opt["StagingDir"].strip():
-        run.cleanup_dirs.append(opt["StagingDir"])
+    if run.staging.strip():
+        run.cleanup_dirs.append(run.staging)
 
     log(f"tiff-workflow {tw.TOOLKIT_VERSION} | compress_tiff_zip.py | {tw.python_label()}")
     if overlay["info"]:
@@ -1646,7 +1649,7 @@ def cleanup_after_stop(run):
             run.log(f"RESTORE FAILED | {mv['original']}: {e}", "ERROR")
     if run.created_default_staging:
         try:
-            os.rmdir(run.opt["StagingDir"])     # only when it is empty
+            os.rmdir(run.staging)     # only when it is empty
         except OSError:
             pass
 
