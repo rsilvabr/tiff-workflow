@@ -313,12 +313,30 @@ def test_T3_a_workflow_without_a_registry_backend_is_not_asked(monkeypatch):
     assert REAL_ADVANCED(_cfg(), wf) is True and wf == {"origin": "thumbnails"}
 
 
-def test_T3_the_screen_is_called_after_each_step_basic_params():
-    import re
-    src = (Path(convert_tiff.__file__)).read_text(encoding="utf-8")
-    calls = re.findall(r"^( +)step_basic_params\(cfg, workflow\)\n\1step_advanced_options\(cfg, workflow\)\n",
-                       src, flags=re.M)
-    assert len(calls) == 3 == src.count("step_basic_params(cfg, workflow)")
+def test_T3_the_screen_comes_right_after_the_basic_params(monkeypatch):
+    """step_basic_params ends with the Advanced screen, on the same workflow: no
+    workflow can ask the basic questions and skip it (v3.1: was a text match on the
+    three call sites)."""
+    monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+    # workers, staging, dry-run, safe mode, skip LZW, cap, exclude, force sequential
+    answers = iter(["4", "", "n", "", "", "", "", ""])
+    events = []
+
+    def answer(*a, **k):
+        events.append("basic")
+        return next(answers)
+    monkeypatch.setattr("builtins.input", answer)
+    seen = []
+
+    def advanced(cfg, wf):
+        events.append("advanced")
+        seen.append(wf)
+        return True
+    monkeypatch.setattr(convert_tiff, "step_advanced_options", advanced)
+    workflow = {"origin": "free_compress", "dest": "zip"}
+    assert convert_tiff.step_basic_params(_cfg(), workflow) is True
+    assert events == ["basic"] * 8 + ["advanced"], events
+    assert seen == [workflow] and seen[0] is workflow
 
 
 def test_T3_a_hand_edited_value_that_fails_its_spec_is_dropped_not_passed():

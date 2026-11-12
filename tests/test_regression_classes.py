@@ -1581,15 +1581,8 @@ class TestPythonSubfileRestoreKeepsExplicitZero:
         assert numeric_subfiletypes(tmp8) == before, (
             f"markers changed: {before} -> {numeric_subfiletypes(tmp8)}"
         )
-
-    def test_restore_does_not_use_the_ambiguous_magick_property(self):
-        source = (REPO / "convert_tiff.py").read_text(encoding="utf-8")
-        body = source[source.index("def _restore_subfile_types"):]
-        body = body[:body.index("\ndef ", 1)]
-        assert '"%[tiff:subfiletype]' not in body, (
-            "the restore is reading the property that cannot tell 'absent' from 0 again"
-        )
-        assert '_run_exiftool(' in body and '["-a", "-G1", "-s", "-s", "-n", "-SubfileType"' in body
+        # This run is what catches a restore that loses the explicit 0 again (v3.1: it
+        # replaced a text match on the function's source).
 
 
 

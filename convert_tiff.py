@@ -1588,7 +1588,8 @@ def _supports_cap_workers(workflow: Dict) -> bool:
 
 
 def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
-    """Workers, DryRun, Staging."""
+    """Workers, DryRun, Staging -- then the per-run Advanced options screen, here so that no
+    workflow can ask the first without the second."""
     # The backend this run will actually launch: each one's PARAMS defaults are the
     # source of the prompt defaults below (audit round 17).
     _ref = "compress_tiff_zip.py" if _supports_cap_workers(workflow) else "copy_exif_to_tiff.py"
@@ -1692,6 +1693,7 @@ def step_basic_params(cfg: ToolConfig, workflow: Dict) -> bool:
         if fp == "y":
             workflow["force_sequential"] = True
 
+    step_advanced_options(cfg, workflow)
     return True
 
 
@@ -5726,7 +5728,6 @@ def run_manifest_workflow(cfg) -> bool:
         "dry_run": False,
     }
     step_basic_params(cfg, workflow)
-    step_advanced_options(cfg, workflow)
 
     # Collision policy for mode-2 (flattened) entries, same as the wizard.
     if any(m == 2 for _, _, m in entries):
@@ -5853,7 +5854,6 @@ def run_free_compress(cfg: ToolConfig) -> bool:
 
     # Basic params
     step_basic_params(cfg, workflow)
-    step_advanced_options(cfg, workflow)
 
     # Thumbnail generation option. The defaults come from the backend's own PARAMS
     # table; "Configure? No" adds no thumb_* keys at all, so the backend runs on its
@@ -6000,7 +6000,6 @@ def _run_exif_or_compress(cfg: ToolConfig, workflow_type: str) -> bool:
 
     # Basic params
     step_basic_params(cfg, workflow)
-    step_advanced_options(cfg, workflow)
 
     # Summary + confirm
     if not step_confirm(workflow, cfg):

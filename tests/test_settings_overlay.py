@@ -174,19 +174,57 @@ def test_T6_the_tables_are_exactly_the_planned_ones():
                                               "WorkerMemoryFraction": "float:0:2"}
 
 
-@pytest.mark.parametrize("script", SCRIPTS)
-def test_T6_the_overlay_is_applied_before_anything_reads_a_parameter(script):
+@pytest.mark.parametrize("script,section,key,value", [
+    ("compress_tiff_zip.py", "compress_tiff_zip", "CapWorkers", 3),
+    ("copy_exif_to_tiff.py", "copy_exif", "MagickTimeout", 77),
+    ("generate_thumbnails.py", "generate_thumbnails", "Size", 128),
+])
+def test_T6_the_overlay_is_applied_before_anything_reads_a_parameter(
+        script, section, key, value, tmp_path, monkeypatch):
     """A parameter read before the overlay is applied keeps the script's own value while
-    the rest of the run uses the file's."""
-    import ast
-    tree = ast.parse((REPO / script).read_text(encoding="utf-8"))
-    entry = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in ("run", "run_main"))
-    src = ast.unparse(entry)
-    assert src.count("tw.apply_settings_overlay(") == 1
-    apply_at = src.index("tw.apply_settings_overlay(")
-    assert src.index("tw.parse_args(") < apply_at
-    assert src.index("opt[") > apply_at, f"{script}: a parameter is read before the overlay is applied"
-    assert apply_at < src.index("tiff-workflow {tw.TOOLKIT_VERSION}") < src.index("log(overlay['info'])")
+    the rest of the run uses the file's. The run is watched: every read of the options
+    must come after the one apply_settings_overlay, and the log names the overlay right
+    after its first line (v3.1: was a text match on the source)."""
+    import importlib
+    module = importlib.import_module(script[:-3])
+    applied, early, late = [], [], []
+
+    class Watched(dict):
+        def __getitem__(self, name):
+            (late if applied else early).append(name)
+            return super().__getitem__(name)
+
+        def get(self, name, default=None):
+            (late if applied else early).append(name)
+            return super().get(name, default)
+
+    real_parse, real_apply = twc.parse_args, twc.apply_settings_overlay
+
+    def parse_args(argv, params):
+        opt, bound = real_parse(argv, params)
+        return Watched(opt), bound
+
+    def apply(sec, specs, values, bound, root):
+        applied.append(sec)
+        return real_apply(sec, specs, values, bound, root)
+    monkeypatch.setattr(twc, "parse_args", parse_args)
+    monkeypatch.setattr(twc, "apply_settings_overlay", apply)
+    root = tmp_path / HOSTILE
+    src = root / "in 50%"
+    src.mkdir(parents=True)
+    ov = _write(root / "settings.json", {section: {key: value}})
+    monkeypatch.setenv(ENV, str(ov))
+    monkeypatch.chdir(root)
+    argv = (["-Mode", "1"] if section == "compress_tiff_zip" else []) + ["-InputDir", str(src), "-DryRun"]
+    module.main(argv)
+    assert applied == [section]
+    assert not early, f"{script}: read before the overlay was applied: {early}"
+    assert len(late) >= 3, f"{script}: the run read no option: the watch proves nothing"
+    logs = list((root / "Logs").rglob("*.log"))
+    assert len(logs) == 1, logs
+    lines = logs[0].read_text(encoding="utf-8").splitlines()
+    assert "| tiff-workflow " in lines[0], lines[:3]
+    assert f"Script settings overlay: {ov}: 1 value(s): {key}" in lines[1], lines[:3]
 
 
 # --- T7 / T8: real runs ---------------------------------------------------------------------------

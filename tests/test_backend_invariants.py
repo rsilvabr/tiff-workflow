@@ -2624,8 +2624,21 @@ class TestSourceRules:
                 if owner == "subprocess" and name in ("run", "Popen", "call", "check_output"):
                     sites.append(fn.name)
         assert sites == ["run_captured"], sites
-        src = (REPO / "tiff_workflow_common.py").read_text(encoding="utf-8")
-        assert "capture_output" not in src.replace("capture_output=True makes", "")
+
+    def test_run_captured_starts_no_thread(self, monkeypatch):
+        """capture_output=True starts a reader thread per stream on Windows, which can hang
+        Thread.start() under memory exhaustion before the timeout is armed (round 21).
+        run_captured works with thread creation forbidden, stdin input and a timeout too."""
+        import threading
+
+        def no_thread(self, *a, **k):
+            raise AssertionError("a reader thread was started")
+        monkeypatch.setattr(threading.Thread, "start", no_thread)
+        code = "import sys; d = sys.stdin.buffer.read(); sys.stdout.buffer.write(d[::-1]); sys.stderr.write('e')"
+        rc, out, err = tw.run_captured([sys.executable, "-c", code], timeout=60, input=b"abc")
+        assert (rc, out, err) == (0, b"cba", b"e")
+        with pytest.raises(subprocess.TimeoutExpired):
+            tw.run_captured([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
 
     @pytest.mark.parametrize("name", ALL_FILES)
     def test_probes_have_a_timeout_and_conversions_do_not_probe(self, name):
