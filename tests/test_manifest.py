@@ -650,3 +650,18 @@ class TestBuildEntryCmd:
     def test_destination_ignored_outside_mode2(self, tmp_path):
         cmd = build_manifest_entry_cmd(str(tmp_path), str(tmp_path / "out"), 1, _workflow())
         assert "-OutputDir" not in cmd
+
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="drive letters")
+def test_the_wizard_and_the_backend_agree_on_where_a_mode_writes():
+    r"""v3.1 phase 6 (W-O4): the wizard's collision scan had its own copy of the backend's
+    output rule, which differed at a drive root: mode 5 with Q:\a\b\x.tif under Q:\ gave
+    Q:\ZIP (the backend writes Q:\a\ZIP); mode 4 with a file in the root gave Q:\_ZIP (the
+    backend has no place for it). One rule now: tiff_workflow_common.resolve_output."""
+    import convert_tiff as ct
+    assert ct._resolve_output_folder(Path(r"Q:\a\b\x.tif"), 5, Path("Q:\\"), "") == Path(r"Q:\a\ZIP")
+    assert ct._resolve_output_folder(Path(r"Q:\x.tif"), 4, Path("Q:\\"), "") is None
+    assert ct._resolve_output_folder(Path(r"Q:\伊豆沼 [x]\TIFF\x.tif"), 4, Path("Q:\\"), "") == \
+        Path(r"Q:\伊豆沼 [x]\ZIP")
+    assert ct._resolve_output_folder(Path(r"Q:\a\x.tif"), 2, Path(r"Q:\a"), r"D:\out 50%") == Path(r"D:\out 50%")

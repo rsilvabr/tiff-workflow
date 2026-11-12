@@ -5109,45 +5109,18 @@ def manifest_source_overlaps(entries: List[Tuple]) -> List[Tuple[str, str]]:
 
 
 def _resolve_output_folder(f: Path, mode: int, src_root: Path, dest_cell: str) -> Optional[Path]:
-    """Mirror of Resolve-Output in compress_tiff_zip.py, returning only the
-    output FOLDER. Only modes 2/4/5 are resolved -- every other mode writes
-    inside the Source tree and never reaches the collision scan."""
-    parent = f.parent
-    # audit round 28: the folder names are the backend's own settings (script or settings
-    # file), never a copy of their defaults -- an edited ZipSuffix / ZipSubfolderName made
-    # this scan look at a folder the backend never writes.
-    zip_suffix = str(_backend_default("compress_tiff_zip.py", "ZipSuffix"))
-    zip_sub = str(_backend_default("compress_tiff_zip.py", "ZipSubfolderName"))
-    if mode == 2:
-        # Mode 2 is recursive-FLAT: every file under the source lands in the
-        # Destination (or the input root when the cell is empty).
-        return Path(dest_cell) if dest_cell else src_root
-    if mode == 4:
-        name = parent.name
-        if re.search(r"_tiff$", name, re.IGNORECASE):
-            new_name = name[:-len("_tiff")] + zip_suffix
-        elif name.lower() == "tiff":
-            # Mirrors Resolve-Output: a folder named exactly "TIFF" has no stem, so the
-            # suffix rule would produce a leading-underscore "_ZIP".
-            new_name = zip_sub
-        elif re.search(r".tiff$", name, re.IGNORECASE):
-            new_name = name[:-len("tiff")] + zip_suffix
-        else:
-            new_name = name + zip_suffix
-        return parent.parent / new_name
-    if mode == 5:
-        grandparent = parent.parent
-        # Never climb above the input root (same rule as the backend). A plain
-        # startswith() matches "C:\database" for root "C:\data" -- compare on
-        # path parts instead of raw prefixes.
-        try:
-            inside = os.path.commonpath([str(grandparent), str(src_root)]).lower() == str(src_root).rstrip("/\\").lower()
-        except ValueError:
-            inside = False  # different drives
-        if not inside:
-            grandparent = src_root
-        return grandparent / zip_sub
-    return None
+    """The output FOLDER compress_tiff_zip will write `f` to in `mode` (2/4/5 reach the
+    collision scan): tw.resolve_output, the backend's own rule, with its folder settings
+    (script or settings file, never a copy of their defaults -- audit round 28). Until v3.1
+    the wizard had its own copy, which differed at a drive root (W-O4)."""
+    if mode not in (2, 4, 5):
+        return None
+    opt = {name: str(_backend_default("compress_tiff_zip.py", name))
+           for name in ("ZipSuffix", "ZipSubfolderName")}     # all that modes 2/4/5 read
+    opt["OutputDir"] = dest_cell or ""
+    found = tw.FoundFile(str(f), f.name, str(f.parent), 0, 0)
+    out = tw.resolve_output(found, mode, str(src_root), opt)
+    return Path(os.path.dirname(out)) if out else None
 
 
 def manifest_output_collisions(entries: List[Tuple], exclude_names=()) -> List[Tuple]:

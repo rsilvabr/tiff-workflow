@@ -581,6 +581,81 @@ def path_excluded(directory, root, names):
     return any(seg and seg.lower() in lowered for seg in parts)
 
 
+def resolve_output(f, mode, input_root, opt):
+    """Where compress_tiff_zip writes the compressed copy of `f` (a FoundFile) in `mode`;
+    None when the mode has no place for it (reported, never dropped silently). The output is
+    always <stem>.tif. `opt` needs ZipSubfolderName, ZipSuffix, OutputDir, ExportMarker,
+    ExportTiffSubfolder and ExportZipSubfolder. The wizard's manifest collision scan asks
+    here too: one rule for where a mode writes (v3.1 phase 6, W-O4)."""
+    parent = f.dir
+    out_name = f.stem + ".tif"
+    # One separator: '/' is legal on Windows, and -InputDir given that way used to defeat
+    # the mode 5 prefix compare and collapse the whole tree into <root>\ZIP.
+    root_p = input_root.replace("/", "\\").rstrip("\\")
+
+    if mode in (0, 8, 9):
+        return join_path(parent, out_name)
+    if mode in (1, 3):
+        return join_path(join_path(parent, opt["ZipSubfolderName"]), out_name)
+    if mode == 2:
+        return join_path(opt["OutputDir"] or root_p, out_name)
+    if mode == 4:
+        folder = os.path.basename(parent.rstrip("\\/"))
+        grandparent = parent_dir(parent)
+        if not grandparent or not folder:
+            return None
+        suffix = opt["ZipSuffix"]
+        if re.search(r"_(TIFF)$", folder, re.I):
+            new = re.sub(r"_(TIFF)$", lambda m: suffix, folder, flags=re.I)
+        elif folder.lower() == "tiff":
+            # A folder named exactly "TIFF" has no stem: the suffix rule made it "_ZIP".
+            new = opt["ZipSubfolderName"]
+        elif re.search(r"^(.+)(TIFF)$", folder, re.I):
+            new = re.sub(r"(TIFF)$", lambda m: suffix, folder, flags=re.I)
+        else:
+            new = folder + suffix
+        return join_path(join_path(grandparent, new), out_name)
+    if mode == 5:
+        grandparent = parent_dir(parent)
+        # Never climb above the input root: a TIFF sitting directly in the root would land
+        # in the drive root, outside the chosen tree. The prefix compare needs a separator
+        # boundary: "C:\data" also prefixes "C:\database".
+        if not grandparent or segments_below(grandparent, root_p) is None:
+            grandparent = root_p
+        return join_path(join_path(grandparent, opt["ZipSubfolderName"]), out_name)
+    if mode in (6, 7):
+        # The marker only counts AT/BELOW the input root: an _EXPORT folder ABOVE the
+        # chosen -InputDir once rebuilt the output outside the selected tree.
+        parts = segments_below(parent, root_p)
+        if parts is None:
+            return None
+        marker = opt["ExportMarker"].lower()
+        export_idx = -1
+        tail_from = -1
+        for i, seg in enumerate(parts):
+            if export_idx < 0 and seg.lower() == marker:
+                export_idx = i
+                if mode == 6:
+                    tail_from = i + 1
+                    break
+                continue
+            # mode 7: the TIFF subfolder only counts when it sits below the marker
+            if mode == 7 and export_idx >= 0 and seg.lower() == opt["ExportTiffSubfolder"].lower():
+                tail_from = i + 1
+                break
+        if export_idx < 0 or tail_from < 0:
+            return None
+        # Inside the _EXPORT folder the file actually came from (<root>\_EXPORT would
+        # merge every job into one folder).
+        export_root = join_path(root_p, "\\".join(parts[:export_idx + 1]))
+        new_parent = join_path(export_root, opt["ExportZipSubfolder"])
+        rel = [p for p in parts[tail_from:] if p]
+        if rel:
+            new_parent = join_path(new_parent, "\\".join(rel))
+        return join_path(new_parent, out_name)
+    return None
+
+
 def parse_exclude_folders(text):
     """The ';'-separated folder NAMES of -ExcludeFolders, or raises UsageError for a path."""
     names = []
