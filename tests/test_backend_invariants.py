@@ -2561,6 +2561,23 @@ class TestCommandLine:
             tw.parse_args(["--page", "first"], gt.PARAMS)
         assert str(e.value) == "argument --page: 'first' is not a valid value"
 
+    def test_the_command_line_of_v3_0_0_is_refused_with_its_translation(self, tmp_path,
+                                                                         monkeypatch, capsys):
+        """D1: v3.1 does not read -Name value. A .bat of v3.0.0 exits 2 before anything is
+        touched, and the message says where the translation is; a line of v3.1 that does not
+        bind gets no such note."""
+        monkeypatch.chdir(tmp_path)
+        for module, argv in ((cz, ["-Mode", "9", "-InputDir", "x"]),
+                             (cx, ["-InputDir", "x", "-SafeMode:$false"]),
+                             (gt, ["-InputDir", "x", "-Size", "128"])):
+            assert module.main(argv) == 2
+            out = capsys.readouterr().out
+            assert out.startswith("ERROR: ") and "tools/legacy_args.py" in out, out
+        assert os.listdir(tmp_path) == [], "a refused run made its log"
+        with pytest.raises(tw.UsageError) as e:
+            tw.parse_args(["--mode", "9", "--no-such-thing"], cz.PARAMS)
+        assert "legacy_args" not in str(e.value)
+
     def test_a_bad_command_line_exits_2_before_anything_is_touched(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
         for module in (cz, cx, gt):

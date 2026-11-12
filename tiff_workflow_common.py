@@ -126,35 +126,11 @@ class ToolError(Exception):
         self.exit_code = exit_code
 
 
-_BOOL_WORDS = {"$true": True, "true": True, "1": True,
-               "$false": False, "false": False, "0": False}
-_PARAM_TOKEN = re.compile(r"-([A-Za-z][A-Za-z0-9]*)(?::(.*))?", re.S)
-
-
-def _legacy_name(name):
-    """The name a parameter had on the command line of v3.0.0 and the .ps1 backends:
-    thumb_size -> ThumbSize (every name of then is its words capitalised, no acronym)."""
-    return "".join(w.capitalize() for w in name.split("_"))
-
-
-def _resolve_param(word, params):
-    low = word.lower()
-    for p in params:
-        if _legacy_name(p.name).lower() == low:
-            return p
-    hits = [p for p in params if _legacy_name(p.name).lower().startswith(low)]
-    if len(hits) == 1:
-        return hits[0]
-    if not hits:
-        raise UsageError(f"unknown parameter -{word}")
-    raise UsageError(f"-{word} is ambiguous: "
-                     + ", ".join("-" + _legacy_name(p.name) for p in hits))
-
-
 def _convert_param(p, raw):
-    """The value `raw` gives `p`: checked against its kind, range, choices (matched without
-    case) and pattern. The UsageError says what is wrong without naming the option -- each
-    reader names it its own way ("argument --workers: must be from 1 to 64, got 65")."""
+    """The value `raw` gives `p` (int, float or str; a yes/no takes no value): checked against
+    its kind, range, choices (matched without case) and pattern. The UsageError says what is
+    wrong without naming the option -- each reader names it its own way ("argument --workers:
+    must be from 1 to 64, got 65"; tools/legacy_args.py's old reader, "-Workers ...")."""
     if p.kind == "int":
         if not re.fullmatch(r"\s*[+-]?\d+\s*", raw):
             raise UsageError(f"needs a whole number, got '{raw}'")
@@ -166,10 +142,6 @@ def _convert_param(p, raw):
             raise UsageError(f"needs a number, got '{raw}'")
         if not math.isfinite(val):
             raise UsageError(f"needs a number, got '{raw}'")
-    elif p.kind == "bool":
-        if raw.strip().lower() not in _BOOL_WORDS:
-            raise UsageError(f"needs $true or $false, got '{raw}'")
-        return _BOOL_WORDS[raw.strip().lower()]
     else:
         val = raw
     if p.kind in ("int", "float"):
@@ -268,77 +240,28 @@ def help_text(params, prog: str, doc: str = "") -> str:
     return ap.format_help()
 
 
-# An argv of the old form: some token is -Name (one dash and a letter), never --name.
-_LEGACY_TOKEN = re.compile(r"-[A-Za-z]")
+# A word of the command line of v3.0.0: -Name, one dash and a capital (v3.1 writes --name, and
+# a value that starts with '-' goes as --name=value).
+_OLD_FORM = re.compile(r"-[A-Z]")
 
 
 def parse_args(argv, params):
     """Bind `argv` to `params`: ({name: value}, {names given on the command line}). The
     command line is `--kebab-case value`, `--switch` / `--no-switch` (v3.1, D3). Raises
-    UsageError for anything it cannot bind.
-
-    During v3.1 phase 8 an argv of the old form (-Name value, -Name:value) still binds
-    through _parse_legacy, so the callers can move one at a time; the end of the phase
-    removes it."""
+    UsageError for anything it cannot bind; a line in the form of v3.0.0 (-Name value) is one
+    of those, and the error says where its translation is (tools/legacy_args.py)."""
     argv = [str(a) for a in argv]
-    if any(_LEGACY_TOKEN.match(a) for a in argv):
-        return _parse_legacy(argv, params)
-    given = vars(_new_parser(params).parse_args(argv))
+    try:
+        given = vars(_new_parser(params).parse_args(argv))
+    except UsageError as e:
+        if any(_OLD_FORM.match(a) for a in argv):
+            raise UsageError(f"{e} -- the command line of v3.0.0 (-Name value) is written "
+                             f"--name value since v3.1: tools/legacy_args.py translates a "
+                             f"line, docs/command_line.md has the table") from None
+        raise
     values = {p.name: p.default for p in params}
     values.update(given)
     return values, set(given)
-
-
-def _parse_legacy(argv, params):
-    """Bind `argv` the way the PowerShell backends bound theirs, so a command line written
-    for a .ps1 (a saved preset, a .bat) still means the same: `-Name value`, `-Name:value`,
-    `-Switch`, `-Switch:$false`; names without case; an unambiguous prefix of a name is
-    that name. Returns ({name: value}, {names given on the command line}). Raises
-    UsageError for anything it cannot bind -- a value without its -Parameter included."""
-    values = {p.name: p.default for p in params}
-    bound = set()
-    i = 0
-    while i < len(argv):
-        tok = str(argv[i])
-        i += 1
-        m = _PARAM_TOKEN.fullmatch(tok)
-        if not m:
-            raise UsageError(f"unexpected argument '{tok}' (every value needs its -Parameter)")
-        p = _resolve_param(m.group(1), params)
-        old = "-" + _legacy_name(p.name)
-        inline = m.group(2)
-        if p.kind == "switch":
-            if inline is None:
-                val = True
-            elif inline.strip().lower() in _BOOL_WORDS:
-                val = _BOOL_WORDS[inline.strip().lower()]
-            else:
-                raise UsageError(f"{old} is a switch: {old} or {old}:$false")
-        else:
-            if inline is not None:
-                raw = inline
-            else:
-                if i >= len(argv):
-                    raise UsageError(f"{old} needs a value")
-                raw = str(argv[i])
-                if p.kind == "str":
-                    m2 = _PARAM_TOKEN.fullmatch(raw)
-                    if m2 and m2.group(2) is None:
-                        try:
-                            _resolve_param(m2.group(1), params)
-                            is_param = True
-                        except UsageError:
-                            is_param = False
-                        if is_param:
-                            raise UsageError(f"{old} needs a value")
-                i += 1
-            try:
-                val = _convert_param(p, raw)
-            except UsageError as e:
-                raise UsageError(f"{old} {e}")
-        values[p.name] = val
-        bound.add(p.name)
-    return values, bound
 
 
 # --- Settings overlay -----------------------------------------------

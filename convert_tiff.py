@@ -1880,9 +1880,7 @@ def _journal_step(line) -> Optional[JournalStep]:
     script = SUBCOMMANDS[line[0]]
     args = [str(a) for a in line[1:]]
     params = _backend_tables(script)[0]
-    # The backends read the old form (-Name value) until the end of v3.1 phase 8; a journal
-    # in it is v3.0.0's and is refused here already.
-    if not params or any(tw._LEGACY_TOKEN.match(a) for a in args):
+    if not params:
         return None
     try:
         values, _given = tw.parse_args(args, params)

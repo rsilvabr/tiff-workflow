@@ -25,6 +25,8 @@ import legacy_args  # noqa: E402
 
 GOLDEN = ROOT / "tests" / "data" / "wizard_registry_golden.json"
 HOSTILE = "D:\\写真 [FINAL] x\\2019 100%"
+#: a word of the old command line: -Name (one dash, a letter)
+OLD_TOKEN = re.compile(r"-[A-Za-z]")
 BACKENDS = sorted(legacy_args.BACKENDS)
 _PS1_TO_BACKEND = {"compress_tiff_zip.ps1": "compress", "copy_exif_to_TIFF_ps7.ps1": "copy-exif"}
 
@@ -35,12 +37,12 @@ def _params(backend):
 
 def _old(argv, params):
     """What v3.0.0 bound `argv` to."""
-    return tw._parse_legacy(list(argv), params)
+    return legacy_args.parse_legacy(list(argv), params)
 
 
 def _new(argv, params):
     """What v3.1 binds `argv` to -- through argparse, never through the old reader."""
-    assert not any(tw._LEGACY_TOKEN.match(a) for a in argv), argv
+    assert not any(OLD_TOKEN.match(a) for a in argv), argv
     return tw.parse_args(list(argv), params)
 
 
@@ -75,11 +77,11 @@ def _values(p):
 def _names(p, params):
     """The ways v3.0.0 let a user name `p`: exact, other case, the shortest unambiguous prefix
     -- of the name it had then (ThumbSize; thumb_size since v3.1, T7)."""
-    old = tw._legacy_name(p.name)
+    old = legacy_args.legacy_name(p.name)
     names = [old, old.lower(), old.upper()]
     for n in range(1, len(old) + 1):
         try:
-            if tw._resolve_param(old[:n], params) is p:
+            if legacy_args.resolve_param(old[:n], params) is p:
                 names.append(old[:n])
                 break
         except tw.UsageError:
@@ -120,9 +122,9 @@ def test_long_names_and_the_names_of_v3_0_0():
     assert tw.cli_switch("safe_mode", False) == "--no-safe-mode"
     assert tw.cli_value("exclude_folders", "-old") == ["--exclude-folders=-old"]
     assert tw.cli_value("workers", 4) == ["--workers", "4"]
-    assert tw._legacy_name("skip_lzw_as_compressed") == "SkipLzwAsCompressed"
-    assert tw._legacy_name("icc_policy") == "IccPolicy"
-    assert tw._legacy_name("size") == "Size"
+    assert legacy_args.legacy_name("skip_lzw_as_compressed") == "SkipLzwAsCompressed"
+    assert legacy_args.legacy_name("icc_policy") == "IccPolicy"
+    assert legacy_args.legacy_name("size") == "Size"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
@@ -144,7 +146,7 @@ def test_every_name_of_v3_0_0_is_known(backend):
         "thumbnails": "InputDir Size OutputDir Remove DryRun Recursive Workers Page Quality "
                       "Format SrgbProfile ExcludeFolders",
     }[backend].split()
-    assert [tw._legacy_name(p.name) for p in _params(backend)] == v300
+    assert [legacy_args.legacy_name(p.name) for p in _params(backend)] == v300
 
 
 # --- the translation binds the same --------------------------------------------------------
@@ -184,7 +186,7 @@ def test_every_parameter_in_one_line_binds_the_same(backend):
         if p.name == "input_dir_file":            # one of -InputDir / -InputDirFile is enough
             continue
         v = HOSTILE if p.kind == "str" and _accepted(p, HOSTILE) else _values(p)[-1]
-        name = tw._legacy_name(p.name)
+        name = legacy_args.legacy_name(p.name)
         old += [f"-{name}:{v}"] if p.kind == "switch" else [f"-{name}", v]
     new = legacy_args.translate(old, params)
     assert _new(new, params) == _old(old, params)
