@@ -26,31 +26,38 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   settings carry `convert_padded: true` (an explicit workflow-7 answer, default no);
   then `_run_diagnose_journal` calls `_compress_padded_files`, whose pixel gate
   (`_padded_pixels_status`) and OLD_PADDED backup are what make that safe unattended.
-- `compress_tiff_zip.py` -- TIFF -> ZIP/Deflate, modes 0-9 and legacy (no
-  `-Mode`: the current folder, in place), backups in `OLD_TIFFs/`, thumbnails,
-  `-ExcludeFolders`. ONE per-file worker, `process_job`, for every mode.
+- `compress_tiff_zip.py` -- TIFF -> ZIP/Deflate, modes 0-9 (`--mode` is required
+  since v3.1; the legacy mode is gone), backups in `OLD_TIFFs/`, thumbnails,
+  `--exclude-folders`. ONE per-file worker, `process_job`, for every mode.
 - `copy_exif_to_tiff.py` -- EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into
-  the TIFF, optionally compressing it (`-CompressZip`). Worker: `process_pair`.
+  the TIFF, optionally compressing it (`--compress-zip`). Worker: `process_pair`.
 - `generate_thumbnails.py` -- sRGB thumbnails, standalone.
 - `tiff_workflow_common.py` -- what the three backends share: the command
   line (`P`, `parse_args`), the settings overlay, the log, every call to
   ImageMagick and exiftool, the gates, the moves, the directory listing, the
-  thread pool (`run_tasks`). It must sit next to the backends.
-  compress and copy_exif also take `-InputDirFile` (one folder per line); the
+  thread pool (`run_tasks`). It must sit next to the backends. Each backend also
+  runs as `convert_tiff.py compress|copy-exif|thumbnails ...` (`_run_backend`:
+  the script, in the same process).
+  compress and copy_exif also take `--input-dir-file` (one folder per line); the
   wizard's `run_subprocess` switches to it when the command line would pass
   `_CMDLINE_SPILL_CHARS`.
 
 ## Hard constraints of the backends
-- **The command line is a contract.** Presets and journals saved by users hold
-  the arguments -- some of them written by the PowerShell edition. Never rename
-  or remove a parameter of a `PARAMS` table or change what a value means;
-  `parse_args` binds the way PowerShell did (`-Name value`, `-Name:value`,
-  `-Switch`, `-Switch:$false`, names without case, unambiguous prefixes) and
-  refuses everything else with exit 1. `tests/test_wizard_registry.py` replays
-  the golden PowerShell command lines (in v3.1's form, through
-  `tools/legacy_args.py`); `tests/test_journal_lines.py` the journal forms.
-  (v3.1 phase 8 replaces this command line with `--kebab-case`; this rule is
-  rewritten when the phase ends.)
+- **The command line is a contract.** Presets, journals and users' `.bat` files
+  hold the arguments. Never rename or remove a parameter of a `PARAMS` table or
+  change what a value means. Since v3.1 (phase 8) `parse_args` is argparse:
+  `--kebab-case value`, every yes/no `--x` / `--no-x`, no abbreviation, exact
+  case; a parameter has ONE name, `snake_case`, in the table, the code
+  (`opt["thumb_size"]`) and the settings file, and `--thumb-size` on the line
+  (`tw.cli_name`). Build an argument with `tw.cli_value` / `tw.cli_switch`
+  (a value that starts with `-` goes as `--name=value`), never by hand. What
+  the line alone refuses exits `tw.EXIT_USAGE` (2), before a log exists; 1 is
+  every other failure. The command line of v3.0.0 (`-Name value`) is refused;
+  its reader lives on in `tools/legacy_args.py` (the translation,
+  `docs/command_line.md`). `tests/test_wizard_registry.py` replays the golden
+  PowerShell command lines through that translation;
+  `tests/test_journal_lines.py` the journal forms (`[subcommand, *args]`, read
+  back with the backend's own table and reader).
 - **One copy of everything.** A helper two backends need goes in
   `tiff_workflow_common.py`, never into both. Since v3.1 the wizard imports
   that module too (never a backend), and reads the overlay with its functions;
@@ -122,7 +129,7 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   `convert_tiff.py` (`_OVERLAY_SETTINGS`) and by every backend
   (`apply_settings_overlay`). Only the names in a script's `OVERLAY_SPECS`
   table are taken: **never add a safety or per-run parameter to one**
-  (tests/test_settings_overlay.py T6 pins the forbidden list). A `-Param` on
+  (tests/test_settings_overlay.py T6 pins the forbidden list). A `--param` on
   the command line wins; a bad file or value changes nothing and warns. Tests
   and the battery switch it off.
 - **Every backend parameter is in `REGISTRY` or in `NOT_OFFERED`** (with the
@@ -181,7 +188,7 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
 
 ## Shared semantics with jxl-photo
 `jxl-photo` (sibling repo) is the **reference implementation** of the features
-both toolkits have -- `-ExcludeFolders` (folder NAMES, matched as segments,
+both toolkits have -- `--exclude-folders` (folder NAMES, matched as segments,
 case-insensitive, only BELOW the scan root; round 14 fixed a matcher that
 split the absolute path), export-marker matching, manifests. When a shared
 feature's semantics are in doubt, read jxl-photo's version and ask before
@@ -316,6 +323,9 @@ change, ask the owner: will the coder be a cheap model (DeepSeek, Kimi, GLM,
 - `docs/README_compress_tiff_zip.md`, `docs/README_convert_tiff_py.md`,
   `docs/README_copy_exif.md`, `docs/README_generate_thumbnails.md` -- per-script
   reference.
+- `docs/command_line.md` -- the command line of v3.1 and every option of v3.0.0
+  in its new form (`tests/test_legacy_args.py` checks the table against the
+  `PARAMS` tables: a new option needs its row).
 - `docs/powershell_edition.md` -- the PowerShell scripts of v2.9.1: where they
   are, what changes for someone moving to v3, and the problems found in them
   while porting. **Written once, with v3.0.0, and frozen** (owner's decision,

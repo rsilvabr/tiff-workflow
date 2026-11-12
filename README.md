@@ -88,15 +88,15 @@ The wizard supports **AutoFind** — automatically locates folders matching patt
 ## The scripts on their own
 
 ```powershell
-python compress_tiff_zip.py -Mode 0 -InputDir .                             # compress in place; originals go to OLD_TIFFs/
-python compress_tiff_zip.py -Mode 8 -InputDir F:\Photos -DeleteSource       # recursive, in place, replaces each original
-python compress_tiff_zip.py -Mode 3 -InputDir F:\Photos -StagingDir E:\staging -Workers 12
-python compress_tiff_zip.py -Mode 9 -GenerateThumbnail -ThumbSize 512 -InputDir F:\Photos   # with an embedded thumbnail page
-python copy_exif_to_tiff.py -InputDir "F:\Photos\S5pro session"             # EXIF from each JPEG into its TIFF
-python generate_thumbnails.py -InputDir F:\Photos -Size 256                 # standalone sRGB thumbnails
+python compress_tiff_zip.py --mode 0 --input-dir .                          # compress in place; originals go to OLD_TIFFs/
+python compress_tiff_zip.py --mode 8 --input-dir F:\Photos --delete-source   # recursive, in place, replaces each original
+python compress_tiff_zip.py --mode 3 --input-dir F:\Photos --staging-dir E:\staging --workers 12
+python compress_tiff_zip.py --mode 9 --generate-thumbnail --thumb-size 512 --input-dir F:\Photos   # with an embedded thumbnail page
+python copy_exif_to_tiff.py --input-dir "F:\Photos\S5pro session"            # EXIF from each JPEG into its TIFF
+python generate_thumbnails.py --input-dir F:\Photos --size 256               # standalone sRGB thumbnails
 ```
 
-The parameters are the ones the PowerShell scripts had (`-Name value`, `-Switch`, names without case). To turn a yes/no setting off, write `-SafeMode:false`. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
+Each is also `python convert_tiff.py compress|copy-exif|thumbnails ...`, and `--help` lists its options. A yes/no is `--safe-mode` / `--no-safe-mode`. **A line written for v3.0.0 or earlier** (`-Mode 9 -SafeMode:$false`) is refused: [the table](docs/command_line.md) rewrites it. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
 
 ---
 
@@ -112,7 +112,7 @@ The parameters are the ones the PowerShell scripts had (`-Name value`, `-Switch`
 | `5` | Sibling folder | Directory (recursive) | `TIFF/ZIP/` → grandparent `ZIP/` | `in/2024/photo.tif` → `in/ZIP/photo.tif` |
 | `6` | Export marker | Directory (recursive) | ONLY inside `_EXPORT` trees | `_EXPORT/photo.tif` → `_EXPORT/ZIP/photo.tif` |
 | `7` | Export marker subfolder | Directory (recursive) | Only inside `_EXPORT/TIFF` trees | `_EXPORT/TIFF/photo.tif` → `_EXPORT/ZIP/photo.tif` |
-| `8` | In-place + delete | Directory (recursive) | In-place, always: the verified output replaces each original. `-DeleteSource` additionally removes a `.tiff` source | `photo.tif` → replaced; `photo.tiff` → `photo.tif`, source deleted |
+| `8` | In-place + delete | Directory (recursive) | In-place, always: the verified output replaces each original. `--delete-source` additionally removes a `.tiff` source | `photo.tif` → replaced; `photo.tiff` → `photo.tif`, source deleted |
 | `9` | In-place recursive + OLD_TIFFs | Directory (recursive) | In-place. Originals → `OLD_TIFFs/` | `photo.tif` → compressed in place |
 
 What each mode does with name collisions, staging and deletes: [docs/README_compress_tiff_zip.md](docs/README_compress_tiff_zip.md#modes-0-9).
@@ -142,9 +142,9 @@ One line each; the detail is behind each link.
 
 - **Safe Mode** (default: ON) skips multi-page TIFFs (scanner IR files, Photoshop layers). A page counts as a thumbnail only when it is marked as one or is strictly smaller than the main image. [More](docs/README_compress_tiff_zip.md#safemode-default-on)
 - **Where the originals go:** modes 0 and 9 keep each original in `OLD_TIFFs/`, moved there only after its compressed copy is ready; wizard options 5 and 6 restore or delete those folders, and no mode ever takes `OLD_TIFFs/` as input. [More](docs/README_compress_tiff_zip.md#old_tiffs-protection-all-modes)
-- **After an interrupted run**, every later run lists originals left in `OLD_TIFFs/` with nothing in their place, and `-RestoreStranded` puts them back. [More](docs/README_compress_tiff_zip.md#stranded-originals)
-- **Embedded thumbnails** (`-GenerateThumbnail`) are colour-managed and never drop pages: a file whose extra pages are real is refused, not rebuilt. A library that is already Deflate needs `-SkipCompressedWithThumb`. [More](docs/README_compress_tiff_zip.md#thumbnail-generation-v12)
-- **Folder exclusion** (`-ExcludeFolders "_EXPORT;temp"`) skips whole folder trees by name, in every mode, and only below the folder you point at. [More](docs/README_compress_tiff_zip.md#behavior)
+- **After an interrupted run**, every later run lists originals left in `OLD_TIFFs/` with nothing in their place, and `--restore-stranded` puts them back. [More](docs/README_compress_tiff_zip.md#stranded-originals)
+- **Embedded thumbnails** (`--generate-thumbnail`) are colour-managed and never drop pages: a file whose extra pages are real is refused, not rebuilt. A library that is already Deflate needs `--skip-compressed-with-thumb`. [More](docs/README_compress_tiff_zip.md#thumbnail-generation-v12)
+- **Folder exclusion** (`--exclude-folders "_EXPORT;temp"`) skips whole folder trees by name, in every mode, and only below the folder you point at. [More](docs/README_compress_tiff_zip.md#behavior)
 - **Copy EXIF** is for Fuji S3/S5 Pro TIFFs exported by Hyper Utility, which come without EXIF: it takes the camera data from the JPEG (or RAF) of the same shot, and can compress in the same pass. [More](docs/README_copy_exif.md)
 - **Diagnose** tells real 16-bit TIFFs from padded 8-bit ones by a 16 → 8 → 16-bit round trip, and only reports unless you ask it to convert them. [More](docs/README_convert_tiff_py.md#diagnose-tiffs-option-7)
 - **Presets:** save the last workflow under a name (main menu **[5]**) and run it unattended with `python convert_tiff.py --run-preset NAME`. [More](docs/README_convert_tiff_py.md#presets-menu-5)
@@ -163,6 +163,7 @@ One line each; the detail is behind each link.
 | [docs/README_compress_tiff_zip.md](docs/README_compress_tiff_zip.md) | `compress_tiff_zip.py`: parameters, modes, Safe Mode, `OLD_TIFFs`, staging, thumbnails |
 | [docs/README_copy_exif.md](docs/README_copy_exif.md) | `copy_exif_to_tiff.py`: pairing a TIFF with its JPEG or RAF, parameters |
 | [docs/README_generate_thumbnails.md](docs/README_generate_thumbnails.md) | `generate_thumbnails.py`: parameters, output, removing thumbnails |
+| [docs/command_line.md](docs/command_line.md) | The command line of v3.1, and every option of v3.0.0 in its new form |
 | [docs/powershell_edition.md](docs/powershell_edition.md) | The PowerShell scripts of v2.9.1 and what changes when you move to v3 |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | What changed in each release |
 | [docs/bugs_fixed.md](docs/bugs_fixed.md) | Every bug fix, one section per audit round |

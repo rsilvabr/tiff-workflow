@@ -220,6 +220,33 @@ def test_what_v3_0_0_refused_is_refused(old):
         legacy_args.translate(old, _params("compress"))
 
 
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_the_table_in_the_docs_is_every_option(backend):
+    """docs/command_line.md translates every option by hand, for whoever has no clone of the
+    repository: each row must be what the translation does, and no option may be missing."""
+    import tiff_workflow_common as twc
+    text = (ROOT / "docs" / "command_line.md").read_text(encoding="utf-8")
+    module = legacy_args.backend_module(backend)
+    section = text.split(f"`convert_tiff.py {backend}`)", 1)[1].split("###", 1)[0]
+    rows = [ln for ln in section.splitlines() if ln.startswith("| `-")]
+    assert len(rows) == len(module.PARAMS)
+    for p, row in zip(module.PARAMS, rows):
+        old = "-" + legacy_name_of(p)
+        new = twc.cli_name(p.name)
+        if p.kind in ("bool", "switch"):
+            on = [old] if p.kind == "switch" else [f"{old}:$true"]
+            assert legacy_args.translate(on, module.PARAMS) == [new]
+            assert legacy_args.translate([f"{old}:$false"], module.PARAMS) == ["--no-" + new[2:]]
+            assert f"`{new}` / `--no-{new[2:]}`" in row, row
+        else:
+            assert f"`{old} <value>` | `{new} <value>`" in row, row
+        assert (f"`{p.name}`" in row) == (p.name in module.OVERLAY_SPECS), row
+
+
+def legacy_name_of(p):
+    return legacy_args.legacy_name(p.name)
+
+
 def test_a_refusal_names_the_parameter_the_way_the_line_did():
     for old, said in ((["-Workers", "65"], "-Workers must be from 1 to 64, got 65"),
                       (["-ThumbSize", "x"], "-ThumbSize needs a whole number, got 'x'"),

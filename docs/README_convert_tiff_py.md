@@ -53,10 +53,10 @@ with what each one is right now (this run, the settings file, or the script's ow
 
 | Option | Backend | What it is |
 |---|---|---|
-| `-MagickTimeout` | compress, Copy EXIF | seconds one `magick` call may run before it is killed (whole number >= 1) |
-| `-WorkerMemoryFraction` | compress, Copy EXIF | share of the free memory the workers may use, `0`-`2` (`0` = no cap; above `1` trusts the memory estimate) |
-| `-SrgbProfile` | compress | ICC file used to convert wide-gamut sources; empty = auto-detect |
-| `-FailOnWarn` | Copy EXIF | exit 1 when a file only produced a warning or had no JPEG |
+| `--magick-timeout` | compress, Copy EXIF | seconds one `magick` call may run before it is killed (whole number >= 1) |
+| `--worker-memory-fraction` | compress, Copy EXIF | share of the free memory the workers may use, `0`-`2` (`0` = no cap; above `1` trusts the memory estimate) |
+| `--srgb-profile` | compress | ICC file used to convert wide-gamut sources; empty = auto-detect |
+| `--fail-on-warn` | Copy EXIF | exit 1 when a file only produced a warning or had no JPEG |
 
 Type a number, then a value; `-` takes your change back; `0` is done. A value is checked
 before it is kept (the same rules as the settings file below) and a wrong one says what was
@@ -120,7 +120,7 @@ by hand). Answer no to restore everything, as before.
 
 When a compress run ends with `STRANDED: N original(s) still in OLD_TIFFs ...`, the wizard asks
 whether to put them back and compress them now (it runs the same command again with
-`-RestoreStranded`). It never asks on a preset, a scheduled run or a dry run -- there it prints
+`--restore-stranded`). It never asks on a preset, a scheduled run or a dry run -- there it prints
 what to do instead.
 
 ### Delete OLD_TIFFs (option 6)
@@ -277,7 +277,7 @@ the end-of-run summary lists every entry's state and is written to
   runs; a conflict aborts the run.
 - Missing Source folders refuse the run.
 - Mode-8 entries (delete sources) require an explicit confirmation once, before any
-  entry starts; `-DeleteSource` is passed only to mode-8 entries, and never in a
+  entry starts; `--delete-source` is passed only to mode-8 entries, and never in a
   dry run.
 
 **Repeat:** main menu [2] ("Repeat last workflow") re-reads the manifest CSV through
@@ -316,10 +316,14 @@ compression) can coexist instead of overwriting each other:
 - A preset runs the backends next to the wizard that starts it, not the ones of the
   folder it was saved from: it keeps working after the toolkit is moved or updated
   into another folder.
-- A preset or "Repeat last workflow" saved by v2.x holds a PowerShell command line
-  (`pwsh -File ...ps1 args`, or the `-Command` form of Windows PowerShell 5.1). It is
+- A preset keeps each step as the backend's name and its arguments
+  (`["compress", "--mode", "9", ...]`), and the wizard reads them back with the backend's
+  own reader before anything runs: what it deletes is what the backend will do.
+- A preset or "Repeat last workflow" saved by v3.0.0 or earlier holds the command line of
+  then (`python ...\compress_tiff_zip.py -Mode 9 ...`, or for v2.x a PowerShell one). It is
   no longer run: it stays in the list, and choosing it says `Saved workflow cannot be
-  replayed` and runs nothing. Run the workflow once more from the menu and save it again.
+  replayed` and runs nothing. Run the workflow once more from the menu and save it again
+  ([command_line.md](command_line.md)).
 
 ### Running a preset unattended (Task Scheduler)
 
@@ -337,12 +341,12 @@ a closed stdin), so a prompt left on the path is a refusal, not a hang.
 | **Dry-run** | off unless you pass `--dry-run`. It is **never** inherited from the stored run |
 | **Exit code** | `0` ran (or nothing to do), `1` failed or refused, `2` no such preset (available names are printed) |
 
-- A preset that deletes or replaces sources (`-DeleteSource` in any spelling the backends
-  bind -- any case, an abbreviation such as `-DeleteS`, `-DeleteSource:$true` -- compress
+- A preset that deletes or replaces sources (`--delete-source` in any spelling the backends
+  bind -- any case, an abbreviation such as `-DeleteS`, `--delete-source` -- compress
   mode 8, or a manifest with a mode-8 row) is **refused** unattended (exit 1) unless you
   pass `--dry-run`: the confirmation cannot be given without a console. Run those from the
   menu.
-- There is no `--overwrite`: the stored command already carries `-Overwrite` if the
+- There is no `--overwrite`: the stored command already carries `--overwrite` if the
   wizard asked for it, and an override has no clear meaning for the backends. A preset
   runs exactly as it was saved.
 - A Fuji preset (workflows 2/3/4) **redoes the AutoFind** on every run, so sessions
@@ -415,7 +419,7 @@ Recursively scans a root folder for sessions matching the chosen pattern. Shows 
 
 Excluded from scan: `Logs`, `logs`, `converted_zip`, `ZIP`, `_EXPORT`, `OLD_TIFFs` folders.
 
-A long AutoFind folder list is passed to the backend through a temporary `-InputDirFile` when it would exceed the command-line limit; journals and presets still record the folders themselves.
+A long AutoFind folder list is passed to the backend through a temporary `--input-dir-file` when it would exceed the command-line limit; journals and presets still record the folders themselves.
 
 ---
 
@@ -437,7 +441,7 @@ Config saved to `~/.convert_tiff_config.json`:
 - `last_diagnose` -- folders and answers of the last Diagnose run (7); a repeat/preset
   re-scans and reports only
 - `presets` -- named snapshots of the journal above (menu 5 and `--run-preset`)
-- `last_exclude_folders` -- last `-ExcludeFolders` list. The wizard asks once per workflow and
+- `last_exclude_folders` -- last `--exclude-folders` list. The wizard asks once per workflow and
   offers this as the default; a fresh install defaults to nothing excluded
 - `check_for_updates` -- `true` (default) lets the main menu look for a new release (see
   [New-release notice](#new-release-notice)); set it to `false` to turn that off
@@ -479,13 +483,13 @@ says the budget and what the typical and the largest file need.
 The settings at the top of the scripts -- folder names, timeouts, thumbnail defaults -- can be
 changed **without editing a `.py`**: they live in one JSON file, read by this wizard
 and by the three backends, and menu **[6]** edits it. In a backend, the settings are the
-defaults of the `PARAMS = (P("Name", "kind", default, ...), ...)` table at the top of the file.
+defaults of the `PARAMS = (P("name", "kind", default, ...), ...)` table at the top of the file.
 
 ```json
 {
-  "compress_tiff_zip":   { "ZipSubfolderName": "ZIPPED", "ThumbQuality": 90, "MagickTimeout": 120 },
-  "copy_exif":           { "MagickTimeout": 120 },
-  "generate_thumbnails": { "Size": 128, "Format": "png" },
+  "compress_tiff_zip":   { "zip_subfolder_name": "ZIPPED", "thumb_quality": 90, "magick_timeout": 120 },
+  "copy_exif":           { "magick_timeout": 120 },
+  "generate_thumbnails": { "size": 128, "format": "png" },
   "convert_tiff":        { "CONVERT_TIMEOUT_S": 120, "DIAGNOSE_CACHE": false }
 }
 ```
@@ -494,8 +498,9 @@ defaults of the `PARAMS = (P("Name", "kind", default, ...), ...)` table at the t
 `TIFFWORKFLOW_SETTINGS` (**set but empty = no overlay at all**), else
 `.tiff_workflow_settings.json` next to the scripts if it is there, else the same name in the
 user profile (`%USERPROFILE%`). Menu 6 shows which one it is using. `copy_exif` is the section
-of `copy_exif_to_tiff.py`. The file, its sections and its rules are the ones of v2.9: a
-settings file written for the PowerShell backends keeps working.
+of `copy_exif_to_tiff.py`. Since v3.1 a name is the one of the code and of the option
+(`zip_subfolder_name`, `--zip-subfolder-name`); a name written for v3.0.0 or earlier
+(`ZipSubfolderName`) is ignored with a warning -- [command_line.md](command_line.md) has every one.
 
 **What it can change** -- only the names in each script's `OVERLAY_SPECS` table (the
 `OVERLAY_SPECS = {...}` table right below `PARAMS` at the top of each backend), each with a
@@ -503,25 +508,25 @@ type and range:
 
 | Section | Names |
 |---|---|
-| `compress_tiff_zip` | `ZipSuffix`, `ZipSubfolderName`, `ExportMarker`, `ExportZipSubfolder`, `ExportTiffSubfolder` (folder/file names), `CapWorkers` (0-64), `MagickTimeout`, `ThumbSize` (whole numbers >= 1), `ThumbQuality` (1-100), `ThumbFormat` (name), `SrgbProfile` (path or `null`), `WorkerMemoryFraction` (0-2) |
-| `copy_exif` | `MagickTimeout`, `WorkerMemoryFraction` |
-| `generate_thumbnails` | `Size`, `Quality`, `Format`, `SrgbProfile` |
+| `compress_tiff_zip` | `zip_suffix`, `zip_subfolder_name`, `export_marker`, `export_zip_subfolder`, `export_tiff_subfolder` (folder/file names), `cap_workers` (0-64), `magick_timeout`, `thumb_size` (whole numbers >= 1), `thumb_quality` (1-100), `thumb_format` (name), `srgb_profile` (path or `null`), `worker_memory_fraction` (0-2) |
+| `copy_exif` | `magick_timeout`, `worker_memory_fraction` |
+| `generate_thumbnails` | `size`, `quality`, `format`, `srgb_profile` |
 | `convert_tiff` | `WORKER_MEMORY_FRACTION`, `WORKER_MEMORY_LIMIT` (`both`, `commit`, `physical`), `DIAGNOSE_CACHE`, `CONVERT_TIMEOUT_S`, `COMPARE_TIMEOUT_S`, `TIMEOUT_S_PER_MB` |
 
-**What it can never change:** anything that deletes, overwrites or is chosen per run -- `Mode`,
-the input/output/staging folders, `Workers`, `DryRun`, `SafeMode`, `SkipLzwAsCompressed`,
-`Overwrite`, `DeleteSource`, `DuplicateAction`, `ForceParallel`/`ForceSequential`,
-`RestoreStranded`, the thumbnail on/off switches, `FailOnWarn`, `ExcludeFolders`. A name that is
+**What it can never change:** anything that deletes, overwrites or is chosen per run -- `mode`,
+the input/output/staging folders, `workers`, `dry_run`, `safe_mode`, `skip_lzw_as_compressed`,
+`overwrite`, `delete_source`, `duplicate_action`, `force_parallel`/`force_sequential`,
+`restore_stranded`, the thumbnail on/off switches, `fail_on_warn`, `exclude_folders`. A name that is
 not in a script's table is ignored with a warning.
 
 A folder name in the file can never turn a copy mode into an in-place replace either: when an
-overlay `ZipSuffix`, `ZipSubfolderName` or `Export*` name makes an output resolve onto its own
+overlay `zip_suffix`, `zip_subfolder_name` or `Export*` name makes an output resolve onto its own
 source, compress refuses that file (round 28).
 
 **It never stops a run.** A file that cannot be read (bad JSON -- strict JSON in UTF-8 for the
 wizard and every backend alike: no comments, trailing commas, single quotes, `0x10` or `010` --
 the root is not an object), an
-unknown name, a value of the wrong type or range, or an `SrgbProfile` that does not exist
+unknown name, a value of the wrong type or range, or an `srgb_profile` that does not exist
 changes nothing -- the script keeps its own
 value and says so: `WARNING: settings overlay: ...` on the console and in the script's log,
 which also names the file and the settings it did change (`Script settings overlay: <file>: N
@@ -548,12 +553,16 @@ python convert_tiff.py --list-presets     # List saved presets and exit
 python convert_tiff.py --run-preset NAME  # Run a preset unattended and exit
 python convert_tiff.py --run-preset NAME --dry-run
 python convert_tiff.py --version          # Print the release (tiff-workflow 3.0.0) and exit
+python convert_tiff.py compress ...       # A backend, as its script: also copy-exif, thumbnails
+python convert_tiff.py compress --help    # Its options
 ```
 
 No CLI flags are required -- the wizard is fully interactive. `--run-preset` and
 `--list-presets` are for Task Scheduler/cron: see
 [Presets (menu 5)](#presets-menu-5). `--version` prints before any config, menu, dependency
-check or network access.
+check or network access. `convert_tiff.py compress|copy-exif|thumbnails ...` runs that
+backend exactly as `python compress_tiff_zip.py ...` (and the other two) would, with the
+command line of v3.1 ([command_line.md](command_line.md)).
 
 The release is also in the main menu's title, on the first line of the logs the wizard
 writes (`Logs/convert_tiff/`), and on the first line of every backend's log.
