@@ -423,8 +423,9 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
         copy_note = f" -> {final_dir}" if tiff_copied else ""
         return PairResult(f"{ok_prefix} | {name} <= {jpeg_name}{copy_note}{heur_suffix}{raw_suffix}")
 
-    ok, comp = tw.ifd0_compression(tiff_target)
-    if not ok:
+    try:
+        comp = tw.ifd0_compression(tiff_target)
+    except tw.ToolError:
         drop_copy()
         return PairResult(f"ERROR (exiftool check) | {name} | cannot detect compression")
     if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):

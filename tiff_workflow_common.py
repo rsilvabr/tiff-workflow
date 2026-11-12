@@ -98,6 +98,21 @@ class UsageError(Exception):
     """A command line that cannot be bound to the parameters."""
 
 
+class ToolError(Exception):
+    """A tool did not do what was asked: it could not be started, it exited non-zero, or
+    what it printed cannot be read. `output` is what it printed (the OSError text when it
+    could not be started); `exit_code` its exit code, -1 when it could not be started, 0
+    when it exited 0 and printed nothing usable.
+
+    FAIL-CLOSED: a caller that decides whether a file may be written over or replaced
+    catches it where it would have tested the exit code, and refuses -- never a pass."""
+
+    def __init__(self, message, output="", exit_code=-1):
+        super().__init__(message)
+        self.output = output
+        self.exit_code = exit_code
+
+
 _BOOL_WORDS = {"$true": True, "true": True, "1": True,
                "$false": False, "false": False, "0": False}
 _PARAM_TOKEN = re.compile(r"-([A-Za-z][A-Za-z0-9]*)(?::(.*))?", re.S)
@@ -1282,14 +1297,15 @@ def tiff_sample_layout_kept(src_pages, dst, main_page_only=False):
 
 
 def ifd0_compression(path):
-    """(ok, text) of IFD0:Compression ("Uncompressed", "Adobe Deflate", "LZW", ...). The
-    main image is IFD0: plain -Compression prints one line per IFD, and a file whose
-    thumbnail page was the compressed one was skipped as already compressed."""
+    """IFD0:Compression as text ("Uncompressed", "Adobe Deflate", "LZW", ...). The main
+    image is IFD0: plain -Compression prints one line per IFD, and a file whose thumbnail
+    page was the compressed one was skipped as already compressed. Raises ToolError when
+    exiftool fails or prints nothing."""
     rc, out = exiftool(["-s", "-s", "-s", "-IFD0:Compression", path])
     lines = [ln for ln in out.split("\n") if ln.strip()]
     if rc != 0 or not lines:
-        return False, ""
-    return True, lines[0].strip()
+        raise ToolError(f"cannot read IFD0:Compression of {path}", out, rc)
+    return lines[0].strip()
 
 
 def is_compressed(comp, skip_lzw):

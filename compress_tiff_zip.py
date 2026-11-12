@@ -619,8 +619,9 @@ def _compress_job(run, t, load, own):
 
     comp = t.comp
     if not comp:
-        ok, comp = tw.ifd0_compression(src)
-        if not ok:
+        try:
+            comp = tw.ifd0_compression(src)
+        except tw.ToolError:
             return res(f"ERROR (exiftool check) | {name} | cannot detect compression")
     # The SKIP decision runs for pre-probed files too.
     if tw.is_compressed(comp, opt["SkipLzwAsCompressed"]):
@@ -949,8 +950,9 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map, staging
     # skipped file is never queued.
     comp = pre_comp
     if f.path.lower() not in comp_map:
-        ok, comp = tw.ifd0_compression(f.path)
-        if not ok:
+        try:
+            comp = tw.ifd0_compression(f.path)
+        except tw.ToolError:
             comp = ""
     if not comp:
         run.count(f"ERROR (exiftool check) | {f.name} | cannot detect compression")

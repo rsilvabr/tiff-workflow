@@ -38,6 +38,11 @@ RGB = ["rgb/3/8,8,8/"]
 # A stand-in for the tools
 # ---------------------------------------------------------------------------
 
+def tool_fails(*args, **kwargs):
+    """A tool call that fails: what the five tool helpers raise instead of answering."""
+    raise tw.ToolError("fake tool failure", "boom", 1)
+
+
 class FakeTools:
     """Replaces every tool call of tiff_workflow_common and records the order of the steps.
     Defaults describe a healthy single-page uncompressed RGB TIFF; a test overrides what it
@@ -70,7 +75,7 @@ class FakeTools:
         self.thumb_safe = tw.ThumbSafe(True, 1, "")
         self.allowed_seen = []
         m = monkeypatch
-        m.setattr(tw, "ifd0_compression", lambda p: (True, self.comp))
+        m.setattr(tw, "ifd0_compression", lambda p: self.comp)
         m.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(True, self.pages, ""))
         m.setattr(tw, "tiff_has_only_subfile_pages", self._only_subfile)
         m.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: False)
@@ -896,7 +901,7 @@ class TestCopyExif:
         elif failing == "jpeg_container":
             tools.meta = (True, None)
         elif failing == "compression":
-            monkeypatch.setattr(tw, "ifd0_compression", lambda p: (False, ""))
+            monkeypatch.setattr(tw, "ifd0_compression", tool_fails)
         elif failing == "layout":
             tools.layout = (False, [])
         elif failing == "magick_rc":
@@ -1860,6 +1865,21 @@ class TestGatesFailClosed:
                 "[IFD0]  ExtraSamples: 0\n[IFD0]  BitsPerSample: 16 16 16 16\n"
                 "[IFD1]  PhotometricInterpretation: 1\n")
         assert tw.tiff_sample_layout("x") == (True, ["rgb/4/16,16,16,16/", "gray/1/1/"])
+
+    def test_ifd0_compression(self, monkeypatch):
+        """v3.1: the value, or ToolError -- never an empty value that reads as "not
+        compressed"."""
+        def says(rc, text):
+            monkeypatch.setattr(tw, "exiftool", lambda args, merge_stderr=False: (rc, text))
+        says(0, "Adobe Deflate\n")
+        assert tw.ifd0_compression("x") == "Adobe Deflate"
+        says(1, "Uncompressed\n")
+        with pytest.raises(tw.ToolError) as e:
+            tw.ifd0_compression("x")
+        assert e.value.exit_code == 1 and e.value.output == "Uncompressed\n"
+        says(0, "\n")
+        with pytest.raises(tw.ToolError):
+            tw.ifd0_compression("x")
 
     def test_keep_type_args(self):
         assert tw.magick_keep_type_args(["rgb/3/8,8,8/"]) == ["-type", "TrueColor"]
