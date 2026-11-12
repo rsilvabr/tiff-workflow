@@ -198,6 +198,16 @@ inventing a new one.
   refused under `伊豆沼`, Delete OLD_TIFFs refused).
 On the owner's machine `py` is a Python 3.13 without pytest -- use `python` for
 the suite and the battery.
+- **A mini run before every long run** (owner's rule, 2026-11-12: "quando for rodar
+  algo demorado, 10min ou mais, faz um mini teste rápido"). Anything of ~10 min or
+  more (the literal suite, the battery, a side-by-side, a timing measurement, a chain
+  in the background) is first run in miniature -- the SAME command, folders and
+  redirections, one scenario or a few files, 1-2 min -- and the miniature must show
+  three things: it runs (the right code, hostile paths), its result lands where it
+  will be read (the log is written, the summary line the grep/monitor waits for is
+  there) and that result answers the question. Say what the long run is for and how
+  long it takes (from a real log, never a guess) before starting it. Long runs never
+  in parallel: they make magick time out.
 - **One suite: `python -m pytest tests`.** It drives the backends end to end
   as subprocesses with real TIFFs, once per LANE (`tests/backends.py`:
   `parallel` and `sequential` -- what the two PowerShell shells were).
