@@ -18,8 +18,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import convert_tiff  # noqa: E402
-from convert_tiff import ToolConfig  # noqa: E402
+from tiff_workflow import wizard as convert_tiff  # noqa: E402
+from tiff_workflow.wizard import ToolConfig  # noqa: E402
 
 FOLDER = "C:\\Fotos\\it's 写真 [x] 50%"
 ARGS = ["--mode", "9", "--input-dir", FOLDER, "--workers", "8", "--no-safe-mode",

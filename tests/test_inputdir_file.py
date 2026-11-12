@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-import convert_tiff
+from tiff_workflow import wizard as convert_tiff
 from test_regression_classes import (
     LANES,
     make_tiff,

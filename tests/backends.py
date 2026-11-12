@@ -44,7 +44,7 @@ def wizard_uses_install(monkeypatch, ct, install):
     """Point the imported wizard `ct` at the installation `install` (an install_copy): the
     backends' tables it reads and the entry point its command lines run."""
     install = Path(install)
-    monkeypatch.setattr(ct, "SCRIPT_DIR", install)
+    monkeypatch.setattr(ct, "INSTALL_DIR", install)
     monkeypatch.setattr(ct, "PACKAGE_DIR", install / PACKAGE)
     monkeypatch.setattr(ct, "ENTRY", install / "convert_tiff.py")
     ct._backend_tables.cache_clear()

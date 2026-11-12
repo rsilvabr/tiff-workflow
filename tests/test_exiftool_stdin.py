@@ -109,7 +109,7 @@ def test_generate_thumbnails_never_calls_exiftool():
 
 
 
-@pytest.mark.parametrize("rel", ["convert_tiff.py", "tiff_workflow/common.py",
+@pytest.mark.parametrize("rel", ["tiff_workflow/wizard.py", "tiff_workflow/common.py",
                                  "tools/real_photo_battery.py"])
 def test_python_never_passes_an_argfile_path(rel):
     src = (REPO / rel).read_text(encoding="utf-8")
@@ -212,7 +212,7 @@ class TestCopyExifUnderNonAnsiTemp:
 @needs_ansi_cp
 @needs_tools
 def test_python_exiftool_calls_survive_a_non_ansi_tempdir(tmp_path, monkeypatch):
-    import convert_tiff
+    from tiff_workflow import wizard as convert_tiff
     src = tmp_path / HOSTILE / "a.tif"
     tiff(src, h=48, w=64)
     reference = convert_tiff._tiff_metadata_signature(src)

@@ -24,7 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-import convert_tiff as ct
+from tiff_workflow import wizard as ct
 from backends import PACKAGE, install_copy, wizard_uses_install
 
 

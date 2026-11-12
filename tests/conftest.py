@@ -20,7 +20,7 @@ os.environ["TIFFWORKFLOW_SETTINGS"] = ""
 def _isolated_diagnose_cache(tmp_path, monkeypatch):
     """Diagnose writes its verdict cache next to the user's config; no test may touch
     the real one. Tests that set USERPROFILE to tmp_path see the same file."""
-    import convert_tiff
+    from tiff_workflow import wizard as convert_tiff
     monkeypatch.setattr(convert_tiff, "_diagnose_cache_path",
                         lambda: tmp_path / ".convert_tiff_diagnose_cache.json")
 
@@ -45,7 +45,7 @@ def _no_advanced_screen(monkeypatch):
     """Tests script the wizard's prompts one by one; the per-run Advanced options question
     would eat an answer. It answers "No" (nothing stored) here; tests/test_wizard_registry.py
     keeps the real function in REAL_ADVANCED."""
-    import convert_tiff
+    from tiff_workflow import wizard as convert_tiff
     monkeypatch.setattr(convert_tiff, "step_advanced_options", lambda cfg, wf: True)
 
 

@@ -525,7 +525,7 @@ GOOD_FILES = {
 def test_overlay_reader_is_as_strict_as_the_wizard(tmp_path, monkeypatch, label):
     """The wizard plans with the settings file and the backend runs with it: a file one of
     them reads and the other refuses means a run with another value than the one shown."""
-    import convert_tiff
+    from tiff_workflow import wizard as convert_tiff
     good = label in GOOD_FILES
     f = tmp_path / "写真 [x]" / "ov.json"
     f.parent.mkdir()

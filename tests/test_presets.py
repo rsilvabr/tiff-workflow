@@ -25,8 +25,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import convert_tiff
-from convert_tiff import (
+from tiff_workflow import wizard as convert_tiff
+from tiff_workflow.wizard import (
     ToolConfig,
     build_compress_command,
     build_copy_exif_command,

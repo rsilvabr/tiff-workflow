@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import convert_tiff as ct
+from tiff_workflow import wizard as ct
 
 MINE = ct.TOOLKIT_VERSION       # e.g. "2.7.4"
 TODAY = __import__("datetime").date.today().isoformat()

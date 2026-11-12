@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import tifffile
 
-import convert_tiff
+from tiff_workflow import wizard as convert_tiff
 from test_exiftool_stdin import exif_stdin
 
 REPO = Path(__file__).resolve().parent.parent

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import convert_tiff as ct  # noqa: E402
+from tiff_workflow import wizard as ct  # noqa: E402
 
 HOSTILE = "伊豆沼_夏 [FINAL] 5% off"
 # A compress run of the entry point of any copy (v3.1 phase 9: convert_tiff.py compress ...)

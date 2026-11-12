@@ -26,7 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
-import convert_tiff as ct  # noqa: E402
+from tiff_workflow import wizard as ct  # noqa: E402
 import move_old_backups as mop  # noqa: E402
 from test_presets import _cfg as _preset_cfg, _compress_entry, calls  # noqa: E402,F401
 from test_diagnose_preset import (  # noqa: E402,F401

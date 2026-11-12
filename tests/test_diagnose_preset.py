@@ -25,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import convert_tiff as ct
+from tiff_workflow import wizard as ct
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -778,7 +778,7 @@ def test_depth_probe_pings_and_scales_its_timeout(tmp_path, monkeypatch):
 
 
 def test_every_identify_probe_pings():
-    src = (REPO / "convert_tiff.py").read_text(encoding="utf-8")
+    src = (REPO / "tiff_workflow" / "wizard.py").read_text(encoding="utf-8")
     import re
     calls = re.findall(r'\["magick", "identify", ([^\]]*)', src)
     assert calls and all(c.startswith('"-ping"') for c in calls), calls

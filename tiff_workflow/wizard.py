@@ -1,6 +1,5 @@
-#!/usr/bin/env python3
 """
-convert_tiff.py -- TIFF Workflow Manager
+tiff_workflow.wizard -- TIFF Workflow Manager, the wizard `python convert_tiff.py` starts
 
 Unified wizard for TIFF processing workflows:
   [1] Compress TIFFs  → Zip/Deflate, modes 0-9 (any folder)
@@ -16,12 +15,10 @@ Supports AutoFind for S3/S5 Pro folders, persistent config,
 and streaming output from the backend scripts.
 """
 
-# Written into xmpMM:History by the padded 16 -> 8-bit conversion. Not a setting: it is
-# the release this file belongs to (tests/test_diagnose_preset.py pins it to the newest
-# docs/CHANGELOG.md section).
-TOOLKIT_NAME = "tiff-workflow"
-TOOLKIT_VERSION = "3.0.0"
-TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"
+# The release, written into xmpMM:History by the padded 16 -> 8-bit conversion. Not a
+# setting: one copy, in tiff_workflow/__init__.py (tests/test_diagnose_preset.py pins it to
+# the newest docs/CHANGELOG.md section).
+from . import TOOLKIT_NAME, TOOLKIT_URL, TOOLKIT_VERSION
 
 DEBUG_TIMING = False  # Set True to benchmark compression modes
 
@@ -71,7 +68,6 @@ import csv
 import fnmatch
 import functools
 import hashlib
-import importlib
 import io
 import json
 import locale
@@ -293,17 +289,18 @@ def _panel(text, title: str, style: str = "") -> None:
 
 # --- Paths ---------------------------------------------------------
 
-SCRIPT_DIR = Path(__file__).parent.resolve()
-#: The package next to this file: the three backends and what they share (v3.1 phase 9).
-PACKAGE_DIR = SCRIPT_DIR / "tiff_workflow"
-#: What runs a backend: this file, with the backend's subcommand.
-ENTRY = SCRIPT_DIR / "convert_tiff.py"
+#: The package: this wizard, the three backends and what they share (v3.1 phase 9).
+PACKAGE_DIR = Path(__file__).parent.resolve()
+#: The installation: the entry point convert_tiff.py and the package. The settings overlay
+#: (".tiff_workflow_settings.json", "next to the scripts") and manifests/ are here.
+INSTALL_DIR = PACKAGE_DIR.parent
+#: What runs a backend: the entry point, with the backend's subcommand.
+ENTRY = INSTALL_DIR / "convert_tiff.py"
 
 # What the three backends share; the wizard uses its helpers instead of carrying copies of
-# them (v3.1 phase 5). This folder goes on sys.path, so a preset started from another
-# folder finds the package too.
-sys.path.insert(0, str(SCRIPT_DIR))
-from tiff_workflow import common as tw  # noqa: E402
+# them (v3.1 phase 5). The subcommands are the entry point's.
+from . import common as tw  # noqa: E402
+from .cli import SUBCOMMANDS  # noqa: E402
 
 
 # --- Settings overlay ----------------------------------------------
@@ -331,7 +328,7 @@ def _settings_overlay_path() -> Optional[Path]:
     """The overlay file to read (it may not exist), or None when TIFFWORKFLOW_SETTINGS is
     set but empty (overlay OFF): tw.settings_overlay_path, looking next to this script --
     the variable, then next to the scripts if the file is there, then the user profile."""
-    path = tw.settings_overlay_path(str(SCRIPT_DIR))
+    path = tw.settings_overlay_path(str(INSTALL_DIR))
     return Path(path) if path is not None else None
 
 # The overlay grammar is the backends' own (one reader: the wizard plans with the value the
@@ -485,7 +482,7 @@ def _apply_settings_overlay(namespace: dict) -> dict:
     the settings above are already defined and nothing has read them yet), read by
     tw.read_settings_overlay with _OVERLAY_SETTINGS as its table. Returns {"path", "applied",
     "warnings"} for the start-up notice. Never raises."""
-    overlay = tw.read_settings_overlay("convert_tiff", _OVERLAY_SETTINGS, str(SCRIPT_DIR))
+    overlay = tw.read_settings_overlay("convert_tiff", _OVERLAY_SETTINGS, str(INSTALL_DIR))
     namespace.update(overlay["values"])
     return {"path": Path(overlay["path"]) if overlay["path"] else None,
             "applied": list(overlay["values"]), "warnings": list(overlay["warnings"])}
@@ -806,10 +803,8 @@ BACKEND_SCRIPTS = [
 ]
 #: ...and the module the three of them import.
 BACKEND_SHARED = "common.py"
-#: The name of each backend in a journal (v3.1, T8): [subcommand, *args]. The Windows
-#: program takes the same three names.
-SUBCOMMANDS = {"compress": "compress_tiff_zip.py", "copy-exif": "copy_exif_to_tiff.py",
-               "thumbnails": "generate_thumbnails.py"}
+#: The name of each backend on the entry point's command line and in a journal (v3.1, T8:
+#: [subcommand, *args]) is SUBCOMMANDS, imported from tiff_workflow/cli.py above.
 
 def _probe_version(cmd: List[str], timeout: int = 10) -> Optional[str]:
     """Run a version probe, return the first non-empty output line or None."""
@@ -4875,7 +4870,7 @@ def generate_manifest(root: Path, mode: int) -> Optional[str]:
         folders = [root]
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    manifest_dir = SCRIPT_DIR / "manifests"
+    manifest_dir = INSTALL_DIR / "manifests"
     manifest_dir.mkdir(exist_ok=True)
     manifest_path = manifest_dir / f"manifest_{timestamp}.csv"
 
@@ -4895,7 +4890,7 @@ def generate_manifest(root: Path, mode: int) -> Optional[str]:
 
 def get_latest_manifest() -> Optional[str]:
     """Get the most recent manifest file."""
-    manifest_dir = SCRIPT_DIR / "manifests"
+    manifest_dir = INSTALL_DIR / "manifests"
     if not manifest_dir.exists():
         return None
     manifests = list(manifest_dir.glob("manifest_*.csv"))
@@ -4907,7 +4902,7 @@ def get_latest_manifest() -> Optional[str]:
 def pick_manifest() -> Optional[str]:
     """Pick a manifest from manifests/ (newest first). With several files
     the user chooses; with one it is used directly."""
-    manifest_dir = SCRIPT_DIR / "manifests"
+    manifest_dir = INSTALL_DIR / "manifests"
     if not manifest_dir.exists():
         return None
     manifests = sorted(manifest_dir.glob("manifest_*.csv"),
@@ -6152,15 +6147,10 @@ def _overlay_notice() -> None:
         _say(f"WARNING: settings overlay: {warning}", "yellow")
 
 
-def _run_backend(sub: str, args: List[str]) -> int:
-    """`convert_tiff.py compress|copy-exif|thumbnails ...`: that backend of the package, in
-    this process, with `args` (v3.1: one entry point). Its exit code -- main()'s return
-    value, as when it runs as `python -m tiff_workflow.<module>`."""
-    module = importlib.import_module("tiff_workflow." + Path(SUBCOMMANDS[sub]).stem)
-    return module.main([str(a) for a in args])
-
-
-def main():
+def main(argv: Optional[List[str]] = None) -> None:
+    """The wizard: the menu, or what --run-preset, --list-presets or --version ask (`argv`,
+    sys.argv[1:] when None). A backend's subcommand never comes here: tiff_workflow/cli.py
+    runs it without importing this module."""
     # Plain print() on a legacy Windows console (cp850/cp1252) raises
     # UnicodeEncodeError on non-ANSI paths (e.g. 横浜) -- a crash in the middle of a
     # workflow. Rich's console handles this itself; the plain-text path needs it here.
@@ -6171,11 +6161,8 @@ def main():
             except Exception:
                 pass
 
-    argv = sys.argv[1:]
-    if argv and argv[0] in SUBCOMMANDS:
-        sys.exit(_run_backend(argv[0], argv[1:]))
-
     parser = argparse.ArgumentParser(
+        prog="convert_tiff.py",
         description="TIFF Workflow Manager -- interactive wizard for TIFF compression, "
                     "EXIF copy, diagnostics and cleanup.",
         epilog="Run without arguments to start the interactive wizard. A backend runs "
@@ -6192,7 +6179,7 @@ def main():
     parser.add_argument("--version", action="version",
                         version=f"{TOOLKIT_NAME} {TOOLKIT_VERSION}",
                         help="Print the release and exit")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     # A stray --dry-run would otherwise be ignored -- the worst outcome is a real
     # run for someone who asked for a simulation. Same rule as jxl-photo.
@@ -6301,12 +6288,14 @@ def _menu_loop(cfg) -> None:
             _WORKFLOWS[wf](cfg)
 
 
-if __name__ == "__main__":
+def run(argv: Optional[List[str]] = None) -> int:
+    """The wizard as the entry point starts it (tiff_workflow/cli.py): main() with `argv`.
+    Ctrl+C at a question ends it with "Interrupted." and exit code 1. What prints and exits
+    (--help, --version, --list-presets, --run-preset) ends in SystemExit with its code, as
+    argparse does."""
     try:
-        main()
+        main(argv)
     except KeyboardInterrupt:
-        if RICH_AVAILABLE and console:
-            console.print("\n[dim]Interrupted.[/dim]")
-        else:
-            print("\nInterrupted.")
-        sys.exit(1)
+        _say("\nInterrupted.", "dim")
+        return 1
+    return 0

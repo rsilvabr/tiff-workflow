@@ -1,9 +1,9 @@
-"""The release number lives in two places, in each backend's log, and behind `--version`.
+"""The release number: one copy, in tiff_workflow/__init__.py (v3.1 phase 9; it was written in
+convert_tiff.py and in tiff_workflow_common.py until then), in each backend's log, and behind
+`--version`.
 
-convert_tiff.py has TOOLKIT_VERSION (pinned to the newest docs/CHANGELOG.md section by
-tests/test_diagnose_preset.py; the Windows program's build reads it there), and the three
-backends take theirs from the package (tiff_workflow/__init__.py, through tiff_workflow.common).
-The release bumps both at once; these tests fail when one is forgotten.
+tests/test_diagnose_preset.py pins it to the newest docs/CHANGELOG.md section. These tests
+fail when a second copy appears or a backend stops logging it.
 """
 
 import re
@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import tifffile
 
-import convert_tiff
+from tiff_workflow import wizard as convert_tiff
 
 REPO = Path(__file__).resolve().parent.parent
 from tiff_workflow import common as twc  # noqa: E402
@@ -26,9 +26,18 @@ TOOLS = shutil.which("magick") is not None and shutil.which("exiftool") is not N
 HOSTILE = "写真 [FINAL] x"
 
 
-def test_the_backends_carry_the_release_of_convert_tiff():
-    assert twc.TOOLKIT_VERSION == convert_tiff.TOOLKIT_VERSION
-    assert twc.TOOLKIT_URL == convert_tiff.TOOLKIT_URL
+def test_the_release_has_one_copy():
+    """Written in tiff_workflow/__init__.py only: the wizard, the shared module and the entry
+    point read it from there."""
+    import tiff_workflow
+    assert convert_tiff.TOOLKIT_VERSION == twc.TOOLKIT_VERSION == tiff_workflow.TOOLKIT_VERSION
+    assert convert_tiff.TOOLKIT_URL == twc.TOOLKIT_URL == tiff_workflow.TOOLKIT_URL
+    sources = [REPO / "convert_tiff.py"] + sorted((REPO / "tiff_workflow").glob("*.py"))
+    assert len(sources) >= 8, sources
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        written = re.search(r"^\s*(TOOLKIT_VERSION|__version__)\s*=", text, re.M)
+        assert bool(written) is (path.name == "__init__.py"), path
 
 
 @pytest.mark.parametrize("name", BACKENDS)

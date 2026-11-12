@@ -1,4 +1,4 @@
-"""v3.1 phase 8: one entry point, and --help.
+"""v3.1 phases 8 and 9: one entry point, and --help.
 
 `python convert_tiff.py` is the wizard; `python convert_tiff.py compress|copy-exif|thumbnails
 ...` runs that backend, in the same process, exactly as its module would run with the same
@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from tiff_workflow import compress_tiff_zip as cz  # noqa: E402
-import convert_tiff  # noqa: E402
+from tiff_workflow import cli  # noqa: E402
+from tiff_workflow import wizard as convert_tiff  # noqa: E402
 from tiff_workflow import copy_exif_to_tiff as cx  # noqa: E402
 from tiff_workflow import generate_thumbnails as gt  # noqa: E402
 from tiff_workflow import common as tw  # noqa: E402
@@ -48,7 +49,7 @@ def _script(script, args, cwd, timeout=300):
 
 
 def test_the_subcommands_are_the_three_backends():
-    assert {s: "tiff_workflow." + Path(f).stem for s, f in convert_tiff.SUBCOMMANDS.items()} == \
+    assert {s: "tiff_workflow." + Path(f).stem for s, f in cli.SUBCOMMANDS.items()} == \
         {s: m.__name__ for s, m in MODULES.items()}
 
 
@@ -87,7 +88,7 @@ def test_the_exit_code_is_the_backends(sub, args, code, tmp_path):
 
     rc, out = _wizard([sub] + args, tmp_path)
     assert rc == code, out
-    rc2, out2 = _script(convert_tiff.SUBCOMMANDS[sub], args, tmp_path)
+    rc2, out2 = _script(cli.SUBCOMMANDS[sub], args, tmp_path)
     assert rc2 == code and first(out) == first(out2), (out, out2)
 
 
@@ -109,7 +110,7 @@ def test_the_wizard_checks_the_package_next_to_it(tmp_path, monkeypatch):
 
 def test_the_entry_point_gives_argv_back(monkeypatch, capsys):
     before = list(sys.argv)
-    assert convert_tiff._run_backend("thumbnails", ["--help"]) == 0
+    assert cli.run_backend("thumbnails", ["--help"]) == 0
     assert sys.argv == before
     assert "--size" in capsys.readouterr().out
 
@@ -138,3 +139,103 @@ def test_a_real_run_through_the_entry_point_is_the_scripts(tmp_path):
         outs.append(sorted(" | ".join(p.strip() for p in ln.split("|")[1:4])
                            for ln in out.splitlines() if "| a.tif" in ln))
     assert outs[0] == outs[1] and outs[0], outs
+
+
+# --- v3.1 phase 9: convert_tiff.py only starts the package -----------------------------------
+
+# Runs convert_tiff.py the way runpy runs a script (its folder is NOT on sys.path), then
+# prints the exit code and which of the package's modules and Rich were imported.
+_IMPORTED_BY = (
+    "import contextlib, io, runpy, sys\n"
+    "sys.argv = sys.argv[1:]\n"
+    "code = 0\n"
+    "try:\n"
+    "    with contextlib.redirect_stdout(io.StringIO()):\n"
+    "        runpy.run_path(sys.argv[0], run_name='__main__')\n"
+    "except SystemExit as e:\n"
+    "    code = e.code\n"
+    "print(code, *sorted(m for m in sys.modules\n"
+    "                    if m == 'rich' or m.startswith(('rich.', 'tiff_workflow'))))\n"
+)
+
+
+@pytest.mark.parametrize("args, code, wizard", [
+    (["thumbnails", "--help"], "0", False),
+    (["compress", "--input-dir", "x"], "2", False),        # refused: no --mode
+    (["--version"], "0", True),                            # the wizard: the check sees it
+])
+def test_a_backend_run_never_imports_the_wizard(tmp_path, args, code, wizard):
+    """A subcommand runs its backend without the wizard's module or Rich: a backend run does
+    not depend on them. Started as a preset or the Windows program starts it: convert_tiff.py
+    by its full path, from another (hostile) folder."""
+    cwd = tmp_path / HOSTILE
+    cwd.mkdir()
+    r = subprocess.run([sys.executable, "-c", _IMPORTED_BY, str(ROOT / "convert_tiff.py"), *args],
+                       cwd=str(cwd), stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
+                       env=dict(os.environ, TIFFWORKFLOW_SETTINGS=""))
+    out = r.stdout.decode("utf-8", "replace").strip().splitlines()
+    assert r.returncode == 0 and out, r.stderr.decode("utf-8", "replace")
+    got, *loaded = out[-1].split()
+    assert got == code, out
+    assert ("tiff_workflow.wizard" in loaded) is wizard, loaded
+    if not wizard:
+        assert not [m for m in loaded if m == "rich" or m.startswith("rich.")], loaded
+        assert "tiff_workflow.cli" in loaded, loaded
+
+
+def test_python_m_tiff_workflow_is_the_entry_point(tmp_path):
+    """`python -m tiff_workflow ...` is `python convert_tiff.py ...`: the wizard's --version,
+    and a backend's own exit code (2: no --mode)."""
+    def m(*args):
+        r = subprocess.run([sys.executable, "-m", "tiff_workflow", *args], cwd=str(tmp_path),
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=120,
+                           env=dict(os.environ, TIFFWORKFLOW_SETTINGS="", PYTHONPATH=str(ROOT)))
+        return r.returncode, (r.stdout + r.stderr).decode("utf-8", "replace")
+
+    assert m("--version") == _wizard(["--version"], tmp_path)
+    rc, out = m("compress", "--input-dir", "x")
+    assert rc == 2 and "--mode is required" in out, out
+
+
+def test_the_root_holds_only_the_entry_point():
+    """v3.1 phase 9 (D4): one .py at the root of the repository, and it only starts the
+    package: no function or class of its own, nothing imported but the entry point."""
+    import ast
+    assert sorted(p.name for p in ROOT.glob("*.py")) == ["convert_tiff.py"]
+    tree = ast.parse((ROOT / "convert_tiff.py").read_text(encoding="utf-8"))
+    assert not [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.ClassDef))]
+    imported = ({a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+                | {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)})
+    assert imported == {"os", "sys", "tiff_workflow.cli"}, imported
+
+
+def test_ctrl_c_at_a_question_of_the_wizard(monkeypatch, capsys):
+    """The wizard's run(): Ctrl+C at a question says "Interrupted." and the exit code is 1 (it
+    was the __main__ block of convert_tiff.py until v3.1 phase 9); a menu left with 0 is 0."""
+    def interrupted(argv):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(convert_tiff, "main", interrupted)
+    assert cli.main([]) == 1
+    assert capsys.readouterr().out == "\nInterrupted.\n"
+    monkeypatch.setattr(convert_tiff, "main", lambda argv: None)
+    assert cli.main([]) == 0
+
+
+def test_the_installation_is_the_folder_of_convert_tiff_py():
+    """Where the settings overlay ("next to the scripts") and manifests/ are, and what runs a
+    backend: one folder for the wizard and the backends, the one convert_tiff.py is in -- the
+    same place as before v3.1 phase 9."""
+    assert convert_tiff.INSTALL_DIR == ROOT
+    assert Path(tw.INSTALL_DIR).resolve() == ROOT
+    assert convert_tiff.PACKAGE_DIR == ROOT / "tiff_workflow"
+    assert convert_tiff.ENTRY == ROOT / "convert_tiff.py" and convert_tiff.ENTRY.is_file()
+
+
+def test_the_wizard_reads_the_argv_it_is_given(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["convert_tiff.py", "--no-such-option"])
+    with pytest.raises(SystemExit) as e:
+        cli.main(["--version"])
+    assert e.value.code == 0
+    assert capsys.readouterr().out.strip() == f"tiff-workflow {convert_tiff.TOOLKIT_VERSION}"

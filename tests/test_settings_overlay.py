@@ -26,7 +26,7 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-import convert_tiff  # noqa: E402
+from tiff_workflow import wizard as convert_tiff  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = ["compress_tiff_zip.py", "copy_exif_to_tiff.py", "generate_thumbnails.py"]
@@ -394,7 +394,7 @@ class TestEndToEnd:
 def test_T9_python_discovery_order(tmp_path, monkeypatch):
     portable_dir, home = tmp_path / "scripts [x]", tmp_path / "home 写真"
     portable_dir.mkdir(), home.mkdir()
-    monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", portable_dir)
+    monkeypatch.setattr(convert_tiff, "INSTALL_DIR", portable_dir)
     monkeypatch.setenv("USERPROFILE", str(home))
     monkeypatch.setenv("HOME", str(home))
     name = convert_tiff._SETTINGS_OVERLAY_FILE

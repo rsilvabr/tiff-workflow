@@ -246,7 +246,7 @@ def test_wizard_ctrl_c_kills_the_backend_and_what_it_started(tmp_path, screen):
         "import ctypes, sys\n"
         "ctypes.windll.kernel32.SetConsoleCtrlHandler(None, False)\n"
         f"sys.path.insert(0, {str(REPO)!r})\n"
-        "import convert_tiff as ct\n"
+        "from tiff_workflow import wizard as ct\n"
         + ("ct.RICH_AVAILABLE = False\nct.console = None\n" if screen == "plain" else "")
         + f"rc = ct.run_subprocess([sys.executable, {str(stubborn)!r}, {str(child_pid)!r}, {str(grandchild_pid)!r}])\n"
         "print('RC=%d' % rc, flush=True)\n"

@@ -52,8 +52,8 @@ def _fake_round28_exiftool(cmd, kwargs):
     return None
 
 
-import convert_tiff
-from convert_tiff import (
+from tiff_workflow import wizard as convert_tiff
+from tiff_workflow.wizard import (
     ToolConfig,
     _compare_tiff_metadata,
     _compress_padded_files,

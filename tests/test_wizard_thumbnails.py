@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import convert_tiff as ct  # noqa: E402
+from tiff_workflow import wizard as ct  # noqa: E402
 
 HOSTILE = "写真 [FINAL] 50% x"
 #: what runs the backend: this Python, the entry point, the subcommand (v3.1 phase 9)

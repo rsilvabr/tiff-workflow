@@ -61,7 +61,7 @@ sys.path.insert(0, str(REPO))
 # file must never change what the battery measures. Set before convert_tiff is imported, which
 # applies its own section on import.
 os.environ["TIFFWORKFLOW_SETTINGS"] = ""
-import convert_tiff  # noqa: E402  (the repo root must be on sys.path first)
+from tiff_workflow import wizard as convert_tiff  # noqa: E402  (the repo root must be on sys.path first)
 
 try:  # folder names with Japanese characters must not kill the console print
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")

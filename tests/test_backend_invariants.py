@@ -2055,7 +2055,7 @@ class TestGatesFailClosed:
     def test_one_reader_of_the_free_memory(self, monkeypatch):
         """v3.1 phase 5: the backends' worker cap and the wizard's memory budget read the
         same two numbers (tw.memory_readings)."""
-        import convert_tiff as ct
+        from tiff_workflow import wizard as ct
         phys, commit = tw.memory_readings()
         assert phys and commit and phys > 0 and commit > 0, "this machine's memory reads"
         # the free memory moves between two readings: compare on fixed numbers
@@ -2823,11 +2823,8 @@ class TestThumbnails:
 # ---------------------------------------------------------------------------
 
 def _tree(name):
-    """A module of the package, or the wizard (convert_tiff.py, next to the package)."""
-    path = REPO / "tiff_workflow" / name
-    if not path.exists():
-        path = REPO / name
-    return ast.parse(path.read_text(encoding="utf-8"))
+    """A module of the package tiff_workflow/ (the wizard is wizard.py)."""
+    return ast.parse((REPO / "tiff_workflow" / name).read_text(encoding="utf-8"))
 
 
 def _calls(tree):
@@ -2900,8 +2897,8 @@ class TestSourceRules:
     def test_the_wizard_never_moves_with_shutil(self):
         """v3.1 phase 6 (W-O8): shutil.move turns into a copy and a delete on a locked file;
         the wizard moves with tw.move_file_into_place, like the backends."""
-        for node, owner, fname in _calls(_tree("convert_tiff.py")):
-            assert not (owner == "shutil" and fname == "move"), f"convert_tiff.py:{node.lineno}"
+        for node, owner, fname in _calls(_tree("wizard.py")):
+            assert not (owner == "shutil" and fname == "move"), f"wizard.py:{node.lineno}"
 
     @pytest.mark.parametrize("name", ALL_FILES)
     def test_the_swap_is_one_rename(self, name):
@@ -2948,7 +2945,7 @@ class TestSourceRules:
 
     def test_the_overlay_reader_is_the_wizards(self):
         """One grammar: the wizard plans with the values the backend will run with."""
-        import convert_tiff as ct
+        from tiff_workflow import wizard as ct
         for fn in ("_overlay_object_pairs", "_overlay_value"):
             assert getattr(ct, fn) is getattr(tw, fn), f"{fn}: v3.1 phase 5, one copy"
         assert ct._SETTINGS_OVERLAY_FILE == tw.SETTINGS_OVERLAY_FILE

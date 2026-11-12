@@ -16,8 +16,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import convert_tiff
-from convert_tiff import (
+from tiff_workflow import wizard as convert_tiff
+from tiff_workflow.wizard import (
     ToolConfig,
     _is_manifest_header_row,
     build_manifest_entry_cmd,
@@ -103,7 +103,7 @@ def _prompt(monkeypatch, value):
 class TestEncoding:
     def test_manifest_written_with_bom_for_excel(self, tmp_path, monkeypatch):
         """Paths with non-ASCII chars must survive an Excel round-trip."""
-        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        monkeypatch.setattr(convert_tiff, "INSTALL_DIR", tmp_path)
         src = tmp_path / "240419_山羊公園"
         src.mkdir()
         (src / "foto.tif").write_bytes(b"x")
@@ -580,7 +580,7 @@ class TestRepeat:
 
 class TestGeneration:
     def test_per_folder_entries_for_nonrecursive_modes(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        monkeypatch.setattr(convert_tiff, "INSTALL_DIR", tmp_path)
         a = tmp_path / "a"
         b = tmp_path / "b"
         a.mkdir()
@@ -598,7 +598,7 @@ class TestGeneration:
         assert all(m == 0 for _, _, m in entries)
 
     def test_single_root_entry_for_recursive_modes(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        monkeypatch.setattr(convert_tiff, "INSTALL_DIR", tmp_path)
         sub = tmp_path / "sub"
         sub.mkdir()
         (sub / "x.tif").write_bytes(b"x")
@@ -610,7 +610,7 @@ class TestGeneration:
             "recursive modes get one entry for the root (per-folder entries would overlap)"
 
     def test_mode2_prefills_flat_destination(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        monkeypatch.setattr(convert_tiff, "INSTALL_DIR", tmp_path)
         (tmp_path / "x.tif").write_bytes(b"x")
 
         path = Path(generate_manifest(tmp_path, 2))
@@ -619,14 +619,14 @@ class TestGeneration:
         assert entries == [(str(tmp_path), str(tmp_path / "ZIP_flat"), 2)]
 
     def test_no_tiffs_returns_none(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        monkeypatch.setattr(convert_tiff, "INSTALL_DIR", tmp_path)
 
         assert generate_manifest(tmp_path, 0) is None
 
     def test_generation_excludes_backup_and_output_folders(self, tmp_path, monkeypatch):
         """OLD_TIFFs holds the archived originals -- a manifest entry pointing
         there would recompress the backups (and mode 8 would delete them)."""
-        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        monkeypatch.setattr(convert_tiff, "INSTALL_DIR", tmp_path)
         good = tmp_path / "photos"
         good.mkdir()
         (good / "x.tif").write_bytes(b"x")
@@ -651,7 +651,7 @@ class TestGeneration:
         latest.write_text("x")
         os.utime(older, (1000000000, 1000000000))
         os.utime(latest, (1600000000, 1600000000))
-        monkeypatch.setattr(convert_tiff, "SCRIPT_DIR", tmp_path)
+        monkeypatch.setattr(convert_tiff, "INSTALL_DIR", tmp_path)
 
         assert get_latest_manifest() == str(latest)
 
@@ -685,7 +685,7 @@ def test_the_wizard_and_the_backend_agree_on_where_a_mode_writes():
     output rule, which differed at a drive root: mode 5 with Q:\a\b\x.tif under Q:\ gave
     Q:\ZIP (the backend writes Q:\a\ZIP); mode 4 with a file in the root gave Q:\_ZIP (the
     backend has no place for it). One rule now: tiff_workflow.common.resolve_output."""
-    import convert_tiff as ct
+    from tiff_workflow import wizard as ct
     assert ct._resolve_output_folder(Path(r"Q:\a\b\x.tif"), 5, Path("Q:\\"), "") == Path(r"Q:\a\ZIP")
     assert ct._resolve_output_folder(Path(r"Q:\x.tif"), 4, Path("Q:\\"), "") is None
     assert ct._resolve_output_folder(Path(r"Q:\伊豆沼 [x]\TIFF\x.tif"), 4, Path("Q:\\"), "") == \

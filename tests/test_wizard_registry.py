@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
 
 import pytest
 
-import convert_tiff
+from tiff_workflow import wizard as convert_tiff
 import legacy_args
 
 GOLDEN = Path(__file__).parent / "data" / "wizard_registry_golden.json"
@@ -78,7 +78,7 @@ def _golden():
 
 
 def _golden_cmd(cid, shell):
-    return [a.replace(TOKEN, str(convert_tiff.SCRIPT_DIR)) for a in _golden()[cid][shell]]
+    return [a.replace(TOKEN, str(convert_tiff.INSTALL_DIR)) for a in _golden()[cid][shell]]
 
 
 #: The script each golden line named -> the backend that takes the same arguments today.

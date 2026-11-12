@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import convert_tiff as ct  # noqa: E402
+from tiff_workflow import wizard as ct  # noqa: E402
 
 rich = pytest.importorskip("rich")
 from rich.console import Console  # noqa: E402

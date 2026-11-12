@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import convert_tiff
+from tiff_workflow import wizard as convert_tiff
 # audit round 28: the padded conversion and the purge gate also read the per-page sample
 # layout (exiftool -SamplesPerPixel ...) and the XMP/IPTC values (exiftool -j). Test doubles
 # that answer every exiftool call with "" have to answer those two as well.
@@ -35,7 +35,7 @@ def _fake_exiftool_round28(kwargs):
     return None
 
 
-from convert_tiff import (
+from tiff_workflow.wizard import (
     _format_size,
     truncate_path,
     build_compress_command,

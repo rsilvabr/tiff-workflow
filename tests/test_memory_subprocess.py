@@ -32,7 +32,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-import convert_tiff as ct
+from tiff_workflow import wizard as ct
 from backends import install_copy
 from test_regression_classes import IMAGE_TOOLS, make_tiff, read_tag, run_ps
 
@@ -72,15 +72,15 @@ def _subprocess_call_owners(node, current):
 
 def test_no_subprocess_call_outside_the_capture_helper():
     """T1: every subprocess.run/Popen/call/check_output/check_call in
-    convert_tiff.py lives inside _run_captured, the two version probes or
+    the wizard (tiff_workflow/wizard.py) lives inside _run_captured, the two version probes or
     run_subprocess. The nested _kill_tree is NOT an exception: it goes through
     _run_captured too."""
-    tree = ast.parse((REPO / "convert_tiff.py").read_text(encoding="utf-8"))
+    tree = ast.parse((REPO / "tiff_workflow" / "wizard.py").read_text(encoding="utf-8"))
     offenders = [(owner, lineno)
                  for owner, lineno in _subprocess_call_owners(tree, None)
                  if owner not in _ALLOWED_OWNERS]
     assert not offenders, (
-        "convert_tiff.py: subprocess call(s) outside _run_captured "
+        "tiff_workflow/wizard.py: subprocess call(s) outside _run_captured "
         "(and the documented probes):\n"
         + "\n".join(f"  line {lineno}: {owner}()" for owner, lineno in offenders))
 
