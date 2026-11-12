@@ -169,3 +169,28 @@ def test_copy_exif_zip_keeps_the_page_markers(tmp_path, hostile, lane):
     probe.write_bytes(tif.read_bytes())
     assert read_compression(probe).lower() == "zipzip", "both pages ZIP (magick prints one per page)"
     assert numeric_subfiletypes(probe) == before
+
+
+@requires_tools
+@pytest.mark.parametrize("lane", LANES)
+def test_mode5_never_replaces_a_photo_living_in_zip(tmp_path, lane):
+    """v3.1 (review of phases 3+4, V4; so since v3.0.0): ZIP/x.tif (an uncompressed photo
+    living in ZIP/) and sub/x.tif (another photo). Mode 5 sends sub/x.tif to ZIP/x.tif; with
+    -Overwrite the red photo was replaced by the blue one, OK and exit code 0."""
+    plain = tmp_path / "plain"
+    (plain / "ZIP").mkdir(parents=True)
+    (plain / "sub [1]").mkdir()
+    solid(plain / "ZIP" / "x.tif", "red")
+    solid(plain / "sub [1]" / "x.tif", "blue")
+    root = tmp_path / HOSTILE
+    plain.rename(root)
+    blue_before = (root / "sub [1]" / "x.tif").read_bytes()
+    result = run_ps(lane, "compress_tiff_zip.py", ["-Mode", "5", "-InputDir", root, "-Overwrite"], tmp_path)
+    out = result.stdout
+    assert result.returncode == 1, out
+    assert ("ERROR (mode 5 would replace another source file of this run - refused) | x.tif | "
+            + str(root / "ZIP" / "x.tif")) in out, out
+    assert first_pixel_plain(root / "ZIP" / "x.tif", tmp_path) == RED, "the red photo is gone"
+    assert read_compression(root / "ZIP" / "x.tif").lower() == "zip", "compressed in its own place"
+    assert (root / "sub [1]" / "x.tif").read_bytes() == blue_before
+    assert sorted(p.name for p in (root / "ZIP").iterdir()) == ["x.tif"], "no x_v2.tif either"

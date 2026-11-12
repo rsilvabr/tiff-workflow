@@ -1050,7 +1050,7 @@ def _plan_jobs(run, files, comp_map):
     plan = _Plan(jobs=[], collision_notes={})
     used_names = {}        # mode 2: names given out per output folder
     claimed = {}           # other modes: destination -> the source that claimed it
-    sources = {f.path.lower() for f in files} if mode == 2 else set()
+    sources = {f.path.lower() for f in files} if 1 <= mode <= 7 else set()
     if mode == 2:
         _warn_flat_output_in_the_input(run, files)
     for f in files:
@@ -1085,17 +1085,20 @@ def _plan_jobs(run, files, comp_map):
         if not dry and final_dir.strip() and not os.path.isdir(final_dir):
             os.makedirs(final_dir, exist_ok=True)
 
-        # Mode 2 with its output in the input folder: the flat name of a file from a
-        # subfolder can be ANOTHER source of this run (a.tif in the root, a.tif in a
-        # subfolder). With -Overwrite that photo was replaced by the other one, the only
-        # copy of it gone, exit code 0. Never: the file is refused, and the source it would
-        # have replaced is compressed in its own place as usual. (Without -Overwrite nothing
-        # is written over it: the worker answers SKIP (exists), or -DuplicateAction gives
-        # another name.) A file whose destination is ITSELF is the in-place write, allowed.
+        # A copy mode whose destination is ANOTHER source of this run: mode 2 with its output
+        # in the input folder (a.tif in the root, a.tif in a subfolder), mode 5 with an
+        # uncompressed TIFF living in ZIP\ (sub\x.tif -> ZIP\x.tif), mode 4 with a source in a
+        # folder that ends in the suffix. With -Overwrite that photo was replaced by the other
+        # one, the only copy of it gone, exit code 0 (mode 5 since v3.0.0 at least). Never:
+        # the file is refused, and the source it would have replaced is compressed as usual.
+        # (Without -Overwrite nothing is written over it: the worker answers SKIP (exists), or
+        # -DuplicateAction gives another name.) A file whose destination is ITSELF is the
+        # in-place write, allowed. Modes 0/8/9 write in place and are not copy modes.
         replaces_another = final_dst.lower() in sources and not tw.same_path(final_dst, f.path)
-        if mode == 2 and opt["Overwrite"] and replaces_another:
-            run.count(f"ERROR (mode 2 would replace another source file of this run - refused; "
-                      f"pass -OutputDir) | {f.name} | {final_dst}")
+        if 1 <= mode <= 7 and opt["Overwrite"] and replaces_another:
+            hint = "; pass -OutputDir" if mode == 2 else ""
+            run.count(f"ERROR (mode {mode} would replace another source file of this run - refused"
+                      f"{hint}) | {f.name} | {final_dst}")
             continue
 
         if mode == 2:

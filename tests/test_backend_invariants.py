@@ -1549,6 +1549,53 @@ class TestMode2InTheInputFolder:
         assert not said(run, "would replace another source")
 
 
+class TestCopyModesNeverReplaceASource:
+    """v3.1 (review of phases 3+4, V4; already so in v3.0.0): the A8 refusal of mode 2 holds
+    in every copy mode. Mode 5 sends sub\\x.tif to ZIP\\x.tif; when ZIP\\x.tif is itself a
+    source (an uncompressed TIFF living in ZIP\\), -Overwrite replaced that photo with the
+    other one, OK and exit code 0. Mode 4 the same with shoot\\x.tif -> shoot_ZIP\\x.tif."""
+
+    LAYOUTS = {
+        "5": ("ZIP", "sub [1]"),             # (the folder of the photo in the way, the other's)
+        "4": ("shoot 伊豆沼_ZIP", "shoot 伊豆沼"),
+    }
+
+    # mode 4 derives the destination from the other photo's folder name: "shoot" always lists
+    # before "shoot_ZIP", so it has one order
+    @pytest.fixture(params=[("5", "aa first"), ("5", "zz last"), ("4", "natural")],
+                    ids=["mode5-other-first", "mode5-other-last", "mode4"])
+    def lib(self, request, tmp_path):
+        mode, order = request.param
+        root = tmp_path / "190815_伊豆沼 [FINAL] 50% x"
+        in_the_way, other = self.LAYOUTS[mode]
+        if order == "aa first":
+            other = "!" + other                 # listed before the photo in the way
+        (root / in_the_way).mkdir(parents=True)
+        (root / other).mkdir(parents=True)
+        (root / in_the_way / "x 50%.tif").write_bytes(b"RED PHOTO")
+        (root / other / "x 50%.tif").write_bytes(b"BLUE PHOTO")
+        return mode, root, root / in_the_way / "x 50%.tif", root / other / "x 50%.tif"
+
+    def test_a_photo_is_never_replaced_by_another_source(self, tools, lib):
+        mode, root, red, blue = lib
+        run, rc = modes("-Mode", mode, "-InputDir", str(root), "-Overwrite")
+        refused = said(run, f"ERROR (mode {mode} would replace another source file of this run - refused) "
+                            f"| x 50%.tif | {red}")
+        assert len(refused) == 1 and run.err == 1 and rc == 1, run.log.lines
+        assert str(blue) not in [c[1] for c in tools.magick_calls], "the other photo was converted"
+        assert blue.read_bytes() == b"BLUE PHOTO"
+        assert red.read_bytes() != b"BLUE PHOTO" and not said(run, "renamed to"), run.log.lines
+        if mode == "5":
+            assert red.read_bytes() == b"COMPRESSED", "the photo in ZIP\\ is compressed in its own place"
+
+    def test_without_overwrite_nothing_is_written_over_it(self, tools, lib):
+        """As before: the other photo is skipped (its destination exists)."""
+        mode, root, red, blue = lib
+        run, rc = modes("-Mode", mode, "-InputDir", str(root))
+        assert not said(run, "would replace another source"), run.log.lines
+        assert blue.read_bytes() == b"BLUE PHOTO" and red.read_bytes() in (b"RED PHOTO", b"COMPRESSED")
+
+
 class TestMode8DefaultStaging:
     """Mode 8 without -StagingDir stages in a folder of its own (_cs8_<id>): inside the input
     folder when there is one, in the temp folder when there are several. On an interactive
