@@ -194,6 +194,14 @@ def _error(text) -> None:
         print(f"ERROR: {_plain(text)}")
 
 
+def _warn(text) -> None:
+    """A warning: yellow on the Rich screen, `WARNING: ` in front on the plain one."""
+    if RICH_AVAILABLE and console:
+        console.print(_highlighted(_rich_text(text, "yellow")))
+    else:
+        print(f"WARNING: {_plain(text)}")
+
+
 def _ask(question, default: Optional[str] = None, style: str = "cyan",
          choices: Optional[List[str]] = None) -> str:
     """A question answered with a line of text, stripped. Enter gives `default` (shown
@@ -4832,13 +4840,6 @@ _COLLISION_SCAN_MODES = {2, 4, 5}
 _PER_FOLDER_MODES = {0, 1}
 
 
-def _manifest_error(msg: str) -> None:
-    if RICH_AVAILABLE and console:
-        console.print(f"[red]{escape(msg)}[/red]")
-    else:
-        print(f"ERROR: {msg}")
-
-
 def _is_manifest_header_row(row) -> bool:
     """True only when the first row really is the CSV header -- not when a
     data folder happens to be named 'source'. A header names at least one of
@@ -4880,7 +4881,7 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
     entries = []
     stream = _open_manifest_for_read(manifest_path)
     if stream is None:
-        _manifest_error(
+        _error(
             f"Manifest is not UTF-8: {manifest_path}\n"
             f"Excel re-saved it in the system ANSI codepage, so the paths cannot be "
             f"decoded reliably -- and a wrongly-decoded path is worse than no run at all. "
@@ -4895,7 +4896,7 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
         # line becomes a "source" path containing ';' -- which the backend
         # then SPLITS into two roots (it splits -InputDir on ';'). Detect and refuse.
         if first_row is not None and len(first_row) == 1 and ';' in first_row[0]:
-            _manifest_error(
+            _error(
                 f"Manifest appears to be ';'-delimited: {manifest_path}\n"
                 f"This Excel locale saves CSV with ';' instead of ','. Re-save it as "
                 f"'CSV UTF-8 (comma delimited)' or re-generate the manifest.")
@@ -4933,16 +4934,16 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
                             raise ValueError
                         entry_mode = int(_mode_f)
                     except ValueError:
-                        _manifest_error(f"Invalid Mode value in manifest: {row[2].strip()!r} (row: {source})")
+                        _error(f"Invalid Mode value in manifest: {row[2].strip()!r} (row: {source})")
                         return None
                     if not 0 <= entry_mode <= 9:
-                        _manifest_error(f"Mode out of range (0-9) in manifest: {entry_mode} (row: {source})")
+                        _error(f"Mode out of range (0-9) in manifest: {entry_mode} (row: {source})")
                         return None
                 # ';' is legal in Windows folder names, but the backend splits
                 # -InputDir on ';', so one entry would arrive as two roots --
                 # and in mode 8 the wrong root gets its sources deleted.
                 if ';' in source or ';' in dest:
-                    _manifest_error(
+                    _error(
                         f"';' is not allowed in manifest paths: {source} -> {dest}\n"
                         f"The backend splits folder lists on ';', so this path would be "
                         f"processed as two different folders.")
@@ -4957,17 +4958,14 @@ def load_manifest_entries(manifest_path) -> Optional[List[Tuple[str, str, Option
                     # dropped folder looks exactly like a folder that
                     # compressed cleanly. Same fail-closed rule as the
                     # Mode checks above.
-                    _manifest_error(
+                    _error(
                         f"Path traversal in manifest entry: {source} -> {dest}\n"
                         f"Use absolute paths (or paths without '..') and run it again.")
                     return None
                 entries.append((source, dest, entry_mode))
 
     if not entries:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]Manifest is empty or only has comments.[/yellow]")
-        else:
-            print("Manifest is empty or only has comments.")
+        _say("Manifest is empty or only has comments.", "yellow")
         return None
 
     return entries
@@ -4996,10 +4994,7 @@ def generate_manifest(root: Path, mode: int) -> Optional[str]:
         except OSError:
             continue
     if not tiff_dirs:
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No TIFF files found -- nothing to add to the manifest.[/yellow]")
-        else:
-            print("No TIFF files found -- nothing to add to the manifest.")
+        _say("No TIFF files found -- nothing to add to the manifest.", "yellow")
         return None
 
     if mode in _PER_FOLDER_MODES:
@@ -5050,51 +5045,26 @@ def pick_manifest() -> Optional[str]:
     if len(manifests) == 1:
         return str(manifests[0])
     shown = manifests[:10]
-    if RICH_AVAILABLE and console:
-        console.print("[bold]Available manifests (newest first):[/bold]")
-        for i, m in enumerate(shown, 1):
-            console.print(f"  [{i}] {escape(m.name)}")
-        choice = Prompt.ask("Which manifest?",
-                            choices=[str(i) for i in range(1, len(shown) + 1)], default="1")
-        return str(shown[int(choice) - 1])
-    print("Available manifests (newest first):")
+    _say("Available manifests (newest first):", "bold")
     for i, m in enumerate(shown, 1):
-        print(f"  [{i}] {m.name}")
-    raw = input("Which manifest? [1]: ").strip() or "1"
-    try:
-        idx = max(1, min(int(raw), len(shown))) - 1
-    except ValueError:
-        idx = 0
-    return str(shown[idx])
+        _say(f"  [{i}] {m.name}")
+    choice = _ask("Which manifest?", "1", style="", choices=[str(i) for i in range(1, len(shown) + 1)])
+    return str(shown[int(choice) - 1])
 
 
 def confirm_manifest_entries(manifest_path: str, entries: List[Tuple]) -> bool:
     """Preview the entries and ask for a go-ahead."""
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[bold cyan]Manifest:[/bold cyan] {escape(manifest_path)}")
-        console.print(f"[bold]Entries to process:[/bold] {len(entries)}")
-        table = Table(show_header=True, header_style="bold cyan")
-        table.add_column("#", justify="right", style="dim")
-        table.add_column("Source", style="red")
-        table.add_column("Destination", style="green")
-        table.add_column("Mode", style="magenta")
-        for i, (src, dst, mode) in enumerate(entries[:15], 1):
-            table.add_row(str(i), truncate_path(Path(src)), truncate_path(Path(dst)), str(mode))
-        console.print(table)
-        if len(entries) > 15:
-            console.print(f"[dim]... and {len(entries) - 15} more entries[/dim]")
-        console.print()
-        return Confirm.ask("Proceed with manifest?", default=True)
-
-    print(f"\nManifest: {manifest_path}")
-    print(f"Entries to process: {len(entries)}\n")
-    for i, (src, dst, mode) in enumerate(entries[:15], 1):
-        print(f"  {i}. {src}")
-        print(f"     -> {dst} (mode {mode})")
+    _say(["\n", ("Manifest:", "bold cyan"), f" {manifest_path}"])
+    _say([("Entries to process:", "bold"), f" {len(entries)}"])
+    _table([{"name": "#", "justify": "right", "style": "dim"}, {"name": "Source", "style": "red"},
+            {"name": "Destination", "style": "green"}, {"name": "Mode", "style": "magenta"}],
+           [[str(i), truncate_path(Path(src)), truncate_path(Path(dst)), str(mode)]
+            for i, (src, dst, mode) in enumerate(entries[:15], 1)],
+           show_header=True, header_style="bold cyan")
     if len(entries) > 15:
-        print(f"  ... and {len(entries) - 15} more entries")
-    print()
-    return _yes(input("Proceed with manifest? [Y/n]: "), True)
+        _say(f"... and {len(entries) - 15} more entries", "dim")
+    _say("")
+    return _ask_yes_no("Proceed with manifest?", True)
 
 
 def manifest_source_overlaps(entries: List[Tuple]) -> List[Tuple[str, str]]:
@@ -5160,10 +5130,7 @@ def manifest_output_collisions(entries: List[Tuple], exclude_names=()) -> List[T
             continue
         # This walk is the slow part on large trees (recursive glob + per-file
         # stat) -- say so.
-        if RICH_AVAILABLE and console:
-            console.print(f"[dim]Collision check: scanning {escape(str(src_root))} ...[/dim]")
-        else:
-            print(f"Collision check: scanning {src_root} ...")
+        _say(f"Collision check: scanning {src_root} ...", "dim")
         try:
             files = sorted(src_root.rglob("*"))
         except OSError:
@@ -5222,7 +5189,7 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
     without a console), and the mode-8 gate below stays as a defensive refusal (the runner
     already refused a deleting preset before calling this)."""
     if not entries:
-        _manifest_error("No manifest entries found!")
+        _error("No manifest entries found!")
         return False
 
     dry_run = workflow.get("dry_run", False)
@@ -5232,12 +5199,8 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
     ignored_dests = [(s, d, m) for s, d, m in entries
                      if m != 2 and d and Path(d) != Path(s)]
     if ignored_dests:
-        warn = (f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
-                f"Destination column (only mode 2 honors it) -- outputs follow the mode rules.")
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{warn}[/yellow]")
-        else:
-            print(f"WARNING: {warn}")
+        _warn(f"Note: {len(ignored_dests)} manifest entry(ies) use modes that ignore the "
+              f"Destination column (only mode 2 honors it) -- outputs follow the mode rules.")
         for s, d, m in ignored_dests[:5]:
             print(f"  mode {m}: {d} (ignored)")
 
@@ -5245,38 +5208,22 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
     # root, mixing outputs with sources (same caveat as the wizard's mode 2).
     root_mix = [s for s, d, m in entries if m == 2 and Path(d) == Path(s)]
     if root_mix:
-        warn = (f"Note: {len(root_mix)} mode-2 entry(ies) have Destination == Source: "
-                f"all TIFFs land flattened in the input folder itself.")
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{warn}[/yellow]")
-        else:
-            print(f"WARNING: {warn}")
+        _warn(f"Note: {len(root_mix)} mode-2 entry(ies) have Destination == Source: "
+              f"all TIFFs land flattened in the input folder itself.")
 
     # Overlapping source trees: one entry's Source inside another's means the
     # same files are processed twice by SEPARATE child processes.
     overlaps = manifest_source_overlaps(entries)
     if overlaps:
-        head = (f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
-                f"Source folders -- the same files would be processed twice:")
-        if RICH_AVAILABLE and console:
-            console.print(f"[yellow]{head}[/yellow]")
-        else:
-            print(f"WARNING: {head}")
+        _warn(f"{len(overlaps)} manifest entry pair(s) have duplicate or nested "
+              f"Source folders -- the same files would be processed twice:")
         for a, b in overlaps[:10]:
             print(f"  {a}  <->  {b}")
         if unattended:
-            msg = ("Refused: overlapping sources need a confirmation, which cannot be "
+            _error("Refused: overlapping sources need a confirmation, which cannot be "
                    "given unattended.")
-            if RICH_AVAILABLE and console:
-                console.print(f"[red]{escape(msg)}[/red]")
-            else:
-                print(f"ERROR: {msg}")
             return False
-        if RICH_AVAILABLE and console:
-            ok_overlap = Confirm.ask("Run anyway?", default=False)
-        else:
-            ok_overlap = _yes(input("Run anyway? [y/N]: "), False)
-        if not ok_overlap:
+        if not _ask_yes_no("Run anyway?", False):
             return False
 
     # Cross-entry duplicate outputs: refuse loudly instead of silently
@@ -5286,30 +5233,23 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
         collisions = manifest_output_collisions(
             entries, tw.parse_exclude_folders(workflow.get("exclude_folders") or ""))
         if collisions:
-            _manifest_error(
+            _error(
                 "Aborting: manifest entries would write different files to the same output.")
             for a, b, d in collisions[:10]:
-                msg = f"  {a} + {b}  ->  same name in {d}"
-                if RICH_AVAILABLE and console:
-                    console.print(f"[red]{escape(msg)}[/red]")
-                else:
-                    print(msg)
+                _say(f"  {a} + {b}  ->  same name in {d}", "red")
             if len(collisions) > 10:
                 print(f"  ... and {len(collisions) - 10} more")
-            _manifest_error(
+            _error(
                 "Rename the inputs, pick another mode, or run the folder directly.")
             return False
     else:
-        if RICH_AVAILABLE and console:
-            console.print("[dim]Collision check: skipped (per-source output modes).[/dim]")
-        else:
-            print("Collision check: skipped (per-source output modes).")
+        _say("Collision check: skipped (per-source output modes).", "dim")
 
     # A missing Source must fail closed: a folder that silently vanishes from
     # the run looks exactly like a folder that compressed cleanly.
     missing = [s for s, _, _ in entries if not Path(s).is_dir()]
     if missing:
-        _manifest_error(f"{len(missing)} manifest Source folder(s) do not exist:")
+        _error(f"{len(missing)} manifest Source folder(s) do not exist:")
         for s in missing[:10]:
             print(f"  {s}")
         if len(missing) > 10:
@@ -5325,36 +5265,24 @@ def execute_manifest_workflow(cfg, entries: List[Tuple], workflow: Dict,
             # reaches this call, because there is nobody to confirm. Fail closed
             # if a future caller ever gets here unattended.
             return False
-        if RICH_AVAILABLE and console:
-            if not Confirm.ask("[red]Manifest contains mode-8 entries: source TIFFs will be DELETED after compression. Are you sure?[/red]", default=False):
-                console.print("[dim]Cancelled.[/dim]")
-                return False
-        else:
-            if not _yes(input("Manifest contains mode-8 entries: source TIFFs will be DELETED. Confirm? [y/N]: "), False):
-                print("Cancelled.")
-                return False
+        if not _ask_yes_no("Manifest contains mode-8 entries: source TIFFs will be DELETED after "
+                           "compression. Are you sure?", False, "red"):
+            _say("Cancelled.", "dim")
+            return False
 
     total_entries = len(entries)
     ok_count = 0
     error_count = 0
     entry_reports: List[Dict] = []
 
-    if RICH_AVAILABLE and console:
-        console.print(f"\n[bold cyan]Executing manifest: {total_entries} entry(ies)[/bold cyan]")
-        if dry_run:
-            console.print("[yellow]DRY RUN MODE[/yellow]")
-        console.print()
-    else:
-        print(f"\nExecuting manifest: {total_entries} entry(ies)")
-        if dry_run:
-            print("DRY RUN MODE")
-        print()
+    _say(f"\nExecuting manifest: {total_entries} entry(ies)", "bold cyan")
+    if dry_run:
+        _say("DRY RUN MODE", "yellow")
+    _say("")
 
     for i, (source, dest_path, mode) in enumerate(entries, 1):
-        if RICH_AVAILABLE and console:
-            console.print(f"[{i}/{total_entries}] [bold]Mode {mode}[/bold] | {escape(truncate_path(Path(source), 40))} -> {escape(truncate_path(Path(dest_path), 40))}")
-        else:
-            print(f"[{i}/{total_entries}] Mode {mode} | {source} -> {dest_path}")
+        _say([f"[{i}/{total_entries}] ", (f"Mode {mode}", "bold"),
+              f" | {truncate_path(Path(source), 40)} -> {truncate_path(Path(dest_path), 40)}"])
 
         cmd = build_manifest_entry_cmd(source, dest_path, mode, workflow)
         if unattended:
@@ -5438,10 +5366,7 @@ def run_manifest_workflow(cfg) -> bool:
     """Menu option 3: run the compress workflow from a manifest CSV."""
     manifest_path = pick_manifest()
     if not manifest_path or not Path(manifest_path).exists():
-        if RICH_AVAILABLE and console:
-            console.print("[yellow]No manifest found. Generate one from workflow [1] (Compress TIFFs).[/yellow]")
-        else:
-            print("No manifest found. Generate one from workflow [1] (Compress TIFFs).")
+        _say("No manifest found. Generate one from workflow [1] (Compress TIFFs).", "yellow")
         return False
 
     entries = load_manifest_entries(manifest_path)
@@ -5451,20 +5376,8 @@ def run_manifest_workflow(cfg) -> bool:
     # Rows without a Mode cell inherit a default mode asked once per run.
     default_mode = None
     if any(m is None for _, _, m in entries):
-        if RICH_AVAILABLE and console:
-            raw = Prompt.ask(
-                "[cyan]Default mode for manifest rows without a Mode cell[/cyan]",
-                choices=[str(m) for m in MODE_NAMES],
-                default=str(cfg.config.last_mode or 0))
-            default_mode = int(raw)
-        else:
-            raw = input(f"Default mode for rows without a Mode cell [{cfg.config.last_mode or 0}]: ").strip()
-            try:
-                default_mode = int(raw) if raw else (cfg.config.last_mode or 0)
-            except ValueError:
-                default_mode = cfg.config.last_mode or 0
-            if not 0 <= default_mode <= 9:
-                default_mode = 0
+        default_mode = int(_ask("Default mode for manifest rows without a Mode cell",
+                                str(cfg.config.last_mode or 0), choices=[str(m) for m in MODE_NAMES]))
     if default_mode is not None:
         entries = [(s, d, m if m is not None else default_mode) for s, d, m in entries]
 
@@ -5480,15 +5393,8 @@ def run_manifest_workflow(cfg) -> bool:
     # Collision policy for mode-2 (flattened) entries, same as the wizard.
     if any(m == 2 for _, _, m in entries):
         dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
-        if RICH_AVAILABLE and console:
-            workflow["duplicate_action"] = Prompt.ask(
-                "[cyan]Duplicate filenames (mode 2)[/cyan]",
-                choices=["Numbered", "Skip", "Overwrite"],
-                default=dup_default,
-            )
-        else:
-            dup = input(f"Duplicate filenames (Numbered/Skip/Overwrite) [{dup_default}]: ").strip() or dup_default
-            workflow["duplicate_action"] = dup if dup in ("Numbered", "Skip", "Overwrite") else dup_default
+        workflow["duplicate_action"] = _ask("Duplicate filenames (mode 2)", dup_default,
+                                            choices=["Numbered", "Skip", "Overwrite"])
 
     if not confirm_manifest_entries(manifest_path, entries):
         return False
