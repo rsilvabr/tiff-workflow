@@ -137,21 +137,10 @@ _OVERLAY_SECTIONS = {
 
 def _settings_overlay_path() -> Optional[Path]:
     """The overlay file to read (it may not exist), or None when TIFFWORKFLOW_SETTINGS is
-    set but empty (overlay OFF). Same order as the backends' reader
-    (tiff_workflow_common.settings_overlay_path): the variable, then next to the scripts if
-    the file is there, then the user profile."""
-    env = os.environ.get(_SETTINGS_OVERLAY_ENV)
-    if env is not None:
-        return Path(env) if env.strip() else None
-    portable = SCRIPT_DIR / _SETTINGS_OVERLAY_FILE
-    if portable.is_file():
-        return portable
-    if platform.system() == "Windows":
-        home = Path(os.environ.get("USERPROFILE") or Path.home())
-    else:
-        home = Path.home()
-    return home / _SETTINGS_OVERLAY_FILE
-
+    set but empty (overlay OFF): tw.settings_overlay_path, looking next to this script --
+    the variable, then next to the scripts if the file is there, then the user profile."""
+    path = tw.settings_overlay_path(str(SCRIPT_DIR))
+    return Path(path) if path is not None else None
 
 # The overlay grammar is the backends' own (one reader: the wizard plans with the value the
 # backend will run with).
@@ -301,30 +290,13 @@ _OVERLAY_SETTINGS = {
 
 def _apply_settings_overlay(namespace: dict) -> dict:
     """Apply the `convert_tiff` section to `namespace` (this module's globals(), right here:
-    the settings above are already defined and nothing has read them yet). Returns
-    {"path", "applied", "warnings"} for the start-up notice. Never raises."""
-    result = {"path": None, "applied": [], "warnings": []}
-    try:
-        result["path"] = _settings_overlay_path()
-        section = _settings_overlay_section(result["path"], "convert_tiff")
-    except Exception as e:
-        result["warnings"].append(f"{result['path']}: not read ({e}); no setting changed")
-        return result
-    for name, value in (section or {}).items():
-        spec = _OVERLAY_SETTINGS.get(name)
-        if spec is None:
-            result["warnings"].append(f"{name} is not a setting the overlay can change in "
-                                      f"convert_tiff; ignored")
-            continue
-        ok, checked = _overlay_value(spec, value)
-        if not ok:
-            result["warnings"].append(f"{name} = {json.dumps(value, ensure_ascii=False)} is not "
-                                      f"valid ({checked}); the script's value is kept")
-            continue
-        namespace[name] = checked
-        result["applied"].append(name)
-    return result
-
+    the settings above are already defined and nothing has read them yet), read by
+    tw.read_settings_overlay with _OVERLAY_SETTINGS as its table. Returns {"path", "applied",
+    "warnings"} for the start-up notice. Never raises."""
+    overlay = tw.read_settings_overlay("convert_tiff", _OVERLAY_SETTINGS, str(SCRIPT_DIR))
+    namespace.update(overlay["values"])
+    return {"path": Path(overlay["path"]) if overlay["path"] else None,
+            "applied": list(overlay["values"]), "warnings": list(overlay["warnings"])}
 
 _SETTINGS_OVERLAY = _apply_settings_overlay(globals())
 
