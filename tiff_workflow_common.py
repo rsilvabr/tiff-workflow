@@ -775,14 +775,20 @@ def magick_probe(args, timeout=30):
 
 
 def magick_run(args):
-    """`magick <args>` with no timeout, for the conversions: (exit code, stdout + stderr
-    as text). A conversion that hangs hangs the run -- visible, interruptible and
-    non-destructive, since nothing replaces an original before the gates have passed."""
+    """`magick <args>` with no timeout, for the conversions: what it printed (stdout +
+    stderr, as text). Raises ToolError, with that text as its `output`, when magick exits
+    non-zero or cannot be started (exit_code -1, the OSError text as output). A
+    conversion that hangs hangs the run -- visible, interruptible and non-destructive,
+    since nothing replaces an original before the gates have passed. Exit 0 is not proof
+    of a file: the callers check that the output exists."""
     try:
         rc, out, err = run_captured([find_tool("magick") or "magick"] + [str(a) for a in args])
     except OSError as e:
-        return -1, str(e)
-    return rc, _text(out) + _text(err)
+        raise ToolError(f"magick could not be started: {e}", str(e), -1) from e
+    text = _text(out) + _text(err)
+    if rc != 0:
+        raise ToolError(f"magick exit {rc}", text, rc)
+    return text
 
 
 def exiftool(args, merge_stderr=False):

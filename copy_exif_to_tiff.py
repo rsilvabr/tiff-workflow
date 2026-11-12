@@ -258,15 +258,17 @@ def _zip_staged(run, name, tiff_target, write_dst, timeout, load_factor, drop_co
 
     # Input literal, OUTPUT escaped: a '%' in the name sends the output somewhere else while
     # magick still exits 0.
-    rc, out = tw.magick_run(["-quiet", tiff_target, "-compress", "zip"] + type_args
-                            + [tw.magick_path_spec(write_dst)])
-    err = tw.one_line(out)
-    if rc == 0 and not os.path.exists(write_dst):
-        rc = 1
-        err = f"magick reported success but wrote no file (expected: {write_dst})"
-    if rc != 0:
+    try:
+        tw.magick_run(["-quiet", tiff_target, "-compress", "zip"] + type_args
+                      + [tw.magick_path_spec(write_dst)])
+    except tw.ToolError as e:
+        failure = tw.one_line(e.output)
+    else:
+        failure = (None if os.path.exists(write_dst)
+                   else f"magick reported success but wrote no file (expected: {write_dst})")
+    if failure is not None:
         drop_staged()
-        return f"ERROR (magick ZIP) | {name} | {err}"
+        return f"ERROR (magick ZIP) | {name} | {failure}"
 
     # The staged ZIP is moved ON TOP of the TIFF it came from and there is no OLD_TIFFs
     # backup on this path, so it must be proven pixel-identical first. A zero exit from

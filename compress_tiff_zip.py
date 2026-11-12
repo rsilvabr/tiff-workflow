@@ -542,25 +542,31 @@ def _write_with_thumbnail(run, src, write_dst, type_args, name):
     temp_tiff = tw.temp_file_path(".tif")
     thumb_temp = tw.temp_file_path("." + thumb_ext)
     try:
-        rc, out = tw.magick_run(["-quiet", main_page, "-compress", "zip"] + type_args
-                                + [tw.magick_path_spec(temp_tiff)])
-        if rc != 0:
-            return ThumbWrite(error=f"ERROR (magick compress) | {name} | {tw.one_line(out)}")
+        try:
+            tw.magick_run(["-quiet", main_page, "-compress", "zip"] + type_args
+                          + [tw.magick_path_spec(temp_tiff)])
+        except tw.ToolError as e:
+            return ThumbWrite(error=f"ERROR (magick compress) | {name} | {tw.one_line(e.output)}")
         thumb_cmd = ["-quiet", main_page] + tw.thumbnail_magick_args(run.srgb_profile, opt["ThumbSize"])
         if thumb_ext == "jpg":
             thumb_cmd += ["-quality", str(opt["ThumbQuality"])]
         thumb_cmd.append(f"{thumb_ext}:{tw.magick_path_spec(thumb_temp)}")
-        rc, _out = tw.magick_run(thumb_cmd)
-        if rc != 0 or not os.path.exists(thumb_temp):
+        try:
+            tw.magick_run(thumb_cmd)
+            thumb_made = os.path.exists(thumb_temp)
+        except tw.ToolError:
+            thumb_made = False
+        if not thumb_made:
             # the thumbnail failed: the compressed main image alone
             shutil.copyfile(temp_tiff, write_dst)
             no_thumb = True
         if not no_thumb:
             # The two INPUTS stay literal: a plain input is opened verbatim.
-            rc, _out = tw.magick_run(["-quiet", temp_tiff, f"{thumb_ext}:{thumb_temp}",
-                                      "-compress", "zip"] + type_args
-                                     + [tw.magick_path_spec(write_dst)])
-            if rc != 0:
+            try:
+                tw.magick_run(["-quiet", temp_tiff, f"{thumb_ext}:{thumb_temp}",
+                               "-compress", "zip"] + type_args
+                              + [tw.magick_path_spec(write_dst)])
+            except tw.ToolError:
                 shutil.copyfile(temp_tiff, write_dst)
                 no_thumb = True
         # magick can exit 0 and still leave nothing at write_dst (a full disk).
@@ -717,15 +723,16 @@ def _compress_job(run, t, load, own):
     else:
         # The input stays literal (magick opens a plain path verbatim); the OUTPUT is
         # escaped, or a '%' in the name silently redirects it.
-        rc, out = tw.magick_run(["-quiet", src, "-compress", "zip"] + type_args
-                                + [tw.magick_path_spec(write_dst)])
-        if rc != 0:
+        try:
+            tw.magick_run(["-quiet", src, "-compress", "zip"] + type_args
+                          + [tw.magick_path_spec(write_dst)])
+        except tw.ToolError as e:
             tw.remove_quietly(meta_backup)
             # The partial output is this run's own file (never the source: an in-place
             # write goes to a temp sibling): drop it. A leftover also vetoes a later
             # "exists" check.
             tw.remove_quietly(write_dst)
-            return res(f"ERROR (magick) | {name} | {tw.one_line(out)}", fd=True)
+            return res(f"ERROR (magick) | {name} | {tw.one_line(e.output)}", fd=True)
         if not os.path.exists(write_dst):
             tw.remove_quietly(meta_backup)
             return res(f"ERROR (magick reported success but wrote no file) | {name} | expected: {write_dst}", fd=True)

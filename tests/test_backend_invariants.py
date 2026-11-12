@@ -140,7 +140,9 @@ class FakeTools:
                 out = out.split(":", 1)[1]
             with open(out, "wb") as fh:
                 fh.write(b"COMPRESSED")
-        return rc, "magick: boom" if rc else ""
+        if rc:
+            raise tw.ToolError(f"magick exit {rc}", "magick: boom", rc)
+        return ""
 
     def _exiftool(self, args, merge_stderr=False):
         self.events.append("exif")
@@ -320,7 +322,7 @@ class TestMagickArguments:
         out.write_bytes(b"PARTIAL")
         tools.magick_rc = 1
         r = job(compress_run("-Mode", "1", "-Overwrite"), photo, write_dst=out, final_dst=out)
-        assert r.result.startswith("ERROR (magick) |"), r.result
+        assert r.result == f"ERROR (magick) | {photo.name} | magick: boom", r.result
         assert not out.exists()
 
     def test_a_changed_layout_drops_the_output(self, tools, photo, tmp_path):
@@ -927,6 +929,8 @@ class TestCopyExif:
         assert r.line.startswith(text), r.line
         if failing == "magick_writes":
             assert "magick reported success but wrote no file" in r.line
+        if failing == "magick_rc":
+            assert r.line == f"ERROR (magick ZIP) | {photo.name} | magick: boom"
         assert r.staged is None
         assert os.listdir(out) == [], "the copy or the staged file stayed in -OutputDir"
         assert photo.read_bytes() == b"ORIGINAL"
@@ -1895,6 +1899,28 @@ class TestGatesFailClosed:
         with pytest.raises(tw.ToolError):
             tw.ifd0_compression("x")
 
+    def test_magick_run(self, monkeypatch):
+        """v3.1: what magick printed, or ToolError carrying it and the exit code."""
+        answers = []
+
+        def run_captured(cmd, timeout=None, input=None):
+            assert timeout is None, "a conversion has no timeout"
+            a = answers.pop(0)
+            if isinstance(a, BaseException):
+                raise a
+            return a
+        monkeypatch.setattr(tw, "run_captured", run_captured)
+        answers.append((0, b"out\r\n", b"warn\n"))
+        assert tw.magick_run(["a.tif", "b.tif"]) == "out\nwarn\n"
+        answers.append((1, b"", b"magick: unable to open\n"))
+        with pytest.raises(tw.ToolError) as e:
+            tw.magick_run(["a.tif", "b.tif"])
+        assert e.value.exit_code == 1 and e.value.output == "magick: unable to open\n"
+        answers.append(FileNotFoundError(2, "not found"))
+        with pytest.raises(tw.ToolError) as e:
+            tw.magick_run(["a.tif", "b.tif"])
+        assert e.value.exit_code == -1 and "not found" in e.value.output
+
     def test_keep_type_args(self):
         assert tw.magick_keep_type_args(["rgb/3/8,8,8/"]) == ["-type", "TrueColor"]
         assert tw.magick_keep_type_args(["rgb/4/8,8,8,8/"]) == ["-type", "TrueColor"], "an IR channel"
@@ -2409,7 +2435,7 @@ class TestThumbnails:
         def magick_run(args):
             calls.append([str(a) for a in args])
             Path(str(args[-1]).replace("%%", "%")).write_bytes(b"T")
-            return 0, ""
+            return ""
         monkeypatch.setattr(tw, "magick_run", magick_run)
         src = str(tmp_path / "伊豆沼 [x] 50%off.tif")
         dest = str(tmp_path / "out 100%" / "伊豆沼 [x] 50%off_thumb.jpg")
@@ -2431,6 +2457,12 @@ class TestThumbnails:
         dry = gt.make_thumbnail(src, dest[:-4] + "_other.jpg", cfg._replace(dry_run=True))
         assert dry == "DRY-RUN | 伊豆沼 [x] 50%off.tif -> 伊豆沼 [x] 50%off_thumb_other.jpg"
         assert len(calls) == 2, "a dry run starts nothing"
+
+        def magick_fails(args):
+            raise tw.ToolError("magick exit 1", "\n  magick: no decode delegate \nsecond line\n", 1)
+        monkeypatch.setattr(tw, "magick_run", magick_fails)
+        assert gt.make_thumbnail(src, dest[:-4] + "_failed.jpg", cfg) == \
+            "ERROR (magick failed) | 伊豆沼 [x] 50%off.tif | magick: no decode delegate"
 
 
 # ---------------------------------------------------------------------------

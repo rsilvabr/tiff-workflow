@@ -149,9 +149,10 @@ def make_thumbnail(src, dest, cfg):
         # The output path is always escaped: a '%' in the name would send the thumbnail
         # somewhere else while magick still exits 0.
         args.append(tw.magick_path_spec(dest))
-        rc, out = tw.magick_run(args)
-        if rc != 0:
-            first = next((ln.strip() for ln in out.splitlines() if ln.strip()), "")
+        try:
+            tw.magick_run(args)
+        except tw.ToolError as e:
+            first = next((ln.strip() for ln in e.output.splitlines() if ln.strip()), "")
             return f"ERROR (magick failed) | {name} | {first}"
         if os.path.exists(dest):
             return f"OK | {name} -> {os.path.basename(dest)} ({os.path.getsize(dest)} bytes)"
