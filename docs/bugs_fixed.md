@@ -12,6 +12,130 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.1.0 - The rework of the Python code
+
+Not an audit round: the backends and the wizard were reworked in ten phases (one implementation
+of each rule, the usual Python command line, the package `tiff_workflow/`). These are the
+defects found and fixed on the way, present in v3.0.0 unless said otherwise. File names are
+those of v3.1. What changed on purpose -- the command line, the presets, where the files are --
+is in the CHANGELOG.
+
+### HIGH - compress modes 2, 4 and 5 could replace one photo with another
+**Issue:** mode 2 writes every output into one folder; without `-OutputDir` that is the input
+folder itself, and the files of its subfolders become copies in the root. With `-Overwrite`, a
+file of the root was replaced by a subfolder's file of the same name -- another photo -- with
+`OK` and exit code 0: the first photo's only copy was gone. Mode 5 (`sub\x.tif` -> `ZIP\x.tif`,
+when `ZIP\x.tif` is itself a photo of the run) and mode 4 (a source in a folder that ends in the
+suffix) could do the same; those two were found by the review of v3.1.
+- **Fix:** before the work, an output that would land on another source of the same run is
+  refused (`ERROR (mode N would replace another source file of this run - refused)`, exit code
+  1), and the photo in the way is compressed in its own place. Mode 2 announces the copies it
+  makes into the input folder. Modes 0, 8 and 9 write in place and are unchanged.
+- **Files:** `tiff_workflow/compress_tiff_zip.py`, `tests/test_backend_invariants.py`,
+  `tests/test_v31_backends.py`
+
+### HIGH - Wizard, plain screen: a typed "no" ran what it declined
+**Issue:** six readers of a yes/no answer disagreed. On the plain screen `yes` typed out counted
+as NO in 22 questions and `s`/`sim` nearly everywhere, and where the default is yes only a bare
+`n` said no: `no` at "Proceed?" ran the compression, `no` at Restore's "Move all files back?"
+moved the files. Nine more questions -- the mode 8 confirmations of free compress and of the
+manifest, Delete OLD_TIFFs, "Run it now?" -- had readers of their own.
+- **Fix:** one reader, `_yes`: `y`/`yes`/`s`/`sim` and `n`/`no`/`nao`/`não`, on both screens.
+  Anything else keeps the question's default on the plain screen ("no" wherever something is
+  deleted or replaced) and is asked again on the Rich one. A test by AST flags a reader made by
+  hand.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_round28_py_fixes.py`, `tests/test_manifest.py`
+
+### MEDIUM - copy_exif ignored `-ExcludeFolders` with `-AutoFind`
+**Issue:** the flag was accepted and did nothing in this backend: a session folder below a
+folder with an excluded name, or named so, was processed.
+- **Fix:** the sessions AutoFind finds go through the exclusion matcher of the other backends
+  (names below the scan root), and the log says how many were left out.
+- **Files:** `tiff_workflow/copy_exif_to_tiff.py`, `tiff_workflow/common.py`,
+  `tests/test_backend_invariants.py`
+
+### MEDIUM - Delete OLD_TIFFs deleted a backup minutes after checking its copy
+**Issue:** each pair was compared before the questions and the backup deleted after them, with
+only an `exists()` in between -- minutes later, or at the end of a big folder. An edit or another
+run that changed the copy meanwhile did not stop the deletion.
+- **Fix (the owner's choice of check):** the size and write time of both files are recorded right
+  after the comparison and compared again right before each deletion; a change, or the copy gone,
+  keeps the backup (`KEPT (changed since it was checked)`), and the summary counts them.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_regression_classes.py`
+
+### MEDIUM - Wizard, Restore: a rule of its own for "nothing in its place"
+**Issue:** the wizard decided with its own copy which originals in `OLD_TIFFs` were stranded,
+and it disagreed with compress's: it walked into a backup folder nested in another
+(`OLD_TIFFs\sub\OLD_TIFFs\deep.tif` would have been restored into `OLD_TIFFs\sub\`), missed the
+singular `OLD_TIFF` the backends also write, and took a folder of the photo's name for the photo.
+- **Fix:** one rule, `find_stranded_originals` in the common module, for compress and the wizard;
+  "restore all" never touches a nested backup folder.
+- **Files:** `tiff_workflow/common.py`, `tiff_workflow/compress_tiff_zip.py`,
+  `tiff_workflow/wizard.py`, `tests/test_wizard_stranded.py`, `tests/test_round28_py_fixes.py`
+
+### MEDIUM - Wizard, AutoFind offered a folder inside `OLD_TIFFs` as a session
+**Issue:** only the folder's own name was checked, so `S5pro 01\OLD_TIFFs\S5pro bak\` was listed
+as a session to process.
+- **Fix:** every level below the chosen folder counts (no tool folder: `OLD_TIFFs`, `ZIP`,
+  `OLD_PADDED`, ...), as in copy_exif's own `-AutoFind`.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_round28_py_fixes.py`
+
+### MEDIUM - A file that ended in an error left its temporary files, and one was taken for done
+**Issue:** with `-StagingDir` in modes 1-7, a staged file refused by the page gate stayed in the
+staging folder. After an unforeseen error (`ERROR (unexpected)`), the temp sibling next to the
+photo, the metadata container and -- in copy_exif with `-OutputDir` -- the copy and the staged
+ZIP stayed on disk; the next run skipped that copy as `exists in OutputDir`, without its EXIF.
+- **Fix:** each worker removes what it made for its file, whatever the error. An original is
+  never among these files.
+- **Files:** `tiff_workflow/compress_tiff_zip.py`, `tiff_workflow/copy_exif_to_tiff.py`,
+  `tests/test_backend_invariants.py`
+
+### MEDIUM - The config file with the presets was not written atomically
+**Issue:** the wizard wrote its config in place: killed mid-write, it left a truncated file, and
+every preset was lost.
+- **Fix:** written whole to a temp file and renamed over the old one, in UTF-8.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_presets.py`
+
+### MEDIUM - Wizard, padded conversion: the page markers were written after the last pixel gate
+**Issue:** the 8-bit file got its page markers (SubfileType) after the pixel gate, and nothing
+read the file again: the bytes that landed were not the ones checked.
+- **Fix (owner's decision: write first, gate after):** the markers go back right after the page
+  count and layout checks, so the pixel gate reads the bytes that land, as in the backends since
+  v3.1; a failed marker write is still its own refusal. Their exiftool calls scale the timeout
+  with the file, like the others.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_round28_py_fixes.py`
+
+### LOW - Counting the pages of a TIFF decoded every page
+**Issue:** `tiff_page_count` (SafeMode and the page gates) ran `magick identify` without
+`-ping`: seconds on a large scan, about half of a Copy EXIF run, and on a busy machine a healthy
+file could run past the timeout and end as `ERROR (magick timeout) ... possibly corrupted`, exit
+code 1 (nothing touched).
+- **Fix:** `-ping` reads the file's directories only. The same count on 104 real TIFFs, 91 s
+  against 4 s.
+- **Files:** `tiff_workflow/common.py`, `tests/test_v31_backends.py`
+
+### LOW - Smaller ones
+- `-OutputDir` naming an existing file: compress ended in `FATAL (unhandled error) |
+  FileExistsError` in the middle of the run; the three backends now refuse it before it starts.
+- A missing folder listed twice in `-InputDir` was one error in compress and two in the other
+  backends: the three read their input folders with one function (`resolve_input_dirs`).
+- compress, three result lines: modes 0/9 with `-SkipCompressedWithThumb` named the option that
+  was passed; mode 2 `-DuplicateAction Skip` lost its `[n/total]`; `Workers reduced from 8 to 4`
+  while 2 ran (`-CapWorkers 2`).
+- An exiftool older than 12.15 cannot report the result of each command of one run: every file
+  ended as an ERROR or a WARN although the writes were done. The run now stops at the start.
+- A failure nobody foresaw while the metadata were written back was a `WARN` and the file went
+  on; it is `ERROR (unexpected)` now, with nothing replaced.
+- generate_thumbnails ran at most 16 thumbnails at once whatever `-Workers` said, without a word.
+- Wizard: with `[ ]` in the temp folder, Diagnose and the padded conversion failed every file
+  (nothing touched); Diagnose's temp-folder question took `y` for a folder name; Workers and
+  Staging were read differently on the two screens; a folder name such as `[/b]` stopped the
+  wizard right before a run; the Script settings menu opened an overlay file the scripts refuse;
+  the manifest's collision check counted the files inside `OLD_TIFFs`; Restore moved files with
+  `shutil.move` (a copy and a delete on a locked file; one replacing rename now), and a restored
+  `x.tiff` was left beside the compressed `x.tif` (which now moves to `ZIP\`, the owner's
+  decision).
+
 ## v3.0.0 - The port to Python
 
 Not an audit round: the three PowerShell backends were rewritten in Python (one file each plus
