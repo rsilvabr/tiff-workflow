@@ -697,6 +697,49 @@ def test_budget_releases_when_a_check_fails(tmp_path, monkeypatch):
     assert budget.used == 0
 
 
+def test_the_one_pool(monkeypatch):
+    """v3.1 phase 7 (W6): Diagnose and the padded conversion ran two copies of one pool. Now
+    one: each result reaches the caller's thread as it comes in, a work that raised is
+    replaced, the timeout load counts the workers while they run and is 1 after, and a
+    Ctrl+C on the caller's thread cancels what has not started."""
+    import threading
+    import time
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    main = threading.current_thread()
+    seen = []
+
+    def work(i):
+        if i == 3:
+            raise ValueError("boom")
+        return ("ok", i, ct._TIMEOUT_LOAD)
+
+    def on_done(n, r):
+        assert threading.current_thread() is main
+        seen.append((n, r))
+
+    ct._run_pool(list(range(6)), work, 3, on_done, lambda item, e: ("error", item, str(e)), "done")
+    assert [n for n, _ in seen] == [1, 2, 3, 4, 5, 6]
+    assert sorted(r[1] for _, r in seen) == [0, 1, 2, 3, 4, 5]
+    assert ("error", 3, "boom") in [r for _, r in seen]
+    assert {r[2] for _, r in seen if r[0] == "ok"} == {3}, "the timeout load must count the workers"
+    assert ct._TIMEOUT_LOAD == 1
+
+    started = []
+
+    def slow(i):
+        started.append(i)
+        time.sleep(0.2)
+        return i
+
+    def interrupt(n, r):
+        raise KeyboardInterrupt
+    with pytest.raises(KeyboardInterrupt):
+        ct._run_pool(list(range(40)), slow, 2, interrupt, lambda i, e: None, "done")
+    time.sleep(1.5)
+    assert len(started) <= 4, f"Ctrl+C let the queue run on: {len(started)} of 40 started"
+    assert ct._TIMEOUT_LOAD == 1
+
+
 def test_budget_line_names_typical_and_largest(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
     monkeypatch.setattr(ct, "_available_memory_bytes", lambda: (40 * 2**30, "commit"))

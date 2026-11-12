@@ -66,6 +66,7 @@ import argparse
 import ast
 import atexit
 import concurrent.futures
+import contextlib
 import csv
 import fnmatch
 import functools
@@ -1100,6 +1101,48 @@ def _work_timeout(base_s: float, *paths) -> float:
         except (OSError, TypeError, ValueError):
             continue
     return base_s + (total / (1024 * 1024)) * TIMEOUT_S_PER_MB * max(1, _TIMEOUT_LOAD)
+
+
+@contextlib.contextmanager
+def _timeout_load(workers: int):
+    """While a pool of `workers` runs, every size-scaled timeout counts them (they share the
+    disk). Not reentrant: it goes back to 1, not to what it was -- no pool runs inside
+    another."""
+    global _TIMEOUT_LOAD
+    _TIMEOUT_LOAD = workers
+    try:
+        yield
+    finally:
+        _TIMEOUT_LOAD = 1
+
+
+def _run_pool(items: list, work, workers: int, on_done, error_result, verb: str) -> None:
+    """`work(item)` for every item on `workers` threads (Diagnose's check, the padded
+    conversion). Each result is handed to `on_done(n, result)` on THIS thread as soon as it
+    is in (n counts from 1); a work that raised is replaced by `error_result(item, exc)`.
+    A progress line every 25 items. On Ctrl+C the items not started yet are cancelled
+    instead of all being run first."""
+    total = len(items)
+    t_start = time.time()
+    with _timeout_load(workers):
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = {executor.submit(work, item): item for item in items}
+            for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
+                try:
+                    result = future.result()
+                except Exception as e:
+                    result = error_result(futures[future], e)
+                on_done(done, result)
+                if done % 25 == 0 and done < total:
+                    spent = time.time() - t_start
+                    _say(f"  {done}/{total} {verb} in {_fmt_duration(spent)} -- about "
+                         f"{_fmt_duration(spent / done * (total - done))} left", "cyan")
+        except BaseException:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
 
 _magick_alias_dir: Optional[Path] = None
@@ -3219,59 +3262,36 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
     each result as it arrives (the Diagnose cache saves from it). On Ctrl+C the files
     not started yet are cancelled instead of all being run first. With `budget`, each
     check first reserves its own estimate (`pixels` x tw.COMPARE_BYTES_PER_PIXEL)."""
-    global _TIMEOUT_LOAD
 
-    def process_one(tiff_path):
+    def process_one(tiff_path) -> DiagnoseResult:
         if budget is None:
-            return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
+            return DiagnoseResult(tiff_path, *_is_real_16bit(tiff_path, temp_dir, compress_tmp))
         key = os.path.normcase(os.path.abspath(tiff_path))
         need = (pixels or {}).get(key, tw.UNKNOWN_IMAGE_PIXELS) * tw.COMPARE_BYTES_PER_PIXEL
         held = budget.acquire(need)
         try:
-            return tiff_path, _is_real_16bit(tiff_path, temp_dir, compress_tmp)
+            return DiagnoseResult(tiff_path, *_is_real_16bit(tiff_path, temp_dir, compress_tmp))
         finally:
             budget.release(held)
 
     results = []
     total = len(tiff_files)
-    t_start = time.time()
-    _TIMEOUT_LOAD = workers
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-    try:
-        futures = {executor.submit(process_one, f): f for f in tiff_files}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                tiff_path, (is_real, stddev, detail) = future.result()
-            except Exception as e:
-                tiff_path = futures[future]
-                is_real = False
-                stddev = 0.0
-                detail = f"ERROR: {e}"
-            results.append(DiagnoseResult(tiff_path, is_real, stddev, detail))
 
-            status = _diagnose_status(is_real, detail)
-            shown = {"padded": "PADDED", "real": "real 16-bit"}.get(status, detail)
-            progress = f"[{len(results)}/{total}]"
-            where = _display_path(tiff_path, roots)
-            if RICH_AVAILABLE and console:
-                color = {"padded": "yellow", "real": "dim"}.get(status, "red")
-                console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(where)}")
-            else:
-                print(f"  {progress} {shown} - {where}")
-            if on_result is not None:
-                on_result(results[-1])
-            done = len(results)
-            if done % 25 == 0 and done < total:
-                spent = time.time() - t_start
-                _say(f"  {done}/{total} checked in {_fmt_duration(spent)} -- about "
-                     f"{_fmt_duration(spent / done * (total - done))} left", "cyan")
-    except BaseException:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
-    finally:
-        _TIMEOUT_LOAD = 1
+    def show(done, r: DiagnoseResult):
+        results.append(r)
+        shown = {"padded": "PADDED", "real": "real 16-bit"}.get(r.status, r.detail)
+        progress = f"[{done}/{total}]"
+        where = _display_path(r.path, roots)
+        if RICH_AVAILABLE and console:
+            color = {"padded": "yellow", "real": "dim"}.get(r.status, "red")
+            console.print(f"  {progress} [{color}]{escape(shown)}[/{color}] {escape(where)}")
+        else:
+            print(f"  {progress} {shown} - {where}")
+        if on_result is not None:
+            on_result(r)
+
+    _run_pool(tiff_files, process_one, workers, show,
+              lambda f, e: DiagnoseResult(f, False, 0.0, f"ERROR: {e}"), "checked")
     return results
 
 
@@ -3406,17 +3426,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
 
     total_start = time.time() if DEBUG_TIMING else None
     if todo:
-        budget, pixels = _memory_budget(todo, tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
-        if RICH_AVAILABLE and console:
-            console.print(f"\n[cyan]Diagnosing {len(todo)} TIFF file(s) with {workers} workers...[/cyan]")
-        else:
-            print(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...")
-        if DIAGNOSE_CACHE:
-            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
-                                         roots=[folder], budget=budget, pixels=pixels)
-        else:
-            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=[folder],
-                                      budget=budget, pixels=pixels)
+        results += _diagnose_check(todo, keys, cache, workers, temp_dir, compress_tmp, [folder])
     statuses = [r.status for r in results]
     padded_files = [r.path for r in results if r.status == "padded"]
     padded_count = len(padded_files)
@@ -3561,6 +3571,20 @@ def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
             _save_diagnose_cache(cache)
 
 
+def _diagnose_check(todo: List[Path], keys: Dict, cache: Dict, workers: int,
+                    temp_dir: Optional[Path], compress_tmp: str, roots) -> List[DiagnoseResult]:
+    """The files the cache could not answer, checked: each verdict kept in the cache as it
+    comes in (_check_with_cache), or the pool alone with DIAGNOSE_CACHE off. Workflow 7 and
+    a Diagnose preset both check through here."""
+    budget, pixels = _memory_budget(todo, tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
+    _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
+    if DIAGNOSE_CACHE:
+        return _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
+                                 roots=roots, budget=budget, pixels=pixels)
+    return _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=roots,
+                          budget=budget, pixels=pixels)
+
+
 def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False,
                           dry_run: bool = False) -> int:
     """A Diagnose repeat/preset: re-scan the saved roots and REPORT the padded files.
@@ -3615,15 +3639,8 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
                             cfg.config.default_workers)
     if todo:
         temp_dir = _usable_temp_dir(d.get("temp_dir"), "yellow")
-        budget, pixels = _memory_budget(todo, tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
-        _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
         compress_tmp = d.get("compress_tmp") or "none"
-        if DIAGNOSE_CACHE:
-            results += _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
-                                         roots=roots, budget=budget, pixels=pixels)
-        else:
-            results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=roots,
-                                      budget=budget, pixels=pixels)
+        results += _diagnose_check(todo, keys, cache, workers, temp_dir, compress_tmp, roots)
 
     by_status = {"padded": [], "real": [], "other": [], "error": []}
     for r in sorted(results, key=lambda r: str(r.path)):
@@ -4268,7 +4285,6 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
     and "failed": [(path, reason)] for every file that should have been converted and was
     not (refusals such as real 16-bit data or a multi-page scan are not failures).
     """
-    global _TIMEOUT_LOAD
     converted = 0
     failed = []
     _FAILED_STATUSES = ("magick_not_found", "error", "magick_error", "missing",
@@ -4299,9 +4315,6 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
             return _process_single_padded(tiff_path, staging)
         finally:
             budget.release(held)
-
-    total = len(padded_files)
-    t_start = time.time()
 
     # Each file is finished -- printed, backed up, moved into place -- AS SOON AS its
     # conversion is done. The pool used to convert every file first and only then print
@@ -4438,30 +4451,10 @@ def _compress_padded_files(padded_files: list, temp_dir: Path, workers: int, cfg
                 tmp8.unlink(missing_ok=True)
 
 
-    _TIMEOUT_LOAD = workers
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-    try:
-        futures = {executor.submit(_process_one, f): i for i, f in enumerate(padded_files)}
-        for done, future in enumerate(concurrent.futures.as_completed(futures), 1):
-            try:
-                result = future.result()
-            except Exception as e:
-                f = padded_files[futures[future]]
-                # audit round 16: the last slot is the staging path the result loop may
-                # unlink; putting the SOURCE path there risked deleting the original.
-                result = PaddedResult(f.name, f.parent, "error", error=str(e))
-            _finalize(done - 1, result)
-            if done % 25 == 0 and done < total:
-                spent = time.time() - t_start
-                _say(f"  {done}/{total} done in {_fmt_duration(spent)} -- about "
-                     f"{_fmt_duration(spent / done * (total - done))} left", "cyan")
-    except BaseException:
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
-    finally:
-        _TIMEOUT_LOAD = 1
+    # audit round 16: a worker that raised gets no tmp8 -- _finalize may unlink that slot,
+    # and the SOURCE path there risked deleting the original.
+    _run_pool(padded_files, _process_one, workers, lambda done, r: _finalize(done - 1, r),
+              lambda f, e: PaddedResult(f.name, f.parent, "error", error=str(e)), "done")
 
     # Safe to wipe wholesale: the directory belongs to this run only.
     shutil.rmtree(staging, ignore_errors=True)
@@ -4486,7 +4479,6 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     (same filename), confirming content matches (ignoring compression).
     Shows sizes and asks for time confirmation before deleting.
     """
-    global _TIMEOUT_LOAD
     folder = step_folder(cfg, "Root folder to scan for OLD_TIFFs")
     if folder is None:
         return False
@@ -4553,14 +4545,11 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
 
     workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
     workers = _memory_capped_pool_workers(workers, [it[0] for it in items if tw.is_tiff_name(str(it[0]))], tw.COMPARE_BYTES_PER_PIXEL, "copy verification")
-    _TIMEOUT_LOAD = workers
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            for result in executor.map(_verify, items):
-                if result:
-                    (orphans if result[2] == MISSING_PARENT else mismatches).append(result)
-    finally:
-        _TIMEOUT_LOAD = 1
+    with _timeout_load(workers), \
+            concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for result in executor.map(_verify, items):
+            if result:
+                (orphans if result[2] == MISSING_PARENT else mismatches).append(result)
 
     orphan_keys = {(o[0], o[1]) for o in orphans}
     # A file that does not verify is KEPT -- and only that file. One mismatch used to abort
