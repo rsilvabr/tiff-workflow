@@ -614,3 +614,25 @@ class TestCliExitCodes:
         listing = _run_cli(["--list-presets"], tmp_path)
         assert listing.returncode == 0
         assert "danger" in listing.stdout and "nightly" in listing.stdout
+
+
+
+def test_a_preset_edited_into_a_shape_the_runner_cannot_read_is_dropped(tmp_path, monkeypatch, capsys):
+    """v3.1 phase 6 (W-O22): such a preset reached the runner and stopped --run-preset with a
+    traceback; it is dropped at start with a sentence, and the good ones stay."""
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    good = {"kind": "compress", "label": "Compress TIFFs -- mode 1", "time": "t",
+            "commands": [["python", "compress_tiff_zip.py", "-Mode", "1"]]}
+    presets = {"good": good,
+               "no root": dict(good, label="Fuji: Compress", autofind={"patterns": ["S5"]}),
+               "patterns text": dict(good, autofind={"root": "E:\\x", "patterns": "S5"}),
+               "workflow text": {"kind": "manifest", "label": "Manifest", "manifest_workflow": "x"},
+               "number in command": dict(good, commands=[["python", 5]])}
+    (tmp_path / ".convert_tiff_config.json").write_text(
+        json.dumps({"presets": presets}), encoding="utf-8")
+    cfg = convert_tiff.ConfigManager()
+    err = capsys.readouterr().err
+    assert list(cfg.config.presets) == ["good"], cfg.config.presets
+    for name in ("no root", "patterns text", "workflow text", "number in command"):
+        assert name in err, err

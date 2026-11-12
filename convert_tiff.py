@@ -4692,11 +4692,25 @@ def _journal_snapshot(cfg) -> Dict:
 
 
 def _journal_runnable(entry: Dict) -> bool:
-    if not entry.get("label"):
+    """Whether a saved journal (a preset, Repeat last) has the shape _run_journal reads. A
+    preset edited by hand into another shape used to reach the runner and stop it with a
+    traceback (`af["root"]`, `dict(workflow)`); it is dropped at start instead, with a
+    sentence (v3.1 phase 6, W-O22)."""
+    if not isinstance(entry, dict) or not entry.get("label"):
+        return False
+    af = entry.get("autofind")
+    if af is not None and not (isinstance(af, dict) and isinstance(af.get("root"), str)
+                               and isinstance(af.get("patterns"), list)
+                               and all(isinstance(x, str) for x in af["patterns"])):
         return False
     if entry.get("kind") == "diagnose":
         return isinstance(entry.get("diagnose"), dict) and bool(entry["diagnose"].get("roots"))
-    return bool(entry.get("commands") or entry.get("kind") == "manifest")
+    if entry.get("kind") == "manifest":
+        mw = entry.get("manifest_workflow")
+        return mw is None or isinstance(mw, dict)
+    cmds = entry.get("commands")
+    return (isinstance(cmds, list) and bool(cmds)
+            and all(isinstance(c, list) and c and all(isinstance(a, str) for a in c) for c in cmds))
 
 
 WORKFLOW_OPTIONS = [
