@@ -89,6 +89,13 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   `backup_tiff_metadata`; in the wizard `_compare_tiff_metadata`,
   `_process_single_padded`). Ask what a gate can actually OBSERVE: a decode
   check cannot see a missing page (round 12).
+  Since v3.1 the tool helpers (`exiftool`, `magick_run`, `ifd0_compression`,
+  `tiff_sample_layout`, `backup_tiff_metadata`) RAISE `tw.ToolError` instead of
+  returning `(ok, value)`; the yes/no gates still answer False. Catch
+  `tw.ToolError` exactly where the exit code used to be tested and refuse there --
+  never with a broader `except` that could turn a tool failure into a pass.
+  `exiftool(..., check=False)` is only for a batch read whose output counts even
+  when one file of it could not be read.
 - **Every tool call goes through the common module**: `run_captured` is the
   only place that starts a process, `exiftool()` the only way to exiftool,
   `magick_probe` (timeout, killed when it passes) for identify/compare/decode
