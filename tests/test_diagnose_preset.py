@@ -693,7 +693,7 @@ def test_budget_releases_when_a_check_fails(tmp_path, monkeypatch):
     budget = ct._MemoryBudget(10**9)
     files = [tmp_path / f"{i}.tif" for i in range(5)]
     results = ct._diagnose_pool(files, 2, None, "none", budget=budget, pixels={})
-    assert all(r[3].startswith("ERROR") for r in results)
+    assert all(r.detail.startswith("ERROR") for r in results)
     assert budget.used == 0
 
 

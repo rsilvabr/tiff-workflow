@@ -3194,13 +3194,28 @@ def _display_path(path: Path, roots=None) -> str:
     return str(path)
 
 
+@dataclass(frozen=True)
+class DiagnoseResult:
+    """One file's verdict in Diagnose: checked now (_diagnose_pool) or read from the cache
+    (_split_cached)."""
+    path: Path
+    is_real: bool
+    rmse: float
+    detail: str
+
+    @property
+    def status(self) -> str:
+        """"padded", "real", "other" or "error" (_diagnose_status)."""
+        return _diagnose_status(self.is_real, self.detail)
+
+
 def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path],
                    compress_tmp: str, on_result=None, roots=None,
                    budget: Optional["_MemoryBudget"] = None,
-                   pixels: Optional[Dict[str, int]] = None) -> List[tuple]:
+                   pixels: Optional[Dict[str, int]] = None) -> List[DiagnoseResult]:
     """Run _is_real_16bit over `tiff_files` with `workers` threads, printing one line
-    per file (its path below `roots`, see _display_path). Returns
-    [(path, is_real, rmse, detail)] in completion order. `on_result` is called with
+    per file (its path below `roots`, see _display_path). Returns a DiagnoseResult per
+    file, in completion order. `on_result` is called with
     each result as it arrives (the Diagnose cache saves from it). On Ctrl+C the files
     not started yet are cancelled instead of all being run first. With `budget`, each
     check first reserves its own estimate (`pixels` x tw.COMPARE_BYTES_PER_PIXEL)."""
@@ -3232,7 +3247,7 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
                 is_real = False
                 stddev = 0.0
                 detail = f"ERROR: {e}"
-            results.append((tiff_path, is_real, stddev, detail))
+            results.append(DiagnoseResult(tiff_path, is_real, stddev, detail))
 
             status = _diagnose_status(is_real, detail)
             shown = {"padded": "PADDED", "real": "real 16-bit"}.get(status, detail)
@@ -3402,8 +3417,8 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
         else:
             results += _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=[folder],
                                       budget=budget, pixels=pixels)
-    statuses = [_diagnose_status(r[1], r[3]) for r in results]
-    padded_files = [r[0] for r, s in zip(results, statuses) if s == "padded"]
+    statuses = [r.status for r in results]
+    padded_files = [r.path for r in results if r.status == "padded"]
     padded_count = len(padded_files)
     real_count = statuses.count("real")
     other_count = statuses.count("other")
@@ -3501,7 +3516,7 @@ def _save_diagnose_cache(cache: Dict) -> None:
 _CACHE_SAVE_EVERY = 25  # results between two cache writes during a Diagnose run
 
 
-def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[tuple], List[Path], Dict]:
+def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[DiagnoseResult], List[Path], Dict]:
     """(results already known, files to check, {file: key}). A cached verdict counts only
     while the file keeps the size and modification time it had when checked."""
     cached, todo, keys = [], [], {}
@@ -3512,8 +3527,8 @@ def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[tuple], List[Pat
         if (isinstance(hit, dict) and hit.get("size") == key[1]
                 and hit.get("mtime_ns") == key[2]
                 and hit.get("status") in ("real", "padded", "other")):
-            cached.append((f, hit["status"] == "real", float(hit.get("rmse") or 0.0),
-                           str(hit.get("detail") or "")))
+            cached.append(DiagnoseResult(f, hit["status"] == "real", float(hit.get("rmse") or 0.0),
+                                         str(hit.get("detail") or "")))
         else:
             todo.append(f)
     return cached, todo, keys
@@ -3521,19 +3536,18 @@ def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[tuple], List[Pat
 
 def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
                       temp_dir: Optional[Path], compress_tmp: str, roots=None,
-                      budget=None, pixels=None) -> List[tuple]:
+                      budget=None, pixels=None) -> List[DiagnoseResult]:
     """_diagnose_pool over `todo`, recording each verdict in `cache` and writing the
     cache every _CACHE_SAVE_EVERY results and once more at the end -- also when the
     run is interrupted -- so a stopped run keeps what it already checked."""
     pending = [0]
 
-    def record(result):
-        f, is_real, rmse, detail = result
-        status = _diagnose_status(is_real, detail)
-        key = keys.get(f)
+    def record(result: DiagnoseResult):
+        status = result.status
+        key = keys.get(result.path)
         if key and status != "error":
             cache[key[0]] = {"size": key[1], "mtime_ns": key[2], "status": status,
-                             "rmse": rmse, "detail": detail}
+                             "rmse": result.rmse, "detail": result.detail}
             pending[0] += 1
             if pending[0] >= _CACHE_SAVE_EVERY:
                 _save_diagnose_cache(cache)
@@ -3612,8 +3626,8 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
                                       budget=budget, pixels=pixels)
 
     by_status = {"padded": [], "real": [], "other": [], "error": []}
-    for f, is_real, rmse, detail in sorted(results, key=lambda r: str(r[0])):
-        by_status[_diagnose_status(is_real, detail)].append((f, detail))
+    for r in sorted(results, key=lambda r: str(r.path)):
+        by_status[r.status].append((r.path, r.detail))
 
     lines = [f"{title} -- {time.strftime('%Y-%m-%d %H:%M:%S')}",
              entry.get("label") or "",
