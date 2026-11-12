@@ -3728,27 +3728,14 @@ def _restore_subfile_types(src_path, dst_path) -> bool:
     except Exception:
         return False
 
-    src_types = {}
-    for line in (r.stdout or "").splitlines():
-        m = re.match(r"^\[IFD(\d+)\]\s+SubfileType:\s*(\d+)\s*$", line.strip())
-        if m:
-            src_types[int(m.group(1))] = int(m.group(2))
+    src_types = tw._parse_subfile_types(r.stdout or "")
 
     pages = _tiff_page_count(src_path)
     if pages is None:
         return False
     # Single-page sources need no restore: magick only stamps PAGE when it writes a
     # multi-page file, and an absent NewSubfileType means 0 per the TIFF spec anyway.
-    if pages <= 1:
-        return True
-
-    tags = []
-    for i in range(pages):
-        if i in src_types:
-            tags.append("-IFD%d:SubfileType#=%d" % (i, src_types[i]))
-        else:
-            # Source had no marker on this page: clear whatever magick stamped on it.
-            tags.append("-IFD%d:SubfileType=" % i)
+    tags = tw.subfile_marker_list(pages, src_types)
     if not tags:
         return True
     try:
@@ -3789,35 +3776,30 @@ def _tiff_sample_layout(path) -> Optional[List[Dict]]:
             return None
     except Exception:
         return None
-    pages: Dict[int, Dict[str, str]] = {}
-    for line in (r.stdout or "").splitlines():
-        m = re.match(r"^\[IFD(\d+)\]\s+(SamplesPerPixel|PhotometricInterpretation|ExtraSamples|BitsPerSample):\s*(.*?)\s*$",
-                     line.strip())
-        if m:
-            pages.setdefault(int(m.group(1)), {})[m.group(2)] = m.group(3)
-    if not pages or sorted(pages) != list(range(len(pages))):
+    try:
+        pages = tw._parse_layout(r.stdout or "", str(path))
+    except tw.ToolError:
         return None
     out = []
-    for i in range(len(pages)):
-        p = pages[i]
-        photo = p.get("PhotometricInterpretation", "").strip()
-        if not photo:
+    for text in pages:
+        cls, spp, bits, alpha = text.split("/")
+        if cls.startswith("p"):         # a Photometric the parser does not name: its number
+            cls = cls[1:]
+        if not cls:
             return None
-        cls = "gray" if photo in ("0", "1") else "rgb" if photo in ("2", "6") else photo
         try:
-            spp = int(p.get("SamplesPerPixel", "1").strip() or "1")
+            spp_n = int(spp.strip() or "1")
         except ValueError:
             return None
-        alpha = tuple(v for v in p.get("ExtraSamples", "").split() if v in ("1", "2"))
-        bits = " ".join(p.get("BitsPerSample", "1").split()) or "1"
-        out.append({"cls": cls, "spp": spp, "alpha": alpha, "bits": bits})
+        out.append({"cls": cls, "spp": spp_n, "alpha": tuple(a for a in alpha.split(",") if a),
+                    "bits": " ".join(bits.split(",")) or "1"})
     return out
 
 
 def _magick_keep_type_args(layout: Optional[List[Dict]]) -> List[str]:
     """The magick write options that stop the TIFF writer from changing the sample layout.
 
-    Same rule as magick_keep_type_args in the backends. `-type` is a WRITE setting that applies to
+    tw.magick_keep_type_args decides (one rule). `-type` is a WRITE setting that applies to
     every page of the output (per-page parentheses do not scope it -- verified on 7.1.2-27),
     so it is passed only when every page wants the same one: all RGB without alpha ->
     TrueColor (a neutral RGB+IR scan keeps its 4 samples, pixel-identical), all RGB with
@@ -3826,17 +3808,11 @@ def _magick_keep_type_args(layout: Optional[List[Dict]]) -> List[str]:
     gets nothing; the layout gate after the write refuses it if magick changed a page.
     `-define colorspace:auto-grayscale=false` does NOT stop the reduction.
     """
-    if not layout or any(p["cls"] != "rgb" for p in layout):
+    if not layout:
         return []
-    with_alpha = [p for p in layout if p["alpha"]]
-    if not with_alpha:
-        return ["-type", "TrueColor"]
-    if len(with_alpha) != len(layout):
-        return []
-    args = ["-type", "TrueColorAlpha"]
-    if all(set(p["alpha"]) == {"1"} for p in layout):
-        args += ["-define", "tiff:alpha=associated"]
-    return args
+    return tw.magick_keep_type_args(
+        [f"{p['cls']}/{p['spp']}/{','.join(str(p['bits']).split())}/{','.join(p['alpha'])}"
+         for p in layout])
 
 
 def _sample_layout_diff(src: Optional[List[Dict]], dst: Optional[List[Dict]],

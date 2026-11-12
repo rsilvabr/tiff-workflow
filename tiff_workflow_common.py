@@ -1216,8 +1216,18 @@ def subfile_marker_args(src, types, timeout=30):
         return []
     if types is None:
         return None
+    return subfile_marker_list(pc.count, types)
+
+
+def subfile_marker_list(page_count, types):
+    """The marker assignments for a file of `page_count` pages whose source carried `types`
+    ({ifd: SubfileType}): the value back where the source had one (an explicit 0 included),
+    the tag cleared where it had none. [] for one page: magick only stamps PAGE on a
+    multi-page write. The wizard's padded conversion builds its list here too."""
+    if page_count <= 1:
+        return []
     return [f"-IFD{i}:SubfileType#={types[i]}" if i in types else f"-IFD{i}:SubfileType="
-            for i in range(pc.count)]
+            for i in range(page_count)]
 
 def set_tiff_thumb_markers(src, dst):
     """The page markers of a -GenerateThumbnail output: page 0 keeps the marker the SOURCE
