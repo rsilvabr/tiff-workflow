@@ -584,3 +584,19 @@ def test_a_temp_folder_with_brackets_works(tmp_path):
     staging.mkdir()
     res = ct._process_single_padded(src, staging)
     assert res[2] == "ok", res
+
+
+
+def test_the_wizard_keeps_a_mapped_drive_letter(tmp_path, monkeypatch):
+    r"""v3.1 phase 6 (W-O12): the folder answer went into the config through resolve(), which
+    turns a SUBST or mapped drive (G:\...) into its real path (\\server\share\...); the next
+    question offered a path the user never typed, and a preset saved from it did not run
+    where G: was mapped. The folder is kept absolute, as typed."""
+    folder = tmp_path / "伊豆沼 [x] 50%"
+    folder.mkdir()
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    monkeypatch.setattr("builtins.input", lambda *a, **k: str(folder))
+    monkeypatch.setattr(ct.Path, "resolve", lambda self, strict=False: Path(r"\\server\share\elsewhere"))
+    cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
+    assert ct.step_folder(cfg) == folder
+    assert cfg.config.last_input_dir == str(folder)

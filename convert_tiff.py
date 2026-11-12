@@ -1417,7 +1417,7 @@ def step_folder(cfg: "ConfigManager", prompt_text: str = "Input folder") -> Opti
         else:
             print(f"ERROR: Folder path contains ';' which is not supported: {p}")
         return None
-    cfg.config.last_input_dir = str(p.resolve())
+    cfg.config.last_input_dir = os.path.abspath(str(p))
     # audit round 28: ABSOLUTE, never the text as typed. A relative answer ("photos") went
     # into the preset journal as -InputDir photos, and --run-preset from another folder --
     # the Task Scheduler starts in System32 -- compressed a different folder. abspath, not
@@ -3297,7 +3297,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     else:
         convert_padded = input(f"\n{convert_q} [y/N]: ").strip().lower() == "y"
 
-    settings = {"roots": [str(folder.resolve())], "scope": scope, "skip_names": skip_names,
+    settings = {"roots": [os.path.abspath(str(folder))], "scope": scope, "skip_names": skip_names,
                 "workers": workers, "temp_dir": str(temp_dir) if temp_dir else None,
                 "compress_tmp": compress_tmp, "convert_padded": convert_padded}
     _save_last_run(cfg, "diagnose", _diagnose_label(settings), None, diagnose=settings)
@@ -5909,7 +5909,7 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
         else:
             print(f"ERROR: {msg}")
         return False
-    cfg.config.last_input_dir = str(p.resolve())
+    cfg.config.last_input_dir = os.path.abspath(str(p))
     cfg.save_config()
     # audit round 28: the backend gets (and a preset saves) the absolute path, never "."
     # or a relative answer -- see step_folder.
