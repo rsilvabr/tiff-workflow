@@ -2786,6 +2786,91 @@ def _rmse_value(output: str) -> Tuple[Optional[float], str]:
 
 
 @_scoped_magick_aliases
+def _tiff_dimensions(path):
+    """(width, height) of page 0; (None, None) when it cannot be read."""
+    try:
+        result = _run_captured(
+            ["magick", "identify", "-ping", "-format", "%w %h", f"{_magick_spec(path)}[0]"],
+            _work_timeout(30, path), text=True
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split()
+            if len(parts) >= 2:
+                return int(parts[0]), int(parts[1])
+        return None, None
+    except FileNotFoundError:
+        return None, None
+    except Exception:
+        return None, None
+
+
+@_scoped_magick_aliases
+def _pages_identical(old_path: Path, new_path: Path, pairs) -> tuple[bool, str]:
+    for old_page, new_page in pairs:
+        try:
+            result = _run_captured(
+                ["magick", "compare", "-metric", "RMSE",
+                 f"{_magick_spec(old_path)}[{old_page}]", f"{_magick_spec(new_path)}[{new_page}]", "null:"],
+                _work_timeout(COMPARE_TIMEOUT_S, old_path, new_path), text=True
+            )
+            output = _compare_output(result)
+            if result.returncode not in (0, 1):
+                return False, f"compare failed on page {old_page}: {output}"
+            rmse, output = _rmse_value(output)
+            if rmse is None:
+                return False, f"parse failed on page {old_page}: '{output}'"
+            if rmse != 0.0:
+                return False, f"PIXEL_DIFF page {old_page} RMSE={rmse}"
+
+        except subprocess.TimeoutExpired:
+            return False, f"compare timeout on page {old_page}"
+        except FileNotFoundError:
+            return False, "ImageMagick not found (magick command missing)"
+        except Exception as e:
+            return False, f"compare error on page {old_page}: {e}"
+    return True, ""
+
+
+def _metadata_matches(old_path: Path, new_path: Path, pairs) -> tuple[bool, str]:
+    """audit round 16: pixel equality alone does not prove the backup is redundant --
+    a conversion can drop metadata (a per-page SubfileType, the EXIF block, the ICC
+    profile) while leaving every pixel intact, and this gate authorises permanently
+    deleting the original. Compared on the same page pairs that were pixel-compared:
+    per-IFD SubfileType (absent == 0 per the TIFF spec), EXIF presence per group,
+    and ICC profile identity. Missing exiftool or unreadable tags refuse the purge.
+    """
+    old_meta = _tiff_metadata_signature(old_path)
+    new_meta = _tiff_metadata_signature(new_path)
+    if old_meta is None or new_meta is None:
+        return False, "metadata unreadable (exiftool) -- refusing purge"
+    for old_page, new_page in pairs:
+        old_st = old_meta["subfile"].get(old_page, 0)
+        new_st = new_meta["subfile"].get(new_page, 0)
+        if old_st != new_st:
+            return False, f"SUBFILETYPE_MISMATCH page {old_page}: {old_st} vs {new_st}"
+        # EXIF presence on the compared page: an added/regenerated thumbnail page
+        # legitimately carries tags page 0 never had, so only aligned pages compare.
+        if old_meta["exif_pages"].get(old_page, False) != new_meta["exif_pages"].get(new_page, False):
+            return False, f"EXIF_MISMATCH page {old_page} (metadata block present on only one side)"
+    if old_meta["exif_other"] != new_meta["exif_other"]:
+        return False, ("EXIF_MISMATCH (metadata groups differ: "
+                       f"{sorted(old_meta['exif_other'])} vs {sorted(new_meta['exif_other'])})")
+    if old_meta["icc"] != new_meta["icc"]:
+        return False, "ICC_PROFILE_MISMATCH"
+    old_x, new_x = old_meta.get("xmp_iptc"), new_meta.get("xmp_iptc")
+    if old_x is None or new_x is None:
+        return False, "XMP/IPTC unreadable -- refusing purge"
+    if old_x != new_x:
+        diff = sorted(k for k in set(old_x) | set(new_x) if old_x.get(k) != new_x.get(k))
+        return False, f"XMP_IPTC_MISMATCH ({', '.join(diff[:5])}{' ...' if len(diff) > 5 else ''})"
+    layout_diff = _sample_layout_diff(old_meta.get("layout"), new_meta.get("layout"),
+                                      pages=list(pairs))
+    if layout_diff:
+        return False, f"SAMPLE_LAYOUT_MISMATCH ({layout_diff})"
+    return True, ""
+
+
+@_scoped_magick_aliases
 def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     """
     Compare two TIFFs pixel-by-pixel using RMSE.
@@ -2795,24 +2880,8 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     - If RMSE > 0, images differ
     """
 
-    def get_dimensions(path):
-        try:
-            result = _run_captured(
-                ["magick", "identify", "-ping", "-format", "%w %h", f"{_magick_spec(path)}[0]"],
-                _work_timeout(30, path), text=True
-            )
-            if result.returncode == 0:
-                parts = result.stdout.strip().split()
-                if len(parts) >= 2:
-                    return int(parts[0]), int(parts[1])
-            return None, None
-        except FileNotFoundError:
-            return None, None
-        except Exception:
-            return None, None
-
-    old_w, old_h = get_dimensions(old_path)
-    new_w, new_h = get_dimensions(new_path)
+    old_w, old_h = _tiff_dimensions(old_path)
+    new_w, new_h = _tiff_dimensions(new_path)
 
     if old_w is None or new_w is None:
         return False, "magick identify failed"
@@ -2836,73 +2905,10 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     # a single whole-file compare cannot be trusted; comparing only [0] would miss a
     # corrupted extra page. This gate authorises permanent deletion, so any page that
     # differs (or cannot be compared) blocks the purge.
-    def _pages_identical(pairs) -> tuple[bool, str]:
-        for old_page, new_page in pairs:
-            try:
-                result = _run_captured(
-                    ["magick", "compare", "-metric", "RMSE",
-                     f"{_magick_spec(old_path)}[{old_page}]", f"{_magick_spec(new_path)}[{new_page}]", "null:"],
-                    _work_timeout(COMPARE_TIMEOUT_S, old_path, new_path), text=True
-                )
-                output = _compare_output(result)
-                if result.returncode not in (0, 1):
-                    return False, f"compare failed on page {old_page}: {output}"
-                rmse, output = _rmse_value(output)
-                if rmse is None:
-                    return False, f"parse failed on page {old_page}: '{output}'"
-                if rmse != 0.0:
-                    return False, f"PIXEL_DIFF page {old_page} RMSE={rmse}"
-
-            except subprocess.TimeoutExpired:
-                return False, f"compare timeout on page {old_page}"
-            except FileNotFoundError:
-                return False, "ImageMagick not found (magick command missing)"
-            except Exception as e:
-                return False, f"compare error on page {old_page}: {e}"
-        return True, ""
-
-    def _metadata_matches(pairs) -> tuple[bool, str]:
-        """audit round 16: pixel equality alone does not prove the backup is redundant --
-        a conversion can drop metadata (a per-page SubfileType, the EXIF block, the ICC
-        profile) while leaving every pixel intact, and this gate authorises permanently
-        deleting the original. Compared on the same page pairs that were pixel-compared:
-        per-IFD SubfileType (absent == 0 per the TIFF spec), EXIF presence per group,
-        and ICC profile identity. Missing exiftool or unreadable tags refuse the purge.
-        """
-        old_meta = _tiff_metadata_signature(old_path)
-        new_meta = _tiff_metadata_signature(new_path)
-        if old_meta is None or new_meta is None:
-            return False, "metadata unreadable (exiftool) -- refusing purge"
-        for old_page, new_page in pairs:
-            old_st = old_meta["subfile"].get(old_page, 0)
-            new_st = new_meta["subfile"].get(new_page, 0)
-            if old_st != new_st:
-                return False, f"SUBFILETYPE_MISMATCH page {old_page}: {old_st} vs {new_st}"
-            # EXIF presence on the compared page: an added/regenerated thumbnail page
-            # legitimately carries tags page 0 never had, so only aligned pages compare.
-            if old_meta["exif_pages"].get(old_page, False) != new_meta["exif_pages"].get(new_page, False):
-                return False, f"EXIF_MISMATCH page {old_page} (metadata block present on only one side)"
-        if old_meta["exif_other"] != new_meta["exif_other"]:
-            return False, ("EXIF_MISMATCH (metadata groups differ: "
-                           f"{sorted(old_meta['exif_other'])} vs {sorted(new_meta['exif_other'])})")
-        if old_meta["icc"] != new_meta["icc"]:
-            return False, "ICC_PROFILE_MISMATCH"
-        old_x, new_x = old_meta.get("xmp_iptc"), new_meta.get("xmp_iptc")
-        if old_x is None or new_x is None:
-            return False, "XMP/IPTC unreadable -- refusing purge"
-        if old_x != new_x:
-            diff = sorted(k for k in set(old_x) | set(new_x) if old_x.get(k) != new_x.get(k))
-            return False, f"XMP_IPTC_MISMATCH ({', '.join(diff[:5])}{' ...' if len(diff) > 5 else ''})"
-        layout_diff = _sample_layout_diff(old_meta.get("layout"), new_meta.get("layout"),
-                                          pages=list(pairs))
-        if layout_diff:
-            return False, f"SAMPLE_LAYOUT_MISMATCH ({layout_diff})"
-        return True, ""
-
     if old_pages == new_pages:
-        strict_ok, strict_detail = _pages_identical([(i, i) for i in range(old_pages)])
+        strict_ok, strict_detail = _pages_identical(old_path, new_path, [(i, i) for i in range(old_pages)])
         if strict_ok:
-            meta_ok, meta_detail = _metadata_matches([(i, i) for i in range(old_pages)])
+            meta_ok, meta_detail = _metadata_matches(old_path, new_path, [(i, i) for i in range(old_pages)])
             if not meta_ok:
                 return False, meta_detail
             return True, f"IDENTICAL ({old_w}x{old_h}, {old_pages} page(s))"
@@ -2932,11 +2938,11 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
         # No thumbnail on either side -- nothing to excuse, the strict verdict stands.
         return False, strict_detail
 
-    img_ok, _img_detail = _pages_identical(list(zip(old_img, new_img)))
+    img_ok, _img_detail = _pages_identical(old_path, new_path, list(zip(old_img, new_img)))
     if not img_ok:
         return False, strict_detail
 
-    meta_ok, meta_detail = _metadata_matches(list(zip(old_img, new_img)))
+    meta_ok, meta_detail = _metadata_matches(old_path, new_path, list(zip(old_img, new_img)))
     if not meta_ok:
         return False, meta_detail
 
