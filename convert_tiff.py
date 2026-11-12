@@ -2804,7 +2804,6 @@ def _tiff_metadata_signature(path) -> Optional[Dict]:
             "xmp_iptc": xmp_iptc, "layout": layout}
 
 
-@_scoped_magick_aliases
 def _compare_output(result) -> str:
     """What a finished `magick compare` printed: the metric goes to stderr."""
     return result.stdout.strip() if result.stdout else result.stderr.strip() if result.stderr else ""
@@ -2824,6 +2823,7 @@ def _rmse_value(output: str) -> Tuple[Optional[float], str]:
     return (float(match.group(1)) if match else None), output
 
 
+@_scoped_magick_aliases
 def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
     """
     Compare two TIFFs pixel-by-pixel using RMSE.

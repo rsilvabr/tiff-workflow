@@ -485,6 +485,21 @@ class TestBracketAliasesAreReleased:
         assert status == "ok", status
         assert list(alias_dir.iterdir()) == []
 
+    def test_purge_gate_leaves_no_alias(self, tmp_path, monkeypatch):
+        """v3.1 phase 7: W3 put two helpers between @_scoped_magick_aliases and
+        _compare_tiff_metadata, so the decorator wrapped one of them and Delete OLD_TIFFs
+        kept every alias copy until the run ended. Nothing tested the purge gate's aliases."""
+        folder = tmp_path / "190815_Film_伊豆沼 [FINAL] 50%"
+        new = _padded(folder / "p 1.tif")
+        old = folder / "OLD_TIFFs" / "p 1.tif"
+        old.parent.mkdir()
+        shutil.copyfile(new, old)
+        alias_dir, made = self._setup(tmp_path, monkeypatch)
+        ok, detail = ct._compare_tiff_metadata(old, new)
+        assert ok, detail
+        assert made, "precondition: the '[FINAL]' folder sends magick through aliases"
+        assert list(alias_dir.iterdir()) == [], "alias copies were left in %TEMP%"
+
 
 # --- progress line names the folder, not only the file -----------------------
 
