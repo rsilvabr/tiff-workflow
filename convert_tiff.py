@@ -427,12 +427,12 @@ class ConfigManager:
         self.config.presets = clean
 
     def save_config(self) -> None:
+        """Write the whole config -- presets included -- through a temp file in its folder and
+        one replacing rename, in UTF-8 (v3.1 phase 6, W-O9: it truncated the file and wrote it
+        in place, so a run killed mid-write lost every preset)."""
         try:
             with self._save_lock:
-                self.config_path.parent.mkdir(parents=True, exist_ok=True)
-                data = asdict(self.config)
-                with open(self.config_path, 'w') as f:
-                    json.dump(data, f, indent=2)
+                self._write_atomically(asdict(self.config))
         except Exception as e:
             # audit round 16: same story on save -- a config that silently never
             # persisted looked exactly like one that did.
@@ -461,19 +461,24 @@ class ConfigManager:
                     return
             data["update_checked_on"] = self.config.update_checked_on
             data["update_latest_seen"] = self.config.update_latest_seen
-            self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp = tempfile.mkstemp(dir=str(self.config_path.parent),
-                                       prefix=".convert_tiff_config.", suffix=".tmp")
+            self._write_atomically(data)
+
+    def _write_atomically(self, data: Dict) -> None:
+        """`data` as the config file: a temp file in the same folder, then one replacing
+        rename (tw.move_file_replacing). The file is whole at every moment. Raises OSError."""
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(self.config_path.parent),
+                                   prefix=".convert_tiff_config.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            tw.move_file_replacing(tmp, str(self.config_path))
+        except BaseException:
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                os.replace(tmp, self.config_path)
-            except BaseException:
-                try:
-                    os.unlink(tmp)
-                except OSError:
-                    pass
-                raise
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 # --- New-release notice -------------------------------------------------

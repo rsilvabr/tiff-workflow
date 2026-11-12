@@ -59,6 +59,31 @@ def _isolated_manager(tmp_path, monkeypatch):
     return convert_tiff.ConfigManager()
 
 
+def test_a_save_that_dies_half_way_keeps_the_presets(tmp_path, monkeypatch, capsys):
+    """v3.1 phase 6 (W-O9): save_config truncated the file and wrote it in place; a run
+    killed in the middle of the write (here: json.dump dies after half the text) left a
+    file with no presets. The file on disk is whole at every moment now."""
+    folder = tmp_path / "伊豆沼 [x] 50%"
+    folder.mkdir()
+    cfg = _isolated_manager(folder, monkeypatch)
+    cfg.config.presets = {"nightly 伊豆沼": {"kind": "compress", "commands": [["python", "a.py"]]}}
+    cfg.save_config()
+    before = cfg.config_path.read_bytes()
+    assert "伊豆沼".encode("utf-8") in before or b"\\u4f0a" in before
+    real_dump = json.dump
+
+    def dies(obj, fh, **kw):
+        fh.write(json.dumps(obj, **kw)[:40])
+        raise OSError("the run was killed")
+    monkeypatch.setattr(convert_tiff.json, "dump", dies)
+    cfg.config.presets["second"] = {"kind": "compress"}
+    cfg.save_config()
+    assert "could not save config file" in capsys.readouterr().err
+    monkeypatch.setattr(convert_tiff.json, "dump", real_dump)
+    assert cfg.config_path.read_bytes() == before, "the presets file was cut in half"
+    assert [p.name for p in cfg.config_path.parent.iterdir() if p.suffix == ".tmp"] == []
+
+
 def _write_manifest(path, rows):
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
