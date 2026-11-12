@@ -5267,6 +5267,54 @@ def _run_exif_then_compress(cmd_copy: List[str], cmd_compress: List[str]):
     return rc_copy, run_subprocess(cmd_compress)
 
 
+def _ask_flat_output(folder: Path, workflow: Dict) -> bool:
+    """Mode 2's own questions. Mode 2 flattens every TIFF into one folder; without an
+    explicit output folder the backend falls back to the input root, mixing outputs with
+    sources and recompressing root-level TIFFs in place -- so it is asked here, with the
+    policy for names that collide. False = cancelled or refused."""
+    default_out = str(folder / "ZIP_flat")
+    out_dir = _ask("Output folder (mode 2 merges all TIFFs here)", default_out)
+    if len(out_dir) >= 2 and out_dir[0] == out_dir[-1] and out_dir[0] in ("'", '"'):
+        out_dir = out_dir[1:-1]
+    if ";" in out_dir:
+        _error(f"Output path contains ';' which is not supported: {out_dir}")
+        return False
+    if Path(out_dir).resolve() == folder.resolve():
+        warn = "Output folder is the input folder: TIFFs will be recompressed in place, without a backup."
+        if not _ask_yes_no(f"{warn} Continue?", False, "yellow"):
+            _say("Cancelled.", "dim")
+            return False
+    else:
+        workflow["output_dir"] = out_dir
+
+    # Collision policy for the flattened output
+    dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
+    workflow["duplicate_action"] = _ask("Duplicate filenames", dup_default,
+                                        choices=["Numbered", "Skip", "Overwrite"])
+    return True
+
+
+def _ask_thumbnails(workflow: Dict) -> None:
+    """The embedded-thumbnail questions. The defaults come from the backend's own PARAMS
+    table; "Configure? No" adds no thumb_* keys at all, so the backend runs on its own
+    settings (audit round 17 -- the wizard used to force 256/"85"/jpg always)."""
+    thumb_size_default = _backend_default("compress_tiff_zip.py", "ThumbSize")
+    thumb_quality_default = _backend_default("compress_tiff_zip.py", "ThumbQuality")
+    thumb_format_default = _backend_default("compress_tiff_zip.py", "ThumbFormat")
+    if not _ask_yes_no("Generate embedded thumbnails?", False, "cyan"):
+        return
+    workflow["generate_thumbnail"] = True
+    if _ask_yes_no("Configure thumbnail settings?", False, "cyan"):
+        size_str = _ask("Thumbnail size (px)", str(thumb_size_default))
+        workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
+        workflow["thumb_quality"] = _ask("JPEG quality", thumb_quality_default)
+        # audit round 16: -ThumbFormat only ever gets one of the formats the backend takes
+        workflow["thumb_format"] = _ask("Format", thumb_format_default, choices=["jpg", "png", "tif"])
+    # Option to skip compressed TIFFs with existing thumbnails
+    workflow["skip_compressed_with_thumb"] = _ask_yes_no(
+        "Skip already-compressed TIFFs that have thumbnails?", False, "cyan")
+
+
 def run_free_compress(cfg: "ConfigManager") -> bool:
     """Workflow 1: Free compress with modes 0-9."""
     workflow = {
@@ -5303,50 +5351,13 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
             _say("Edit in Excel, then run it from the main menu: [3] Run from manifest", "dim")
         return True
 
-    # Mode 2 flattens every TIFF into one folder. Without an explicit output folder the
-    # backend falls back to the input root, mixing outputs with sources and recompressing
-    # root-level TIFFs in place -- so ask for it here.
-    if mode == 2:
-        default_out = str(folder / "ZIP_flat")
-        out_dir = _ask("Output folder (mode 2 merges all TIFFs here)", default_out)
-        if len(out_dir) >= 2 and out_dir[0] == out_dir[-1] and out_dir[0] in ("'", '"'):
-            out_dir = out_dir[1:-1]
-        if ";" in out_dir:
-            _error(f"Output path contains ';' which is not supported: {out_dir}")
-            return False
-        if Path(out_dir).resolve() == folder.resolve():
-            warn = "Output folder is the input folder: TIFFs will be recompressed in place, without a backup."
-            if not _ask_yes_no(f"{warn} Continue?", False, "yellow"):
-                _say("Cancelled.", "dim")
-                return False
-        else:
-            workflow["output_dir"] = out_dir
-
-        # Collision policy for the flattened output
-        dup_default = _backend_default("compress_tiff_zip.py", "DuplicateAction")
-        workflow["duplicate_action"] = _ask("Duplicate filenames", dup_default,
-                                            choices=["Numbered", "Skip", "Overwrite"])
+    if mode == 2 and not _ask_flat_output(folder, workflow):
+        return False
 
     # Basic params
     step_basic_params(cfg, workflow)
 
-    # Thumbnail generation option. The defaults come from the backend's own PARAMS
-    # table; "Configure? No" adds no thumb_* keys at all, so the backend runs on its
-    # own settings (audit round 17 -- the wizard used to force 256/"85"/jpg always).
-    thumb_size_default = _backend_default("compress_tiff_zip.py", "ThumbSize")
-    thumb_quality_default = _backend_default("compress_tiff_zip.py", "ThumbQuality")
-    thumb_format_default = _backend_default("compress_tiff_zip.py", "ThumbFormat")
-    if _ask_yes_no("Generate embedded thumbnails?", False, "cyan"):
-        workflow["generate_thumbnail"] = True
-        if _ask_yes_no("Configure thumbnail settings?", False, "cyan"):
-            size_str = _ask("Thumbnail size (px)", str(thumb_size_default))
-            workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
-            workflow["thumb_quality"] = _ask("JPEG quality", thumb_quality_default)
-            # audit round 16: -ThumbFormat only ever gets one of the formats the backend takes
-            workflow["thumb_format"] = _ask("Format", thumb_format_default, choices=["jpg", "png", "tif"])
-        # Option to skip compressed TIFFs with existing thumbnails
-        workflow["skip_compressed_with_thumb"] = _ask_yes_no(
-            "Skip already-compressed TIFFs that have thumbnails?", False, "cyan")
+    _ask_thumbnails(workflow)
 
     # For mode 8: confirm delete
     if mode == 8:
