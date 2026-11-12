@@ -9,7 +9,7 @@ Unified TIFF processing toolkit with four complementary workflows:
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
-**Current version: v3.0.0** (2026-11-11) · [What's new](#whats-new-in-v300) · [Coming from the PowerShell scripts](docs/powershell_edition.md) · [All releases](docs/CHANGELOG.md)
+**Current version: v3.1.0** (2026-11-13) · [What's new](#whats-new-in-v310) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
 
 **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; ExifTool and ImageMagick included.
 
@@ -41,13 +41,13 @@ Option 7 (Diagnose TIFFs) helps you find these bloated files.
 
 ## The scripts
 
-| Script | What it does |
-|--------|--------------|
-| [`convert_tiff.py`](convert_tiff.py) | The interactive wizard: guided workflows, AutoFind, presets, manifests |
-| [`compress_tiff_zip.py`](compress_tiff_zip.py) | TIFF → ZIP/Deflate, modes 0-9, optionally with an embedded thumbnail |
-| [`copy_exif_to_tiff.py`](copy_exif_to_tiff.py) | EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into the TIFF |
-| [`generate_thumbnails.py`](generate_thumbnails.py) | sRGB thumbnails, standalone |
-| [`tiff_workflow_common.py`](tiff_workflow_common.py) | Shared by the three scripts above: keep it next to them |
+| File | What it does |
+|------|--------------|
+| [`convert_tiff.py`](convert_tiff.py) | What you run: the interactive wizard (guided workflows, AutoFind, presets, manifests), and each backend below by its name |
+| [`tiff_workflow/compress_tiff_zip.py`](tiff_workflow/compress_tiff_zip.py) | `compress`: TIFF → ZIP/Deflate, modes 0-9, optionally with an embedded thumbnail |
+| [`tiff_workflow/copy_exif_to_tiff.py`](tiff_workflow/copy_exif_to_tiff.py) | `copy-exif`: EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into the TIFF |
+| [`tiff_workflow/generate_thumbnails.py`](tiff_workflow/generate_thumbnails.py) | `thumbnails`: sRGB thumbnails, standalone |
+| [`tiff_workflow/`](tiff_workflow) | Also the wizard (`wizard.py`) and what the backends share (`common.py`): keep the folder next to `convert_tiff.py` |
 
 ---
 
@@ -61,7 +61,7 @@ Option 7 (Diagnose TIFFs) helps you find these bloated files.
 pip install rich
 ```
 
-plus two tools on PATH: [ImageMagick 7](https://imagemagick.org/script/download.php) and [ExifTool](https://exiftool.org), the latter named exactly `exiftool.exe` (the download comes as `exiftool(-k).exe`: rename it). `rich` is only for the wizard's menus; the three scripts it runs use only what Python ships with. Step by step, with the PATH setup and troubleshooting: [docs/install.md](docs/install.md).
+plus two tools on PATH: [ImageMagick 7](https://imagemagick.org/script/download.php) and [ExifTool](https://exiftool.org), the latter named exactly `exiftool.exe` (the download comes as `exiftool(-k).exe`: rename it). `rich` is only for the wizard's menus; the backends use only what Python ships with. Step by step, with the PATH setup and troubleshooting: [docs/install.md](docs/install.md).
 
 ---
 
@@ -85,18 +85,18 @@ The wizard supports **AutoFind** — automatically locates folders matching patt
 
 ---
 
-## The scripts on their own
+## The backends on their own
 
 ```powershell
-python compress_tiff_zip.py --mode 0 --input-dir .                          # compress in place; originals go to OLD_TIFFs/
-python compress_tiff_zip.py --mode 8 --input-dir F:\Photos --delete-source   # recursive, in place, replaces each original
-python compress_tiff_zip.py --mode 3 --input-dir F:\Photos --staging-dir E:\staging --workers 12
-python compress_tiff_zip.py --mode 9 --generate-thumbnail --thumb-size 512 --input-dir F:\Photos   # with an embedded thumbnail page
-python copy_exif_to_tiff.py --input-dir "F:\Photos\S5pro session"            # EXIF from each JPEG into its TIFF
-python generate_thumbnails.py --input-dir F:\Photos --size 256               # standalone sRGB thumbnails
+python convert_tiff.py compress --mode 0 --input-dir .                          # compress in place; originals go to OLD_TIFFs/
+python convert_tiff.py compress --mode 8 --input-dir F:\Photos --delete-source   # recursive, in place, replaces each original
+python convert_tiff.py compress --mode 3 --input-dir F:\Photos --staging-dir E:\staging --workers 12
+python convert_tiff.py compress --mode 9 --generate-thumbnail --thumb-size 512 --input-dir F:\Photos   # with an embedded thumbnail page
+python convert_tiff.py copy-exif --input-dir "F:\Photos\S5pro session"         # EXIF from each JPEG into its TIFF
+python convert_tiff.py thumbnails --input-dir F:\Photos --size 256             # standalone sRGB thumbnails
 ```
 
-Each is also `python convert_tiff.py compress|copy-exif|thumbnails ...`, and `--help` lists its options. A yes/no is `--safe-mode` / `--no-safe-mode`. **A line written for v3.0.0 or earlier** (`-Mode 9 -SafeMode:$false`) is refused: [the table](docs/command_line.md) rewrites it. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
+`--help` after the name lists its options. A yes/no is `--safe-mode` / `--no-safe-mode`. **A line written for v3.0.0 or earlier** (`python compress_tiff_zip.py -Mode 9 -SafeMode:$false`) is refused: [the table](docs/command_line.md) rewrites it. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
 
 ---
 
@@ -160,9 +160,9 @@ One line each; the detail is behind each link.
 |----------|----------|
 | [docs/install.md](docs/install.md) | Installing the Python version step by step: downloads, PATH, troubleshooting |
 | [docs/README_convert_tiff_py.md](docs/README_convert_tiff_py.md) | The wizard: every workflow, manifests, presets and scheduling, script settings |
-| [docs/README_compress_tiff_zip.md](docs/README_compress_tiff_zip.md) | `compress_tiff_zip.py`: parameters, modes, Safe Mode, `OLD_TIFFs`, staging, thumbnails |
-| [docs/README_copy_exif.md](docs/README_copy_exif.md) | `copy_exif_to_tiff.py`: pairing a TIFF with its JPEG or RAF, parameters |
-| [docs/README_generate_thumbnails.md](docs/README_generate_thumbnails.md) | `generate_thumbnails.py`: parameters, output, removing thumbnails |
+| [docs/README_compress_tiff_zip.md](docs/README_compress_tiff_zip.md) | `convert_tiff.py compress`: parameters, modes, Safe Mode, `OLD_TIFFs`, staging, thumbnails |
+| [docs/README_copy_exif.md](docs/README_copy_exif.md) | `convert_tiff.py copy-exif`: pairing a TIFF with its JPEG or RAF, parameters |
+| [docs/README_generate_thumbnails.md](docs/README_generate_thumbnails.md) | `convert_tiff.py thumbnails`: parameters, output, removing thumbnails |
 | [docs/command_line.md](docs/command_line.md) | The command line of v3.1, and every option of v3.0.0 in its new form |
 | [docs/powershell_edition.md](docs/powershell_edition.md) | The PowerShell scripts of v2.9.1 and what changes when you move to v3 |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | What changed in each release |
@@ -172,15 +172,16 @@ One line each; the detail is behind each link.
 
 ---
 
-## What's new in v3.0.0
+## What's new in v3.1.0
 
-2026-11-11. Everything is Python now; if you use the wizard, there is nothing to do.
+2026-11-13. If you only use the wizard's menus, nothing to do. If you type commands, keep `.bat` files or run presets, read the first two lines.
 
-- **The three backends were PowerShell scripts and are Python scripts now.** They take the same command line and do the same to your files, and PowerShell is no longer needed.
-- **Presets, *Repeat last* and manifests saved by v2.x keep working**, and the settings file is the same.
-- **If you call the scripts from your own `.bat` files**, change how each line starts (`python compress_tiff_zip.py ...`) and keep its arguments: [The PowerShell edition](docs/powershell_edition.md).
+- **The backends take the usual Python command line**, `--mode 9 --input-dir F:\Photos --no-safe-mode`, through one entry point: `python convert_tiff.py compress ...` (also `copy-exif`, `thumbnails`). A line written for v3.0.0 is refused, nothing touched: [the table](docs/command_line.md) rewrites it.
+- **Presets and *Repeat last* saved by v3.0.0 or earlier no longer run:** run the workflow once and save it again. The settings file takes the new names (`zip_subfolder_name`).
+- **The files moved:** everything but `convert_tiff.py` is in the folder `tiff_workflow/`; copy both.
+- **The wizard reads every yes/no the same way** on both screens (`y/yes/s/sim`, `n/no/nao/não`; "no" is the default of every question that deletes or replaces), and Restore, Delete OLD_TIFFs, Diagnose and mode 2 got fixes.
 
-[Every change](docs/CHANGELOG.md#v300) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
+[Every change](docs/CHANGELOG.md#v310) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
 
 ---
 

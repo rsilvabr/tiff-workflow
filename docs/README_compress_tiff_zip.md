@@ -1,8 +1,8 @@
-# compress_tiff_zip.py -- ZIP Compression Backend
+# compress (`tiff_workflow/compress_tiff_zip.py`) -- ZIP Compression Backend
 
 Python compression backend with modes 0-9 CLI flags. Called by `convert_tiff.py` wizard or used directly.
 
-**Requires:** Python 3.9+ (standard library only), ImageMagick 7, exiftool. `tiff_workflow_common.py`, the module the three backends share, must sit next to the script.
+**Requires:** Python 3.9+ (standard library only), ImageMagick 7, exiftool. It runs as `python convert_tiff.py compress ...`, from a copy of the whole toolkit (`convert_tiff.py` and the folder `tiff_workflow/`).
 
 Until v2.9.1 this backend was `compress_tiff_zip.ps1`; that edition is described in [powershell_edition.md](powershell_edition.md). v3.0.0 kept the `.ps1` command line; v3.1 writes it the usual Python way (`--mode 9 --no-safe-mode`), and `--mode` is required (the legacy mode of a run without it is gone). [command_line.md](command_line.md) translates every option of v3.0.0.
 
@@ -12,25 +12,25 @@ Until v2.9.1 this backend was `compress_tiff_zip.ps1`; that edition is described
 
 ```powershell
 # In-place, non-recursive (mode 0)
-python compress_tiff_zip.py --mode 0 --input-dir .
+python convert_tiff.py compress --mode 0 --input-dir .
 
 # Recursive, in-place with delete (mode 8)
-python compress_tiff_zip.py --mode 8 --input-dir F:\Photos --delete-source
+python convert_tiff.py compress --mode 8 --input-dir F:\Photos --delete-source
 
 # Subfolder per folder (mode 1)
-python compress_tiff_zip.py --mode 1 --input-dir F:\Photos --zip-subfolder-name "ZIP"
+python convert_tiff.py compress --mode 1 --input-dir F:\Photos --zip-subfolder-name "ZIP"
 
 # Flat to output folder (mode 2)
-python compress_tiff_zip.py --mode 2 --input-dir F:\Photos --output-dir E:\all_zips
+python convert_tiff.py compress --mode 2 --input-dir F:\Photos --output-dir E:\all_zips
 
 # Folder rename (mode 4)
-python compress_tiff_zip.py --mode 4 --input-dir F:\Photos --zip-suffix "_ZIP"
+python convert_tiff.py compress --mode 4 --input-dir F:\Photos --zip-suffix "_ZIP"
 
 # With staging and workers
-python compress_tiff_zip.py --mode 3 --input-dir F:\Photos --staging-dir E:\staging --workers 12
+python convert_tiff.py compress --mode 3 --input-dir F:\Photos --staging-dir E:\staging --workers 12
 
 # Dry-run
-python compress_tiff_zip.py --mode 3 --input-dir F:\Photos --dry-run
+python convert_tiff.py compress --mode 3 --input-dir F:\Photos --dry-run
 ```
 
 An option is written in full, in lower case, its value after it: `--workers 8`. A yes/no is
@@ -44,7 +44,7 @@ touched; 1 is a run in which something failed.
 
 ## Parameters
 
-The defaults below are the `PARAMS` table at the top of `compress_tiff_zip.py`.
+The defaults below are the `PARAMS` table at the top of `tiff_workflow/compress_tiff_zip.py`.
 
 ### Core
 
@@ -111,7 +111,7 @@ stricter; if the available memory cannot be read at all, the count is left alone
 **Example:**
 ```powershell
 # Compress with embedded 512px thumbnail
-python compress_tiff_zip.py --mode 9 --generate-thumbnail --thumb-size 512 --input-dir F:\Photos
+python convert_tiff.py compress --mode 9 --generate-thumbnail --thumb-size 512 --input-dir F:\Photos
 ```
 
 **Thumbnail format:**
@@ -208,7 +208,7 @@ COMPRESS all TIFFs: --no-safe-mode
 
 To force compression of all TIFFs (including multi-page):
 ```powershell
-python compress_tiff_zip.py --mode 0 --input-dir . --no-safe-mode
+python convert_tiff.py compress --mode 0 --input-dir . --no-safe-mode
 ```
 
 ---
@@ -368,7 +368,7 @@ Logs written to `Logs/compress_tiff_zip/<timestamp>.log` in the current working 
 
 Sample output:
 ```
-10:23:45 | INFO | tiff-workflow 3.0.0 | compress_tiff_zip.py | Python 3.13.1
+10:23:45 | INFO | tiff-workflow 3.1.0 | compress_tiff_zip.py | Python 3.13.1
 10:23:45 | INFO | Log: Logs/compress_tiff_zip/20240415_102345.log
 10:23:45 | INFO | Mode: 3 | Workers: 8 | OutputDir: (in-place/flat) | Staging: disabled | DryRun: False | SafeMode: True | SkipLzw: False | Overwrite: False | DeleteSource: OFF
 10:23:45 | INFO | Found: 150 TIFF(s)
@@ -399,8 +399,8 @@ exiftool         https://exiftool.org
 Python 3.9+      https://www.python.org
 ```
 
-Both `magick.exe` and `exiftool.exe` must be on your PATH. The script uses only Python's
-standard library; `tiff_workflow_common.py` must be in the same folder.
+Both `magick.exe` and `exiftool.exe` must be on your PATH. The backends use only Python's
+standard library; keep the folder `tiff_workflow/` next to `convert_tiff.py`.
 
 ### Verify
 ```powershell

@@ -1,14 +1,14 @@
-# copy_exif_to_tiff.py -- TIFF Metadata Restoration
+# copy-exif (`tiff_workflow/copy_exif_to_tiff.py`) -- TIFF Metadata Restoration
 
 Copy EXIF metadata from JPEG to TIFF. Used in Fuji S3/S5 Pro workflows where Hyper Utility exports TIFFs without camera metadata.
 
-**Status:** Implemented. The `convert_tiff.py` wizard runs `copy_exif_to_tiff.py`.
+**Status:** Implemented. It runs as `python convert_tiff.py copy-exif ...`, or from the wizard.
 
 ---
 
 ## Script
 
-One script, **`copy_exif_to_tiff.py`**, callable directly or via the `convert_tiff.py` wizard.
+One module, **`tiff_workflow/copy_exif_to_tiff.py`**, run as `python convert_tiff.py copy-exif ...` or from the wizard.
 It works on several TIFFs at once by default (`--workers`), on any machine; `--workers 1` runs
 one at a time.
 
@@ -43,25 +43,25 @@ Fuji S3 Pro / S5 Pro workflow with Hyper Utility:
 
 ```powershell
 # Basic usage
-python copy_exif_to_tiff.py --input-dir .
+python convert_tiff.py copy-exif --input-dir .
 
 # With worker count
-python copy_exif_to_tiff.py --input-dir . --workers 12
+python convert_tiff.py copy-exif --input-dir . --workers 12
 
 # One TIFF at a time
-python copy_exif_to_tiff.py --input-dir . --workers 1
+python convert_tiff.py copy-exif --input-dir . --workers 1
 
 # Dry-run
-python copy_exif_to_tiff.py --input-dir . --dry-run
+python convert_tiff.py copy-exif --input-dir . --dry-run
 
 # Skip TIFFs that already carry camera EXIF (default: overwrite existing EXIF)
-python copy_exif_to_tiff.py --input-dir . --skip-if-tiff-has-exif
+python convert_tiff.py copy-exif --input-dir . --skip-if-tiff-has-exif
 
 # Compress TIFF to ZIP after copying EXIF
-python copy_exif_to_tiff.py --input-dir . --compress-zip
+python convert_tiff.py copy-exif --input-dir . --compress-zip
 
 # Overwrite existing output
-python copy_exif_to_tiff.py --input-dir . --overwrite
+python convert_tiff.py copy-exif --input-dir . --overwrite
 ```
 
 An option is written in full, in lower case, its value after it; a yes/no is `--x` /
@@ -74,7 +74,7 @@ is touched; [command_line.md](command_line.md) translates a line of v3.0.0.
 
 ## Parameters
 
-The defaults below are the `PARAMS` table at the top of `copy_exif_to_tiff.py`.
+The defaults below are the `PARAMS` table at the top of `tiff_workflow/copy_exif_to_tiff.py`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -115,7 +115,7 @@ Each run writes its log to `Logs\Copy-S5Pro-Exif\<timestamp>.log` under the **cu
 folder** (the one you start it from), like the other backends -- through the wizard, that is
 the folder the wizard was started from. Calling the script from somewhere else puts its
 `Logs\` there. The first log line names the release, the script and the Python version:
-`tiff-workflow 3.0.0 | copy_exif_to_tiff.py | Python 3.13.1`.
+`tiff-workflow 3.1.0 | copy_exif_to_tiff.py | Python 3.13.1`.
 
 ### Pairing
 
@@ -175,8 +175,8 @@ exiftool         https://exiftool.org
 Python 3.9+      https://www.python.org
 ```
 
-Both `magick.exe` and `exiftool.exe` must be on your PATH. The script uses only Python's
-standard library; `tiff_workflow_common.py` must be in the same folder.
+Both `magick.exe` and `exiftool.exe` must be on your PATH. The backends use only Python's
+standard library; keep the folder `tiff_workflow/` next to `convert_tiff.py`.
 
 ### Verify
 ```powershell

@@ -1,8 +1,8 @@
-# generate_thumbnails.py -- Thumbnail Generator
+# thumbnails (`tiff_workflow/generate_thumbnails.py`) -- Thumbnail Generator
 
 Standalone thumbnail generator for TIFF files. Converts TIFF pages to smaller JPEG/PNG/TIFF thumbnails.
 
-**Requires:** Python 3.9+ (standard library only), ImageMagick 7. No exiftool required. `tiff_workflow_common.py`, the module the three backends share, must sit next to the script.
+**Requires:** Python 3.9+ (standard library only), ImageMagick 7. No exiftool required. It runs as `python convert_tiff.py thumbnails ...`, from a copy of the whole toolkit (`convert_tiff.py` and the folder `tiff_workflow/`).
 
 Until v2.9.1 this backend was `generate_thumbnails.ps1`; that edition is described in [powershell_edition.md](powershell_edition.md). v3.0.0 kept the `.ps1` command line; v3.1 writes it the usual Python way (`--input-dir X --size 256`).
 
@@ -12,19 +12,19 @@ Until v2.9.1 this backend was `generate_thumbnails.ps1`; that edition is describ
 
 ```powershell
 # Basic usage: generate 256px JPEG thumbnails in current directory
-python generate_thumbnails.py
+python convert_tiff.py thumbnails
 
 # Custom size and output directory
-python generate_thumbnails.py --input-dir . --size 512 --output-dir "C:\Thumbs"
+python convert_tiff.py thumbnails --input-dir . --size 512 --output-dir "C:\Thumbs"
 
 # Recursive processing with parallel workers
-python generate_thumbnails.py --input-dir . --recursive --workers 8
+python convert_tiff.py thumbnails --input-dir . --recursive --workers 8
 
 # TIFF output with ZIP compression
-python generate_thumbnails.py --format tif --quality 95
+python convert_tiff.py thumbnails --format tif --quality 95
 
 # Dry-run to preview what would be generated
-python generate_thumbnails.py --input-dir . --dry-run
+python convert_tiff.py thumbnails --input-dir . --dry-run
 ```
 
 An option is written in full, in lower case, its value after it; a yes/no is `--x` /
@@ -37,7 +37,7 @@ is touched; [command_line.md](command_line.md) translates a line of v3.0.0.
 
 ## Parameters
 
-The defaults below are the `PARAMS` table at the top of `generate_thumbnails.py`.
+The defaults below are the `PARAMS` table at the top of `tiff_workflow/generate_thumbnails.py`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -104,7 +104,7 @@ side (round 28): a photo that happens to be called `something_thumb.tif` is kept
 TIFF thumbnails were made with a larger `--size`, pass the same `--size` to `--remove`.
 
 ```powershell
-python generate_thumbnails.py --input-dir . --recursive --remove --dry-run
+python convert_tiff.py thumbnails --input-dir . --recursive --remove --dry-run
 ```
 
 ---

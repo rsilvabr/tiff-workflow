@@ -11,5 +11,5 @@ three backends; each also runs as `python -m tiff_workflow.<module>`).
 
 TOOLKIT_NAME = "tiff-workflow"
 #: The release. One copy: everything else reads it from here.
-TOOLKIT_VERSION = "3.0.0"
+TOOLKIT_VERSION = "3.1.0"
 TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"

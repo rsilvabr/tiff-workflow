@@ -12,35 +12,46 @@ gitignored). If one exists:
   items. Tell the user there is pending work reserved for Claude Opus (name
   the file), then continue with what the user asked.
 
-## Active scripts
-Everything is Python since v3.0.0. Until v2.9.1 the three backends were
-PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
+## The files
+Everything is Python since v3.0.0; until v2.9.1 the three backends were
+PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`). Since v3.1 the
+toolkit is the package `tiff_workflow/` and one file at the root that only
+starts it.
 
-- `convert_tiff.py` -- the interactive wizard. Builds the backends' command
+- `convert_tiff.py` -- the entry point and nothing else (`tiff_workflow.cli.main`):
+  `python convert_tiff.py` is the wizard, `python convert_tiff.py
+  compress|copy-exif|thumbnails ...` a backend, run in the same process by
+  `tiff_workflow/cli.py` (`run_backend`) without importing the wizard or Rich;
+  `python -m tiff_workflow` is the same. Its folder is the installation
+  (`INSTALL_DIR`; `tw.INSTALL_DIR` in the backends): the settings overlay "next to
+  the scripts" and `manifests/` are there. The modules of the package do not
+  start on their own (relative imports).
+- `tiff_workflow/wizard.py` -- the interactive wizard. Builds the backends' command
   lines and runs them as subprocesses (`_backend_command`: this Python, the
-  script next to the wizard), owns the manifest, the AutoFind search and the
-  multi-step workflows (it gates step 2 on step 1's exit code). Presets
+  installation's `convert_tiff.py`, the backend's subcommand), owns the manifest,
+  the AutoFind search and the multi-step workflows (it gates step 2 on step 1's
+  exit code). Presets
   (menu 5, `--run-preset`, `--list-presets`) are named journal snapshots run
   by `_run_journal`, the same runner as Repeat last. A Diagnose journal
   (kind `diagnose`, settings in `diagnose`, no commands) is REPORT ONLY unless its
   settings carry `convert_padded: true` (an explicit workflow-7 answer, default no);
   then `_run_diagnose_journal` calls `_compress_padded_files`, whose pixel gate
   (`_padded_pixels_status`) and OLD_PADDED backup are what make that safe unattended.
-- `compress_tiff_zip.py` -- TIFF -> ZIP/Deflate, modes 0-9 (`--mode` is required
-  since v3.1; the legacy mode is gone), backups in `OLD_TIFFs/`, thumbnails,
+- `tiff_workflow/compress_tiff_zip.py` -- TIFF -> ZIP/Deflate, modes 0-9 (`--mode` is
+  required since v3.1; the legacy mode is gone), backups in `OLD_TIFFs/`, thumbnails,
   `--exclude-folders`. ONE per-file worker, `process_job`, for every mode.
-- `copy_exif_to_tiff.py` -- EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into
+- `tiff_workflow/copy_exif_to_tiff.py` -- EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into
   the TIFF, optionally compressing it (`--compress-zip`). Worker: `process_pair`.
-- `generate_thumbnails.py` -- sRGB thumbnails, standalone.
-- `tiff_workflow_common.py` -- what the three backends share: the command
+- `tiff_workflow/generate_thumbnails.py` -- sRGB thumbnails, standalone.
+- `tiff_workflow/common.py` -- what the three backends share: the command
   line (`P`, `parse_args`), the settings overlay, the log, every call to
   ImageMagick and exiftool, the gates, the moves, the directory listing, the
-  thread pool (`run_tasks`). It must sit next to the backends. Each backend also
-  runs as `convert_tiff.py compress|copy-exif|thumbnails ...` (`_run_backend`:
-  the script, in the same process).
+  thread pool (`run_tasks`).
   compress and copy_exif also take `--input-dir-file` (one folder per line); the
   wizard's `run_subprocess` switches to it when the command line would pass
   `_CMDLINE_SPILL_CHARS`.
+- `tiff_workflow/__init__.py` -- the release (`TOOLKIT_VERSION`), its only copy.
+- `pyproject.toml` -- the settings of the development tools (`ruff`, `mypy`), nothing else.
 
 ## Hard constraints of the backends
 - **The command line is a contract.** Presets, journals and users' `.bat` files
@@ -59,9 +70,10 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   `tests/test_journal_lines.py` the journal forms (`[subcommand, *args]`, read
   back with the backend's own table and reader).
 - **One copy of everything.** A helper two backends need goes in
-  `tiff_workflow_common.py`, never into both. Since v3.1 the wizard imports
-  that module too (never a backend), and reads the overlay with its functions;
-  its own copies are being removed one by one (v3.1 phase 5). The wizard's own
+  `tiff_workflow/common.py`, never into both. Since v3.1 the wizard imports
+  that module too (never a backend: it reads a backend's `PARAMS` with `ast`),
+  and reads the overlay with its functions; its own copies went in v3.1 phase 5.
+  The wizard's own
   TIFF helpers that remain (`_tiff_sample_layout`,
   `_restore_subfile_types`, `_magick_spec`, ...) serve the padded conversion and
   the purge gate and are a separate pipeline.
@@ -72,8 +84,8 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   worker makes onto a photo is the verified in-place swap of its own file.
 - **The exit code is `main()`'s return value.** `sys.exit` appears once per
   backend, at the entry point; a run function never falls off its end or
-  returns nothing (`tests/test_backend_invariants.py`). `convert_tiff.py`
-  relies on "any error -> exit 1".
+  returns nothing (`tests/test_backend_invariants.py`). The wizard
+  relies on "any error -> a non-zero exit" (1; 2 for a line that cannot run).
 - **Paths are compared with `same_path` / `.lower()`, never `==`.** Windows
   names files without case, and the PowerShell scripts compared that way.
 - **The backends use the standard library only**, and run on Python 3.9.
@@ -111,10 +123,10 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
 
 ## Settings are never hardcoded
 - The user-editable settings are the defaults in the `PARAMS` table at the top
-  of each backend (and the constants at the top of `convert_tiff.py`). Code
+  of each backend (and the constants at the top of `tiff_workflow/wizard.py`). Code
   READS them -- never repeat a default as a literal. A literal equal to the
   default passes every test and silently discards the user's edit.
-- When `convert_tiff.py` passes a setting to a backend, pass it explicitly,
+- When the wizard passes a setting to a backend, pass it explicitly,
   even when it equals the default: omitting it "because it is the default"
   lets a backend whose own setting was edited run with a different value
   than the wizard planned with.
@@ -124,20 +136,21 @@ PowerShell scripts (`docs/powershell_edition.md`; tag `v2.9.1`).
   wizard); its `_BACKEND_PARAM_FALLBACKS` is used only when the script cannot
   be read, and `tests/test_settings_literals.py` pins it to the scripts.
 - **The settings overlay** `.tiff_workflow_settings.json` (env
-  `TIFFWORKFLOW_SETTINGS`, blank = off; else next to the scripts; else the
+  `TIFFWORKFLOW_SETTINGS`, blank = off; else next to `convert_tiff.py`; else the
   user profile) changes those settings without editing a file. It is read by
-  `convert_tiff.py` (`_OVERLAY_SETTINGS`) and by every backend
+  the wizard (`_OVERLAY_SETTINGS`) and by every backend
   (`apply_settings_overlay`). Only the names in a script's `OVERLAY_SPECS`
   table are taken: **never add a safety or per-run parameter to one**
   (tests/test_settings_overlay.py T6 pins the forbidden list). A `--param` on
   the command line wins; a bad file or value changes nothing and warns. Tests
   and the battery switch it off.
 - **Every backend parameter is in `REGISTRY` or in `NOT_OFFERED`** (with the
-  reason) in `convert_tiff.py`; the argv comes from `_emit_all`, in REGISTRY
+  reason) in the wizard; the argv comes from `_emit_all`, in REGISTRY
   order. `tests/test_wizard_registry.py` fails on a new parameter nobody
   decided about, and its golden file `tests/data/wizard_registry_golden.json`
-  is never regenerated (it holds the PowerShell edition's command lines: the
-  arguments must stay byte for byte).
+  is never regenerated: it holds the PowerShell edition's command lines, and
+  since v3.1 the wizard's arguments must be their translation by
+  `tools/legacy_args.py`, option by option.
 
 ## Tool traps (verified, all silent)
 - **exiftool `-tagsfromfile SRCFILE` expands printf codes** in SRCFILE: `%o`
@@ -224,6 +237,10 @@ the suite and the battery.
   a failed gate leaves on disk, what is sent to the tools. Add a rule there by
   RUNNING the code; match the text of the source only for what cannot be run
   (the AST rules at its end).
+- **`ruff` and `mypy` find nothing** (settings in `pyproject.toml`; mypy 1.x, the
+  last that checks Python 3.9): `tests/test_lint.py` runs both, and is skipped
+  in a Python that does not have them (`python -m pip install ruff "mypy<2"`).
+  They are development tools: nothing imports them at run time.
 - **Real-photo battery** -- `python tools/real_photo_battery.py
   --fixtures <folder>` (or `TW_FIXTURES`) runs the backends unattended on COPIES
   of real photos in both lanes and checks the files on disk. Run it before
@@ -233,7 +250,7 @@ the suite and the battery.
   check): extract the old file and run the test against it, then compare the
   restored file's hash with the original bytes.
   ```
-  git show HEAD:compress_tiff_zip.py > <tmpdir>/compress_tiff_zip.py
+  git show HEAD:tiff_workflow/compress_tiff_zip.py > <tmpdir>/compress_tiff_zip.py
   ```
   Never `git stash` for this.
 - **Changing a function's signature OR its return shape** (a new parameter, a
@@ -250,7 +267,7 @@ the suite and the battery.
   the folder, never modify them, work on copies.
 - Fixtures with `%` in the name are built under a safe name and renamed
   (`make_tiff_named`), or `magick` writes `500ff.tif`.
-- **Every subprocess call in `convert_tiff.py` goes through `_run_captured`**
+- **Every subprocess call in the wizard (`tiff_workflow/wizard.py`) goes through `_run_captured`**
   except the version probe (`_probe_version`) and the streaming
   `run_subprocess`; `tests/test_memory_subprocess.py` enforces it.
   `capture_output=True` starts reader threads that can hang `Thread.start()`
@@ -353,9 +370,9 @@ change, ask the owner: will the coder be a cheap model (DeepSeek, Kimi, GLM,
   README's Acknowledgments.
 - An audit round is one `fix(audit-round-N): ...` commit plus its
   `docs/bugs_fixed.md` section.
-- The release number lives in two places: `TOOLKIT_VERSION` in
-  `convert_tiff.py` (the Windows program's build reads it there) and in
-  `tiff_workflow_common.py` (`tests/test_version_parity.py`), and it must match
+- The release number has one copy, `TOOLKIT_VERSION` in
+  `tiff_workflow/__init__.py` (the Windows program's build reads it there;
+  `tests/test_version_parity.py` fails on a second copy), and it must match
   the newest `docs/CHANGELOG.md` section (`tests/test_diagnose_preset.py`).
 - Commit or push only when the owner asks.
 - **Every tiff-workflow release updates tiff-workflow-exe too** (owner's rule,
@@ -368,8 +385,11 @@ change, ask the owner: will the coder be a cheap model (DeepSeek, Kimi, GLM,
   program from a hostile, internet-marked folder; must pass) before it is
   published as a regular release. A bundled tool update (ExifTool,
   ImageMagick: URL + SHA-256 in its `TOOLS`) goes the same way with the next
-  `PACKAGE_REVISION`. A new file the backends need (as
-  `tiff_workflow_common.py` was) must be added to its `SCRIPT_NAMES`.
+  `PACKAGE_REVISION`. Its `build.py` copies `convert_tiff.py` and every `.py` of
+  `tiff_workflow/` (nothing to list) and reads the release from
+  `tiff_workflow/__init__.py`; its `tiff-workflow.spec` analyses the package and
+  leaves it OUT of the bundle, so the plain files in the program's `scripts/` are
+  what runs (a setting edited there counts).
 
 ## Pending list
 The owner keeps one list of everything still pending, across all repos, in

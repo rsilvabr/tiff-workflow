@@ -2,7 +2,7 @@
 
 Unified Python/Rich wizard for TIFF processing. Use this for guided workflows with AutoFind, persistent config, and streaming output from the backends.
 
-**Requires:** Python 3.9+, ImageMagick 7, exiftool. Rich (`pip install rich`) is optional: without it the wizard falls back to a plain-text UI. No PowerShell is needed: the backends (`compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and the module they share, `tiff_workflow_common.py`) are Python scripts next to the wizard, started with the same Python that runs it. The PowerShell backends of v2.9.1 and earlier are described in [powershell_edition.md](powershell_edition.md).
+**Requires:** Python 3.9+, ImageMagick 7, exiftool. Rich (`pip install rich`) is optional: without it the wizard falls back to a plain-text UI. No PowerShell is needed: the backends (`compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and the module they share, `common.py`) are Python modules of the folder `tiff_workflow/`, beside the wizard (`wizard.py`), and the wizard starts each with the same Python that runs it, as `convert_tiff.py compress`, `copy-exif` or `thumbnails`. The PowerShell backends of v2.9.1 and earlier are described in [powershell_edition.md](powershell_edition.md).
 
 ---
 
@@ -483,7 +483,9 @@ says the budget and what the typical and the largest file need.
 The settings at the top of the scripts -- folder names, timeouts, thumbnail defaults -- can be
 changed **without editing a `.py`**: they live in one JSON file, read by this wizard
 and by the three backends, and menu **[6]** edits it. In a backend, the settings are the
-defaults of the `PARAMS = (P("name", "kind", default, ...), ...)` table at the top of the file.
+defaults of the `PARAMS = (P("name", "kind", default, ...), ...)` table at the top of the file
+(`tiff_workflow/compress_tiff_zip.py` and the other two; the wizard's own at the top of
+`tiff_workflow/wizard.py`).
 
 ```json
 {
@@ -496,7 +498,7 @@ defaults of the `PARAMS = (P("name", "kind", default, ...), ...)` table at the t
 
 **Where the file is** (first that applies): the path in the environment variable
 `TIFFWORKFLOW_SETTINGS` (**set but empty = no overlay at all**), else
-`.tiff_workflow_settings.json` next to the scripts if it is there, else the same name in the
+`.tiff_workflow_settings.json` next to `convert_tiff.py` if it is there, else the same name in the
 user profile (`%USERPROFILE%`). Menu 6 shows which one it is using. `copy_exif` is the section
 of `copy_exif_to_tiff.py`. Since v3.1 a name is the one of the code and of the option
 (`zip_subfolder_name`, `--zip-subfolder-name`); a name written for v3.0.0 or earlier
@@ -561,8 +563,8 @@ No CLI flags are required -- the wizard is fully interactive. `--run-preset` and
 `--list-presets` are for Task Scheduler/cron: see
 [Presets (menu 5)](#presets-menu-5). `--version` prints before any config, menu, dependency
 check or network access. `convert_tiff.py compress|copy-exif|thumbnails ...` runs that
-backend exactly as `python compress_tiff_zip.py ...` (and the other two) would, with the
-command line of v3.1 ([command_line.md](command_line.md)).
+backend, without loading the wizard, with the command line of v3.1
+([command_line.md](command_line.md)).
 
 The release is also in the main menu's title, on the first line of the logs the wizard
 writes (`Logs/convert_tiff/`), and on the first line of every backend's log.
@@ -595,7 +597,7 @@ A new release is out: v3.1.0 (this copy is 3.0.0) -- [U] in the menu opens its p
 
 ## Output
 
-The wizard calls `compress_tiff_zip.py`, `copy_exif_to_tiff.py`, or `generate_thumbnails.py` as a subprocess (started with the same Python that runs the wizard) and streams their output with color coding:
+The wizard runs each backend as a subprocess -- the same Python, `convert_tiff.py compress`, `copy-exif` or `thumbnails` -- and streams its output with color coding:
 - `[OK]` lines -- green
 - `[ERROR]` lines -- red
 - `[WARNING]` / `[WARN]` lines -- yellow

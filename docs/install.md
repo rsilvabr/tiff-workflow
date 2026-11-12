@@ -88,6 +88,7 @@ python convert_tiff.py
 | `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download the `.zip` with `_64` suffix |
 | `ModuleNotFoundError: No module named 'rich'` | `rich` installed in a different Python version | Run `python -m pip install rich` |
 | PATH still not working | Terminal not restarted | Close and reopen the terminal completely |
-| `No module named 'tiff_workflow_common'` | A backend was copied somewhere on its own | Keep `tiff_workflow_common.py` in the same folder as the three backends |
+| `No module named 'tiff_workflow'` | `convert_tiff.py` was copied without the folder `tiff_workflow` | Keep the folder `tiff_workflow` next to `convert_tiff.py` (copy both) |
+| `attempted relative import with no known parent package` | A file of `tiff_workflow\` was started on its own | Start it through `convert_tiff.py`: `python convert_tiff.py compress ...` (also `copy-exif`, `thumbnails`) |
 | "ERROR (exiftool check) — cannot detect compression" | exiftool can't read the file | `exiftool -s -s -s -Compression photo.tif` — should output: Deflate, LZW, or nothing (uncompressed) |
 | "ERROR (magick) — compression failed" | magick can't read the file | `magick identify -verbose photo.tif` — should display image info without errors |

@@ -1,7 +1,8 @@
 # The command line (v3.1)
 
-v3.1 gives the three scripts the usual Python command line. A `.bat`, a scheduled task or a
-shortcut written for v3.0.0 or earlier stops working until it is rewritten: the scripts refuse
+v3.1 gives the three backends the usual Python command line, and one entry point:
+`python convert_tiff.py compress|copy-exif|thumbnails ...`. A `.bat`, a scheduled task or a
+shortcut written for v3.0.0 or earlier stops working until it is rewritten: the backends refuse
 the old form (exit code 2, nothing touched) and say where this page is. The table below
 translates every option; `tools/legacy_args.py` translates a whole line.
 
@@ -14,15 +15,18 @@ translates every option; `tools/legacy_args.py` translates a whole line.
 | a switch | `-DryRun` (`-DryRun:$false` off) | `--dry-run` (`--no-dry-run` off) |
 | names | any case, any unambiguous prefix (`-mo 9`) | written in full, in lower case |
 | a value that starts with `-` | `-ExcludeFolders "-old"` | `--exclude-folders=-old` |
-| the scripts | `python compress_tiff_zip.py ...` | the same, or `python convert_tiff.py compress ...` |
-| help | -- | `--help` lists the options of a script |
+| starting a backend | `python compress_tiff_zip.py ...` | `python convert_tiff.py compress ...` |
+| help | -- | `--help` after the name lists the options of a backend |
 | a command line that cannot run | exit code 1 | exit code 2 (1: a file failed, a folder does not exist) |
 | the settings file | `"ZipSubfolderName": "ZIP"` | `"zip_subfolder_name": "ZIP"` |
 | presets, Repeat last | the saved command line | saved by v3.1 again (see below) |
 
 - **One entry point.** `python convert_tiff.py` is the wizard, as before.
-  `python convert_tiff.py compress ...`, `copy-exif ...` and `thumbnails ...` run a backend
-  exactly as its own script does; the Windows program takes the same three names.
+  `python convert_tiff.py compress ...`, `copy-exif ...` and `thumbnails ...` run a backend;
+  the Windows program takes the same three names. The backends are modules of the folder
+  `tiff_workflow/` next to `convert_tiff.py` and no longer start on their own: a line that
+  started `compress_tiff_zip.py` starts `convert_tiff.py compress` now
+  (`python -m tiff_workflow ...` is the same entry point).
 - **Exit codes.** 0: every file went right. 1: a file failed, an input folder does not exist,
   a tool is missing, a folder or file named on the line is not usable. 2: the line cannot
   run as written -- an unknown option, a missing `--mode`, `--mode 10`, `--input-dir` together
@@ -55,7 +59,7 @@ The value of an option is written after it, as before: `--workers 8`,
 `--duplicate-action Skip`. The last column is the name in the settings file, for the options
 the file can change.
 
-### compress_tiff_zip.py (`convert_tiff.py compress`)
+### tiff_workflow/compress_tiff_zip.py (`convert_tiff.py compress`)
 
 | v3.0.0 and before | v3.1 | settings file |
 |---|---|---|
@@ -91,7 +95,7 @@ the file can change.
 | `-InputDirFile <value>` | `--input-dir-file <value>` |  |
 | `-RestoreStranded` / `-RestoreStranded:$false` | `--restore-stranded` / `--no-restore-stranded` |  |
 
-### copy_exif_to_tiff.py (`convert_tiff.py copy-exif`)
+### tiff_workflow/copy_exif_to_tiff.py (`convert_tiff.py copy-exif`)
 
 | v3.0.0 and before | v3.1 | settings file |
 |---|---|---|
@@ -114,7 +118,7 @@ the file can change.
 | `-WorkerMemoryFraction <value>` | `--worker-memory-fraction <value>` | `worker_memory_fraction` |
 | `-InputDirFile <value>` | `--input-dir-file <value>` |  |
 
-### generate_thumbnails.py (`convert_tiff.py thumbnails`)
+### tiff_workflow/generate_thumbnails.py (`convert_tiff.py thumbnails`)
 
 | v3.0.0 and before | v3.1 | settings file |
 |---|---|---|
