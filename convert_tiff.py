@@ -6,7 +6,7 @@ Unified wizard for TIFF processing workflows:
   [1] Compress TIFFs  → Zip/Deflate, modes 0-9 (any folder)
   [2] Fuji: Copy EXIF from JPEG to TIFF (AutoFind, S3/S5 Pro)
   [3] Fuji: Compress → Zip/Deflate (AutoFind, S3/S5 Pro)
-  [4] Fuji: Copy+Compress combined in one pass (AutoFind, S3/S5 Pro)
+  [4] Fuji: Copy+Compress, one after the other (AutoFind, S3/S5 Pro)
   [5] Restore OLD_TIFFs move TIFFs back to parent folder
   [6] Delete OLD_TIFFs verify copy, then purge
   [7] Diagnose TIFFs check if 16-bit is real or padded
@@ -1958,11 +1958,11 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             "Skip multi-page TIFFs.", danger=True),
         Opt("SkipLzwAsCompressed", "skip_lzw", "bool", "files", "asked", "Skip LZW",
             "Treat LZW files as already compressed and ignore them."),
-        Opt("Overwrite", "overwrite", "flag", "safety", "asked", "Overwrite",
+        Opt("Overwrite", "overwrite", "flag", "safety", "internal", "Overwrite",
             "Replace an existing output.", danger=True),
         Opt("DeleteSource", "delete_source", "flag", "safety", "asked", "Delete source",
             "Mode 8: delete the source after the output is verified.", danger=True),
-        Opt("ForceParallel", "force_parallel", "true_flag", "performance", "asked",
+        Opt("ForceParallel", "force_parallel", "true_flag", "performance", "internal",
             "Force parallel", "Kept for presets saved by v2.x; parallel is the default."),
         Opt("ForceSequential", "force_sequential", "true_flag", "performance", "asked",
             "Force sequential", "One file at a time."),
@@ -2007,9 +2007,9 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
         Opt("OutputDir", "output_dir", "value", "files", "asked", "Output folder",
             "Where the result is written."),
         Opt("DryRun", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
-        Opt("SkipIfTiffHasExif", "skip_exif", "flag", "files", "asked", "Skip if TIFF has EXIF",
+        Opt("SkipIfTiffHasExif", "skip_exif", "flag", "files", "internal", "Skip if TIFF has EXIF",
             "Leave a TIFF that already carries EXIF alone."),
-        Opt("CompressZip", "compress_zip", "flag", "run", "asked", "Compress to ZIP",
+        Opt("CompressZip", "compress_zip", "flag", "run", "internal", "Compress to ZIP",
             "Compress the TIFF in the same pass."),
         Opt("SafeMode", "safe_mode", "bool", "safety", "asked", "Safe mode",
             "Skip multi-page TIFFs.", danger=True),
@@ -2017,7 +2017,7 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
         # compress_tiff_zip.py): its default is OFF by type, so only "yes" is passed.
         Opt("SkipLzwAsCompressed", "skip_lzw", "true_bool", "files", "asked", "Skip LZW",
             "Treat LZW files as already compressed and ignore them."),
-        Opt("Overwrite", "overwrite", "flag", "safety", "asked", "Overwrite",
+        Opt("Overwrite", "overwrite", "flag", "safety", "internal", "Overwrite",
             "Replace an existing output.", danger=True),
         # step_basic_params asks this for every workflow. It used to be dropped here, so in
         # workflow 4 the exclusion applied to the Compress step and silently not to the
@@ -4703,7 +4703,7 @@ WORKFLOW_OPTIONS = [
     ("1", "Compress TIFFs", "To Zip/Deflate, modes 0-9 (any folder)"),
     ("2", "Fuji: Copy EXIF", "From JPEG to TIFF (AutoFind, S3/S5 Pro)"),
     ("3", "Fuji: Compress", "To Zip/Deflate (AutoFind, S3/S5 Pro)"),
-    ("4", "Fuji: Copy + Compress", "Combined in one pass (AutoFind, S3/S5 Pro)"),
+    ("4", "Fuji: Copy + Compress", "Copy EXIF, then compress (AutoFind, S3/S5 Pro)"),
     ("5", "Restore OLD_TIFFs", "Move TIFFs from OLD_TIFFs/ to parent folder"),
     ("6", "Delete OLD_TIFFs", "Verify copy matches, then delete"),
     ("7", "Diagnose TIFFs", "Check if 16-bit is real or padded 8-bit"),

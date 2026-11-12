@@ -75,7 +75,7 @@ Eight workflows available:
 - **[1] Compress TIFFs** — To Zip/Deflate, modes 0-9 (any folder)
 - **[2] Fuji: Copy EXIF** — From JPEG to TIFF (Fuji S3/S5 Pro); falls back to the RAF when there is no JPEG
 - **[3] Fuji: Compress** — To Zip/Deflate (Fuji S3/S5 Pro)
-- **[4] Fuji: Copy + Compress** — Combined in one pass (Fuji S3/S5 Pro)
+- **[4] Fuji: Copy + Compress** — Copy EXIF, then compress (Fuji S3/S5 Pro)
 - **[5] Restore OLD_TIFFs** — Move TIFFs from OLD_TIFFs/ back to parent folder
 - **[6] Delete OLD_TIFFs** — Delete OLD_TIFFs/ after verifying parent copy matches
 - **[7] Diagnose TIFFs** — Check if 16-bit TIFFs are real 16-bit or padded 8-bit

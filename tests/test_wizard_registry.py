@@ -378,3 +378,23 @@ def test_T4_a_saved_workflow_with_advanced_rebuilds_the_same_argv(tmp_path, monk
 
 if __name__ == "__main__":
     sys.exit(__doc__)
+
+
+def test_every_asked_option_is_set_by_a_wizard_step():
+    """v3.1 phase 6 (W-O15): Overwrite, SkipIfTiffHasExif and ForceParallel were registered as
+    "asked" and no step asked them (only a hand-edited preset could set them). Every "asked"
+    option's workflow key is assigned somewhere in the wizard (workflow["key"] = ..., or a
+    key of a workflow dict literal)."""
+    import ast
+    tree = ast.parse(Path(convert_tiff.__file__).read_text(encoding="utf-8"))
+    set_keys = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
+                and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+            set_keys.add(node.slice.value)
+        if isinstance(node, ast.Dict):
+            set_keys.update(k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str))
+    missing = sorted({o.key for opts in convert_tiff.REGISTRY.values() for o in opts
+                      if o.level == "asked" and o.kind != "none"       # thumbnails: own command
+                      and o.key not in set_keys})
+    assert not missing, f"registered as asked, set by no step: {missing}"
