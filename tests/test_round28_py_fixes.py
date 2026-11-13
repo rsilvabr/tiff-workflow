@@ -657,13 +657,16 @@ def test_autofind_has_one_order(tmp_path):
 def test_one_yes_no_reader_for_both_screens(monkeypatch):
     """v3.1 phase 6 (T2, W-O24): six readers disagreed -- "yes" typed out counted as NO in 22
     plain-screen questions, the Portuguese "s"/"sim" as NO nearly everywhere. One reader now,
-    the same words on both screens; anything else is the question's default."""
+    the same words on both screens; Enter is the question's default, and anything else is
+    asked again (None here; review of v3.1, V2: the plain screen took the default for it)."""
     for a in ("y", "Yes", " S ", "sim"):
         assert ct._yes(a, False) is True, a
     for a in ("n", "NO", "nao", "não"):
         assert ct._yes(a, True) is False, a
-    for a in ("", "maybe", "1"):
+    for a in ("", "  ", None):
         assert ct._yes(a, False) is False and ct._yes(a, True) is True, a
+    for a in ("maybe", "1", "nope", "não!"):
+        assert ct._yes(a, False) is None and ct._yes(a, True) is None, a
     if ct.RICH_AVAILABLE:
         import io
         from rich.console import Console

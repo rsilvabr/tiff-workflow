@@ -96,15 +96,19 @@ _YES_WORDS = ("y", "yes", "s", "sim")
 _NO_WORDS = ("n", "no", "nao", "não")
 
 
-def _yes(answer, default: bool) -> bool:
-    """A typed answer read as yes/no; anything else (Enter included) is the question's
-    default -- "no" for every question that deletes or replaces."""
+def _yes(answer, default: bool) -> Optional[bool]:
+    """A typed answer read as yes/no; Enter is the question's default -- "no" for every
+    question that deletes or replaces --, and None for anything else: the question is asked
+    again (T2; the plain screen used to take the default for it too, so `nope` at a question
+    whose default is yes moved or ran -- review of v3.1, V2)."""
     a = (answer or "").strip().lower()
+    if not a:
+        return default
     if a in _YES_WORDS:
         return True
     if a in _NO_WORDS:
         return False
-    return default
+    return None
 
 
 try:
@@ -220,10 +224,16 @@ def _ask(question, default: Optional[str] = None, style: str = "cyan",
 
 
 def _ask_yes_no(question, default: bool, style: str = "") -> bool:
-    """A yes/no question; the words are _yes's on both screens."""
+    """A yes/no question; the words are _yes's on both screens, and an answer that is neither
+    is asked again on both (the Rich screen's own sentence on the plain one)."""
     if RICH_AVAILABLE and console:
         return Confirm.ask(_rich_text(question, style), default=default)
-    return _yes(input(f"{_plain(question)} [{'Y/n' if default else 'y/N'}]: "), default)
+    prompt = f"{_plain(question)} [{'Y/n' if default else 'y/N'}]: "
+    while True:
+        verdict = _yes(input(prompt), default)
+        if verdict is not None:
+            return verdict
+        print("Please enter Y or N")
 
 
 def _table(columns: List[Dict], rows: List[list], panel: Optional[Dict] = None, **table_kw) -> None:

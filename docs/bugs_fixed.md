@@ -41,9 +41,10 @@ as NO in 22 questions and `s`/`sim` nearly everywhere, and where the default is 
 moved the files. Nine more questions -- the mode 8 confirmations of free compress and of the
 manifest, Delete OLD_TIFFs, "Run it now?" -- had readers of their own.
 - **Fix:** one reader, `_yes`: `y`/`yes`/`s`/`sim` and `n`/`no`/`nao`/`não`, on both screens.
-  Anything else keeps the question's default on the plain screen ("no" wherever something is
-  deleted or replaced) and is asked again on the Rich one. A test by AST flags a reader made by
-  hand.
+  Enter is the question's default ("no" wherever something is deleted or replaced), and
+  anything else is asked again on both screens -- the first version of this fix still took the
+  default for it on the plain screen, so `nope` at a question whose default is yes moved or ran
+  (found by the review of v3.1). A test by AST flags a reader made by hand.
 - **Files:** `tiff_workflow/wizard.py`, `tests/test_round28_py_fixes.py`, `tests/test_manifest.py`
 
 ### MEDIUM - copy_exif ignored `-ExcludeFolders` with `-AutoFind`

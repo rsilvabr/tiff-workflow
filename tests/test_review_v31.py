@@ -190,3 +190,25 @@ def test_a_manifest_journal_with_names_of_an_older_version_is_refused(tmp_path, 
     else:
         assert rc == 1 and ran == [], out
         assert "cannot be replayed" in out and "save it again" in out, out
+
+
+# --- V2 of phases 5-8: the plain screen asks again ----------------------------------------
+
+@pytest.mark.parametrize("answers, default, want, asked", [
+    (["nope", "n"], True, False, 2),
+    (["não!", "0", "sim"], True, True, 3),
+    (["cancel", ""], True, True, 2),                  # Enter after it: the default
+    (["x", "n"], False, False, 2),
+])
+def test_the_plain_screen_asks_again_after_an_unknown_answer(monkeypatch, capsys, answers, default,
+                                                             want, asked):
+    """V2: an answer that is neither yes nor no took the question's default on the plain screen,
+    so `nope`, `cancel` or `não!` at "Move all files back to parent folder? [Y/n]" moved the
+    files. It is asked again now, as on the Rich screen (T2)."""
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    it = iter(answers)
+    prompts = []
+    monkeypatch.setattr("builtins.input", lambda p="": prompts.append(p) or next(it))
+    assert ct._ask_yes_no("Move all files back to parent folder?", default) is want
+    assert len(prompts) == asked, prompts
+    assert capsys.readouterr().out.count("Please enter Y or N") == asked - 1
