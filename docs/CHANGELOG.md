@@ -18,7 +18,7 @@ Python command line, `--mode 9 --input-dir "D:\photos" --no-safe-mode`, through 
 shortcut written for v3.0.0 or earlier is refused (exit code 2, nothing touched) until it is
 rewritten -- [command_line.md](command_line.md) translates every option. Presets and *Repeat last*
 saved by v3.0.0 or earlier no longer run: save them again. The settings file takes the new names.
-**Copied over a v3.0.0 folder, v3.1 leaves the five loose scripts of v3.0.0 there: delete
+**Copied over a v3.0.0 folder, v3.1 leaves four loose scripts of v3.0.0 there: delete
 `compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and `tiff_workflow_common.py`.** Until then a `.bat` that starts one of them still runs v3.0.0, without any fix of
 v3.1, silently (the wizard's start panel names them). Whoever only uses the wizard's menus has
 nothing else to change.
