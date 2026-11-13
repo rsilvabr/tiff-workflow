@@ -1654,7 +1654,7 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
     backup when one of that name exists and a .tiff source produces a .tif output."""
 
     def _run_purge(self, tmp_path, monkeypatch, answers=True):
-        folder = tmp_path / "root"
+        folder = tmp_path / "伊豆沼 [FINAL] 50% x"
         old_dir = folder / "OLD_TIFFs"
         old_dir.mkdir(parents=True)
         (old_dir / "img.tif").write_bytes(b"tiffdata")
@@ -1692,7 +1692,7 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
 
     def _run_purge_scripted(self, tmp_path, monkeypatch):
         """_run_purge with the answers left to the caller's input() double (plain screen)."""
-        folder = tmp_path / "root"
+        folder = tmp_path / "伊豆沼 [FINAL] 50% x"
         old_dir = folder / "OLD_TIFFs"
         old_dir.mkdir(parents=True)
         (old_dir / "img.tif").write_bytes(b"tiffdata")
@@ -1742,7 +1742,7 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         and the backup deleted after them; something that changed the copy in between (an
         edit, another run) did not stop the deletion. Size and write time are compared right
         before; a change keeps the backup."""
-        folder = tmp_path / "root"
+        folder = tmp_path / "伊豆沼 [FINAL] 50% x"
 
         def answer(prompt="", *a, **k):
             if "Delete" in prompt:
@@ -1762,6 +1762,58 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         self._run_purge_scripted(tmp_path, monkeypatch)
         out = capsys.readouterr().out
         assert (folder / "OLD_TIFFs" / "img.tif").exists(), "the backup of a changed copy was deleted"
+        assert "KEPT (changed since it was checked): OLD_TIFFs" in out and "1 kept" in out, out
+
+
+    @pytest.mark.parametrize("what", ["edited", "removed"])
+    def test_a_copy_that_changes_while_the_tree_is_checked_keeps_its_backup(self, tmp_path, monkeypatch,
+                                                                            capsys, what):
+        """Review of v3.1 phases 5-8, T1: the size and write time of a pair were taken once the
+        WHOLE tree was checked. A copy checked early and changed while the rest was still being
+        checked (on a big tree, the long phase) entered that record already changed, and its
+        backup was deleted: the photo was gone. They are taken now by the worker that compares
+        the pair, right before the comparison. Here, one worker: while `b` is checked, the
+        copy of `a` (already checked) is rewritten or removed."""
+        folder = tmp_path / "伊豆沼 [FINAL] 50% x"
+        old_dir = folder / "OLD_TIFFs"
+        old_dir.mkdir(parents=True)
+        for name in ("a 1 [x].tif", "b 2 [x].tif"):
+            (old_dir / name).write_bytes(b"tiffdata " + name.encode())
+            (folder / name).write_bytes(b"tiffdata " + name.encode())
+        real_verdict = convert_tiff._purge_verdict
+
+        def verdict(item):
+            if item[0].name.startswith("b "):             # while b is checked, a changes
+                target = folder / "a 1 [x].tif"
+                if what == "edited":
+                    target.write_bytes(b"ANOTHER IMAGE, WRITTEN WHILE b WAS CHECKED")
+                else:
+                    target.unlink()
+            return real_verdict(item)
+
+        def fake_run(cmd, **kwargs):
+            r28 = _fake_round28_exiftool(cmd, kwargs)
+            if r28:
+                return r28
+            cmd = [str(a) for a in cmd]
+            if "compare" in cmd:
+                return SimpleNamespace(returncode=0, stdout="0 (0)", stderr="")
+            fmt = cmd[cmd.index("-format") + 1] if "-format" in cmd else ""
+            if fmt == "%n\n":
+                return SimpleNamespace(returncode=0, stdout="1\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="10 10", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setattr(convert_tiff, "_purge_verdict", verdict)
+        monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, prompt: folder)
+        monkeypatch.setattr(convert_tiff, "_purge_confirm", lambda: True)
+        monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+        cfg = SimpleNamespace(config=ToolConfig())
+        cfg.config.last_workers = 1                       # a, then b, in that order
+        convert_tiff.run_purge_old_tiffs(cfg)
+        out = capsys.readouterr().out
+        assert (old_dir / "a 1 [x].tif").exists(), f"the backup of a copy {what} during the check was deleted"
+        assert not (old_dir / "b 2 [x].tif").exists(), "b verified and did not change: its backup goes"
         assert "KEPT (changed since it was checked): OLD_TIFFs" in out and "1 kept" in out, out
 
 

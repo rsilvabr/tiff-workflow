@@ -4372,9 +4372,20 @@ def _purge_verdict(item) -> Optional[Tuple[Path, Path, str]]:
     return None
 
 
-def _purge_verify(items: list, cfg) -> Tuple[list, list]:
-    """(orphans, mismatches): the backups with no copy in the parent, and the ones whose copy
-    did not verify -- both are KEPT. The workers are capped for the memory a compare takes."""
+def _purge_check(item) -> Tuple[Optional[Tuple[Path, Path, str]], tuple]:
+    """(_purge_verdict of the pair, how the pair looked right BEFORE it was compared): the size
+    and write time of both files, taken by the worker that compares them (W-O16). A pair that
+    changes during its own comparison, or any time after it -- while the rest of a big tree is
+    still being checked, or while the questions are open -- is then kept by _purge_delete."""
+    before = (_size_and_time(item[0]), _size_and_time(item[1]))
+    return _purge_verdict(item), before
+
+
+def _purge_verify(items: list, cfg) -> Tuple[list, list, Dict]:
+    """(orphans, mismatches, checked_as): the backups with no copy in the parent, and the ones
+    whose copy did not verify -- both are KEPT --, and how each pair looked right before it was
+    compared (_purge_check), for _purge_delete. The workers are capped for the memory a
+    compare takes."""
     # A backup whose parent counterpart is simply ABSENT is not a mismatch: there is nothing
     # to compare and nothing that may be deleted, so it is kept and reported. It used to be
     # lumped in with real mismatches and blocked the whole purge -- which a healthy folder
@@ -4382,14 +4393,16 @@ def _purge_verify(items: list, cfg) -> Tuple[list, list]:
     # exists (photo_20260805_101500.tif) and a photo.tiff source produces a photo.tif output.
     orphans: List[tuple] = []
     mismatches: List[tuple] = []
+    checked_as: Dict = {}
     workers = clamp_workers(cfg.config.last_workers or cfg.config.default_workers)
     workers = _memory_capped_pool_workers(workers, [it[0] for it in items if tw.is_tiff_name(str(it[0]))], tw.COMPARE_BYTES_PER_PIXEL, "copy verification")
     with _timeout_load(workers), \
             concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        for result in executor.map(_purge_verdict, items):
+        for item, (result, before) in zip(items, executor.map(_purge_check, items)):
+            checked_as[(item[0], item[1])] = before
             if result:
                 (orphans if result[2] == _MISSING_PARENT else mismatches).append(result)
-    return orphans, mismatches
+    return orphans, mismatches, checked_as
 
 
 def _purge_report(folder: Path, old_dirs: list, items: list, orphans: list, mismatches: list) -> None:
@@ -4520,7 +4533,7 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
         _say("No files found in OLD_TIFFs folders.", "yellow")
         return True
 
-    orphans, mismatches = _purge_verify(items, cfg)
+    orphans, mismatches, checked_as = _purge_verify(items, cfg)
     # A file that does not verify is KEPT -- and only that file. One mismatch used to abort
     # the purge for the entire tree, so a single bad conversion (or, before the thumbnail
     # rule above, any file compressed with --generate-thumbnail) left the user with no way to
@@ -4528,10 +4541,10 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     # exists to prevent.
     kept = {(k[0], k[1]) for k in orphans + mismatches}
     deletable = [it for it in items if (it[0], it[1]) not in kept]
-    # What each verified pair looked like when it was checked: the deletion below comes after
-    # the questions -- minutes later, or at the end of a big tree -- and re-checks this first
-    # (v3.1 phase 6, W-O16, the owner's choice: size and write time, not a second full compare).
-    checked_as = {(it[0], it[1]): (_size_and_time(it[0]), _size_and_time(it[1])) for it in deletable}
+    # `checked_as`: what each pair looked like right before it was compared. The deletion below
+    # comes after the rest of the tree and the questions -- minutes later on a big tree -- and
+    # re-checks it first (v3.1 phase 6, W-O16, the owner's choice: size and write time, not a
+    # second full compare; taken per pair since the review of phases 5-8, T1).
 
     _purge_report(folder, old_dirs, items, orphans, mismatches)
     if not deletable:

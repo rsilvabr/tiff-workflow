@@ -58,9 +58,12 @@ folder with an excluded name, or named so, was processed.
 **Issue:** each pair was compared before the questions and the backup deleted after them, with
 only an `exists()` in between -- minutes later, or at the end of a big folder. An edit or another
 run that changed the copy meanwhile did not stop the deletion.
-- **Fix (the owner's choice of check):** the size and write time of both files are recorded right
-  after the comparison and compared again right before each deletion; a change, or the copy gone,
-  keeps the backup (`KEPT (changed since it was checked)`), and the summary counts them.
+- **Fix (the owner's choice of check):** the size and write time of both files are taken by the
+  worker that compares the pair, right before the comparison, and compared again right before
+  each deletion; a change, or the copy gone, keeps the backup (`KEPT (changed since it was
+  checked)`), and the summary counts them. The first version took them once the WHOLE tree was
+  checked, so a copy changed while the rest of a big tree was still being checked kept no backup
+  (found by the review of v3.1, with real files: the photo was gone).
 - **Files:** `tiff_workflow/wizard.py`, `tests/test_regression_classes.py`
 
 ### MEDIUM - Wizard, Restore: a rule of its own for "nothing in its place"
