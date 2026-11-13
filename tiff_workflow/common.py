@@ -255,6 +255,13 @@ def parse_args(argv, params):
     try:
         given = vars(_new_parser(params).parse_args(argv))
     except UsageError as e:
+        # A value that starts with '-' right after an option that takes one (--exclude-folders
+        # -old) is not the line of v3.0.0: say how to write it (audit round 29).
+        takes_value = {cli_name(p.name) for p in params if p.kind not in ("switch", "bool")}
+        for prev, word in zip(argv, argv[1:]):
+            if prev in takes_value and _OLD_FORM.match(word):
+                raise UsageError(f"{e} -- a value that starts with '-' is written "
+                                 f"{prev}={word}") from None
         if any(_OLD_FORM.match(a) for a in argv):
             raise UsageError(f"{e} -- the command line of v3.0.0 (-Name value) is written "
                              f"--name value since v3.1: tools/legacy_args.py translates a "
@@ -270,9 +277,9 @@ def parse_args(argv, params):
 # `.tiff_workflow_settings.json` changes the settings at the top of the scripts without
 # editing them. Only the names in a script's OVERLAY_SPECS are taken, each checked against its
 # spec; nothing that deletes, overwrites or is chosen per run is ever in a spec table. A
-# -Param on the command line wins; a bad file or value changes nothing and warns.
-# The three functions below are copies of convert_tiff.py's (tests/test_settings_overlay.py
-# keeps them identical): the wizard plans with the values the backend will run with.
+# --param on the command line wins; a bad file or value changes nothing and warns.
+# The wizard reads the overlay with these same functions (one copy since v3.1 phase 5): it
+# plans with the values the backend will run with.
 
 SETTINGS_OVERLAY_FILE = ".tiff_workflow_settings.json"
 SETTINGS_OVERLAY_ENV = "TIFFWORKFLOW_SETTINGS"
@@ -1275,8 +1282,8 @@ def pixel_identical(src, dst, timeout=30, load_factor=1.0):
     pd = tiff_page_count(dst, timeout)
     if not ps.ok or not pd.ok:
         return False
-    if ps.count != pd.count:
-        return False
+    if ps.count != pd.count or ps.count < 1:
+        return False        # no page compared is no proof (audit round 29)
     # '[i]' turns these into filename SPECS: '%' has to be escaped or magick opens another file
     src_spec = magick_path_spec(src)
     dst_spec = magick_path_spec(dst)

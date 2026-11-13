@@ -2474,9 +2474,15 @@ def _restore_stranded_only(stranded) -> bool:
             line = f"  KEPT ({target.name} appeared meanwhile): {f}"
         else:
             try:
-                _safe_move(f, target)
+                # The backend's way (--restore-stranded): os.rename never overwrites on
+                # Windows, so a file that appeared after the check above stays (audit round
+                # 29: _safe_move replaced it). OLD_TIFFs sits in the target's own folder.
+                os.rename(tw.long_path(str(f)), tw.long_path(str(target)))
                 moved += 1
                 line = f"  RESTORED: {target}"
+            except FileExistsError:
+                kept += 1
+                line = f"  KEPT ({target.name} appeared meanwhile): {f}"
             except Exception as e:  # one unmovable file must not stop the rest
                 failed += 1
                 line = f"  FAILED: {f.name} -- {e}"
@@ -2509,9 +2515,17 @@ def _move_compressed_twin_aside(restored: Path) -> int:
     copies; every tool skips it as output, none takes it for a backup), never deleted, never
     onto a file there (a taken name is numbered). Returns 1 when moved (v3.1 phase 6,
     W-O17, the owner's choice: the folder used to keep both, without a word). The original
-    is back BEFORE this runs: a move that fails leaves both side by side, said."""
+    is back BEFORE this runs: a move that fails leaves both side by side, said.
+    Only ITS copy goes, proven by the pixel compare Delete OLD_TIFFs uses: a folder that held
+    two photos, x.tif and x.tiff, keeps the other one where it is (audit round 29: any x.tif
+    was moved and called the compressed copy)."""
     twin = restored.with_suffix(".tif")
     if not twin.is_file() or tw.same_path(str(twin), str(restored)):
+        return 0
+    same, detail = _compare_tiff_metadata(restored, twin)
+    if not same:
+        _say(f"  KEPT BESIDE IT: {twin.name} -- not the compressed copy of the restored "
+             f"{restored.name} ({detail})", "yellow")
         return 0
     zip_dir = restored.parent / str(_backend_default("compress_tiff_zip.py", "zip_subfolder_name"))
     target = zip_dir / twin.name

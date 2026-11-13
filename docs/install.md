@@ -94,9 +94,9 @@ python convert_tiff.py
 | `exiftool` not recognized / wizard reports exiftool missing | Its folder is not on PATH, or the file is still named `exiftool(-k).exe` | Add the folder to PATH (step 2 above) and reopen the terminal; **rename** to `exiftool.exe` — unlike jxl-photo, this toolkit does not detect the `(-k)` name |
 | `magick` not recognized | ImageMagick folder not on PATH | Add its folder to PATH and reopen the terminal |
 | `exiftool` returns nothing | Downloaded `.tar.gz` (Perl source) | Download the `.zip` with `_64` suffix |
-| `ModuleNotFoundError: No module named 'rich'` | `rich` installed in a different Python version | Run `python -m pip install rich` |
+| The wizard's menus are plain text (no colours, no tables) | `rich` is not installed for the Python that runs the wizard (it is optional: the wizard works without it) | Run `python -m pip install rich` with that same `python` |
 | PATH still not working | Terminal not restarted | Close and reopen the terminal completely |
 | `No module named 'tiff_workflow'` | `convert_tiff.py` was copied without the folder `tiff_workflow` | Keep the folder `tiff_workflow` next to `convert_tiff.py` (copy both) |
 | `attempted relative import with no known parent package` | A file of `tiff_workflow\` was started on its own | Start it through `convert_tiff.py`: `python convert_tiff.py compress ...` (also `copy-exif`, `thumbnails`) |
-| "ERROR (exiftool check) — cannot detect compression" | exiftool can't read the file | `exiftool -s -s -s -Compression photo.tif` — should output: Deflate, LZW, or nothing (uncompressed) |
+| "ERROR (exiftool check) — cannot detect compression" | exiftool can't read the file | `exiftool -s -s -s -Compression photo.tif` — should output a name such as `Uncompressed`, `LZW`, `Deflate` or `Adobe Deflate` |
 | "ERROR (magick) — compression failed" | magick can't read the file | `magick identify -verbose photo.tif` — should display image info without errors |

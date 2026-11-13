@@ -117,7 +117,9 @@ starts it.
   `exiftool(..., check=False)` is only for a batch read whose output counts even
   when one file of it could not be read.
 - **Every tool call goes through the common module**: `run_captured` is the
-  only place that starts a process, `exiftool()` the only way to exiftool,
+  only place that starts a process, `exiftool()` the only way to exiftool
+  (`exiftool_commands`, several commands in one exiftool, goes through the same
+  `_exiftool_process`),
   `magick_probe` (timeout, killed when it passes) for identify/compare/decode
   checks, `magick_run` (no timeout) for conversions only.
 
