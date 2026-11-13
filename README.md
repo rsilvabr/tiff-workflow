@@ -9,7 +9,7 @@ Unified TIFF processing toolkit with four complementary workflows:
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
-**Current version: v3.1.0** (2026-11-13) · [What's new](#whats-new-in-v310) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
+**Current version: v3.1.1-rc1** (2026-11-14, pre-release; last stable: [v3.1.0](docs/CHANGELOG.md#v310)) · [What's new](#whats-new-in-v311-rc1) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
 
 **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; ExifTool and ImageMagick included.
 
@@ -96,7 +96,7 @@ python convert_tiff.py copy-exif --input-dir "F:\Photos\S5pro session"         #
 python convert_tiff.py thumbnails --input-dir F:\Photos --size 256             # standalone sRGB thumbnails
 ```
 
-`--help` after the name lists its options. A yes/no is `--safe-mode` / `--no-safe-mode`. **A line written for v3.0.0 or earlier** (`python compress_tiff_zip.py -Mode 9 -SafeMode:$false`) no longer runs -- once the old scripts are deleted (below) -- and `convert_tiff.py compress` refuses its options: [the table](docs/command_line.md) rewrites it. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
+`--help` after the name lists its options. A yes/no is `--safe-mode` / `--no-safe-mode`. **A line written for v3.0.0 or earlier** (`python compress_tiff_zip.py -Mode 9 -SafeMode:$false`) no longer runs -- once the old scripts are deleted ([updating from v3.0.0](docs/install.md#updating-from-v300)) -- and `convert_tiff.py compress` refuses its options: [the table](docs/command_line.md) rewrites it. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
 
 ---
 
@@ -172,16 +172,13 @@ One line each; the detail is behind each link.
 
 ---
 
-## What's new in v3.1.0
+## What's new in v3.1.1-rc1
 
-2026-11-13. If you only use the wizard's menus, nothing to do. If you type commands, keep `.bat` files or run presets, read the first two lines.
+2026-11-14. A test release (pre-release) of v3.1.1; the last stable release is v3.1.0. Test releases are named `-rc1`, `-rc2`…: that name is what the files rewritten with one record in their history. Nothing to change if you run v3.1.0. **Coming from v3.0.0?** Read [v3.1.0's notes](docs/CHANGELOG.md#v310) first: the command line, the presets and the files changed.
 
-- **The backends take the usual Python command line**, `--mode 9 --input-dir F:\Photos --no-safe-mode`, through one entry point: `python convert_tiff.py compress ...` (also `copy-exif`, `thumbnails`). A line written for v3.0.0 is refused, nothing touched: [the table](docs/command_line.md) rewrites it.
-- **Presets and *Repeat last* saved by v3.0.0 or earlier no longer run:** run the workflow once and save it again. The settings file takes the new names (`zip_subfolder_name`).
-- **The files moved:** everything but `convert_tiff.py` is in the folder `tiff_workflow/`; copy both. Over a v3.0.0 folder, delete `compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and `tiff_workflow_common.py`: a `.bat` that starts one of them would keep running v3.0.0 (the wizard's start panel names them).
-- **The wizard reads every yes/no the same way** on both screens (`y/yes/s/sim`, `n/no/nao/não`; "no" is the default of every question that deletes or replaces), and Restore, Delete OLD_TIFFs, Diagnose and mode 2 got fixes.
+- **Rare edge cases closed** (the final review of v3.1): mode 8 with `--delete-source` keeps a `.tiff` whose compressed copy could not land; copy-exif `--compress-zip` checks the pixels of the file as it will land; Restore OLD_TIFFs moves an `x.tif` aside only when it is the restored photo's own compressed copy.
 
-[Every change](docs/CHANGELOG.md#v310) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
+[Every change](docs/CHANGELOG.md#v311-rc1) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
 
 ---
 

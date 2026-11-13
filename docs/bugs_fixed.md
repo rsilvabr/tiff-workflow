@@ -12,6 +12,54 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.1.1-rc1 - Audit round 29: the final review of v3.1
+
+An independent review of v3.1.0 and of its Windows program (2026-11-14) found nothing that had to
+be fixed; these are its "worth fixing" items and the small ones. The first two were already so
+in v3.0.0.
+
+### MEDIUM - compress mode 8, --delete-source: a source was deleted after its copy failed to land
+**Issue:** `_delete_sources` checked only that something at the destination decoded. With
+`--overwrite`, when the landing of `x.tif` failed (the destination open in another program) and
+an older `x.tif` that the run did not take as a source (a hidden file: another photo) sat there,
+that file passed the check and the `x.tiff` source was deleted. Its verified compressed copy
+stayed in the staging folder, under a name every later run skips; exit code 1.
+- **Fix:** a source whose landing failed (`error_srcs`) is kept, with a WARN line
+  (`source preserved, its compressed copy did not land`); the landing already counted the error.
+- **Files:** `tiff_workflow/compress_tiff_zip.py`, `tests/test_backend_invariants.py`
+
+### LOW - copy_exif --compress-zip: the pixel gate ran before exiftool rewrote the file
+**Issue:** `_zip_staged` ran the pixel gate on the staged ZIP and only then wrote its metadata and
+page markers with exiftool; nothing read the file again before it replaced the TIFF (a path with
+no backup). compress, and the wizard's padded conversion since v3.1, write first and check after,
+and this file said the backends all did. No case of damage is known: exiftool rewrites through
+a temporary file and its status is checked.
+- **Fix:** magick, the layout gate, the metadata and the markers, then the pixel gate -- the
+  order of compress: the gate reads the bytes that land.
+- **Files:** `tiff_workflow/copy_exif_to_tiff.py`, `tests/test_backend_invariants.py`
+
+### LOW - Wizard, Restore OLD_TIFFs: another photo named x.tif was moved aside
+**Issue:** after an `x.tiff` original went back, any `x.tif` next to it was moved into `ZIP\` and
+called its compressed copy (W-O17). In a folder that had held two photos, `x.tif` and `x.tiff`,
+the other photo ended in `ZIP\`, where every tool skips it as output. Nothing was deleted. And
+the Restore of stranded originals checked that the place was free, then moved with a function
+that replaces: a file that appeared in between was replaced (a window of microseconds).
+- **Fix:** only the restored photo's own copy goes, proven by the pixel compare of Delete
+  OLD_TIFFs (`KEPT BESIDE IT ... not the compressed copy` otherwise). The stranded restore renames,
+  as the backend's `--restore-stranded`: a rename never overwrites on Windows.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_regression_classes.py`,
+  `tests/test_audit_round29.py`
+
+### Smaller
+- `pixel_identical` returned True for two files of 0 pages, with nothing compared; it fails
+  closed now.
+- `--exclude-folders -old` was refused (right) with the hint about the command line of v3.0.0;
+  it says to write `--exclude-folders=-old`.
+- The padded conversion's refusal of extra pages nobody can classify (`page_layout_unreadable`)
+  had no test; it has one.
+- Texts: the comment over the settings overlay's readers, `docs/install.md` (`rich` is
+  optional; what exiftool prints for an uncompressed TIFF), `AGENTS.md` (`exiftool_commands`).
+
 ## v3.1.0 - The rework of the Python code
 
 Not an audit round: the backends and the wizard were reworked in ten phases (one implementation

@@ -10,6 +10,22 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v3.1.1-rc1
+
+2026-11-14. **A test release (GitHub pre-release) of v3.1.1**; the last stable release is
+[v3.1.0](#v310). Test releases are named `-rc1`, `-rc2`, ... (as jxl-photo's): that name is what
+a file rewritten with one records in its history (`xmpMM:History`: `tiff-workflow 3.1.1-rc1`),
+so `v3.1.1` stays for the final. Nothing changes for whoever runs v3.1.0: the same command line,
+presets and settings. These close rare edge cases found by the final review of v3.1 (audit
+round 29); none was seen on real photos.
+
+- **compress mode 8 with `--delete-source` keeps a `.tiff` source whose compressed copy could not land.** It took `--overwrite`, an older `.tif` of the same name that the run did not take as a source (a hidden file), and the move failing (the destination open in another program): that older file passed the check and the source was deleted, while its verified compressed copy stayed in the staging folder (exit code 1). The log says `source preserved, its compressed copy did not land` now. Already so in v3.0.0
+- **copy_exif `--compress-zip` checks the pixels of the file as it will land.** The metadata and the page markers are written first and the pixel check comes after, as in compress; the check used to run before exiftool rewrote the file. No case of damage is known. Already so in v3.0.0
+- **Restore OLD_TIFFs.** The compressed `x.tif` next to a restored `x.tiff` goes into `ZIP\` only when it is that photo's own copy (the same pixels): another photo of that name stays where it is (`KEPT BESIDE IT`). Restoring only the stranded originals never moves over a file that appeared after the check, as compress's `--restore-stranded`
+- **Small ones.** The pixel check never passes without comparing a page. `--exclude-folders -old` (a value that starts with `-`) says to write `--exclude-folders=-old`, not that the line is of v3.0.0. The wizard's new-release notice reads the `-rcN` names, and a copy running a test release hears of its final release. `docs/install.md`: `rich` is optional
+
+---
+
 ## v3.1.0
 
 **What breaks for whoever types commands or has presets of v3.0.0.** The backends take the usual

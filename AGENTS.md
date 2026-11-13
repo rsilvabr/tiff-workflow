@@ -376,6 +376,15 @@ change, ask the owner: will the coder be a cheap model (DeepSeek, Kimi, GLM,
   `tiff_workflow/__init__.py` (the Windows program's build reads it there;
   `tests/test_version_parity.py` fails on a second copy), and it must match
   the newest `docs/CHANGELOG.md` section (`tests/test_diagnose_preset.py`).
+- **Test releases** (owner's rule, 2026-11-14, as jxl-photo's since v2.30.1-rc1): tag
+  `vX.Y.Z-rcN`, a GitHub PRE-release (never "latest"), title `vX.Y.Z-rcN — What Changed
+  (Pre-release)`. `TOOLKIT_VERSION` carries the suffix (`3.1.1-rc1`): it is what every file
+  rewritten with that release records in its `xmpMM:History`, so `vX.Y.Z` stays for the final
+  and each edited test release takes the next `-rcN`. The release check (`_version_key`) reads
+  `-rcN` and the old `_betaN`; a test release sorts before its release. The README's version
+  line says "pre-release; last stable: vX.Y.Z", the notes' first line points to the exe's
+  `/releases` (its `/latest` never names a pre-release), and the exe follows with
+  `vX.Y.Z-rcN-exe1`, a pre-release too (its Windows version info takes the numbers only).
 - Commit or push only when the owner asks.
 - **Every tiff-workflow release updates tiff-workflow-exe too** (owner's rule,
   2026-10-25), in the sibling repo `../tiff-workflow-exe`: `TIFFWORKFLOW_TAG`
