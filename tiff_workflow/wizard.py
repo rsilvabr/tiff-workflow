@@ -566,6 +566,19 @@ def _write_json_file(path: Path, data, prefix: str, ensure_ascii: bool = True) -
         raise
 
 
+def _read_config_json(path: Path):
+    """The JSON of the config file. Read as UTF-8 (with or without a BOM: what the wizard writes,
+    and what an editor saves today); a file saved by hand in the ANSI code page still reads.
+    Until the review of v3.1 (V3) it was read in the ANSI code page only, so a hand-edited UTF-8
+    file with a Japanese name was "unreadable". Raises what reading or parsing raises."""
+    data = path.read_bytes()
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode(locale.getpreferredencoding(False), errors="strict")
+    return json.loads(text)
+
+
 class ConfigManager:
     """Persistent JSON config for convert_tiff."""
 
@@ -579,6 +592,9 @@ class ConfigManager:
         # the (tag, page URL) of a newer release, when there is one.
         self.update_poll = None
         self.update_available = None
+        # A config file that exists and could not be read: the first save keeps it aside before
+        # writing over it (_keep_unreadable_config) -- it holds the presets.
+        self._unreadable = False
         self._load_config()
 
     def _get_config_path(self) -> Path:
@@ -587,17 +603,30 @@ class ConfigManager:
     def _load_config(self) -> None:
         if self.config_path.exists():
             try:
-                with open(self.config_path) as f:
-                    data = json.load(f)
-                    for k, v in data.items():
-                        if hasattr(self.config, k):
-                            setattr(self.config, k, v)
-                    self._sanitise_presets()
+                data = _read_config_json(self.config_path)
+                for k, v in data.items():
+                    if hasattr(self.config, k):
+                        setattr(self.config, k, v)
+                self._sanitise_presets()
             except Exception as e:
                 # audit round 16: a corrupt config was swallowed silently and the
                 # wizard ran on defaults with no hint why the saved state vanished.
+                self._unreadable = True
                 print(f"WARNING: ignoring unreadable config file {self.config_path}: {e}",
                       file=sys.stderr)
+
+    def _keep_unreadable_config(self) -> None:
+        """Before the first save over a config file that could not be read: a copy of it next
+        to it (`.convert_tiff_config.json.unreadable`, or with the time when that exists), so
+        the presets in it are not lost to a save of the defaults. Once per run."""
+        self._unreadable = False
+        if not self.config_path.exists():
+            return
+        keep = self.config_path.with_name(self.config_path.name + ".unreadable")
+        if keep.exists():
+            keep = keep.with_name(f"{keep.name}.{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        shutil.copy2(str(self.config_path), str(keep))
+        print(f"WARNING: the unreadable config file was kept as {keep}", file=sys.stderr)
 
     def _sanitise_presets(self) -> None:
         """Drop presets that are not a name -> settings mapping.
@@ -638,6 +667,8 @@ class ConfigManager:
         in place, so a run killed mid-write lost every preset)."""
         try:
             with self._save_lock:
+                if self._unreadable:
+                    self._keep_unreadable_config()
                 _write_json_file(self.config_path, asdict(self.config), ".convert_tiff_config.")
         except Exception as e:
             # audit round 16: same story on save -- a config that silently never
@@ -659,8 +690,7 @@ class ConfigManager:
             data: Dict = {}
             if self.config_path.exists():
                 try:
-                    with open(self.config_path, encoding="utf-8") as f:
-                        data = json.load(f)
+                    data = _read_config_json(self.config_path)
                 except Exception:
                     return
                 if not isinstance(data, dict):

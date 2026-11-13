@@ -93,6 +93,17 @@ ZIP stayed on disk; the next run skipped that copy as `exists in OutputDir`, wit
 - **Files:** `tiff_workflow/compress_tiff_zip.py`, `tiff_workflow/copy_exif_to_tiff.py`,
   `tests/test_backend_invariants.py`
 
+### MEDIUM - A config edited by hand in UTF-8 was unreadable, and the next save erased the presets
+**Issue:** `ConfigManager._load_config` opened the config without an encoding, in the ANSI code
+page; the save (W-O9) writes UTF-8. A file edited by hand in UTF-8 with a Japanese preset or folder
+name failed to decode, the wizard warned and went on with an empty config, and its first save --
+every workflow saves -- wrote the defaults over the file: every preset gone. Already so in v3.0.0;
+found by the review of v3.1.
+- **Fix:** `_read_config_json` reads UTF-8 with or without a BOM, and a file saved in the ANSI code
+  page still reads (the release check's reader too). A config that cannot be read at all is copied
+  to `.convert_tiff_config.json.unreadable` before the first save writes over it.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_review_v31.py`
+
 ### MEDIUM - The config file with the presets was not written atomically
 **Issue:** the wizard wrote its config in place: killed mid-write, it left a truncated file, and
 every preset was lost.

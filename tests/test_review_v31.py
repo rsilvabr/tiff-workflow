@@ -94,3 +94,58 @@ def test_a_page_marker_restore_failure_is_a_failed_conversion(tmp_path, monkeypa
     assert done == {"converted": 0, "failed": [(src, "subfile_restore_failed")]}, done
     assert src.read_bytes() == b"ORIGINAL" * 250
     assert "could not restore per-page SubfileType markers -- original preserved" in capsys.readouterr().out
+
+
+# --- V3 of phases 5-8: the config file is read as UTF-8 ------------------------------------
+
+PRESETS = {"presets": {"夏の伊豆沼": {"kind": "compress", "label": "Compress: 伊豆沼 [FINAL]",
+                                     "commands": [["compress", "--mode", "9", "--input-dir", "G:/2019/伊豆沼 [FINAL]"]],
+                                     "time": "2026-11-13 08:00"}},
+           "last_input_dir": "G:/2019/伊豆沼 [FINAL] 50%"}
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    h = tmp_path / "home 伊豆沼 [x] 50%"
+    h.mkdir()
+    monkeypatch.setenv("USERPROFILE", str(h))
+    monkeypatch.setenv("HOME", str(h))
+    return h
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_a_hand_edited_utf8_config_with_japanese_is_read(home, encoding, capsys):
+    """V3: the config was read in the ANSI code page, so a file edited by hand in UTF-8 (what
+    every editor saves today) with a Japanese name was "unreadable"; the wizard went on with an
+    empty config and its first save wrote it over: every preset gone."""
+    import json
+    (home / ".convert_tiff_config.json").write_bytes(
+        json.dumps(PRESETS, ensure_ascii=False, indent=2).encode(encoding))
+    cfg = ct.ConfigManager()
+    assert list(cfg.config.presets) == ["夏の伊豆沼"]
+    assert cfg.config.last_input_dir == "G:/2019/伊豆沼 [FINAL] 50%"
+    assert "unreadable" not in capsys.readouterr().err
+    cfg.save_config()
+    assert list(ct.ConfigManager().config.presets) == ["夏の伊豆沼"]
+
+
+def test_a_config_saved_in_the_ansi_code_page_still_reads(home):
+    import json
+    import locale
+    text = json.dumps({"last_input_dir": "F:/2025/São Paulo"}, ensure_ascii=False)
+    (home / ".convert_tiff_config.json").write_bytes(text.encode(locale.getpreferredencoding(False)))
+    assert ct.ConfigManager().config.last_input_dir == "F:/2025/São Paulo"
+
+
+def test_an_unreadable_config_is_kept_before_the_first_save(home, capsys):
+    """An unreadable config (here a truncated one) is still not repaired -- but the first save no
+    longer writes the defaults over it without a copy: it may hold every preset."""
+    raw = b'{"presets": {"nightly": {"kind": "compress", "label": "trunc'
+    (home / ".convert_tiff_config.json").write_bytes(raw)
+    cfg = ct.ConfigManager()
+    assert "ignoring unreadable config file" in capsys.readouterr().err
+    cfg.save_config()
+    assert (home / ".convert_tiff_config.json.unreadable").read_bytes() == raw
+    assert "was kept as" in capsys.readouterr().err
+    cfg.save_config()                                     # once per run
+    assert not list(home.glob(".convert_tiff_config.json.unreadable.*"))
