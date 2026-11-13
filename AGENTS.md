@@ -378,7 +378,9 @@ change, ask the owner: will the coder be a cheap model (DeepSeek, Kimi, GLM,
 - **Every tiff-workflow release updates tiff-workflow-exe too** (owner's rule,
   2026-10-25), in the sibling repo `../tiff-workflow-exe`: `TIFFWORKFLOW_TAG`
   in its `build.py` set to the new tag and `PACKAGE_REVISION` back to 1, its
-  README "Current version" line and `docs/version_history.md`, then a tag
+  README -- the "Current version" line AND every example, command line and file
+  name in it: the README ships inside the zip (review of v3.1: it still taught
+  the command line of v3.0.0) -- and `docs/version_history.md`, then a tag
   `vX.Y.Z-exe1`: GitHub Actions builds the zip with a build attestation and
   creates a DRAFT release; `gh attestation verify` on the zip, then
   `python tests/battery_on_exe.py --app <that zip, extracted>` (runs the

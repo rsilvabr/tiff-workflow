@@ -773,8 +773,12 @@ def test_the_padded_markers_go_back_before_the_pixel_gate(tmp_path, monkeypatch)
     file AFTER the last pixel gate, and nothing read the file again. They go back first now,
     so the gate sees the bytes that land. W-O10: their exiftool calls scale the timeout."""
     from test_regression_classes import make_multipage_tiff
-    src = make_multipage_tiff(tmp_path / "p.tif", [0, 1], padded=True)
-    staging = tmp_path / "staging"
+    (tmp_path / "plain").mkdir()                # built under a plain name, then moved (AGENTS.md)
+    make_multipage_tiff(tmp_path / "plain" / "p.tif", [0, 1], padded=True)
+    folder = tmp_path / "伊豆沼 [FINAL] 50% x"     # review of v3.1: the test ran in an ASCII folder
+    (tmp_path / "plain").rename(folder)
+    src = folder / "p.tif"
+    staging = tmp_path / "staging [x] 一時"
     staging.mkdir()
     order = []
     real_restore, real_pixels = ct._restore_subfile_types, ct._padded_pixels_status
