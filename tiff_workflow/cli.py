@@ -35,3 +35,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return run_backend(argv[0], argv[1:])
     from . import wizard
     return wizard.run(argv)
+
+
+if __name__ == "__main__":      # python -m tiff_workflow.cli
+    sys.exit(main())

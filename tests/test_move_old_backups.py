@@ -122,3 +122,16 @@ def test_an_original_deleted_after_planning_keeps_its_backup(library, tmp_path, 
               "--dest", str(tmp_path / "H"), "--go"])
     assert f["healthy"].exists()
     assert "nothing in its original place any more" in capsys.readouterr().out
+
+
+def test_a_folder_of_the_photos_name_is_not_the_photo(tmp_path):
+    """Review of v3.1: place_is_empty took any path that exists for the photo, so a FOLDER
+    named like it made the backup look as if its original were in place -- and --go moved the
+    only copy to the archive disk. Only a file counts now, as in the module common's rule."""
+    cam = tmp_path / "G" / "2025" / HOSTILE / "01_D810"
+    backup = put(cam / "OLD_TIFFs" / "h [x].tif", b"orig-h")
+    (cam / "h [x].tif").mkdir()
+    assert mop.place_is_empty(backup)
+    (cam / "h [x].tif").rmdir()
+    put(cam / "h [x].tif", b"zip-h")
+    assert not mop.place_is_empty(backup)

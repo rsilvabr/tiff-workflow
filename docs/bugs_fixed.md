@@ -142,6 +142,7 @@ code 1 (nothing touched).
 - A failure nobody foresaw while the metadata were written back was a `WARN` and the file went
   on; it is `ERROR (unexpected)` now, with nothing replaced.
 - generate_thumbnails ran at most 16 thumbnails at once whatever `-Workers` said, without a word.
+- `tools/move_old_backups.py` took a FOLDER of the photo's name for the photo (`place_is_empty` asked whether the path exists), and `--go` moved the backup -- the only copy -- to the archive disk; only a file counts now (found by the review of v3.1).
 - Wizard: with `[ ]` in the temp folder, Diagnose and the padded conversion failed every file
   (nothing touched); Diagnose's temp-folder question took `y` for a folder name; Workers and
   Staging were read differently on the two screens; a folder name such as `[/b]` stopped the

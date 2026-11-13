@@ -218,6 +218,20 @@ def test_python_m_tiff_workflow_is_the_entry_point(tmp_path):
     assert rc == 2 and "--mode is required" in out, out
 
 
+def test_python_m_of_the_wizard_and_of_cli_runs_them(tmp_path):
+    """Review 9-10: `python -m tiff_workflow.wizard` (and `.cli`) did nothing and exited 0 --
+    a scheduled task with that line "worked" without running anything."""
+    env = dict(os.environ, TIFFWORKFLOW_SETTINGS="", PYTHONPATH=str(ROOT))
+    for module, args, want in (("tiff_workflow.wizard", ["--version"],
+                                f"tiff-workflow {convert_tiff.TOOLKIT_VERSION}"),
+                               ("tiff_workflow.cli", ["thumbnails", "--help"],
+                                "usage: convert_tiff.py thumbnails")):
+        r = subprocess.run([sys.executable, "-m", module, *args], cwd=str(tmp_path),
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=120, env=env)
+        out = (r.stdout + r.stderr).decode("utf-8", "replace")
+        assert r.returncode == 0 and want in out, (module, out)
+
+
 def test_the_root_holds_only_the_entry_point():
     """v3.1 phase 9 (D4): one .py at the root of the repository, and it only starts the
     package: no function or class of its own, nothing imported but the entry point."""

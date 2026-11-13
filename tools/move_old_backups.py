@@ -103,7 +103,10 @@ def counterparts(backup: Path):
 
 
 def place_is_empty(backup: Path) -> bool:
-    return not any(os.path.exists(_long(c)) for c in counterparts(backup))
+    """True when no FILE is where the backup came from: a folder of the photo's name is not the
+    photo (it used to count as "in place", and the backup -- the only copy -- went to the archive
+    disk; review of v3.1), the module common's rule too."""
+    return not any(os.path.isfile(_long(c)) for c in counterparts(backup))
 
 
 def find(source: Path, roots, folder: str):

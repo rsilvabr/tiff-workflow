@@ -1909,7 +1909,7 @@ def _backend_command(script_name: str, args: List[str]) -> List[str]:
 def _command_backend(cmd) -> Optional[str]:
     """The subcommand a command line of _backend_command runs; None for any other."""
     cmd = [str(a) for a in cmd]
-    if len(cmd) > 2 and Path(cmd[1]).name == ENTRY.name and cmd[2] in SUBCOMMANDS:
+    if len(cmd) > 2 and Path(cmd[1]).name.lower() == ENTRY.name.lower() and cmd[2] in SUBCOMMANDS:
         return cmd[2]
     return None
 
@@ -6404,3 +6404,7 @@ def run(argv: Optional[List[str]] = None) -> int:
         _say("\nInterrupted.", "dim")
         return 1
     return 0
+
+
+if __name__ == "__main__":      # python -m tiff_workflow.wizard
+    sys.exit(run())

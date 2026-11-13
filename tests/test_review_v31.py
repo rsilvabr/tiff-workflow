@@ -212,3 +212,22 @@ def test_the_plain_screen_asks_again_after_an_unknown_answer(monkeypatch, capsys
     assert ct._ask_yes_no("Move all files back to parent folder?", default) is want
     assert len(prompts) == asked, prompts
     assert capsys.readouterr().out.count("Please enter Y or N") == asked - 1
+
+
+# --- the small ones -------------------------------------------------------------------------
+
+def test_a_line_of_v300_in_lower_case_gets_the_hint_too():
+    """Review 5-8: v3.0.0 took names in any case (-mode 9 -inputdir X); such a line was
+    refused with exit 2, right, but without the pointer to the translation."""
+    from tiff_workflow import common as tw
+    from tiff_workflow import compress_tiff_zip as cz
+    with pytest.raises(tw.UsageError) as e:
+        tw.parse_args(["-mode", "9", "-inputdir", f"D:\\{HOSTILE}"], cz.PARAMS)
+    assert "the command line of v3.0.0 (-Name value)" in str(e.value), str(e.value)
+
+
+def test_the_entry_point_is_recognised_in_any_case():
+    """Review 9-10: _command_backend compared the file name with == (AGENTS.md: never)."""
+    for path in ("C:\\x\\convert_tiff.py", f"D:\\{HOSTILE}\\CONVERT_TIFF.PY", "Convert_Tiff.py"):
+        assert ct._command_backend([sys.executable, path, "compress", "--mode", "9"]) == "compress", path
+    assert ct._command_backend([sys.executable, "C:\\x\\compress_tiff_zip.py", "--mode", "9"]) is None

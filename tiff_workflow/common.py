@@ -241,9 +241,9 @@ def help_text(params, prog: str, doc: str = "") -> str:
     return ap.format_help()
 
 
-# A word of the command line of v3.0.0: -Name, one dash and a capital (v3.1 writes --name, and
-# a value that starts with '-' goes as --name=value).
-_OLD_FORM = re.compile(r"-[A-Z]")
+# A word of the command line of v3.0.0: -Name, one dash and a letter -- v3.0.0 took names in
+# any case, -mode too (v3.1 writes --name, and a value that starts with '-' goes as --name=value).
+_OLD_FORM = re.compile(r"-[A-Za-z]")
 
 
 def parse_args(argv, params):
