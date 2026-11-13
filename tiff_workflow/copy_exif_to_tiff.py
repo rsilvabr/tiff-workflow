@@ -271,10 +271,10 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
     if not tw.tiff_sample_layout_kept(src_pages, write_dst):
         drop_staged()
         return f"ERROR (sample layout changed: {' '.join(src_pages)} - original untouched) | {name}"
-    if not tw.pixel_identical(tiff_target, write_dst, timeout, load_factor):
-        drop_staged()
-        return f"ERROR (ZIP pixel verification failed - original untouched) | {name}"
 
+    # The metadata and the page markers go in BEFORE the pixel gate, so the gate reads the
+    # bytes that land, as in compress (audit round 29; until then the gate ran first and
+    # exiftool rewrote the file after it).
     # Same '%' trap as the JPEG copy, for a TIFF whose NAME carries one.
     # The metadata and the page markers go back in one exiftool (v3.1 phase 4).
     try:
@@ -293,6 +293,9 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
     if not done.markers:
         drop_staged()
         return f"ERROR (subfiletype restore failed - original untouched) | {name}"
+    if not tw.pixel_identical(tiff_target, write_dst, timeout, load_factor):
+        drop_staged()
+        return f"ERROR (ZIP pixel verification failed - original untouched) | {name}"
     return None
 
 

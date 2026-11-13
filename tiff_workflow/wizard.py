@@ -4068,8 +4068,9 @@ def _process_single_padded(tiff_path, staging) -> PaddedResult:
                 return res(status)
 
             # The page markers go back BEFORE the pixel gate, so the gate reads the file exactly
-            # as it will land (v3.1 phase 6, W-O11, the owner's choice; the backends do the same
-            # since phase 4). audit round 16: a False return is a refusal (WARN, original kept),
+            # as it will land (v3.1 phase 6, W-O11, the owner's choice; compress does the same
+            # since phase 4, copy_exif since audit round 29). audit round 16: a False return is
+            # a refusal (WARN, original kept),
             # never ignored. After the page-count and layout checks, so an unreadable layout
             # still surfaces as their own status.
             if not _restore_subfile_types(tiff_path, tmp8):

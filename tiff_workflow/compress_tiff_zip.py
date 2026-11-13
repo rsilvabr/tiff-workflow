@@ -1137,6 +1137,12 @@ def _delete_sources(run, outcome):
                 # in place: the original was already replaced by the compressed file
                 continue
             src_name = os.path.basename(t.src)
+            if t.src.lower() in outcome.error_srcs:
+                # Its landing failed (_move_staged, which counted the error): whatever sits at
+                # final_dst is not this run's file -- an older one would pass the check below
+                # (audit round 29).
+                log(f"  -> source preserved, its compressed copy did not land | {src_name}", "WARN")
+                continue
             if not os.path.exists(t.final_dst):
                 run.error(f"ERROR (final destination missing, source preserved) | {src_name}")
                 continue

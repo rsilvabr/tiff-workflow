@@ -115,8 +115,8 @@ every preset was lost.
 **Issue:** the 8-bit file got its page markers (SubfileType) after the pixel gate, and nothing
 read the file again: the bytes that landed were not the ones checked.
 - **Fix (owner's decision: write first, gate after):** the markers go back right after the page
-  count and layout checks, so the pixel gate reads the bytes that land, as in the backends since
-  v3.1; a failed marker write is still its own refusal. Their exiftool calls scale the timeout
+  count and layout checks, so the pixel gate reads the bytes that land, as in compress since
+  v3.1 (copy_exif got the same order in audit round 29, v3.1.1); a failed marker write is still its own refusal. Their exiftool calls scale the timeout
   with the file, like the others.
 - **Files:** `tiff_workflow/wizard.py`, `tests/test_round28_py_fixes.py`
 

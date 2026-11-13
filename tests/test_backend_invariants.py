@@ -91,6 +91,9 @@ class FakeTools:
         m.setattr(tw, "tiff_page_count", lambda p, t=30: tw.PageCount(True, self.pages, ""))
         m.setattr(tw, "tiff_has_only_subfile_pages", self._only_subfile)
         m.setattr(tw, "tiff_has_thumbnail_page", lambda p, t=30: False)
+        # No backend calls tiff_sample_layout directly today (tiff_facts and
+        # tiff_sample_layout_kept, both replaced, answer from self.layout): kept so that a
+        # backend that calls it again still runs no real tool here (review 3-4, a mute double).
         m.setattr(tw, "tiff_sample_layout", self._layout)
         m.setattr(tw, "tiff_facts", self._facts)
         m.setattr(tw, "tiff_sample_layout_kept", self._layout_kept)
@@ -943,7 +946,11 @@ class TestCopyExif:
         assert r.staged.startswith(run.run_id + "_") and tw.LEFTOVER_NAME_RE.search(r.staged)
         assert photo.read_bytes() == b"ORIGINAL", "the worker stages; the move comes after"
         ev = tools.events
-        assert ev.index("layout") < ev.index("pixels") < ev.index("subfile")
+        # Audit round 29 (V2 of the final review of v3.1): the metadata and the page markers
+        # go in BEFORE the pixel gate, so the gate reads the bytes that land, as in compress.
+        last_exif = max(i for i, e in enumerate(ev) if e == "exif")
+        assert ev.index("layout") < ev.index("subfile") < ev.index("pixels"), ev
+        assert last_exif < ev.index("pixels"), ev
 
     def _to_outputdir(self, photo, tmp_path, *argv):
         out = tmp_path / "out 伊豆沼 [x] 100%"
@@ -1040,10 +1047,10 @@ class TestCopyExif:
         assert os.listdir(out) == [r.staged]
         assert photo.read_bytes() == b"ORIGINAL"
         ev = tools.events
-        assert ev.index("magick") < ev.index("layout") < ev.index("pixels") < ev.index("subfile")
+        assert ev.index("magick") < ev.index("layout") < ev.index("subfile") < ev.index("pixels")
         restore = next(c for c in tools.exif_calls if "-all:all" in c)
-        assert ev.index("pixels") < [i for i, e in enumerate(ev) if e == "exif"][-1] < ev.index("subfile"), \
-            "the metadata restore runs between the pixel gate and the subfiletype restore"
+        assert ev.index("layout") < [i for i, e in enumerate(ev) if e == "exif"][-1] < ev.index("pixels"), \
+            "the metadata restore runs before the pixel gate, which reads the bytes that land (round 29)"
         assert restore[-1] == str(out / r.staged)
 
     def test_with_outputdir_and_no_zip_the_copy_carries_the_exif(self, tools, photo, tmp_path):
@@ -1764,6 +1771,22 @@ class TestGroupSteps:
         cz._delete_sources(run, self._outcome(results=[(in_place, replaced)]))
         assert src.exists() and dst.exists() and checked == [], "nothing may be deleted in any of these"
         assert run.err == 1 and dry.err == 0 and other_mode.err == 0
+
+    def test_mode8_keeps_the_source_whose_landing_failed(self, tmp_path, monkeypatch):
+        """Audit round 29 (V1 of the final review of v3.1): the landing of a.tif failed
+        (_move_staged put a.tiff in error_srcs) while an older a.tif -- another photo, hidden
+        from the run -- sat at the destination and decoded. That file passed the check and the
+        .tiff source was deleted; its compressed copy was left in the staging folder."""
+        src, dst, job, result = self._tiff_and_tif(tmp_path)
+        checked = []
+        monkeypatch.setattr(tw, "zip_integrity", lambda p, t=30, load_factor=1.0: checked.append(p) or True)
+        run = compress_run("--mode", "8", "--delete-source", "--overwrite")
+        cz._delete_sources(run, self._outcome(results=[(job, result)], error_srcs={str(src).lower()}))
+        assert src.read_bytes() == b"ORIGINAL" and dst.read_bytes() == b"COMPRESSED"
+        assert ("WARN", f"  -> source preserved, its compressed copy did not land | {src.name}") \
+            in run.log.lines
+        assert checked == [] and run.err == 0, "the landing counted its own error"
+        assert not any("Deleted" in line for _, line in run.log.lines)
 
     def test_a_staged_file_that_failed_its_gate_is_dropped_never_moved(self, tmp_path, monkeypatch):
         """Round 12: a bad ZIP must not replace the original. The staged file goes; the good
