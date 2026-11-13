@@ -6,6 +6,11 @@ shortcut written for v3.0.0 or earlier stops working until it is rewritten: the 
 the old form (exit code 2, nothing touched) and say where this page is. The table below
 translates every option; `tools/legacy_args.py` translates a whole line.
 
+**Copying v3.1 over a v3.0.0 folder?** Delete `compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and `tiff_workflow_common.py`
+from it. A line that starts one of them by name would otherwise go on running v3.0.0, with its own
+command line and none of the fixes of v3.1; the wizard's start panel names them while they are
+there.
+
 ## What changed
 
 | | v3.0.0 and before | v3.1 |

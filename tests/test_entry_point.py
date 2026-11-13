@@ -106,6 +106,27 @@ def test_the_wizard_checks_the_package_next_to_it(tmp_path, monkeypatch):
     (install / PACKAGE / "common.py").unlink()
     (install / PACKAGE / "generate_thumbnails.py").unlink()
     assert backend_scripts() == (False, "missing: generate_thumbnails.py, common.py")
+    (install / "convert_tiff.py").unlink()        # review of v3.1 (9-10, V3): the package alone
+    assert backend_scripts() == (False, "missing: generate_thumbnails.py, common.py, convert_tiff.py")
+
+
+def test_the_start_panel_names_the_scripts_of_v300_left_next_to_it(tmp_path, monkeypatch, capsys):
+    """Review of v3.1 (9-10, T1): v3.1 copied over a v3.0.0 folder leaves its loose scripts
+    there, and a .bat or scheduled task that starts one of them still runs v3.0.0 -- without the
+    fixes of v3.1, silently, exit code 0. The start panel names them; with none, no line."""
+    from backends import install_copy, wizard_uses_install
+    monkeypatch.setattr(convert_tiff, "_probe_version", lambda cmd: None)
+    monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+    install = wizard_uses_install(monkeypatch, convert_tiff, install_copy(tmp_path / HOSTILE))
+    assert "old v3.0.0 scripts" not in {n for n, _ok, _d in convert_tiff.check_dependencies(None)}
+    for name in ("compress_tiff_zip.py", "tiff_workflow_common.py"):
+        (install / name).write_text("# v3.0.0\n", encoding="utf-8")
+    rows = {n: (ok, d) for n, ok, d in convert_tiff.check_dependencies(None)}
+    ok, detail = rows["old v3.0.0 scripts"]
+    assert not ok and detail.startswith("compress_tiff_zip.py, tiff_workflow_common.py next to "), detail
+    convert_tiff.show_environment_panel(None)
+    out = capsys.readouterr().out
+    assert "[!!] old v3.0.0 scripts" in out and "still runs v3.0.0" in out and "Delete them" in out, out
 
 
 def test_the_entry_point_gives_argv_back(monkeypatch, capsys):

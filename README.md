@@ -96,7 +96,7 @@ python convert_tiff.py copy-exif --input-dir "F:\Photos\S5pro session"         #
 python convert_tiff.py thumbnails --input-dir F:\Photos --size 256             # standalone sRGB thumbnails
 ```
 
-`--help` after the name lists its options. A yes/no is `--safe-mode` / `--no-safe-mode`. **A line written for v3.0.0 or earlier** (`python compress_tiff_zip.py -Mode 9 -SafeMode:$false`) is refused: [the table](docs/command_line.md) rewrites it. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
+`--help` after the name lists its options. A yes/no is `--safe-mode` / `--no-safe-mode`. **A line written for v3.0.0 or earlier** (`python compress_tiff_zip.py -Mode 9 -SafeMode:$false`) no longer runs -- once the old scripts are deleted (below) -- and `convert_tiff.py compress` refuses its options: [the table](docs/command_line.md) rewrites it. Every parameter: [compress](docs/README_compress_tiff_zip.md), [Copy EXIF](docs/README_copy_exif.md), [thumbnails](docs/README_generate_thumbnails.md).
 
 ---
 
@@ -178,7 +178,7 @@ One line each; the detail is behind each link.
 
 - **The backends take the usual Python command line**, `--mode 9 --input-dir F:\Photos --no-safe-mode`, through one entry point: `python convert_tiff.py compress ...` (also `copy-exif`, `thumbnails`). A line written for v3.0.0 is refused, nothing touched: [the table](docs/command_line.md) rewrites it.
 - **Presets and *Repeat last* saved by v3.0.0 or earlier no longer run:** run the workflow once and save it again. The settings file takes the new names (`zip_subfolder_name`).
-- **The files moved:** everything but `convert_tiff.py` is in the folder `tiff_workflow/`; copy both.
+- **The files moved:** everything but `convert_tiff.py` is in the folder `tiff_workflow/`; copy both. Over a v3.0.0 folder, delete `compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and `tiff_workflow_common.py`: a `.bat` that starts one of them would keep running v3.0.0 (the wizard's start panel names them).
 - **The wizard reads every yes/no the same way** on both screens (`y/yes/s/sim`, `n/no/nao/não`; "no" is the default of every question that deletes or replaces), and Restore, Delete OLD_TIFFs, Diagnose and mode 2 got fixes.
 
 [Every change](docs/CHANGELOG.md#v310) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)

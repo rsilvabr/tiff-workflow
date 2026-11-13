@@ -62,6 +62,14 @@ PowerShell itself is no longer needed: any terminal that starts `python` will do
 
 > Install `rich` in the same Python version you'll use to run the wizard: `python -m pip install rich`.
 
+### Updating from v3.0.0
+
+v3.1 is `convert_tiff.py` and the folder `tiff_workflow/`: copy both. If you copy them over a v3.0.0
+folder, **delete `compress_tiff_zip.py`, `copy_exif_to_tiff.py`, `generate_thumbnails.py` and `tiff_workflow_common.py` from it**: a `.bat`
+or scheduled task that starts one of them would keep running v3.0.0, silently. The wizard's start
+panel lists them while they are there. Lines written for v3.0.0 are rewritten with
+[command_line.md](command_line.md); presets saved by v3.0.0 are saved again from the menu.
+
 ### 4. Verify Installation
 
 **Restart the terminal**, then run:

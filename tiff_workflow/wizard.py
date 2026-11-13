@@ -860,6 +860,12 @@ def _probe_version(cmd: List[str], timeout: int = 10) -> Optional[str]:
     return None
 
 
+#: The loose scripts of v3.0.0. Copied over a v3.0.0 folder, v3.1 leaves them in place, and a
+#: .bat or scheduled task that starts one of them still runs v3.0.0 (review of v3.1, T1).
+_V300_SCRIPTS = ("compress_tiff_zip.py", "copy_exif_to_tiff.py", "generate_thumbnails.py",
+                 "tiff_workflow_common.py")
+
+
 def check_dependencies(cfg) -> List[Tuple[str, bool, str]]:
     """Probe external tools. Returns [(name, ok, detail), ...]. Read-only."""
     results = []
@@ -869,8 +875,16 @@ def check_dependencies(cfg) -> List[Tuple[str, bool, str]]:
     results.append(("exiftool", exif_ver is not None, exif_ver or "not found on PATH"))
     missing = [s for s in BACKEND_SCRIPTS + [BACKEND_SHARED, "__init__.py"]
                if not (PACKAGE_DIR / s).exists()]
+    if not ENTRY.exists():            # the package alone: every backend run would fail
+        missing.append(ENTRY.name)
     results.append(("backend scripts", not missing,
                     "all present" if not missing else "missing: " + ", ".join(missing)))
+    old = [name for name in _V300_SCRIPTS if (INSTALL_DIR / name).is_file()]
+    if old:
+        results.append(("old v3.0.0 scripts", False,
+                        f"{', '.join(old)} next to convert_tiff.py: a .bat or task that starts "
+                        "one of them still runs v3.0.0, without the fixes of v3.1. Delete them "
+                        "(v3.1 runs as convert_tiff.py compress|copy-exif|thumbnails)"))
     results.append(("rich", RICH_AVAILABLE,
                     "installed" if RICH_AVAILABLE else "plain-text UI (pip install rich)"))
     return results
@@ -5963,7 +5977,7 @@ _OVERLAY_MENU = [
     ("compress_tiff_zip", "Compress TIFFs (compress_tiff_zip.py)", "compress_tiff_zip.py"),
     ("copy_exif", "Copy EXIF (copy_exif_to_tiff.py)", "copy_exif_to_tiff.py"),
     ("generate_thumbnails", "Generate thumbnails (generate_thumbnails.py)", "generate_thumbnails.py"),
-    ("convert_tiff", "This wizard (convert_tiff.py)", None),
+    ("convert_tiff", "This wizard (tiff_workflow/wizard.py)", None),
 ]
 
 _CONVERT_SETTING_HELP = {

@@ -199,8 +199,8 @@ and modification time in `.convert_tiff_diagnose_cache.json` next to the config,
 next run checks only new or changed files and still reports the cached padded ones. The
 cache is written every 25 files while the run goes and once more when it ends or is
 stopped with Ctrl+C, so an interrupted run keeps what it already checked. Errors are never
-remembered. `DIAGNOSE_CACHE = False` at the top of `convert_tiff.py` turns it
-off. A hand-edited preset may list several folders in `"roots"`.
+remembered. `DIAGNOSE_CACHE = False` at the top of `tiff_workflow/wizard.py` (or in the
+settings file, menu 6) turns it off. A hand-edited preset may list several folders in `"roots"`.
 
 ### Generate Thumbnails (option 8)
 
@@ -455,7 +455,7 @@ change them without editing a file in the [settings file](#script-settings-main-
 
 The wizard's own workflows that run ImageMagick in parallel (Diagnose, the padded-8-bit
 compress, Delete OLD_TIFFs) are capped by memory instead of by the worker count alone. Two
-settings at the top of `convert_tiff.py` control it:
+settings at the top of `tiff_workflow/wizard.py` (or in the settings file, menu 6) control it:
 
 - `WORKER_MEMORY_FRACTION` (default `0.8`) — the run may use at most this share of the
   available memory; `0` disables the cap.
@@ -555,8 +555,8 @@ python convert_tiff.py --help             # Show help
 python convert_tiff.py --list-presets     # List saved presets and exit
 python convert_tiff.py --run-preset NAME  # Run a preset unattended and exit
 python convert_tiff.py --run-preset NAME --dry-run
-python convert_tiff.py --version          # Print the release (tiff-workflow 3.0.0) and exit
-python convert_tiff.py compress ...       # A backend, as its script: also copy-exif, thumbnails
+python convert_tiff.py --version          # Print the release (tiff-workflow 3.1.0) and exit
+python convert_tiff.py compress ...       # A backend: also copy-exif, thumbnails
 python convert_tiff.py compress --help    # Its options
 ```
 
