@@ -733,10 +733,12 @@ def _update_repo() -> str:
 
 
 def _version_key(text: Optional[str]):
-    """(major, minor, patch, final) of "v2.7.4", "2.7.4_beta1" or "v2.7.4-exe1" (the exe's
-    package revision is ignored: exe2 of the same release is not news here), or None. A
-    beta sorts before its release."""
-    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+)?(?:-exe\d+)?$", (text or "").strip())
+    """(major, minor, patch, final) of "v3.1.0", "3.1.1-rc1" (a test release of 3.1.1, the
+    name since v3.1.1-rc1, as jxl-photo's since v2.30.1-rc1), "2.7.4_beta1" (the old name)
+    or "v3.1.0-exe1" (the exe's package revision is ignored: exe2 of the same release is not
+    news here), or None. A test release sorts before its release: a copy running 3.1.1-rc1
+    is told when 3.1.1 is out (GitHub's "latest" never names a test release itself)."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)(_beta\d+|-rc\d+)?(?:-exe\d+)?$", (text or "").strip())
     if not m:
         return None
     return (int(m.group(1)), int(m.group(2)), int(m.group(3)), 0 if m.group(4) else 1)

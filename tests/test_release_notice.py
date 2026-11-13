@@ -14,7 +14,8 @@ import pytest
 
 from tiff_workflow import wizard as ct
 
-MINE = ct.TOOLKIT_VERSION       # e.g. "2.7.4"
+MINE = ct.TOOLKIT_VERSION       # e.g. "3.1.0", or "3.1.1-rc1" for a test release
+BASE = __import__("re").match(r"\d+\.\d+\.\d+", MINE).group()   # "3.1.1" of "3.1.1-rc1"
 TODAY = __import__("datetime").date.today().isoformat()
 
 
@@ -27,7 +28,7 @@ def mgr(tmp_path, monkeypatch):
 
 
 def _bump(minor=0, patch=0, major=0):
-    a, b, c = (int(x) for x in MINE.split("."))
+    a, b, c = (int(x) for x in BASE.split("."))
     return f"v{a + major}.{b + minor}.{c + patch}"
 
 
@@ -46,6 +47,9 @@ def _answering(monkeypatch, tag, calls=None):
     ("2.7.4", (2, 7, 4, 1)),
     ("v2.7.4-exe3", (2, 7, 4, 1)),            # the exe's package revision is ignored
     ("v2.8.0_beta1", (2, 8, 0, 0)),
+    ("3.1.1-rc1", (3, 1, 1, 0)),               # a test release, named as jxl-photo's
+    ("v3.1.1-rc12-exe2", (3, 1, 1, 0)),        # its package in the exe
+    ("v3.1.1-rc", None), ("v3.1.1_rc1", None), ("v3.1.1-beta1", None),
     ("nonsense", None), ("", None), (None, None), ("v2.7", None),
 ])
 def test_version_key(tag, expected):
@@ -54,7 +58,10 @@ def test_version_key(tag, expected):
 
 def test_beta_sorts_before_its_release_and_exe_revision_is_not_news():
     assert ct._version_key("v2.8.0_beta1") < ct._version_key("v2.8.0")
+    assert ct._version_key("v3.1.1-rc1") < ct._version_key("v3.1.1")
+    assert ct._version_key("v3.1.0") < ct._version_key("v3.1.1-rc1")
     assert ct._version_key("v2.7.4-exe2") == ct._version_key("v2.7.4")
+    assert ct._version_key(ct.TOOLKIT_VERSION) is not None, "this copy's own version must parse"
 
 
 # --- newer / same / older / beta / exe tags -----------------------------------------------
@@ -67,7 +74,10 @@ def test_beta_sorts_before_its_release_and_exe_revision_is_not_news():
     ("v" + MINE + "-exe1", False),            # the exe's revision of this very release
     ("v1.0.0", False),                        # older
     (_bump(minor=1) + "_beta1", True),        # a beta of a LATER release is newer than this one
-    ("v" + MINE + "_beta1", False),           # a beta sorts before its own release
+    (_bump(minor=1) + "-rc1", True),          # so is a test release of one (-rcN since v3.1.1)
+    ("v" + BASE + "_beta1", False),           # a beta sorts before its own release
+    ("v" + BASE + "-rc1", False),             # ... and a test release (older, or this very one)
+    ("v" + BASE, MINE != BASE),               # a copy running a test release is told of the final
 ])
 def test_notice_for_a_tag(mgr, monkeypatch, tag, expect_notice):
     _answering(monkeypatch, tag)
