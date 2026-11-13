@@ -5759,6 +5759,24 @@ def _run_journal(cfg, entry: Dict, title: str, unattended: bool = False,
     return _run_command_journal(entry, title, unattended, dry_run)
 
 
+def _unknown_advanced_names(workflow: Dict) -> List[str]:
+    """The names in a saved workflow's Advanced options that its backend does not take, as
+    "backend.name": what an older version saved (v3.0.0 wrote MagickTimeout, v3.1 writes
+    magick_timeout) or a hand edit. Such a journal is refused, never run without them (D1)."""
+    adv = workflow.get("advanced")
+    if not isinstance(adv, dict):
+        return []
+    unknown = []
+    for backend, values in adv.items():
+        scripts = REGISTRY_SCRIPTS.get(backend)
+        if not scripts or not isinstance(values, dict):
+            unknown.append(str(backend))
+            continue
+        names = {n for script in scripts for n in _backend_param_names(script)}
+        unknown += [f"{backend}.{k}" for k in values if k not in names]
+    return unknown
+
+
 def _run_manifest_journal(cfg, entry: Dict, title: str, unattended: bool, dry_run: bool) -> int:
     """A manifest repeat/preset: the CSV read again, run with the settings and the default
     mode the run saved. 0 = ran cleanly, 1 = failed, refused or cancelled."""
@@ -5776,6 +5794,14 @@ def _run_manifest_journal(cfg, entry: Dict, title: str, unattended: bool, dry_ru
                         "repeat or save it as a preset.")
     if workflow is None:
         _say(old_manifest_msg, "red")
+        return 1
+    # Review of v3.1 (V1): the Advanced options are kept by name; a name of an older version
+    # was ignored without a word and the backend ran with its own value instead.
+    unknown = _unknown_advanced_names(workflow)
+    if unknown:
+        _say("Saved workflow cannot be replayed: its Advanced options were recorded under names "
+             f"this version does not take ({', '.join(unknown)}: an older version, or edited by "
+             "hand). Run the manifest again from menu 3 and save it again.", "red")
         return 1
     default_mode = entry.get("manifest_default_mode")
     if any(m is None for _, _, m in entries):

@@ -323,7 +323,8 @@ compression) can coexist instead of overwriting each other:
   then (`python ...\compress_tiff_zip.py -Mode 9 ...`, or for v2.x a PowerShell one). It is
   no longer run: it stays in the list, and choosing it says `Saved workflow cannot be
   replayed` and runs nothing. Run the workflow once more from the menu and save it again
-  ([command_line.md](command_line.md)).
+  ([command_line.md](command_line.md)). A manifest preset keeps the Advanced answers by name;
+  one saved by v3.0.0 (`MagickTimeout`, ...) is refused the same way.
 
 ### Running a preset unattended (Task Scheduler)
 

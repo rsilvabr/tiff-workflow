@@ -149,3 +149,44 @@ def test_an_unreadable_config_is_kept_before_the_first_save(home, capsys):
     assert "was kept as" in capsys.readouterr().err
     cfg.save_config()                                     # once per run
     assert not list(home.glob(".convert_tiff_config.json.unreadable.*"))
+
+
+# --- V1 of phases 5-8: a manifest journal of an older version is refused (D1) --------------
+
+def _manifest_entry(tmp_path, advanced):
+    src = tmp_path / HOSTILE / "scans 01"
+    src.mkdir(parents=True)
+    csv = tmp_path / HOSTILE / "manifest.csv"
+    csv.write_text(f"Source,Destination,Mode\n{src},{src},9\n", encoding="utf-8")
+    workflow = {"workers": 4, "safe_mode": True, "skip_lzw": False}
+    if advanced is not None:
+        workflow["advanced"] = advanced
+    return {"kind": "manifest", "label": "Manifest: nightly", "time": "2026-11-01 03:00",
+            "commands": None, "manifest_path": str(csv), "manifest_workflow": workflow,
+            "manifest_default_mode": None, "autofind": None}
+
+
+@pytest.mark.parametrize("advanced, runs", [
+    ({"compress": {"MagickTimeout": 600, "WorkerMemoryFraction": 0.5}}, False),    # v3.0.0
+    ({"compress": {"magick_timeout": 600, "worker_memory_fraction": 0.5}}, True),  # v3.1
+    ({"compress": {"magick_timeout": 600}, "copy_exif": {"SrgbProfile": "x.icc"}}, False),
+    (None, True),
+], ids=["v300-names", "v31-names", "one-old-name", "no-advanced"])
+def test_a_manifest_journal_with_names_of_an_older_version_is_refused(tmp_path, monkeypatch,
+                                                                       capsys, advanced, runs):
+    """V1: a journal of a manifest run keeps the Advanced answers by name. One saved by v3.0.0
+    (MagickTimeout, WorkerMemoryFraction, SrgbProfile) RAN -- also unattended -- with those
+    answers dropped without a word: the backend used its own timeout, memory share and sRGB
+    profile. Refused now, as every other journal of an older version (D1)."""
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    ran = []
+    monkeypatch.setattr(ct, "execute_manifest_workflow",
+                        lambda cfg, entries, wf, **k: ran.append(wf) or True)
+    rc = ct._run_journal(_cfg(), _manifest_entry(tmp_path, advanced), "Preset: nightly",
+                         unattended=True)
+    out = capsys.readouterr().out
+    if runs:
+        assert rc == 0 and len(ran) == 1, out
+    else:
+        assert rc == 1 and ran == [], out
+        assert "cannot be replayed" in out and "save it again" in out, out

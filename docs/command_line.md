@@ -38,7 +38,9 @@ translates every option; `tools/legacy_args.py` translates a whole line.
   (`convert_tiff`: `WORKER_MEMORY_FRACTION`, ...) did not change.
 - **Presets and Repeat last** saved by v3.0.0 hold the old command line. v3.1 does not read
   it: running one says "cannot be replayed" and runs nothing. Run the workflow again from the
-  menu and save the preset again; the old one stays in the config until you delete it.
+  menu and save the preset again; the old one stays in the config until you delete it. A
+  manifest preset keeps the Advanced answers under the old names (`MagickTimeout`): refused
+  the same way.
 
 ## Translating a line
 
