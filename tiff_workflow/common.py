@@ -1484,18 +1484,21 @@ def history_agent():
     return f"tiff-workflow {TOOLKIT_VERSION} ({TOOLKIT_URL})"
 
 
-def _history_args(path, parameters):
-    """The exiftool command that appends this rewrite to xmpMM:History (Action, When,
+def _history_assignment(parameters):
+    """The exiftool assignment that adds this rewrite to xmpMM:History (Action, When,
     SoftwareAgent, Parameters); earlier entries (Capture One, scanner software) are kept.
-    A command of its OWN on purpose: in the same command as `-tagsfromfile -all:all`, `+=`
-    doubles every copied entry (jxl-photo #531) -- an `-execute` of the same process is a
-    command of its own. The values must stay free of the struct characters , { } [ ] |."""
+
+    `=`, not `+=`, and in the SAME command as the metadata copy (finish_written_tiff): there
+    the copied list and this entry are queued together and REPLACE the list the file has --
+    the source's entries once, this one after them. `+=` in that command keeps the list
+    magick carried over and adds the copied one to it: every earlier entry doubled
+    (jxl-photo #531; measured again in v3.1.1). The values must stay free of the struct
+    characters , { } [ ] |."""
     now = datetime.now().astimezone()
     off = now.strftime("%z")
     when = now.strftime("%Y-%m-%dT%H:%M:%S") + (off[:3] + ":" + off[3:5] if off else "")
-    assign = (f"-XMP-xmpMM:History+={{Action=converted,When={when},"
-              f"SoftwareAgent={history_agent()},Parameters={parameters}}}")
-    return ["-q", "-overwrite_original", assign, path]
+    return (f"-XMP-xmpMM:History={{Action=converted,When={when},"
+            f"SoftwareAgent={history_agent()},Parameters={parameters}}}")
 
 
 class Finished(NamedTuple):
@@ -1505,31 +1508,35 @@ class Finished(NamedTuple):
 
 
 def finish_written_tiff(dst, tag_source, markers, history=None):
-    """The writes onto a TIFF magick just wrote, in ONE exiftool (v3.1 phase 4: three
-    processes until then), each a command of its own with its own verdict: the metadata
-    from `tag_source`, the page `markers` (subfile_marker_args: [] = none to write, None =
-    could not be read, so failed), and, with `history`, this rewrite in xmpMM:History
-    (`history` is its Parameters text). Run before the gates, so they check the final bytes.
+    """The writes onto a TIFF magick just wrote, in ONE exiftool command, so the file is
+    rewritten ONCE: the metadata from `tag_source`, then the page `markers`
+    (subfile_marker_args: [] = none to write, None = could not be read, so failed), then,
+    with `history`, this rewrite in xmpMM:History (`history` is its Parameters text;
+    _history_assignment says why it is `=`). Run before the gates, so they check the final
+    bytes.
+
+    Until v3.1.1-rc1 these were three commands, and exiftool writes the WHOLE file for each:
+    a 215 MB ZIP of a 45 MP scan was written four times (magick + three), 861 MB on the
+    staging disk. The one command gives the same bytes (84 of 87 varied real TIFFs, 7 of 8
+    full size; the others keep an XMP namespace prefix the three commands in one exiftool
+    process renamed).
+
+    Verdicts, all from the one command: the metadata as before (status 0 and the source was
+    opened), the markers by the status, the History by the status and no "error" in what
+    exiftool printed -- a warning about any part now fails the History too (the safe side).
     FAIL-CLOSED: exiftool that cannot be started fails all three; never raises for it."""
-    commands = [_restore_metadata_args(tag_source, dst)]
-    if markers:
-        commands.append(["-q", "-q", "-overwrite_original"] + list(markers) + [dst])
+    command = _restore_metadata_args(tag_source, dst)
+    extra = list(markers or [])
     if history is not None:
-        commands.append(_history_args(dst, history))
+        extra.append(_history_assignment(history))
+    command = command[:-1] + extra + command[-1:]
     try:
-        results = exiftool_commands(commands)
+        r = exiftool_commands([command])[0]
     except ToolError:
-        results = [ExifResult(-1, "")] * len(commands)
-    metadata = _metadata_restored(results[0])
-    done_markers = markers is not None
-    i = 1
-    if markers:
-        done_markers = results[i].status == 0
-        i += 1
-    done_history = True
-    if history is not None:
-        r = results[i]
-        done_history = r.status == 0 and not re.search("error", r.output, re.I)
+        r = ExifResult(-1, "")
+    metadata = _metadata_restored(r)
+    done_markers = markers is not None and (not markers or r.status == 0)
+    done_history = history is None or (r.status == 0 and not re.search("error", r.output, re.I))
     return Finished(metadata, done_markers, done_history)
 
 class ThumbSafe(NamedTuple):

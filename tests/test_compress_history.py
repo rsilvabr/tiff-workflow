@@ -1,11 +1,11 @@
 """compress_tiff_zip.py appends an xmpMM:History entry to every TIFF it rewrites.
 
 Action=converted, When, SoftwareAgent (tool, version, link), Parameters -- the format of
-convert_tiff.py's padded conversion and of jxl-photo. It is written in its OWN exiftool call
-(in the same call as `-tagsfromfile -all:all`, `+=` doubles every copied entry, jxl-photo
-#531), after the tag copy and BEFORE the page-count / integrity / pixel gates. Real runs in
-both lanes (sequential and parallel), a copy mode and in place, in a hostile folder; one file name
-has a '%'.
+convert_tiff.py's padded conversion and of jxl-photo. Since v3.1.1 it is written in the SAME
+exiftool command as the tag copy, with `=` after it (`+=` there doubles every copied entry,
+jxl-photo #531): one rewrite of the file, BEFORE the page-count / integrity / pixel gates. Real
+runs in both lanes (sequential and parallel), a copy mode and in place, in a hostile folder; one
+file name has a '%'.
 """
 
 import hashlib

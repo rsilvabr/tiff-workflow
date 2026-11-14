@@ -350,13 +350,16 @@ Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (with a thumbnail:
                                                              "... + thumbnail page")
 ```
 
-- Earlier entries (Capture One, scanner software) are kept, never doubled: the entry is its
-  own exiftool call, after the tag copy.
+- Earlier entries (Capture One, scanner software) are kept, never doubled. The tag copy, the
+  page markers and the entry are ONE exiftool command, so the new file is rewritten once (until
+  v3.1.1-rc1 three times: exiftool writes the whole file for each command); the entry is
+  assigned after the copy, with `=` (`+=` in that command would double the copied entries).
 - It is written to the new file before the page-count, integrity and pixel checks, so those
   check the final bytes; the original still leaves its place only after every check passed.
 - Only a file this run wrote: skipped files, multi-page files left alone and dry runs get none,
   and a second run over the output adds nothing (it skips the already-ZIP file).
-- Always on (no switch). Cost on real files: 0.5-0.9 s per file, 2-15 % of the compression.
+- Always on (no switch). No cost of its own since v3.1.1: it goes in the rewrite that copies
+  the metadata back (until then a rewrite of its own, 0.5-0.9 s per file).
 - If the entry cannot be written the file is still a good ZIP: the line is a `WARN` ending
   in `[history not written]`, never an `ERROR`.
 

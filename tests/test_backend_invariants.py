@@ -2188,37 +2188,46 @@ class TestGatesFailClosed:
             "-IFD2:SubfileType#=4"]
 
     def test_finish_written_tiff(self, monkeypatch):
-        """v3.1 phase 4: the metadata, the markers and the history entry in ONE exiftool,
-        three commands, each judged on its own; exiftool not started fails all three."""
+        """v3.1.1: the metadata, the markers and the history entry in ONE exiftool command --
+        the file is rewritten once (until v3.1.1-rc1, three commands, three rewrites). The
+        markers and the history come AFTER the copy, the history with `=` (in one command
+        with the copy, `+=` doubles the copied entries, jxl-photo #531). Verdicts from that
+        one command; exiftool not started fails all three."""
         seen = []
-        answers = {}
+        answer = [tw.ExifResult(0, "")]
 
         def commands(cmds):
             seen.append(cmds)
-            return [answers.get(k, tw.ExifResult(0, "")) for k in range(len(cmds))]
+            return [answer[0] for _ in cmds]
         monkeypatch.setattr(tw, "exiftool_commands", commands)
         dst, src = "E:\\伊豆沼 [x]\\a 50%.tif", "C:\\t\\tw_0123.mie"
         assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "compress mode 9") == \
             tw.Finished(True, True, True)
-        restore, marks, history = seen[-1]
-        assert restore == tw._restore_metadata_args(src, dst) and restore.count("-q") == 1
-        assert marks == ["-q", "-q", "-overwrite_original", "-IFD0:SubfileType#=0", dst]
-        assert history[-1] == dst and "-tagsfromfile" not in history, \
-            "the history entry is a command of its own (+= doubles the copied entries)"
-        assert history[2].startswith("-XMP-xmpMM:History+={Action=converted,")
-        assert history[2].endswith(",Parameters=compress mode 9}")
+        assert len(seen[-1]) == 1, "one command: one rewrite of the file"
+        cmd = seen[-1][0]
+        restore = tw._restore_metadata_args(src, dst)
+        assert cmd[:len(restore) - 1] == restore[:-1] and cmd[-1] == dst
+        assert cmd.count("-q") == 1 and cmd.count("-overwrite_original") == 1
+        assert cmd[len(restore) - 1] == "-IFD0:SubfileType#=0", "the markers after the copy"
+        history = cmd[-2]
+        assert history.startswith("-XMP-xmpMM:History={Action=converted,"), \
+            "= after the copy: += in the same command doubles the copied entries"
+        assert history.endswith(",Parameters=compress mode 9}")
         assert tw.finish_written_tiff(dst, src, [], None) == tw.Finished(True, True, True)
-        assert len(seen[-1]) == 1, "nothing else to write: one command"
-        assert tw.finish_written_tiff(dst, src, None) == tw.Finished(True, False, True)
-        answers[0] = tw.ExifResult(0, "Warning: Error opening file - C:\\t\\tw_0123.mie\n")
-        answers[1] = tw.ExifResult(1, "")
-        answers[2] = tw.ExifResult(0, "Error: XMP format error\n")
+        assert seen[-1] == [restore], "nothing else to write: the copy alone"
+        assert tw.finish_written_tiff(dst, src, None) == tw.Finished(True, False, True), \
+            "markers that could not be read failed"
+        answer[0] = tw.ExifResult(0, "Warning: Error opening file - C:\\t\\tw_0123.mie\n")
+        assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "x") == \
+            tw.Finished(False, True, False), "the source not opened: no metadata, a warning"
+        answer[0] = tw.ExifResult(1, "")
         assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "x") == \
             tw.Finished(False, False, False)
-        answers.clear()
-        answers[0] = tw.ExifResult(-1, "")
-        assert tw.finish_written_tiff(dst, src, [], "x") == tw.Finished(False, True, True), \
-            "a restore whose status could not be read failed"
+        answer[0] = tw.ExifResult(0, "Error: XMP format error\n")
+        assert tw.finish_written_tiff(dst, src, [], "x") == tw.Finished(True, True, False)
+        answer[0] = tw.ExifResult(-1, "")
+        assert tw.finish_written_tiff(dst, src, [], "x") == tw.Finished(False, True, False), \
+            "a command whose status could not be read failed"
         monkeypatch.setattr(tw, "exiftool_commands", tool_fails)
         assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "x") == \
             tw.Finished(False, False, False)
