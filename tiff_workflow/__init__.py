@@ -12,5 +12,5 @@ three backends; each also runs as `python -m tiff_workflow.<module>`).
 TOOLKIT_NAME = "tiff-workflow"
 #: The release. One copy: everything else reads it from here. A test release carries its
 #: -rcN (3.1.1-rc1): that is what a file rewritten with it records in its xmpMM:History.
-TOOLKIT_VERSION = "3.1.1-rc1"
+TOOLKIT_VERSION = "3.1.1"
 TOOLKIT_URL = "https://github.com/rsilvabr/tiff-workflow"

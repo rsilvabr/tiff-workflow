@@ -9,7 +9,7 @@ Unified TIFF processing toolkit with four complementary workflows:
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
-**Current version: v3.1.1-rc1** (2026-11-14, pre-release; last stable: [v3.1.0](docs/CHANGELOG.md#v310)) · [What's new](#whats-new-in-v311-rc1) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
+**Current version: v3.1.1** (2026-11-14) · [What's new](#whats-new-in-v311) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
 
 **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; ExifTool and ImageMagick included.
 
@@ -172,13 +172,14 @@ One line each; the detail is behind each link.
 
 ---
 
-## What's new in v3.1.1-rc1
+## What's new in v3.1.1
 
-2026-11-14. A test release (pre-release) of v3.1.1; the last stable release is v3.1.0. Test releases are named `-rc1`, `-rc2`…: that name is what the files rewritten with one record in their history. Nothing to change if you run v3.1.0. **Coming from v3.0.0?** Read [v3.1.0's notes](docs/CHANGELOG.md#v310) first: the command line, the presets and the files changed.
+2026-11-14. Nothing to change if you run v3.1.0 or v3.1.1-rc1. **Coming from v3.0.0?** Read [v3.1.0's notes](docs/CHANGELOG.md#v310) first: the command line, the presets and the files changed.
 
+- **Less disk work, the same files:** each compressed TIFF is written to the staging folder twice instead of four times; `--generate-thumbnail` compresses the photo once (about twice as fast); Diagnose writes no temp files, and it finds padded black-and-white scans with an IR channel that it used to miss.
 - **Rare edge cases closed** (the final review of v3.1): mode 8 with `--delete-source` keeps a `.tiff` whose compressed copy could not land; copy-exif `--compress-zip` checks the pixels of the file as it will land; Restore OLD_TIFFs moves an `x.tif` aside only when it is the restored photo's own compressed copy.
 
-[Every change](docs/CHANGELOG.md#v311-rc1) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
+[Every change](docs/CHANGELOG.md#v311) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
 
 ---
 

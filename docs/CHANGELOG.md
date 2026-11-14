@@ -10,9 +10,23 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v3.1.1
+
+2026-11-14. **The release of v3.1.1**: everything of the test release [v3.1.1-rc1](#v311-rc1)
+(the final review of v3.1) and a round that measured what every step writes and reads. Nothing
+to change for whoever runs v3.1.0 or the rc: the same command line, presets and settings;
+workflow 7 asks one question less. **Coming from v3.0.0?** Read [v3.1.0](#v310) first.
+
+- **Each compressed TIFF is written half as often.** exiftool rewrites the whole file for every command, and the metadata, the page markers and the history entry were three commands: a 45 MP Capture One export compressed in mode 8 was written four times to the staging folder (861 MB for a 215 MB ZIP). They are one command now: twice, 431 MB, the same bytes (compared byte for byte with the rc on real files, in modes 1, 8 and 9 and copy-exif `--compress-zip`)
+- **`--generate-thumbnail` compresses the main image once.** It went through a temp TIFF and was compressed twice: 26 s, now 13-15 s, for a 45 MP export -- the same files
+- **Safe mode reads each page's marker and size from the file's directory** instead of decoding every page: 0.3 s less per Capture One export (it always has a thumbnail page). A scan with damaged pixels is no longer skipped as multi-page; the integrity check reports it (audit round 30)
+- **Diagnose checks in memory** (workflow 7 and its presets): no temp TIFFs (380 MB per 45 MP file), a third faster, the same verdicts -- and it finds a padded black-and-white scan whose IR channel is a 4th sample, which it always called real 16-bit (audit round 30). Workflow 7 no longer asks how to compress the temp files; the temp folder it asks for is where the padded files are converted. A preset with the old answer runs as before
+
+---
+
 ## v3.1.1-rc1
 
-2026-11-14. **A test release (GitHub pre-release) of v3.1.1**; the last stable release is
+2026-11-14. Superseded by [v3.1.1](#v311). **A test release (GitHub pre-release) of v3.1.1**; the last stable release is
 [v3.1.0](#v310). Test releases are named `-rc1`, `-rc2`, ... (as jxl-photo's): that name is what
 a file rewritten with one records in its history (`xmpMM:History`: `tiff-workflow 3.1.1-rc1`),
 so `v3.1.1` stays for the final. Nothing changes for whoever runs v3.1.0: the same command line,
