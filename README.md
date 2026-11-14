@@ -176,7 +176,7 @@ One line each; the detail is behind each link.
 
 2026-11-14. Nothing to change if you run v3.1.0 or v3.1.1-rc1. **Coming from v3.0.0?** Read [v3.1.0's notes](docs/CHANGELOG.md#v310) first: the command line, the presets and the files changed.
 
-- **Less disk work, the same files:** each compressed TIFF is written to the staging folder twice instead of four times; `--generate-thumbnail` compresses the photo once (about twice as fast); Diagnose writes no temp files, and it finds padded black-and-white scans with an IR channel that it used to miss.
+- **Faster and lighter on the disk, the same files:** compression writes each file's metadata in a single pass (half the disk writes); `--generate-thumbnail` is about twice as fast; Diagnose works in memory and now recognizes padded black-and-white scans with an IR channel.
 - **Rare edge cases closed** (the final review of v3.1): mode 8 with `--delete-source` keeps a `.tiff` whose compressed copy could not land; copy-exif `--compress-zip` checks the pixels of the file as it will land; Restore OLD_TIFFs moves an `x.tif` aside only when it is the restored photo's own compressed copy.
 
 [Every change](docs/CHANGELOG.md#v311) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)

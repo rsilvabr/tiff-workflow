@@ -17,10 +17,10 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 to change for whoever runs v3.1.0 or the rc: the same command line, presets and settings;
 workflow 7 asks one question less. **Coming from v3.0.0?** Read [v3.1.0](#v310) first.
 
-- **Each compressed TIFF is written half as often.** exiftool rewrites the whole file for every command, and the metadata, the page markers and the history entry were three commands: a 45 MP Capture One export compressed in mode 8 was written four times to the staging folder (861 MB for a 215 MB ZIP). They are one command now: twice, 431 MB, the same bytes (compared byte for byte with the rc on real files, in modes 1, 8 and 9 and copy-exif `--compress-zip`)
-- **`--generate-thumbnail` compresses the main image once.** It went through a temp TIFF and was compressed twice: 26 s, now 13-15 s, for a 45 MP export -- the same files
-- **Safe mode reads each page's marker and size from the file's directory** instead of decoding every page: 0.3 s less per Capture One export (it always has a thumbnail page). A scan with damaged pixels is no longer skipped as multi-page; the integrity check reports it (audit round 30)
-- **Diagnose checks in memory** (workflow 7 and its presets): no temp TIFFs (380 MB per 45 MP file), a third faster, the same verdicts -- and it finds a padded black-and-white scan whose IR channel is a 4th sample, which it always called real 16-bit (audit round 30). Workflow 7 no longer asks how to compress the temp files; the temp folder it asks for is where the padded files are converted. A preset with the old answer runs as before
+- **Compression is lighter on the disk.** The metadata, the page markers and the history entry of each compressed TIFF are written in a single pass (one exiftool command), which halves the disk writes of a run: 431 MB per 45 MP Capture One export to the staging folder. The same files, byte for byte (compared with the rc on real files, in modes 1, 8 and 9 and copy-exif `--compress-zip`)
+- **`--generate-thumbnail` is about twice as fast:** the photo is compressed in a single pass, 13-15 s instead of 26 s for a 45 MP export -- the same files
+- **Safe mode checks the pages faster:** each page's marker and size come from the file's directory, without decoding the image (0.3 s less per Capture One export, which always has a thumbnail page). A scan with damaged pixels is reported by the integrity check instead of being skipped as multi-page (audit round 30)
+- **Diagnose works in memory** (workflow 7 and its presets): no temporary files, a third faster, the same memory and verdicts -- and it now recognizes padded black-and-white scans whose IR channel is a 4th sample, which it reported as real 16-bit (audit round 30). Workflow 7 no longer asks how to compress temporary files; the temp folder it asks for is where the padded files are converted. A preset with the old answer runs as before
 
 ---
 
