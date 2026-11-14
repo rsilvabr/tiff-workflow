@@ -118,6 +118,9 @@ python convert_tiff.py compress --mode 9 --generate-thumbnail --thumb-size 512 -
 - Page 0: Original image (compressed with ZIP/Deflate), keeping the `SubfileType` marker the source carried
 - Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved), marked `subfiletype=1` (reduced resolution flag)
 - The main image is always read from page 0, and the thumbnail is always appended after it.
+- The thumbnail is made first, then page 0 and the thumbnail are written together: the main image
+  is compressed once (since v3.1.1; until then twice, through a temp TIFF -- 26 s instead of 13
+  for a 45 MP scan).
 
 **Thumbnails are colour-managed.** Wide-gamut sources (ProPhoto, AdobeRGB) are converted *through*
 their embedded ICC profile before the profile is stripped, so a Capture One ProPhoto export produces

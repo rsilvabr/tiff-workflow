@@ -1413,19 +1413,10 @@ def tiff_has_thumbnail_page(path, timeout=30):
 _SUBFILE_LINE = re.compile(r"^\[IFD(\d+)\]\s+SubfileType:\s*(\d+)\s*$")
 
 
-def _read_subfile_types(path):
-    """{ifd index: numeric SubfileType} of the IFDs that HAVE the tag, or None on failure.
-    Read with exiftool: magick's `%[tiff:subfiletype]` is empty both when the tag is absent
-    and when it is 0, and every scanner TIFF carries an explicit 0."""
-    try:
-        out = exiftool(["-a", "-G1", "-s", "-s", "-n", "-SubfileType", path])
-    except ToolError:
-        return None
-    return _parse_subfile_types(out)
-
-
 def _parse_subfile_types(out):
-    """{ifd index: numeric SubfileType} of the IFDs whose line exiftool printed."""
+    """{ifd index: numeric SubfileType} of the IFDs whose line exiftool printed (`-a -G1 -s
+    -s -n -SubfileType`). Read with exiftool: magick's `%[tiff:subfiletype]` is empty both
+    when the tag is absent and when it is 0, and every scanner TIFF carries an explicit 0."""
     types = {}
     for line in out.split("\n"):
         m = _SUBFILE_LINE.match(line)
@@ -1464,20 +1455,14 @@ def subfile_marker_list(page_count, types):
     return [f"-IFD{i}:SubfileType#={types[i]}" if i in types else f"-IFD{i}:SubfileType="
             for i in range(page_count)]
 
-def set_tiff_thumb_markers(src, dst):
-    """The page markers of a --generate-thumbnail output: page 0 keeps the marker the SOURCE
-    had on its main image (absent stays absent), page 1 is stamped REDUCEDIMAGE (1). magick
-    stamps PAGE on every page of a multi-page write, so both have to be written."""
-    types = _read_subfile_types(src)
-    if types is None:
-        return False
+def thumbnail_marker_list(types):
+    """The page markers of a --generate-thumbnail output (finish_written_tiff writes them
+    with the metadata): page 0 keeps the marker the SOURCE had on its main image (absent
+    stays absent), page 1 is stamped REDUCEDIMAGE (1). magick stamps PAGE on every page of a
+    multi-page write, so both have to be written. `types`: the source's markers as tiff_facts
+    read them. Until v3.1.1-rc1 a read and a rewrite of their own (set_tiff_thumb_markers)."""
     main_tag = f"-IFD0:SubfileType#={types[0]}" if 0 in types else "-IFD0:SubfileType="
-    try:
-        exiftool(["-q", "-q", "-overwrite_original", main_tag, "-IFD1:SubfileType#=1", dst],
-                 merge_stderr=True)
-    except ToolError:
-        return False
-    return True
+    return [main_tag, "-IFD1:SubfileType#=1"]
 
 
 def history_agent():

@@ -20,7 +20,6 @@ is written, checked and sitting next to it on the same volume, and the swap is o
 
 import os
 import re
-import shutil
 import sys
 import tempfile
 import time
@@ -388,66 +387,61 @@ class ThumbWrite(NamedTuple):
     keep_final_dst: bool = False
     drop_output: bool = False
     no_thumb: bool = False          # written without the thumbnail: the [no thumb] fallback
-    marker_failed: bool = False     # written, but the page markers could not be set
 
 
 def _write_with_thumbnail(run, src, write_dst, type_args, name):
     """-GenerateThumbnail: write page 0 of `src` as ZIP to `write_dst`, with an sRGB
     thumbnail appended as page 1. Returns a ThumbWrite. The caller removes the metadata
-    container on an error; the two temp files are this function's and are always removed."""
+    container on an error, and writes the page markers (thumbnail_marker_list) with the
+    metadata; the thumbnail's temp file is this function's and is always removed.
+
+    The thumbnail is made first, then ONE magick reads page 0 of the source and the thumbnail
+    and writes the ZIP (v3.1.1). Until v3.1.1-rc1 page 0 was compressed into a temp TIFF in
+    the temp folder, read back and compressed again together with the thumbnail: the main
+    image deflated twice, 26 s against 13 for a 45 MP export, for the same bytes (real files,
+    old and new side by side). A thumbnail that cannot be made or joined leaves the main
+    image alone (the [no thumb] fallback)."""
     opt = run.opt
-    no_thumb = False
-    marker_failed = False
     # The main image is always page 0; the thumbnail is appended after it. '[0]' makes
     # the input a filename SPEC, so '%' is escaped there and in every output path.
     main_page = f"{tw.magick_path_spec(src)}[0]"
+    out_spec = tw.magick_path_spec(write_dst)
     thumb_ext = (opt["thumb_format"] or "jpg").lower()
-    temp_tiff = tw.temp_file_path(".tif")
     thumb_temp = tw.temp_file_path("." + thumb_ext)
     try:
-        try:
-            tw.magick_run(["-quiet", main_page, "-compress", "zip"] + type_args
-                          + [tw.magick_path_spec(temp_tiff)])
-        except tw.ToolError as e:
-            return ThumbWrite(error=f"ERROR (magick compress) | {name} | {tw.one_line(e.output)}")
         thumb_cmd = ["-quiet", main_page] + tw.thumbnail_magick_args(run.srgb_profile, opt["thumb_size"])
         if thumb_ext == "jpg":
             thumb_cmd += ["-quality", str(opt["thumb_quality"])]
         thumb_cmd.append(f"{thumb_ext}:{tw.magick_path_spec(thumb_temp)}")
         try:
             tw.magick_run(thumb_cmd)
-            thumb_made = os.path.exists(thumb_temp)
+            no_thumb = not os.path.exists(thumb_temp)
         except tw.ToolError:
-            thumb_made = False
-        if not thumb_made:
-            # the thumbnail failed: the compressed main image alone
-            shutil.copyfile(temp_tiff, write_dst)
             no_thumb = True
         if not no_thumb:
-            # The two INPUTS stay literal: a plain input is opened verbatim.
+            # The thumbnail INPUT stays literal: a plain input is opened verbatim.
             try:
-                tw.magick_run(["-quiet", temp_tiff, f"{thumb_ext}:{thumb_temp}",
-                               "-compress", "zip"] + type_args
-                              + [tw.magick_path_spec(write_dst)])
+                tw.magick_run(["-quiet", main_page, f"{thumb_ext}:{thumb_temp}",
+                               "-compress", "zip"] + type_args + [out_spec])
             except tw.ToolError:
-                shutil.copyfile(temp_tiff, write_dst)
                 no_thumb = True
+        if no_thumb:
+            # the thumbnail failed: the main image alone (over what a failed join left)
+            try:
+                tw.magick_run(["-quiet", main_page, "-compress", "zip"] + type_args + [out_spec])
+            except tw.ToolError as e:
+                return ThumbWrite(error=f"ERROR (magick compress) | {name} | {tw.one_line(e.output)}",
+                                  drop_output=True)
         # magick can exit 0 and still leave nothing at write_dst (a full disk).
         if not os.path.exists(write_dst):
             return ThumbWrite(
                 error=f"ERROR (magick reported success but wrote no file) | {name} | expected: {write_dst}",
                 keep_final_dst=True)
-        if not no_thumb:
-            # Both markers: magick stamps PAGE on page 0 of any multi-page write, so
-            # the main image has to get the source's marker back.
-            if not tw.set_tiff_thumb_markers(src, write_dst):
-                marker_failed = True
     except OSError as e:
         return ThumbWrite(error=f"ERROR (magick compress) | {name} | {e}", drop_output=True)
     finally:
-        tw.remove_quietly(temp_tiff)
         tw.remove_quietly(thumb_temp)
-    return ThumbWrite(no_thumb=no_thumb, marker_failed=marker_failed)
+    return ThumbWrite(no_thumb=no_thumb)
 
 
 def process_job(run, t, load):
@@ -573,7 +567,6 @@ def _compress_job(run, t, load, own):
         own.append(write_dst)
 
     no_thumb_note = ""
-    thumb_marker_failed = False
 
     if generate_thumb:
         written = _write_with_thumbnail(run, src, write_dst, type_args, name)
@@ -584,7 +577,6 @@ def _compress_job(run, t, load, own):
             return res(written.error, fd=written.keep_final_dst)
         if written.no_thumb:
             no_thumb_note = " [no thumb]"
-        thumb_marker_failed = written.marker_failed
     else:
         # The input stays literal (magick opens a plain path verbatim); the OUTPUT is
         # escaped, or a '%' in the name silently redirects it.
@@ -612,18 +604,25 @@ def _compress_job(run, t, load, own):
         return res(f"ERROR (sample layout changed: {' '.join(layout_pages)} - output dropped, original untouched) | {name}", fd=True)
 
     staging_name = os.path.basename(write_dst)
-    # The writes onto the output, in one exiftool (v3.1 phase 4): the metadata from the
-    # source (or the container), the page markers (the thumbnail path set its own), and
-    # this rewrite in xmpMM:History. Before the gates, so they check the final bytes; the
-    # irreversible step stays last. A failed history entry is a WARN.
-    markers = [] if generate_thumb else tw.subfile_marker_args(src, facts.subfile_types, timeout)
+    # The writes onto the output, one rewrite of it (tw.finish_written_tiff): the metadata
+    # from the source (or the container), the page markers, and this rewrite in
+    # xmpMM:History. Before the gates, so they check the final bytes; the irreversible step
+    # stays last. A failed history entry is a WARN.
+    thumb_page = generate_thumb and not no_thumb_note
+    if thumb_page:
+        markers = tw.thumbnail_marker_list(facts.subfile_types)
+    elif generate_thumb:
+        markers = []        # the main image alone: one page, nothing stamped on it
+    else:
+        markers = tw.subfile_marker_args(src, facts.subfile_types, timeout)
     history = f"compress_tiff_zip mode {mode}: ZIP (Deflate)"
-    if generate_thumb and not no_thumb_note:
+    if thumb_page:
         history += " + thumbnail page"
     done = tw.finish_written_tiff(write_dst, meta_backup or src, markers, history)
     tw.remove_quietly(meta_backup)
     exif_warn = not done.metadata
-    subfile_restore_failed = not done.markers
+    thumb_marker_failed = thumb_page and not done.markers
+    subfile_restore_failed = not done.markers and not thumb_marker_failed
     history_failed = not done.history
 
     # Modes 1-7 have no pixel gate: a rewrite that dropped pages is data loss (audit

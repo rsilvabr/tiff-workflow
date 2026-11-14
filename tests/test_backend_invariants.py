@@ -74,10 +74,10 @@ class FakeTools:
         self.magick_rc = 0
         self.magick_writes = True
         # one entry per magick call, in order, for a test that needs the calls to differ:
-        # "ok", "fail" (exit 1, nothing written), "nofile" (exit 0, nothing written) or an
-        # exception to raise. When it runs out, magick_rc / magick_writes answer.
+        # "ok", "fail" (exit 1, nothing written), "nofile" (exit 0, nothing written), "half"
+        # (exit 1 after writing part of the output: a full disk) or an exception to raise.
+        # When it runs out, magick_rc / magick_writes answer.
         self.magick_plan = []
-        self.thumb_markers = True
         self.exif_result = (0, "")
         self.subfile_restore = True
         self.history = True
@@ -103,7 +103,6 @@ class FakeTools:
         m.setattr(tw, "exiftool", fake_exiftool(self._exiftool))
         m.setattr(tw, "subfile_marker_args", lambda src, types, t=30: ["-IFD0:SubfileType#=0"])
         m.setattr(tw, "finish_written_tiff", self._finish)
-        m.setattr(tw, "set_tiff_thumb_markers", lambda s, d: self.thumb_markers)
         m.setattr(tw, "zip_integrity", self._integrity)
         m.setattr(tw, "pixel_identical", self._pixels)
         m.setattr(tw, "thumb_output_matches_source", self._thumb_match)
@@ -147,18 +146,22 @@ class FakeTools:
             step = self.magick_plan.pop(0)
             if isinstance(step, BaseException):
                 raise step
-            rc, writes = {"ok": (0, True), "fail": (1, False), "nofile": (0, False)}[step]
+            if step == "half":
+                self._magick_write(args, 0, True, b"HALF")
+                rc, writes = 1, False
+            else:
+                rc, writes = {"ok": (0, True), "fail": (1, False), "nofile": (0, False)}[step]
         else:
             rc, writes = self.magick_rc, self.magick_writes
         return self._magick_write(args, rc, writes)
 
-    def _magick_write(self, args, rc, writes):
+    def _magick_write(self, args, rc, writes, data=b"COMPRESSED"):
         if rc == 0 and writes:
             out = str(args[-1]).replace("%%", "%")
             if ":" in out[:8] and not out[1:3] == ":\\":
                 out = out.split(":", 1)[1]
             with open(out, "wb") as fh:
-                fh.write(b"COMPRESSED")
+                fh.write(data)
         if rc:
             raise tw.ToolError(f"magick exit {rc}", "magick: boom", rc)
         return ""
@@ -476,15 +479,17 @@ class TestGatesPerMode:
 
 
 class TestThumbnailWrite:
-    """--generate-thumbnail is three magick calls -- the main image, the thumbnail, the two
-    together -- in _write_with_thumbnail, which hands process_job a ThumbWrite. What
-    process_job does with each of its fields: the [no thumb] fallback and the page count the
-    gate then expects, the marker warning, and what a failure leaves behind (nothing: not
-    the partial output, not the metadata container, not the two temp files)."""
+    """--generate-thumbnail is two magick calls -- the thumbnail, then page 0 of the source and
+    the thumbnail together (v3.1.1; until then the main image went through a temp TIFF and was
+    compressed twice) -- plus the main image alone when the thumbnail cannot be made or
+    joined, in _write_with_thumbnail, which hands process_job a ThumbWrite. What process_job
+    does with each of its fields: the [no thumb] fallback and the page count the gate then
+    expects, the marker warning, and what a failure leaves behind (nothing: not the partial
+    output, not the metadata container, not the thumbnail's temp file)."""
 
     @pytest.fixture
     def tmp(self, tmp_path, monkeypatch):
-        """The folder of _write_with_thumbnail's two temp files."""
+        """The folder of _write_with_thumbnail's temp file."""
         folder = tmp_path / "tmp 一時 [x]"
         folder.mkdir()
         counter = iter(range(100))
@@ -507,11 +512,18 @@ class TestThumbnailWrite:
     def test_the_thumbnail_is_written_and_two_pages_are_expected(self, tools, photo, tmp):
         r = self.in_place(tools, photo)
         assert r.result == f"OK (Uncompressed -> ZIP) | {photo.name}"
-        assert len(tools.magick_calls) == 3 and tools.thumb_expected == 2
+        assert len(tools.magick_calls) == 2 and tools.thumb_expected == 2
+        thumb, joined = tools.magick_calls
+        page0 = f"{tw.magick_path_spec(str(photo))}[0]"
+        assert thumb[1] == page0 and joined[1] == page0, \
+            "both read page 0 of the SOURCE: no temp TIFF of the main image (v3.1.1)"
+        assert sum(c.count("-compress") for c in tools.magick_calls) == 1, \
+            "the main image is compressed once"
         assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate) + thumbnail page"
+        assert tools.events.count("subfile") == 1, "the page markers go with the metadata"
         assert photo.read_bytes() == b"COMPRESSED" and self.nothing_left(photo, tmp)
 
-    @pytest.mark.parametrize("plan", [("ok", "fail"), ("ok", "nofile"), ("ok", "ok", "fail")],
+    @pytest.mark.parametrize("plan", [("fail",), ("nofile",), ("ok", "fail")],
                              ids=["thumbnail-fails", "thumbnail-not-written", "joining-fails"])
     def test_a_failed_thumbnail_falls_back_to_the_main_image_alone(self, tools, photo, tmp, plan):
         """The fallback writes ONE page: the gate must expect one, or it refuses a good file
@@ -521,42 +533,36 @@ class TestThumbnailWrite:
         assert tools.thumb_expected == 1
         assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate)", \
             "the history must not claim a thumbnail page"
+        assert "subfile" not in tools.events, "one page: no marker to write"
         assert photo.read_bytes() == b"COMPRESSED" and self.nothing_left(photo, tmp)
 
     def test_a_failed_page_marker_is_a_warning_on_the_result_line(self, tools, photo, tmp):
-        tools.thumb_markers = False
+        tools.subfile_restore = False
         r = self.in_place(tools, photo)
         assert r.result == f"WARN (exiftool failed, ZIP ok) [thumb marker failed] | {photo.name}"
         assert photo.read_bytes() == b"COMPRESSED" and self.nothing_left(photo, tmp)
 
-    def test_a_failed_main_image_leaves_nothing(self, tools, photo, tmp):
-        r = self.in_place(tools, photo, "fail")
+    @pytest.mark.parametrize("plan", [("fail", "fail"), ("ok", "fail", "fail")],
+                             ids=["no-thumbnail", "joining-fails"])
+    def test_a_failed_main_image_leaves_nothing(self, tools, photo, tmp, plan):
+        r = self.in_place(tools, photo, *plan)
         assert r.result == f"ERROR (magick compress) | {photo.name} | magick: boom"
         assert r.final_dst is None
         assert photo.read_bytes() == b"ORIGINAL" and self.nothing_left(photo, tmp)
         assert "replace" not in tools.events and "exif" not in tools.events
 
-    def test_an_os_error_drops_the_partial_output(self, tools, photo, tmp, monkeypatch):
-        """A full disk during the fallback copy: the half-written temp sibling must go, or
-        the next run finds a leftover -- and in a copy mode a file that says "exists"."""
-        def full_disk(src, dst):
-            with open(dst, "wb") as fh:
-                fh.write(b"HALF")
-            raise OSError("no space left on device")
-        monkeypatch.setattr(cz.shutil, "copyfile", full_disk)
-        r = self.in_place(tools, photo, "ok", "fail")
-        assert r.result == f"ERROR (magick compress) | {photo.name} | no space left on device"
+    def test_a_write_that_dies_half_way_drops_the_partial_output(self, tools, photo, tmp):
+        """A full disk during the write of the main image alone: the half-written temp
+        sibling must go, or the next run finds a leftover -- and in a copy mode a file that
+        says "exists"."""
+        r = self.in_place(tools, photo, "ok", "half", "half")
+        assert r.result == f"ERROR (magick compress) | {photo.name} | magick: boom"
         assert r.final_dst is None
         assert photo.read_bytes() == b"ORIGINAL" and self.nothing_left(photo, tmp)
 
-    def test_an_os_error_drops_the_partial_output_of_a_copy_mode(self, tools, photo, tmp, tmp_path,
-                                                                 monkeypatch):
-        def full_disk(src, dst):
-            with open(dst, "wb") as fh:
-                fh.write(b"HALF")
-            raise OSError("no space left on device")
-        monkeypatch.setattr(cz.shutil, "copyfile", full_disk)
-        tools.magick_plan = ["ok", "fail"]
+    def test_a_write_that_dies_half_way_drops_the_partial_output_of_a_copy_mode(
+            self, tools, photo, tmp, tmp_path):
+        tools.magick_plan = ["fail", "half"]
         out = tmp_path / "out [x]" / photo.name
         out.parent.mkdir()
         r = job(compress_run("--mode", "1", "--generate-thumbnail"), photo, write_dst=out, final_dst=out)
@@ -565,7 +571,7 @@ class TestThumbnailWrite:
         assert os.listdir(tmp) == []
 
     def test_success_without_a_file_is_an_error_that_names_the_destination(self, tools, photo, tmp):
-        r = self.in_place(tools, photo, "ok", "ok", "nofile")
+        r = self.in_place(tools, photo, "ok", "nofile")
         assert r.result.startswith(f"ERROR (magick reported success but wrote no file) | {photo.name} | expected: ")
         assert r.final_dst == str(photo)
         assert photo.read_bytes() == b"ORIGINAL" and self.nothing_left(photo, tmp)

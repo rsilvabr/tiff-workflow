@@ -118,3 +118,61 @@ def test_the_writes_after_magick_rewrite_the_file_once(tmp_path, monkeypatch, va
         assert real([cmd])[0].status == 0
     tw.remove_quietly(None if tag_source == str(src) else tag_source)
     assert new.read_bytes() == ref.read_bytes(), "the same file as the three rewrites left"
+
+
+class _NoLog:
+    path = ""
+
+    def __call__(self, msg="", level="INFO"):
+        pass
+
+
+@requires_tools
+def test_a_thumbnail_output_compresses_the_main_image_once(tmp_path, monkeypatch):
+    """--generate-thumbnail: the thumbnail first, then ONE magick reads page 0 of the source and
+    the thumbnail and writes the ZIP, and the page markers go into the one exiftool rewrite.
+    Until v3.1.1-rc1 page 0 was compressed into a temp TIFF, read back and compressed again
+    with the thumbnail (two deflates of the main image, 26 s against 13 for a 45 MP export),
+    and the markers were a read and a rewrite of their own."""
+    from tiff_workflow import compress_tiff_zip as cz
+    src = _source(tmp_path, "direct")
+    out = src.parent / "ZIP [x]" / src.name
+    out.parent.mkdir()
+    opt, _bound = tw.parse_args(["--mode", "1", "--generate-thumbnail", "--thumb-size", "16"],
+                                cz.PARAMS)
+    run = cz.Run(opt, _NoLog(), [])
+    run.srgb_profile = tw.resolve_srgb_profile("")
+    calls, writes = [], []
+    real_magick, real_exif, real_cmds = tw.magick_run, tw.exiftool, tw.exiftool_commands
+
+    def magick(args):
+        calls.append([str(a) for a in args])
+        return real_magick(args)
+
+    def exif(args, *a, **k):
+        if "-overwrite_original" in [str(x) for x in args]:
+            writes.append(args)
+        return real_exif(args, *a, **k)
+
+    def cmds(commands):
+        writes.extend(c for c in commands if "-overwrite_original" in c)
+        return real_cmds(commands)
+    monkeypatch.setattr(tw, "magick_run", magick)
+    monkeypatch.setattr(tw, "exiftool", exif)
+    monkeypatch.setattr(tw, "exiftool_commands", cmds)
+    r = cz.process_job(run, cz.Job(src=str(src), write_dst=str(out), final_dst=str(out),
+                                   name=src.name), 1.0)
+    assert r.result == f"OK (Uncompressed -> ZIP) [thumb replaced] | {src.name}", r.result
+    deflates = [c for c in calls if "-compress" in c]
+    assert len(deflates) == 1, f"the main image compressed once, not {len(deflates)} times"
+    assert deflates[0][1] == f"{tw.magick_path_spec(str(src))}[0]", "read from the source"
+    assert len(writes) == 1, f"one exiftool rewrite of the output, not {len(writes)}"
+    assert tw.thumb_output_matches_source(str(src), str(out), 2), "page 0 = the source's"
+    marks = [m.strip() for m in exif_stdin(out, "-a", "-G1", "-s", "-s", "-n",
+                                           "-SubfileType").splitlines()]
+    assert marks == ["[IFD1] SubfileType: 1"], "the new thumbnail marked, the image unmarked"
+    hist = _history(out)
+    assert len(hist) == 3 and hist[-1].get("Parameters") == \
+        "compress_tiff_zip mode 1: ZIP (Deflate) + thumbnail page"
+    assert exif_stdin(out, "-s3", "-IPTC:Keywords") == "伊豆沼"
+
