@@ -78,7 +78,7 @@ produce the missing one.)
 
 ### Folders skipped during discovery
 
-`OLD_TIFFs`, `OLD_TIFF` and `converted_zip` are skipped -- they hold backups and tool output
+`OLD_TIFFs`, `OLD_TIFF`, `OLD_PADDED` and `converted_zip` are skipped -- they hold backups and tool output
 nobody wants a thumbnail of -- matched RELATIVE to `--input-dir`, so pointing the tool straight at
 one of them still works. Every run logs how many files were left out.
 

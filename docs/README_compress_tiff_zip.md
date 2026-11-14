@@ -223,6 +223,11 @@ Modes 0 and 9 move originals to an `OLD_TIFFs/` subfolder. **Every mode then ski
 straight at an `OLD_TIFFs` folder still processes it. This protects originals from previous
 conversions and prevents re-processing.
 
+`OLD_PADDED` folders are skipped the same way since v3.1.1: there the wizard's Diagnose
+workflow keeps the 16-bit originals of the padded files it converted to 8-bit. Before, a
+recursive mode compressed those originals in place (mode 8) or wrote its output into the
+folder (`OLD_PADDED/OLD_TIFFs/`, `OLD_PADDED/ZIP/`; audit round 31).
+
 Before round 15 only modes 0 and 9 applied the filter, so a mode 2/3/5 run over a tree already
 compressed with mode 0/9 walked into the backups: the real file was skipped as already-Deflate,
 which left the *backup* to claim the output name and produced a folder of `_v2` copies of backups.

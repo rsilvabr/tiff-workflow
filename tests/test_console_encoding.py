@@ -8,6 +8,7 @@ was right. Each backend switches its output to UTF-8 when it is redirected
 brackets + space), per the AGENTS.md rule.
 """
 
+import os
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from test_presets import _compress_entry, _write_preset_config
 from test_regression_classes import make_tiff
 
 REPO = Path(__file__).resolve().parent.parent
@@ -62,4 +64,34 @@ def test_the_first_line_already_carries_utf8(tmp_path, lane):
     lines = r.stdout.decode("utf-8", "replace").splitlines()
     first_log = next((ln for ln in lines if "| Log:" in ln), "")
     assert "谷津バラ園" in first_log, f"Log line mangled: {first_log!r}"
+
+
+def test_the_wizard_writes_utf8_to_a_pipe(tmp_path):
+    """Audit round 31: the wizard's own output went to a pipe in the ANSI code page, every
+    Japanese name as '?' -- a `--run-preset ... > log.txt` had it so in the wizard's own
+    lines (a preset's label, the Diagnose report's paths) and in the backend lines it
+    streams, which reach it as UTF-8. On screen it was right. It now switches a redirected
+    output to UTF-8 as the backends do (tw.setup_console). The backend runs in the wizard's
+    folder, so its "Log:" line, streamed through the wizard, carries that folder's name."""
+    in_dir = tmp_path / NAME / "in"
+    in_dir.mkdir(parents=True)
+    make_tiff(tmp_path / "a.tif")
+    (tmp_path / "a.tif").rename(in_dir / "a.tif")
+    cwd = tmp_path / "作業 [cwd] 50%"
+    cwd.mkdir()
+    _write_preset_config(tmp_path, {"nightly": _compress_entry(in_dir)})
+    env = dict(os.environ, USERPROFILE=str(tmp_path), HOME=str(tmp_path))
+
+    def wizard(*args):
+        r = subprocess.run([sys.executable, str(REPO / "convert_tiff.py"), *args], cwd=str(cwd),
+                           env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=300)
+        assert r.returncode == 0, r.stdout.decode("utf-8", "replace") + r.stderr.decode("utf-8", "replace")
+        # strict: the pipe carries UTF-8. Rich breaks long lines at 80 columns.
+        return r.stdout.decode("utf-8").replace("\r", "").replace("\n", "")
+
+    listed = wizard("--list-presets")
+    assert "谷津バラ園" in listed, f"the preset's label was mangled: {listed[-600:]}"
+    ran = wizard("--run-preset", "nightly", "--dry-run")
+    assert "谷津バラ園" in ran, f"the wizard's own lines were mangled: {ran[:800]}"
+    assert "作業 [cwd]" in ran, f"the backend lines it streamed were mangled: {ran[-1500:]}"
 

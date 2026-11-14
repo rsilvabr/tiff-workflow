@@ -12,6 +12,40 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.1.1 - Audit round 31: what the check of the owner's install found
+
+The owner's presets, run on a copy of the config to check the install of v3.1.1 (2026-11-14),
+showed these two. Both were there before v3.1.1; the release was taken back for a day to ship
+with them.
+
+### MEDIUM - compress, generate_thumbnails: the originals kept in OLD_PADDED/ were processed
+**Issue:** the wizard's padded conversion (Diagnose, workflow 7) keeps each 16-bit original it
+replaces with an 8-bit copy in `OLD_PADDED/`. The wizard's own discovery skipped that folder
+(round 16); the backends skipped only `OLD_TIFFs`/`OLD_TIFF` (thumbnails also `converted_zip`).
+The owner's mode-8 preset, run over a folder the Diagnose had converted, rewrote those originals
+in place: losslessly (the pixel gate passed), but the backup was no longer the original's bytes.
+Mode 9 made `OLD_PADDED/OLD_TIFFs/`, mode 3 `OLD_PADDED/ZIP/`, and `generate_thumbnails
+--recursive` wrote its JPEGs into the folder. Modes 0 and 1 do not enter subfolders, and
+copy_exif lists a session's TIFFs without descending: neither reached it.
+- **Fix:** `OLD_PADDED` -- one name, `tw.PADDED_BACKUP_DIR`, which the wizard uses too -- is
+  skipped by compress in every mode and by generate_thumbnails, below the scan root as
+  `OLD_TIFFs` is: a run pointed AT the folder still processes it. The stranded-originals check
+  still looks only in `OLD_TIFFs`/`OLD_TIFF`, compress's own backups. The log line reads
+  `Skipped N file(s) in OLD_TIFFs/OLD_TIFF/OLD_PADDED (this toolkit's own backups)`.
+- **Files:** `tiff_workflow/common.py`, `tiff_workflow/compress_tiff_zip.py`,
+  `tiff_workflow/generate_thumbnails.py`, `tiff_workflow/wizard.py`,
+  `tests/test_old_padded_skipped.py`
+
+### LOW - Wizard: a redirected output had '?' for every Japanese name
+**Issue:** the wizard told its output to replace what the code page cannot show (a crash
+otherwise, 2026-08-03) but kept the code page when the output went to a file or a pipe
+(`--run-preset ... > log.txt`): every Japanese name was '?', in its own lines (a preset's label,
+the Diagnose report's paths) and in the backend lines it streams, which reach it as UTF-8. On
+screen it was right, and so were the backends' own logs.
+- **Fix:** the wizard switches a redirected output to UTF-8, as the backends do since 2026-10-17
+  (`tw.setup_console`); an interactive console is left as it was.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_console_encoding.py`
+
 ## v3.1.1 - Audit round 30: what the I/O round found
 
 A round that measured what every step writes and reads (`AI_tools/261114_Claude_report_io-optimizations.md`)

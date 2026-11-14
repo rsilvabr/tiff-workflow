@@ -63,6 +63,13 @@ LEFTOVER_NAME_RE = re.compile(
 
 TIFF_EXT_RE = re.compile(r"^\.(tif|tiff)$", re.I)
 
+# Where the wizard's padded conversion (Diagnose, workflow 7) keeps each 16-bit original it
+# replaced with an 8-bit copy. Not a backend's own backup folder, but the backends' discovery
+# skips it as compress skips OLD_TIFFs: matched as a folder name BELOW the scan root, so
+# pointing a backend AT it on purpose still works (audit round 31: compress mode 8 rewrote
+# the originals kept there in place, and modes 0/9/1 wrote their own output into it).
+PADDED_BACKUP_DIR = "OLD_PADDED"
+
 # The page markers that make an extra page a thumbnail, for safe_mode and --generate-thumbnail.
 # MASK and PAGE are NOT in it: they are real pages (a scanner's IR channel, a second photo),
 # and with the default list of tiff_has_only_subfile_pages, which has them, an RGB+IR scan

@@ -66,7 +66,8 @@ THUMB_NAME_RE = re.compile(r"_thumb(_v\d+)?(-\d+)?$", re.I)
 # Folder names skipped during discovery, matched RELATIVE to the root each file was found
 # under. `ZIP` and `_EXPORT` are deliberately NOT here: `_EXPORT` is what compress modes 6/7
 # exist to process, and `ZIP/` is where modes 1/3/5/6/7 PUT the compressed library.
-TOOL_OUTPUT_NAMES = ("OLD_TIFFs", "OLD_TIFF", "converted_zip")
+# OLD_PADDED holds the 16-bit originals of the wizard's padded conversion (audit round 31).
+TOOL_OUTPUT_NAMES = ("OLD_TIFFs", "OLD_TIFF", "converted_zip", tw.PADDED_BACKUP_DIR)
 
 # The thumbnails made at once, whatever --workers asks for (it accepts up to 64, as the
 # other backends do): each one is a magick process that reads a whole TIFF. A run that asks

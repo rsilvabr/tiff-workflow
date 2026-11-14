@@ -101,6 +101,10 @@ SCRIPT_NAME = "compress_tiff_zip"
 # EVERY mode, matched RELATIVE to the scan root: pointing the tool AT an OLD_TIFFs folder on
 # purpose still works.
 TOOL_OUTPUT_NAMES = ("OLD_TIFFs", "OLD_TIFF")
+# What discovery skips, the same way: those, and the wizard's OLD_PADDED (the 16-bit originals
+# of its padded conversion; audit round 31). Only TOOL_OUTPUT_NAMES hold this tool's own
+# originals: the stranded check looks for them there and nowhere else.
+SKIPPED_BACKUP_NAMES = TOOL_OUTPUT_NAMES + (tw.PADDED_BACKUP_DIR,)
 
 # Mode 8's own staging folders: `_cs8_<8 hex>` is the short form; the long
 # `compress_staging*_<32 hex>` form is still matched so a folder left behind by an old
@@ -1203,7 +1207,7 @@ def _collect_files(run, mode, input_roots):
                 continue
             seen_files.add(f.path.lower())
             # this toolkit's own backups, in EVERY mode, relative to THIS root
-            if tw.path_excluded(f.dir, root, TOOL_OUTPUT_NAMES):
+            if tw.path_excluded(f.dir, root, SKIPPED_BACKUP_NAMES):
                 backups += 1
                 continue
             # staged/temp files an interrupted run left behind
@@ -1222,7 +1226,7 @@ def _collect_files(run, mode, input_roots):
     if run.exclude_names:
         log(f"Excluded {excluded} file(s) under: {'; '.join(run.exclude_names)}")
     if backups > 0:
-        log(f"Skipped {backups} file(s) in {'/'.join(TOOL_OUTPUT_NAMES)} (this tool's own backups)")
+        log(f"Skipped {backups} file(s) in {'/'.join(SKIPPED_BACKUP_NAMES)} (this toolkit's own backups)")
     if leftovers > 0:
         log(f"Skipped {leftovers} staged/temp file(s) left by an interrupted run", "WARN")
 

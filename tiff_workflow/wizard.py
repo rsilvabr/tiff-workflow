@@ -1051,7 +1051,7 @@ def _tool_output_names() -> set:
     """Lower-cased folder names that hold this toolkit's own output (discovery skips
     them below the scan root). The ZIP/_EXPORT names come from compress_tiff_zip.py's
     own settings: a copy here let an edited --zip-subfolder-name be walked into."""
-    names = {"old_tiffs", "old_padded", "logs", "converted_zip"}
+    names = {"old_tiffs", tw.PADDED_BACKUP_DIR.lower(), "logs", "converted_zip"}
     for p in ("zip_subfolder_name", "export_zip_subfolder", "export_marker"):
         names.add(str(_backend_default("compress_tiff_zip.py", p)).lower())
     return names
@@ -4261,7 +4261,7 @@ def _finalize_padded(n: int, total: int, result: PaddedResult, failed: list) -> 
     # staging folder -- across volumes a copy straight into the photo's name, so
     # a kill left the place empty or holding a truncated file, and nothing
     # reported it. Now: see _land_padded_conversion.
-    backup_dir = parent / "OLD_PADDED"
+    backup_dir = parent / tw.PADDED_BACKUP_DIR
     try:
         backup_dir.mkdir(exist_ok=True)
         backup_path = backup_dir / name
@@ -6230,13 +6230,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     runs it without importing this module."""
     # Plain print() on a legacy Windows console (cp850/cp1252) raises
     # UnicodeEncodeError on non-ANSI paths (e.g. 横浜) -- a crash in the middle of a
-    # workflow. Rich's console handles this itself; the plain-text path needs it here.
-    for stream in (sys.stdout, sys.stderr):
-        if stream and hasattr(stream, "reconfigure"):
-            try:
-                stream.reconfigure(errors="replace")
-            except Exception:
-                pass
+    # workflow: errors="replace". A redirected output (`--run-preset ... > log.txt`) is
+    # UTF-8, as the backends' (audit round 31: it was the ANSI code page, every Japanese
+    # name in it '?' -- the wizard's own lines and the backend lines it streams).
+    tw.setup_console()
 
     parser = argparse.ArgumentParser(
         prog="convert_tiff.py",

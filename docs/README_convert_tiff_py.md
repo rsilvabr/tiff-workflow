@@ -405,7 +405,7 @@ schtasks /Create /TN "tiff-workflow" /SC WEEKLY /D SAT /ST 23:30 /RL LIMITED /TR
 
 Recursively scans a root folder for sessions matching the chosen pattern. Shows a table with session name, TIFF count, and truncated path. Prompts for confirmation before processing.
 
-Excluded from scan: `Logs`, `logs`, `converted_zip`, `ZIP`, `_EXPORT`, `OLD_TIFFs` folders.
+Excluded from scan: `Logs`, `logs`, `converted_zip`, `ZIP`, `_EXPORT`, `OLD_TIFFs`, `OLD_PADDED` folders.
 
 A long AutoFind folder list is passed to the backend through a temporary `--input-dir-file` when it would exceed the command-line limit; journals and presets still record the folders themselves.
 
