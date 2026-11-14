@@ -12,15 +12,19 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ## v3.1.1
 
-2026-11-14. **The release of v3.1.1**: everything of the test release [v3.1.1-rc1](#v311-rc1)
-(the final review of v3.1) and a round that measured what every step writes and reads. Nothing
-to change for whoever runs v3.1.0 or the rc: the same command line, presets and settings;
-workflow 7 asks one question less. **Coming from v3.0.0?** Read [v3.1.0](#v310) first.
+2026-11-15. **The release of v3.1.1**: everything of the test release [v3.1.1-rc1](#v311-rc1)
+(the final review of v3.1), a round that measured what every step writes and reads, and two
+fixes found while installing it (first published on 2026-11-14 and taken back the same night
+to ship with them). Nothing to change for whoever runs v3.1.0 or the rc: the same command line,
+presets and settings; workflow 7 asks one question less. **Coming from v3.0.0?** Read
+[v3.1.0](#v310) first.
 
 - **Compression is lighter on the disk.** The metadata, the page markers and the history entry of each compressed TIFF are written in a single pass (one exiftool command), which halves the disk writes of a run: 431 MB per 45 MP Capture One export to the staging folder. The same files, byte for byte (compared with the rc on real files, in modes 1, 8 and 9 and copy-exif `--compress-zip`)
 - **`--generate-thumbnail` is about twice as fast:** the photo is compressed in a single pass, 13-15 s instead of 26 s for a 45 MP export -- the same files
 - **Safe mode checks the pages faster:** each page's marker and size come from the file's directory, without decoding the image (0.3 s less per Capture One export, which always has a thumbnail page). A scan with damaged pixels is reported by the integrity check instead of being skipped as multi-page (audit round 30)
 - **Diagnose works in memory** (workflow 7 and its presets): no temporary files, a third faster, the same memory and verdicts -- and it now recognizes padded black-and-white scans whose IR channel is a 4th sample, which it reported as real 16-bit (audit round 30). Workflow 7 no longer asks how to compress temporary files; the temp folder it asks for is where the padded files are converted. A preset with the old answer runs as before
+- **The originals Diagnose keeps stay as they are:** compress (every mode) and `generate_thumbnails` skip `OLD_PADDED/`, where workflow 7 keeps the 16-bit originals of the files it converted, as they skip `OLD_TIFFs/`. A recursive run used to compress those originals in place (mode 8, losslessly) or write its output into the folder (modes 3 and 9, thumbnails). A run pointed at the folder itself still processes it (audit round 31)
+- **Japanese names survive a redirected wizard:** `--run-preset ... > log.txt` writes UTF-8, as the scripts do; until now every Japanese name was `?` there -- on screen it was right (audit round 31)
 
 ---
 
