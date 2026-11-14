@@ -176,3 +176,69 @@ def test_a_thumbnail_output_compresses_the_main_image_once(tmp_path, monkeypatch
         "compress_tiff_zip mode 1: ZIP (Deflate) + thumbnail page"
     assert exif_stdin(out, "-s3", "-IPTC:Keywords") == "伊豆沼"
 
+class TestPageClassesWithPing:
+    """v3.1.1: the page classifiers read each page's marker and size from its directory
+    (`identify -ping`), as tiff_page_count does since v3.1. The full identify decoded every
+    page -- 0.3 s for a 45 MP Capture One export, multi-page by its thumbnail -- for the same
+    answers (95 real TIFFs read both ways, AI_tools/261114_Claude_report_io-optimizations.md)."""
+
+    def test_what_is_sent_to_magick(self, monkeypatch):
+        sent = []
+
+        def fake(args, timeout=30):
+            sent.append(([str(a) for a in args], timeout))
+            geometry = "|%w|%h" in str(args[3])
+            return tw.MagickResult(False, 0, ["|64|48", "REDUCEDIMAGE|16|12"] if geometry
+                                   else ["", "REDUCEDIMAGE"])
+        monkeypatch.setattr(tw, "magick_probe", fake)
+        p = r"E:\伊豆沼 [x]\50%off.tif"
+        assert tw.tiff_has_only_subfile_pages(p, 2, tw.THUMBNAIL_PAGE_TYPES, 45) is True
+        assert tw.tiff_has_thumbnail_page(p, 45) is True
+        assert sent == [(["identify", "-ping", "-format", "%[tiff:subfiletype]|%w|%h\n", p], 45),
+                        (["identify", "-ping", "-format", "%[tiff:subfiletype]\\n", p], 45)]
+
+    @requires_tools
+    @pytest.mark.parametrize("subfiletypes, thumbs_only, has_thumb", [
+        ([None, 1], True, True),            # image + reduced preview
+        ([None, 1, 4], False, True),        # scanner: image, preview, IR mask
+        ([None, None, None], False, False), # three full pages, no markers
+    ], ids=["preview", "scanner-ir", "three-unmarked"])
+    def test_the_layouts_the_gates_meet(self, tmp_path, subfiletypes, thumbs_only, has_thumb):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        built = make_multipage_tiff(plain / "scan.tif", subfiletypes)
+        folder = tmp_path / FOLDERS["container"]
+        folder.mkdir()
+        photo = folder / "0014_14 (2) 50%off.tif"
+        built.rename(photo)
+        n = len(subfiletypes)
+        assert tw.tiff_has_only_subfile_pages(str(photo), n, tw.THUMBNAIL_PAGE_TYPES) is thumbs_only
+        assert tw.tiff_has_thumbnail_page(str(photo)) is has_thumb
+
+    @requires_tools
+    def test_damaged_pixels_do_not_make_a_scan_multi_page(self, tmp_path):
+        """Damaged pixel data on page 0, directories intact: the pages are still an image and
+        its preview. The full identify failed on the pixels and safe mode skipped the file as
+        MULTI (2 pages) -- a wrong reason; the conversion now meets the damage and says so."""
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        built = make_multipage_tiff(plain / "scan.tif", [None, 1], sizes=["600x400", "60x40"])
+        zipped = plain / "zip.tif"
+        import subprocess
+        subprocess.run(["magick", str(built), "-compress", "zip", str(zipped)],
+                       capture_output=True, check=True, timeout=120)
+        _write_tags(zipped, ["-IFD0:SubfileType=", "-IFD1:SubfileType#=1"])
+        data = bytearray(zipped.read_bytes())
+        for i in range(len(data) // 3, len(data) // 3 + 20000):
+            data[i] = 0x55
+        zipped.write_bytes(bytes(data))
+        full = subprocess.run(["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n",
+                               str(zipped)], capture_output=True, timeout=120)
+        assert full.returncode != 0, "the fixture: the full identify fails on the pixels"
+        folder = tmp_path / FOLDERS["direct"]
+        folder.mkdir()
+        photo = folder / "0014_14 (2).tif"
+        zipped.rename(photo)
+        assert tw.tiff_has_only_subfile_pages(str(photo), 2, tw.THUMBNAIL_PAGE_TYPES) is True
+        assert tw.tiff_has_thumbnail_page(str(photo)) is True
+        assert not tw.zip_integrity(str(photo)), "the damage is the integrity gate's to see"

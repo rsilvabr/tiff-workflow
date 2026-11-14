@@ -1372,10 +1372,16 @@ def tiff_has_only_subfile_pages(path, page_count, allowed=("REDUCEDIMAGE", "REDU
     `allowed`, OR it is strictly smaller than the main image (the tag alone is unreliable:
     ImageMagick stamps PAGE on every page it rewrites). A full-size extra page with an
     empty or unlisted tag is a real page (scanner IR, a layer, a second photo). A page that
-    cannot be classified fails closed."""
+    cannot be classified fails closed.
+
+    `-ping` (v3.1.1), as tiff_page_count since v3.1: each page's marker and size come from
+    its directory. The full identify decoded every page -- 0.3 s for a 45 MP Capture One
+    export, which is always multi-page (its thumbnail page) -- for the same answers (95 real
+    TIFFs read both ways). Whether the pixels decode is not this probe's question:
+    zip_integrity and pixel_identical answer it."""
     if page_count <= 1:
         return True
-    r = magick_probe(["identify", "-format", "%[tiff:subfiletype]|%w|%h\n", path], timeout)
+    r = magick_probe(["identify", "-ping", "-format", "%[tiff:subfiletype]|%w|%h\n", path], timeout)
     if r.timed_out or r.exit_code != 0:
         return False
     lines = [ln for ln in r.lines if ln.strip()]
@@ -1405,8 +1411,9 @@ def tiff_has_only_subfile_pages(path, page_count, allowed=("REDUCEDIMAGE", "REDU
 
 
 def tiff_has_thumbnail_page(path, timeout=30):
-    """True when a page of the TIFF is tagged REDUCEDIMAGE (an embedded thumbnail)."""
-    r = magick_probe(["identify", "-format", "%[tiff:subfiletype]\\n", path], timeout)
+    """True when a page of the TIFF is tagged REDUCEDIMAGE (an embedded thumbnail). The
+    markers come from the directories (`-ping`, v3.1.1): no page is decoded."""
+    r = magick_probe(["identify", "-ping", "-format", "%[tiff:subfiletype]\\n", path], timeout)
     return any(ln.strip().upper() in THUMBNAIL_PAGE_TYPES for ln in r.lines)
 
 
