@@ -542,8 +542,10 @@ class ToolConfig:
     # A repeat or preset searches again, so sessions added since are included.
     last_autofind: Optional[Dict] = None
     # Settings of the last Diagnose run (workflow 7): {"roots": [str], "scope": str,
-    # "skip_names": str, "workers": int, "temp_dir": str|None, "compress_tmp": str}.
-    # A repeat or preset re-scans the roots and only REPORTS (never converts).
+    # "skip_names": str, "workers": int, "temp_dir": str|None, "convert_padded": bool}
+    # (until v3.1.1 also "compress_tmp", the compression of the check's temp TIFFs: ignored
+    # now). A repeat or preset re-scans the roots and REPORTS; it converts the padded files
+    # only with convert_padded, through temp_dir.
     last_diagnose: Optional[Dict] = None
     # Named snapshots of the journal above: name -> {kind, label, commands, time,
     # manifest_path, manifest_workflow, manifest_default_mode, autofind, diagnose,
@@ -3039,14 +3041,16 @@ def _compare_tiff_metadata(old_path: Path, new_path: Path) -> tuple[bool, str]:
 
 
 @_scoped_magick_aliases
-def _is_real_16bit(tiff_path: Path, temp_dir: Optional[Path] = None, compress_tmp: str = "none") -> tuple[bool, float, str]:
+def _is_real_16bit(tiff_path: Path) -> tuple[bool, float, str]:
     """
     Check if a TIFF is real 16-bit or padded 8-bit (stretched to 16).
-    Method: Convert to 8-bit and back to 16-bit. If RMSE=0, it's padded 8-bit.
-    Uses temp_dir for temporary files if provided.
-    """
 
-    work_dir = temp_dir if temp_dir else Path(tempfile.gettempdir())
+    Method: page 0 against itself reduced to 8 bits and brought back to 16, in ONE `magick
+    compare`, in memory (v3.1.1). RMSE 0 = padded 8-bit. Until v3.1.1 the round trip went
+    through two temp TIFFs in a temp folder -- an 8-bit and a 16-bit copy, 380 MB written for
+    a 45 MP file and 723 MB for an 84 MP scan -- for the same RMSE, the same memory peak (the
+    compare held both images anyway) and a third more time.
+    """
 
     def get_depth(path):
         try:
@@ -3070,82 +3074,36 @@ def _is_real_16bit(tiff_path: Path, temp_dir: Optional[Path] = None, compress_tm
     if depth != 16:
         return False, 0.0, f"{depth}-bit (not 16-bit)"
 
-    tmp8 = None
-    tmp16 = None
+    # [0] on both reads: multi-page TIFFs (Capture One main+thumbnail, scanner RGB+IR) made
+    # the whole-file compare return garbage RMSE (~27%) even for pixel-identical data, so
+    # padded files were misclassified as real 16-bit. The page is read twice: `magick compare`
+    # knows no +clone. The timeout is what the two conversions and the compare had.
+    page = f"{_magick_spec(tiff_path)}[0]"
     try:
-        unique_id = uuid.uuid4().hex[:12]
-        tmp8 = work_dir / f"diag_8bit_{unique_id}.tif"
-        tmp16 = work_dir / f"diag_16bit_{unique_id}.tif"
-
-        compress_8 = f"-compress {compress_tmp}" if compress_tmp != "none" else ""
-        compress_16 = f"-compress {compress_tmp}" if compress_tmp == "zip" else ""
-
         t0 = time.time()
-        try:
-            # [0] on every step: multi-page TIFFs (Capture One main+thumbnail, scanner
-            # RGB+IR) made the whole-file compare return garbage RMSE (~27%) even for
-            # pixel-identical data, so padded files were misclassified as real 16-bit.
-            result = _run_captured(
-                ["magick", f"{_magick_spec(tiff_path)}[0]", "-depth", "8"] + (compress_8.split() if compress_8 else []) + [tw.magick_path_spec(tmp8)],
-                _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
-            )
-        except FileNotFoundError:
-            return False, 0.0, "ERROR: ImageMagick not found"
-        t1 = time.time()
-        if result.returncode != 0:
-            return False, 0.0, "ERROR: 8-bit conversion failed"
-
-        try:
-            result = _run_captured(
-                ["magick", f"{_magick_spec(tmp8)}[0]", "-depth", "16"] + (compress_16.split() if compress_16 else []) + [tw.magick_path_spec(tmp16)],
-                _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
-            )
-        except FileNotFoundError:
-            return False, 0.0, "ERROR: ImageMagick not found"
-        t2 = time.time()
-        if result.returncode != 0:
-            return False, 0.0, "ERROR: 16-bit back conversion failed"
-
-        if not tmp16.exists():
-            return False, 0.0, "ERROR: round-trip file missing"
-
-        try:
-            result = _run_captured(
-                ["magick", "compare", "-metric", "RMSE", f"{_magick_spec(tiff_path)}[0]", f"{_magick_spec(tmp16)}[0]", "null:"],
-                _work_timeout(COMPARE_TIMEOUT_S, tiff_path), text=True
-            )
-        except FileNotFoundError:
-            return False, 0.0, "ERROR: ImageMagick not found (compare failed)"
-        t3 = time.time()
-
+        result = _run_captured(
+            ["magick", "compare", "-metric", "RMSE", page,
+             "(", page, "-depth", "8", "-depth", "16", ")", "null:"],
+            _work_timeout(2 * CONVERT_TIMEOUT_S + COMPARE_TIMEOUT_S, tiff_path), text=True
+        )
         if DEBUG_TIMING:
-            sz8 = os.path.getsize(tmp8) if tmp8.exists() else 0
-            sz16 = os.path.getsize(tmp16) if tmp16.exists() else 0
-            print(f"[DEBUG] {tiff_path.name} | 8bit:{(t1-t0):.2f}s({sz8//1024}KB) 16bit:{(t2-t1):.2f}s({sz16//1024}KB) compare:{(t3-t2):.2f}s")
-
-        output = _compare_output(result)
-        if result.returncode not in (0, 1):
-            return False, 0.0, f"ERROR: compare failed (exit={result.returncode}): {output}"
-        rmse, output = _rmse_value(output)
-        if rmse is None:
-            return False, 0.0, f"ERROR: RMSE parse failed: '{output}'"
-
-        if rmse == 0.0:
-            return False, 0.0, "padded 8-bit (round-trip RMSE=0)"
-        else:
-            return True, rmse, f"real 16-bit (RMSE={rmse})"
-
+            print(f"[DEBUG] {tiff_path.name} | round trip + compare: {time.time() - t0:.2f}s")
+    except FileNotFoundError:
+        return False, 0.0, "ERROR: ImageMagick not found (compare failed)"
     except subprocess.TimeoutExpired:
         return False, 0.0, "ERROR: timeout during comparison"
     except Exception as e:
         return False, 0.0, f"ERROR: {e}"
-    finally:
-        for f in (tmp8, tmp16):
-            if f and f.exists():
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
+
+    output = _compare_output(result)
+    if result.returncode not in (0, 1):
+        return False, 0.0, f"ERROR: compare failed (exit={result.returncode}): {output}"
+    rmse, output = _rmse_value(output)
+    if rmse is None:
+        return False, 0.0, f"ERROR: RMSE parse failed: '{output}'"
+    if rmse == 0.0:
+        return False, 0.0, "padded 8-bit (round-trip RMSE=0)"
+    return True, rmse, f"real 16-bit (RMSE={rmse})"
 
 
 def _split_semicolons(value: Optional[str]) -> List[str]:
@@ -3260,8 +3218,7 @@ class DiagnoseResult:
         return _diagnose_status(self.is_real, self.detail)
 
 
-def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path],
-                   compress_tmp: str, on_result=None, roots=None,
+def _diagnose_pool(tiff_files: List[Path], workers: int, on_result=None, roots=None,
                    budget: Optional["_MemoryBudget"] = None,
                    pixels: Optional[Dict[str, int]] = None) -> List[DiagnoseResult]:
     """Run _is_real_16bit over `tiff_files` with `workers` threads, printing one line
@@ -3273,12 +3230,12 @@ def _diagnose_pool(tiff_files: List[Path], workers: int, temp_dir: Optional[Path
 
     def process_one(tiff_path) -> DiagnoseResult:
         if budget is None:
-            return DiagnoseResult(tiff_path, *_is_real_16bit(tiff_path, temp_dir, compress_tmp))
+            return DiagnoseResult(tiff_path, *_is_real_16bit(tiff_path))
         key = os.path.normcase(os.path.abspath(tiff_path))
         need = (pixels or {}).get(key, tw.UNKNOWN_IMAGE_PIXELS) * tw.COMPARE_BYTES_PER_PIXEL
         held = budget.acquire(need)
         try:
-            return DiagnoseResult(tiff_path, *_is_real_16bit(tiff_path, temp_dir, compress_tmp))
+            return DiagnoseResult(tiff_path, *_is_real_16bit(tiff_path))
         finally:
             budget.release(held)
 
@@ -3321,12 +3278,15 @@ def _usable_temp_dir(path, style: str) -> Optional[Path]:
 
 
 def _ask_temp_dir() -> Optional[Path]:
-    """Diagnose's temp folder: ONE question, the same on both screens (v3.1 phase 6, F3/F4:
-    the Rich screen asked yes/no and then the path, the plain one the path under a question
-    that read like yes/no -- so a "y" made a folder named y in the current folder). A yes/no
-    word is read as one: no = the system temp folder, yes = asked for the path. A relative
-    path is made absolute and shown before it is used; None = the system temp folder."""
-    answer = _ask("\nTemp folder for the checks (Enter = the system temp folder)", style="")
+    """Diagnose's temp folder, where the padded files it finds are converted before they
+    land (the check itself writes nothing since v3.1.1: _is_real_16bit). ONE question, the
+    same on both screens (v3.1 phase 6, F3/F4: the Rich screen asked yes/no and then the
+    path, the plain one the path under a question that read like yes/no -- so a "y" made a
+    folder named y in the current folder). A yes/no word is read as one: no = the system
+    temp folder, yes = asked for the path. A relative path is made absolute and shown before
+    it is used; None = the system temp folder."""
+    answer = _ask("\nTemp folder for converting padded files (Enter = the system temp folder)",
+                  style="")
     if answer.lower() in _NO_WORDS:
         answer = ""
     elif answer.lower() in _YES_WORDS:
@@ -3343,8 +3303,8 @@ def _ask_temp_dir() -> Optional[Path]:
 def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     """
     Workflow 7: Diagnose 16-bit TIFFs.
-    Check if TIFFs marked as 16-bit are real 16-bit data or padded 8-bit.
-    Uses parallel processing with configurable temp directory.
+    Check if TIFFs marked as 16-bit are real 16-bit data or padded 8-bit, in parallel; the
+    padded ones can then be converted to 8-bit ZIP (through the temp folder asked here).
     """
     folder = step_folder(cfg, "Root folder to scan for TIFFs")
     if folder is None:
@@ -3368,21 +3328,17 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
     cfg.config.last_workers = workers
     cfg.save_config()
 
+    # Until v3.1.1 a second question chose how the check's temp TIFFs were compressed; the
+    # check writes none now (_is_real_16bit), and a preset that still carries the answer
+    # ("compress_tmp") runs as before, the answer ignored.
     temp_dir = _ask_temp_dir()
-
-    _say("\nCompress temp TIFFs during comparison?", "cyan")
-    _say("  [1] No      (uncompressed, fast)")
-    _say("  [2] LZW     (8-bit LZW, balanced)")
-    _say("  [3] ZIP     (8+16 bit Deflate, slower)")
-    compress_tmp = {"1": "none", "2": "lzw", "3": "zip"}[
-        _ask("Choice", "1", style="", choices=["1", "2", "3"])]
 
     convert_padded = _ask_yes_no("\nRepeat/preset: also convert the padded files it finds? "
                                  "(pixel-verified, originals kept in OLD_PADDED)", False, "cyan")
 
     settings = {"roots": [os.path.abspath(str(folder))], "scope": scope, "skip_names": skip_names,
                 "workers": workers, "temp_dir": str(temp_dir) if temp_dir else None,
-                "compress_tmp": compress_tmp, "convert_padded": convert_padded}
+                "convert_padded": convert_padded}
     _save_last_run(cfg, "diagnose", _diagnose_label(settings), None, diagnose=settings)
 
     # Same cache as the Diagnose preset: a file already checked and unchanged since is not
@@ -3395,7 +3351,7 @@ def run_diagnose_tiffs(cfg: "ConfigManager") -> bool:
 
     total_start = time.time() if DEBUG_TIMING else None
     if todo:
-        results += _diagnose_check(todo, keys, cache, workers, temp_dir, compress_tmp, [folder])
+        results += _diagnose_check(todo, keys, cache, workers, [folder])
     statuses = [r.status for r in results]
     padded_files = [r.path for r in results if r.status == "padded"]
     padded_count = len(padded_files)
@@ -3490,8 +3446,7 @@ def _split_cached(files: List[Path], cache: Dict) -> Tuple[List[DiagnoseResult],
     return cached, todo, keys
 
 
-def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
-                      temp_dir: Optional[Path], compress_tmp: str, roots=None,
+def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int, roots=None,
                       budget=None, pixels=None) -> List[DiagnoseResult]:
     """_diagnose_pool over `todo`, recording each verdict in `cache` and writing the
     cache every _CACHE_SAVE_EVERY results and once more at the end -- also when the
@@ -3510,25 +3465,25 @@ def _check_with_cache(todo: List[Path], keys: Dict, cache: Dict, workers: int,
                 pending[0] = 0
 
     try:
-        return _diagnose_pool(todo, workers, temp_dir, compress_tmp, on_result=record,
-                              roots=roots, budget=budget, pixels=pixels)
+        return _diagnose_pool(todo, workers, on_result=record, roots=roots, budget=budget,
+                              pixels=pixels)
     finally:
         if pending[0]:
             _save_diagnose_cache(cache)
 
 
 def _diagnose_check(todo: List[Path], keys: Dict, cache: Dict, workers: int,
-                    temp_dir: Optional[Path], compress_tmp: str, roots) -> List[DiagnoseResult]:
+                    roots) -> List[DiagnoseResult]:
     """The files the cache could not answer, checked: each verdict kept in the cache as it
     comes in (_check_with_cache), or the pool alone with DIAGNOSE_CACHE off. Workflow 7 and
-    a Diagnose preset both check through here."""
+    a Diagnose preset both check through here. The check writes no file (v3.1.1), so it needs
+    no temp folder; the memory per file is what the compare always held."""
     budget, pixels = _memory_budget(todo, tw.COMPARE_BYTES_PER_PIXEL, "16-bit check")
     _say(f"\nDiagnosing {len(todo)} TIFF file(s) with {workers} workers...", "cyan")
     if DIAGNOSE_CACHE:
-        return _check_with_cache(todo, keys, cache, workers, temp_dir, compress_tmp,
-                                 roots=roots, budget=budget, pixels=pixels)
-    return _diagnose_pool(todo, workers, temp_dir, compress_tmp, roots=roots,
-                          budget=budget, pixels=pixels)
+        return _check_with_cache(todo, keys, cache, workers, roots=roots, budget=budget,
+                                 pixels=pixels)
+    return _diagnose_pool(todo, workers, roots=roots, budget=budget, pixels=pixels)
 
 
 def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False,
@@ -3580,9 +3535,9 @@ def _run_diagnose_journal(cfg, entry: Dict, title: str, unattended: bool = False
     workers = clamp_workers(d.get("workers") or cfg.config.default_workers,
                             cfg.config.default_workers)
     if todo:
-        temp_dir = _usable_temp_dir(d.get("temp_dir"), "yellow")
-        compress_tmp = d.get("compress_tmp") or "none"
-        results += _diagnose_check(todo, keys, cache, workers, temp_dir, compress_tmp, roots)
+        # the check writes nothing: the saved temp folder is the conversion's (below), and
+        # the temp-compression answer of a preset saved before v3.1.1 is ignored
+        results += _diagnose_check(todo, keys, cache, workers, roots)
 
     by_status: Dict[str, List[Tuple[Path, str]]] = {"padded": [], "real": [], "other": [], "error": []}
     for r in sorted(results, key=lambda r: str(r.path)):

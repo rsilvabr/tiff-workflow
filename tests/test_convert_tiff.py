@@ -327,7 +327,7 @@ class TestIsReal16Bit:
         subprocess.run(["magick", "-size", "64x64", "gradient:red-blue", "-depth", "8", str(main8)], capture_output=True)
         subprocess.run(["magick", str(main8), "-depth", "16", str(padded)], capture_output=True)
 
-        is_real, rmse, msg = _is_real_16bit(padded, tmp_path)
+        is_real, rmse, msg = _is_real_16bit(padded)
         assert is_real is False
         assert "padded" in msg
 
@@ -335,13 +335,13 @@ class TestIsReal16Bit:
         """Regression: whole-file RMSE on multi-page TIFFs returned garbage (~27%), so a
         padded 8-bit file with a thumbnail page was misclassified as real 16-bit."""
         padded = self._make_c1_style(tmp_path, real_16bit=False)
-        is_real, rmse, msg = _is_real_16bit(padded, tmp_path)
+        is_real, rmse, msg = _is_real_16bit(padded)
         assert is_real is False
         assert "padded" in msg
 
     def test_real_16bit_two_page_detected(self, tmp_path):
         real = self._make_c1_style(tmp_path, real_16bit=True)
-        is_real, rmse, msg = _is_real_16bit(real, tmp_path)
+        is_real, rmse, msg = _is_real_16bit(real)
         assert is_real is True
         assert rmse > 0
 

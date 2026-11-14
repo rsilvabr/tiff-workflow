@@ -12,6 +12,35 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.1.1 - Audit round 30: what the I/O round found
+
+A round that measured what every step writes and reads (`AI_tools/261114_Claude_report_io-optimizations.md`)
+cut the rewrites of each TIFF (the `perf:` commits of v3.1.1) and found these two on the way.
+
+### MEDIUM - Wizard, Diagnose: a padded black-and-white scan with its IR channel was never found
+**Issue:** the 16-bit check wrote page 0 as an 8-bit temp TIFF, read it back as 16-bit and compared.
+ImageMagick picks the layout of a file it writes from the pixels (audit round 28): a film scan in
+RGB whose every pixel is neutral (R = G = B), with its IR channel as a 4th sample, came out as
+gray + one extra sample, with other values -- a pixel R = G = B = 10, IR = 117 came back 8 and 8.
+The RMSE against the original (~12 800, a fifth of the range) measured that other image whatever
+the data: such a file was always "real 16-bit" and never offered for conversion. Nothing was lost
+(a padded file that is not found stays as it was).
+- **Fix:** the round trip runs in memory, in one `magick compare` (`f[0]` against
+  `( f[0] -depth 8 -depth 16 )`): nothing is written (380 MB per 45 MP file until now) and the
+  RMSE is the rounding only. 127 of 128 real and padded files gave the same verdict and RMSE both
+  ways; the 128th is a scan of this kind (real, RMSE 12 801 → 74). Padded, real, and padded RGB
+  with a real IR: found right, and the padded one converts to 8-bit with its 4 samples.
+- **Files:** `tiff_workflow/wizard.py`, `tests/test_io_rewrites.py`, the tests that called the
+  check with a temp folder
+
+### LOW - compress safe mode: a scan with damaged pixels was skipped as multi-page
+**Issue:** `tiff_has_only_subfile_pages` decoded every page to read each page's marker and size.
+Damaged pixel data on page 0 made identify fail, and a 2-page scan (image + preview) was reported
+`MULTI (2 pages)`, the wrong reason, instead of meeting the integrity gate.
+- **Fix:** `identify -ping` (each page's directory), as `tiff_page_count` since v3.1 -- the same
+  answers on 95 real TIFFs, 0.3 s less per Capture One export (commit `e2c2594`).
+- **Files:** `tiff_workflow/common.py`, `tests/test_io_rewrites.py`
+
 ## v3.1.1-rc1 - Audit round 29: the final review of v3.1
 
 An independent review of v3.1.0 and of its Windows program (2026-11-14) found nothing that had to

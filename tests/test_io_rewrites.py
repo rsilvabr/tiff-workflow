@@ -242,3 +242,79 @@ class TestPageClassesWithPing:
         assert tw.tiff_has_only_subfile_pages(str(photo), 2, tw.THUMBNAIL_PAGE_TYPES) is True
         assert tw.tiff_has_thumbnail_page(str(photo)) is True
         assert not tw.zip_integrity(str(photo)), "the damage is the integrity gate's to see"
+
+
+@requires_tools
+@pytest.mark.parametrize("pages, padded", [([None], True), ([None], False), ([None, 1], True)],
+                         ids=["padded", "real", "padded-with-preview"])
+def test_diagnose_checks_in_memory_with_the_file_routes_answer(tmp_path, monkeypatch, pages, padded):
+    """v3.1.1: Diagnose's 16-bit check is ONE `magick compare` with the 8-bit round trip in
+    parentheses, in memory. Until v3.1.1 the round trip went through two temp TIFFs (an 8-bit
+    and a 16-bit copy: 380 MB written for a 45 MP file, 723 MB for an 84 MP scan). No command
+    may write a file now, and the RMSE -- so the verdict -- is the one the file route gives."""
+    import subprocess
+    from tiff_workflow import wizard as ct
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    built = make_multipage_tiff(plain / "scan.tif", pages, padded=padded)
+    ref = []
+    for cmd in (["magick", f"{built}[0]", "-depth", "8", str(plain / "t8.tif")],
+                ["magick", f"{plain / 't8.tif'}[0]", "-depth", "16", str(plain / "t16.tif")],
+                ["magick", "compare", "-metric", "RMSE", f"{built}[0]", f"{plain / 't16.tif'}[0]",
+                 "null:"]):
+        ref.append(subprocess.run(cmd, capture_output=True, text=True, timeout=120))
+    file_rmse = ct._rmse_value(ref[-1].stderr or ref[-1].stdout)[0]
+    assert file_rmse is not None and (file_rmse == 0.0) == padded, "the fixture itself"
+    folder = tmp_path / FOLDERS["container"]
+    folder.mkdir()
+    photo = folder / "0014_14 (2) 50%off.tif"
+    built.rename(photo)
+
+    sent = []
+    real_run = ct._run_captured
+
+    def recording(cmd, timeout, text=False, input=None):
+        sent.append([str(c) for c in cmd])
+        return real_run(cmd, timeout, text=text, input=input)
+    monkeypatch.setattr(ct, "_run_captured", recording)
+    is_real, rmse, detail = ct._is_real_16bit(photo)
+
+    writes = [c for c in sent if c[1] not in ("identify", "compare")]
+    assert writes == [], f"the check wrote files: {writes}"
+    assert all(c[-1] == "null:" for c in sent if c[1] == "compare")
+    assert rmse == file_rmse and is_real is (not padded), (is_real, rmse, detail, file_rmse)
+    assert detail.startswith("padded 8-bit" if padded else "real 16-bit"), detail
+
+
+@requires_tools
+@pytest.mark.parametrize("rgb_padded, ir_padded", [(True, True), (False, False), (True, False)],
+                         ids=["padded", "real", "padded-rgb-real-ir"])
+def test_diagnose_reads_a_black_and_white_scan_with_ir(tmp_path, rgb_padded, ir_padded):
+    """A black-and-white film scan in RGB (R = G = B) with its IR channel as a 4th sample.
+    The file route wrote the 8-bit temp TIFF as gray + IR (ImageMagick picks the layout from
+    the pixels, audit round 28) and measured that change of layout: RMSE ~12800 whatever the
+    data, so a padded scan of this kind was never found. In memory the RMSE is the rounding
+    only: padded when every channel is, real when the IR (or the RGB) holds 16-bit data."""
+    import numpy as np
+    import tifffile
+    from tiff_workflow import wizard as ct
+    rng = np.random.default_rng(7)
+
+    def channel(padded):
+        if padded:
+            return rng.integers(0, 256, (48, 64), dtype=np.uint16) * 257
+        return rng.integers(0, 65536, (48, 64), dtype=np.uint16)
+    gray = channel(rgb_padded)
+    data = np.dstack([gray, gray, gray, channel(ir_padded)])
+    folder = tmp_path / FOLDERS["container"]
+    folder.mkdir()
+    photo = folder / "0014_14 (2) 50%off.tif"
+    plain = tmp_path / "scan.tif"
+    tifffile.imwrite(plain, data, photometric="rgb", extrasamples=[0])
+    plain.rename(photo)
+    is_real, rmse, detail = ct._is_real_16bit(photo)
+    padded = rgb_padded and ir_padded
+    assert is_real is (not padded), detail
+    assert detail.startswith("padded 8-bit" if padded else "real 16-bit"), detail
+    if not padded:
+        assert 0 < rmse < 1000, f"the rounding, not a change of layout: {detail}"

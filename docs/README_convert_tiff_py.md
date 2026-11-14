@@ -131,22 +131,9 @@ Verify each TIFF in OLD_TIFFs matches the parent copy (via RMSE), then delete if
 
 Check if 16-bit TIFFs are real 16-bit data or padded 8-bit (stretched from 8-bit by software that only converted depth). Uses round-trip RMSE method.
 
-**How it works:** Round-trip test — converts 16-bit → 8-bit → 16-bit via ImageMagick, then compares RMSE. If RMSE=0, the original was 8-bit padded. If RMSE>0, it's real 16-bit.
+**How it works:** Round-trip test — page 0 is reduced to 8-bit, brought back to 16-bit and compared with itself (RMSE), in ONE `magick compare`, in memory. If RMSE=0, the original was 8-bit padded. If RMSE>0, it's real 16-bit.
 
-**Temporary files compression:** During comparison, you can choose how to compress temp TIFFs (option 1-3):
-- `[1] Uncompressed` — fastest processing, higher I/O (no compression overhead)
-- `[2] LZW` — balanced, 8-bit LZW compression reduces I/O with low CPU cost
-- `[3] ZIP` — compresses both 8-bit and 16-bit temp files, reduces I/O but higher CPU cost
-
-**Benchmark results** (Ryzen 5950x, SSD SATA M.2, 155 photos):
-
-| Mode | Total Time |
-|------|------------|
-| Uncompressed | 78.9s |
-| LZW | 80.8s |
-| ZIP | 135.8s |
-
-On fast storage (SSD), processing cost >> I/O cost, so uncompressed is fastest. On slow storage (HDD, network), LZW may win.
+**Nothing is written for the check** (since v3.1.1). Until then the round trip went through two temp TIFFs in the temp folder -- an 8-bit and a 16-bit copy, 380 MB written for a 45 MP file and 723 MB for an 84 MP scan -- and a question chose their compression. In memory the check takes a third less time, needs the same memory (the comparison always held both images), and gives the same verdicts and RMSE (128 real and padded files, both ways). The one difference is a fix: a black-and-white film scan in RGB (R = G = B) with its IR channel as a 4th sample. ImageMagick picks the layout of a file it writes from the pixels, so the 8-bit temp file came out as gray + one extra sample instead of RGB + IR, with other values (a pixel R = G = B = 10, IR = 117 came back 8 and 8); the old RMSE (~12 800) measured that other image whatever the data, and a padded scan of this kind was never found. It is now. The temp folder question stays: the padded files found are converted through it. A preset saved before v3.1.1 keeps its old compression answer; it is ignored.
 
 **What a padded file costs** (45 MP, Deflate): 70 MB kept as 16-bit, 59 MB as 8-bit (~17% smaller).
 

@@ -612,12 +612,11 @@ def test_autofind_never_takes_a_backup_folder_for_a_session(tmp_path):
 def test_a_temp_folder_with_brackets_works(tmp_path):
     """v3.1 phase 6 (W-O2, F1 of phase 2): with '[ ]' in the temp folder every Diagnose and
     padded file failed -- the OUTPUT specs went through the bracket-free alias, which needs
-    the file to exist, and fell back to an escape magick wrote somewhere else."""
+    the file to exist, and fell back to an escape magick wrote somewhere else. Since v3.1.1
+    the check writes no file (and has no temp folder); the conversion still stages there."""
     from test_regression_classes import make_multipage_tiff
     src = make_multipage_tiff(tmp_path / "padded.tif", [None], padded=True)
-    work = tmp_path / "tmp [x] 伊豆沼"
-    work.mkdir()
-    real, _rmse, verdict = ct._is_real_16bit(src, work)[:3]
+    real, _rmse, verdict = ct._is_real_16bit(src)[:3]
     assert real is False and verdict.startswith("padded 8-bit"), (real, verdict)   # not "ERROR: ..."
     staging = tmp_path / "staging [y]"
     staging.mkdir()

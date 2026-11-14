@@ -187,7 +187,7 @@ class TestJournal:
             ct.Path(r"\\server\share\elsewhere") if str(self) == str(tmp_path) else real_resolve(self, strict)))
         monkeypatch.setattr(ct, "_memory_capped_pool_workers", lambda req, *a, **k: req)
         monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real 16-bit"))
-        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "1", "n"])
+        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "n"])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         cfg = _cfg()
         assert ct.run_diagnose_tiffs(cfg) is True
@@ -200,7 +200,7 @@ class TestJournal:
             _touch(p)
         monkeypatch.setattr(ct, "_memory_capped_pool_workers", lambda req, *a, **k: req)
         monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real 16-bit"))
-        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "1", "n"])
+        answers = iter([str(tmp_path), "_EXPORT/TIFF16", "*NXSTUDIO*", "3", "", "n"])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         cfg = _cfg()
 
@@ -211,8 +211,7 @@ class TestJournal:
         assert snap["commands"] is None
         assert snap["diagnose"] == {"roots": [str(tmp_path.resolve())],
                                     "scope": "_EXPORT/TIFF16", "skip_names": "*NXSTUDIO*",
-                                    "workers": 3, "temp_dir": None, "compress_tmp": "none",
-                                    "convert_padded": False}
+                                    "workers": 3, "temp_dir": None, "convert_padded": False}
         assert "[report only]" in snap["label"]
         assert ct._journal_runnable(snap)
 
@@ -381,9 +380,8 @@ class TestCacheServesTheConversion:
 
         monkeypatch.setattr(ct, "_is_real_16bit",
                             lambda *a, **k: pytest.fail("the menu re-checked a cached file"))
-        # folder, scope, skip names, workers, temp dir, compress-temp choice,
-        # preset converts?, convert now?
-        answers = iter([str(home), "_EXPORT/TIFF16", "*NXSTUDIO*", "2", "", "1", "n", "y"])
+        # folder, scope, skip names, workers, temp dir, preset converts?, convert now?
+        answers = iter([str(home), "_EXPORT/TIFF16", "*NXSTUDIO*", "2", "", "n", "y"])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         assert ct.run_diagnose_tiffs(_cfg()) is True
 
@@ -472,8 +470,8 @@ class TestBracketAliasesAreReleased:
         a = _padded(tmp_path / "250118_Shoot [FINAL]" / "_EXPORT" / "TIFF16" / "a.tif")
         b = _real16(tmp_path / "250118_Shoot [FINAL]" / "_EXPORT" / "TIFF16" / "b.tif")
 
-        assert ct._is_real_16bit(a, tmp_path)[2].startswith("padded")
-        assert ct._is_real_16bit(b, tmp_path)[0] is True
+        assert ct._is_real_16bit(a)[2].startswith("padded")
+        assert ct._is_real_16bit(b)[0] is True
         assert list(alias_dir.iterdir()) == [], "alias copies were left in %TEMP%"
         assert len(made) == 2, f"one alias per file, not one per magick call: {len(made)}"
 
@@ -637,7 +635,7 @@ def test_checks_report_time_left(tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
     monkeypatch.setattr(ct, "_is_real_16bit", lambda *a, **k: (True, 0.5, "real 16-bit"))
     files = [tmp_path / f"{i}.tif" for i in range(60)]
-    ct._diagnose_pool(files, 1, None, "none")
+    ct._diagnose_pool(files, 1)
     out = capsys.readouterr().out
     assert "25/60 checked in" in out and "50/60 checked in" in out
     assert "left" in out
@@ -678,7 +676,7 @@ def test_small_files_use_every_worker_and_a_huge_one_runs_alone(tmp_path, monkey
     # room for 4 small checks at once, but not for the big one next to anything
     budget = ct._MemoryBudget(4 * 30_000_000 * bpp)
 
-    results = ct._diagnose_pool(files, 4, None, "none", budget=budget, pixels=pixels)
+    results = ct._diagnose_pool(files, 4, budget=budget, pixels=pixels)
 
     assert len(results) == len(files)
     assert state["peak"] == 4, f"small files did not use every worker: {state['peak']}"
@@ -693,7 +691,7 @@ def test_budget_releases_when_a_check_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
     budget = ct._MemoryBudget(10**9)
     files = [tmp_path / f"{i}.tif" for i in range(5)]
-    results = ct._diagnose_pool(files, 2, None, "none", budget=budget, pixels={})
+    results = ct._diagnose_pool(files, 2, budget=budget, pixels={})
     assert all(r.detail.startswith("ERROR") for r in results)
     assert budget.used == 0
 
@@ -771,7 +769,7 @@ def test_depth_probe_pings_and_scales_its_timeout(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="8", stderr="")
     monkeypatch.setattr(ct, "_run_captured", fake)
     monkeypatch.setattr(ct, "_TIMEOUT_LOAD", 4)
-    ct._is_real_16bit(big, tmp_path)
+    ct._is_real_16bit(big)
     cmd, timeout = seen[0]
     assert cmd[:3] == ["magick", "identify", "-ping"], cmd
     assert timeout > 30 + 800 * ct.TIMEOUT_S_PER_MB, timeout
