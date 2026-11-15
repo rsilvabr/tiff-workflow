@@ -10,6 +10,22 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v3.2.0
+
+2026-11-15. Nothing to change for whoever runs v3.1.1: the same command line, presets and
+settings, and every new option is off until asked for. Two things improve for everyone: a
+compressed file that takes its original's place keeps the original's date, and the IPTC times
+are no longer given the computer's time zone.
+
+- **Capture One exports about 10 % smaller, the same pixels:** `compress --recompress-zip` rewrites TIFFs that are already ZIP but were saved without a predictor -- what Capture One writes -- and keeps a file only when it shrinks by at least `--recompress-min-saving` percent (default 1). On copies of 30 real 16-bit exports, 24 came out 2.7-28.1 % smaller (median 10.7 %) and 6 stayed as they were. A sample of each file spots the clear losers before anything is written, and the files that do not shrink are remembered (`.tiff_workflow_no_gain.json` in the user profile), so the next run does not read them again. The same checks and the same landing as any compression: mode 8 compares every pixel before the swap
+- **`--include-folders TIFF16`:** only the TIFFs inside folders of those names, in every mode -- the opposite of `--exclude-folders`; the folder you point at counts
+- **`--zip-predictor auto`:** a sample of each file picks ZIP with or without the predictor, whichever is smaller, and the file is still written once. On 31 varied real scans: 3.38 % smaller than always with the predictor (the best possible, both written: 3.39 %). The choice is recorded in the file's history entry, and `--recompress-zip` reads it. The default stays `on`
+- **Dates kept:** a compressed file that takes its original's place -- modes 0, 8 and 9, and a copy mode whose output is its own source -- keeps the original's modification date, so tools that sync by date (jxl-photo's smart mode, backups) do not take a lossless rewrite for a new photo
+- **IPTC times as they were** (audit round 32): exiftool gives an IPTC time without a zone the zone of the computer it runs on, so until now a compressed Capture One export's `15:02:12` came out `15:02:12+09:00` in Japan and `-03:00` in Brazil, wherever the photo was taken. A time without a zone now stays without one, and a camera's zone stays as it is -- in compress, in copy-exif and in the Diagnose's padded conversion. Files written by earlier versions keep what they have
+- **Wizard:** two questions in the compress workflows (recompress ZIP files, only the folders named) and two entries on the Advanced screen (the minimum saving, the predictor)
+
+---
+
 ## v3.1.1
 
 2026-11-15. **The release of v3.1.1**: everything of the test release [v3.1.1-rc1](#v311-rc1)
