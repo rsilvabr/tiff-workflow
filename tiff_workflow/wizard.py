@@ -1725,7 +1725,7 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
     if _supports_cap_workers(workflow):
         workflow["recompress_zip"] = _ask_yes_no(
             [("Recompress ZIP TIFFs saved without a predictor?", "cyan"),
-             " (Capture One exports: usually 5-13% smaller; a file that would not shrink "
+             " (Capture One exports: about 10% smaller; a file that would not shrink "
              "stays as it is)"], False)
 
     # --cap-workers only exists on compress_tiff_zip.py; asking it for a Copy EXIF

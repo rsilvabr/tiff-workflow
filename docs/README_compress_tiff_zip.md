@@ -338,22 +338,27 @@ writes). This script writes ZIP with ImageMagick, which adds the horizontal pred
 16-bit images: it stores the difference between neighbouring pixels instead of their values, and
 Deflate packs those much better. The pixels are the same, bit for bit.
 
-Measured on real 16-bit Capture One exports (45 MP, about 100-260 MB each):
+Measured on copies of 30 real 16-bit Capture One exports (12-261 MB, 2024-2026, 15/11/2026): 24
+came out between 2.7 % and 28.1 % smaller (median 10.7 %), 6 would not shrink and stayed as they
+were. A few of them:
 
-| export | before | after |
-|---|---|---|
-| A | 234.8 MB | 209.6 MB (-10.7 %) |
-| B | 220.0 MB | 194.7 MB (-11.5 %) |
-| C | 141.9 MB | 123.5 MB (-13.0 %) |
-| D | 103.8 MB | 95.4 MB (-8.1 %) |
-| E | 18.0 MB | 25.1 MB (**+39 %**: kept as it was) |
+| before | after |
+|---|---|
+| 234.8 MB (Nikon Z8) | 209.6 MB (-10.7 %) |
+| 239.3 MB | 172.1 MB (-28.1 %) |
+| 190.0 MB | 140.7 MB (-25.9 %) |
+| 28.9 MB | 23.9 MB (-17.3 %) |
+| 154.7 MB | 160.9 MB (**+4.0 %**: kept as it was) |
+| 11.9 MB (Nikon D700) | not even written: its sample was 24.4 % smaller without the predictor |
 
 So the gain is real but not the same for every image, and on some the predictor makes the file
 **larger**. `--recompress-zip` therefore:
 
 - takes a file that is already compressed only when page 0 is Deflate **without** a predictor, 8
   or 16 bits per sample, gray or RGB. A file with a predictor (everything this script wrote), LZW,
-  32-bit or palette stays the `SKIP` it always was;
+  32-bit or palette stays the `SKIP` it always was. So does a file it cannot rewrite safely --
+  an RGBA scan whose associated alpha is not opaque, a layout it cannot read: `SKIP (Adobe
+  Deflate: not rewritten - associated alpha that is not opaque)`, the file exactly as it was;
 - sends it through the normal path of the mode: the same safe-mode check, the same metadata
   copy, the same gates (in mode 8 every pixel is compared before the swap), the same landing;
 - first writes a small SAMPLE of the image both ways (see [Choosing the
@@ -376,7 +381,8 @@ output changes nothing: the files now have a predictor. A file `--zip-predictor 
 WITHOUT the predictor (its History ends in `zipcheck 1 predictor 1`) is skipped as
 `SKIP (Adobe Deflate: already the smaller - zipcheck)`, on any machine and after any rename.
 
-The owner's preset -- every `TIFF16` folder of the exports of three years, replaced in place:
+Example -- a preset over every `TIFF16` folder of three years of exports, replaced in place, the
+staging on a fast drive:
 
 ```
 python convert_tiff.py compress --mode 8 --input-dir "G:\2024;G:\2025;G:\2026" --include-folders TIFF16 --recompress-zip --staging-dir E:\temp_tiff --workers 8 --safe-mode --no-skip-lzw-as-compressed --magick-timeout 180
@@ -416,6 +422,10 @@ each written whole as compress writes it, with and without the predictor (15/11/
 
 Which way an image goes cannot be told from its type (none of those four is a padded 8-bit
 file); it has to be measured.
+
+There is a choice only where ImageMagick writes the horizontal predictor on its own: 8- and
+16-bit gray, RGB and CMYK pages. A float page is written with the floating-point predictor, a
+palette or a 1-bit page with none, and `auto` leaves those as `on` does (no sample, no record).
 
 Writing the TIFF both ways and keeping the smaller would cost a full temporary TIFF per file.
 `--zip-predictor auto` measures a **sample** instead: one ImageMagick reads page 0 and writes four

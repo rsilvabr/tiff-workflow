@@ -280,7 +280,17 @@ class NoGainMemory:
         env = os.environ.get(NO_GAIN_ENV)
         if env is not None and not env.strip():
             return None
-        path = env.strip() if env is not None else os.path.join(tw.user_profile_dir(), NO_GAIN_FILE)
+        if env is not None:
+            path = env.strip()
+        else:
+            # Without USERPROFILE (a task started with an empty environment) the profile is
+            # '~' unexpanded: the memory would land in a '~' folder of the current one.
+            home = tw.user_profile_dir()
+            if not os.path.isabs(home):
+                log("no user profile folder (USERPROFILE is not set): the no-gain memory of "
+                    "--recompress-zip is off for this run", "WARN")
+                return None
+            path = os.path.join(home, NO_GAIN_FILE)
         memory = cls(path, log)
         memory.files = memory._read(warn=True)
         return memory
@@ -697,6 +707,16 @@ def _compress_job(run, t, load, own):
         return JobResult(result=line, name=name, src=src,
                          final_dst=final_dst if fd else None, **extra)
 
+    def refused(error_line, why):
+        """A refusal before anything is written. For a file that has to be compressed it is
+        the ERROR it has always been. For --recompress-zip's file -- already compressed, and
+        fine as it is -- it is the SKIP that file had before the option existed, with the
+        reason: an ERROR there failed every run of a preset over a file nothing can rewrite
+        (an RGBA scan with associated alpha, review of v3.2)."""
+        if recompress:
+            return res(f"SKIP ({comp}: not rewritten - {why}) | {name}")
+        return res(error_line, fd=True)
+
     comp = t.comp
     if not comp:
         try:
@@ -727,7 +747,8 @@ def _compress_job(run, t, load, own):
     if generate_thumb:
         ts = tw.thumbnail_safe_source(src, timeout)
         if not ts.ok:
-            return res(f"ERROR (--generate-thumbnail refused) | {name} | {ts.reason}", fd=True)
+            return refused(f"ERROR (--generate-thumbnail refused) | {name} | {ts.reason}",
+                           f"--generate-thumbnail refused, {ts.reason}")
         if ts.reason == "thumb-replaced":
             thumb_note = " [thumb replaced]"
 
@@ -748,12 +769,13 @@ def _compress_job(run, t, load, own):
     except tw.ToolError:
         facts = None
     if facts is None or facts.pages is None:
-        return res(f"ERROR (sample layout unreadable) | {name}", fd=True)
+        return refused(f"ERROR (sample layout unreadable) | {name}", "sample layout unreadable")
     src_pages = facts.pages
     layout_pages = [src_pages[0]] if generate_thumb else list(src_pages)
     type_args = tw.magick_keep_type_args(layout_pages)
     if not tw.associated_alpha_rewritable(src, layout_pages, timeout):
-        return res(f"ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | {name}", fd=True)
+        return refused(f"ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | {name}",
+                       "associated alpha that is not opaque")
 
     # The predictor, decided BEFORE the one write (tw.predictor_probe: a sample of page 0
     # written both ways, a few MB in the temp folder -- never the whole TIFF twice).
@@ -762,10 +784,13 @@ def _compress_job(run, t, load, own):
     #   original (which has none) stays -- nothing is written; otherwise the write and the
     #   exact size gate below decide.
     # zipcheck = the predictor recorded in the History: only when it was CHOSEN.
+    # auto only where ImageMagick writes the horizontal predictor on its own (8/16 bits, gray,
+    # RGB, CMYK): a float page gets predictor 3 and a palette none, whatever the sample says,
+    # and the History said "predictor 2" of a float file written with 3 (review of v3.2).
     predictor_args = []
     zipcheck = None
     sample_note = ""
-    if recompress or opt["zip_predictor"] == "auto":
+    if recompress or (opt["zip_predictor"] == "auto" and tw.predictor_choice_applies(layout_pages)):
         probe = tw.predictor_probe(src, facts.width, facts.height, timeout, load, type_args)
         without_wins = False
         if probe:

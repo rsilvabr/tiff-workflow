@@ -290,6 +290,27 @@ def test_an_ordinary_compression_in_place_keeps_the_date(tmp_path, lane, mode):
 
 
 @requires_tools
+def test_one_unreadable_file_does_not_lose_the_answers_of_the_batch(tmp_path):
+    """--recompress-zip reads the predictor of the ZIP files in one exiftool per ~400 of them
+    (tw.get_recompress_facts). A file of the batch that cannot be read -- gone since the listing,
+    or not a TIFF at all -- makes exiftool exit 1 for the whole batch: the read must still take
+    the answers it printed for the others (review of v3.2: no test pinned it)."""
+    folder = tmp_path / FOLDER
+    folder.mkdir(parents=True)
+    good = make_c1_like(folder / PHOTO, tmp_path / "build")
+    bad = folder / "not a TIFF [x].tif"
+    bad.write_bytes(b"this is not a TIFF " * 10)
+    gone = folder / "gone 50%.tif"
+
+    facts = tw.get_recompress_facts([str(good), str(gone), str(bad)])
+
+    assert str(good).lower() in facts, facts
+    assert facts[str(good).lower()].predictor in ("-", "1")
+    assert facts[str(good).lower()].bits == "16 16 16"
+    assert str(gone).lower() not in facts
+
+
+@requires_tools
 @pytest.mark.parametrize("lane", LANES)
 def test_include_folders_takes_only_those_folders(tmp_path, lane):
     """The owner's preset: mode 8 over the year folders, only the TIFF16 folders of the exports.

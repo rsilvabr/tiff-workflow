@@ -1813,7 +1813,7 @@ def get_compression_map(paths, chunk_size=400):
 # --- --recompress-zip ---------------------------------------------------------------
 #
 # A TIFF already compressed with Deflate but WITHOUT a predictor (Capture One's exports:
-# level 6, no predictor, measured 15/11/2026) comes out 5-13 % smaller when ImageMagick
+# level 6, no predictor, measured 15/11/2026) comes out about 10 % smaller when ImageMagick
 # writes it again: it adds the horizontal predictor for 8 and 16 bits. Some images grow
 # instead (one Capture One export, +39 %), so compress keeps a recompressed file only when it
 # is smaller (its size gate).
@@ -1959,6 +1959,23 @@ def predictor_probe(src, width, height, timeout=30, load_factor=1.0, write_args=
     finally:
         remove_quietly(with_p)
         remove_quietly(without_p)
+
+
+def predictor_choice_applies(pages):
+    """Whether --zip-predictor auto has a choice to make for a file of this layout (`pages`, as
+    tiff_sample_layout gives them; page 0 decides): ImageMagick writes ZIP with the horizontal
+    predictor on its own for 8- and 16-bit gray, RGB and CMYK pages (min-is-white included: it
+    writes those as min-is-black), and that is what the sample weighs against none. A float page
+    is written with the floating-point predictor (3), a palette or a 1-bit page with none: auto
+    leaves them as `on` does, with no probe and no record (measured 15/11/2026: a float file's
+    History said "predictor 2" while it had 3)."""
+    if not pages:
+        return False
+    parts = str(pages[0]).split("/")
+    if len(parts) < 3 or parts[0] not in ("gray", "rgb", "p5"):
+        return False
+    bits = parts[2].split(",")
+    return all(b in ("8", "16") for b in bits)
 
 
 def recompress_candidate(comp, facts):

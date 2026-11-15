@@ -50,7 +50,7 @@ Two questions of step 4 exist only for compress (since v3.2):
 
 - `Recompress ZIP TIFFs saved without a predictor? [y/N]` -- `--recompress-zip`: Capture One's
   exports, already ZIP but without a predictor, are rewritten when that makes them smaller
-  (usually 5-13 %; a file that would not shrink stays as it is and is remembered).
+  (about 10 %; a file that would not shrink stays as it is and is remembered).
   [More](README_compress_tiff_zip.md#recompressing-zip-tiffs-without-a-predictor---recompress-zip)
 - `Only folders named?` -- `--include-folders`: only the TIFFs inside a folder of one of these
   `;`-separated names (`TIFF16`); `-` = every folder. Offered again on the next run, like the

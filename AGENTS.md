@@ -42,12 +42,15 @@ starts it.
   `--exclude-folders` / `--include-folders`, `--recompress-zip` (v3.2: a ZIP without a
   predictor -- Capture One's exports -- rewritten and kept only when smaller; the files that do
   not shrink are remembered in `.tiff_workflow_no_gain.json` in the profile, env
-  `TIFFWORKFLOW_NO_GAIN`, blank = off), `--zip-predictor on|auto` (auto: a SAMPLE of page 0,
-  `tw.predictor_probe`, decides with or without the predictor before the one write -- never the
-  whole TIFF written twice; the choice is recorded as ` - zipcheck 1 predictor N` at the end of
-  the History entry the rewrite writes anyway, and counts only while it is the file's LAST
-  entry). ONE per-file worker, `process_job`, for every mode; ONE skip decision,
-  `_compressed_skip`, for the plan of modes 0/9 and the worker.
+  `TIFFWORKFLOW_NO_GAIN`, blank = off; a candidate the rewrite refuses before writing is a SKIP
+  with the reason, never an ERROR: it is fine as it is), `--zip-predictor on|auto` (auto: a
+  SAMPLE of page 0, `tw.predictor_probe`, decides with or without the predictor before the one
+  write -- never the whole TIFF written twice; only where ImageMagick writes the horizontal
+  predictor itself, `tw.predictor_choice_applies`: 8/16-bit gray, RGB, CMYK; the choice is
+  recorded as ` - zipcheck 1 predictor N` at the end of the History entry the rewrite writes
+  anyway, and counts only while it is the file's LAST entry). ONE per-file worker,
+  `process_job`, for every mode; ONE skip decision, `_compressed_skip`, for the plan of modes
+  0/9 and the worker.
 - `tiff_workflow/copy_exif_to_tiff.py` -- EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into
   the TIFF, optionally compressing it (`--compress-zip`). Worker: `process_pair`.
 - `tiff_workflow/generate_thumbnails.py` -- sRGB thumbnails, standalone.

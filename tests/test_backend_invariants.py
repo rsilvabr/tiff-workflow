@@ -897,6 +897,37 @@ class TestRecompressZip:
         assert r.result == f"ERROR (exiftool check) | {photo.name} | cannot read the predictor"
         assert tools.magick_calls == [] and photo.read_bytes() == b"ORIGINAL"
 
+    @pytest.mark.parametrize("refusal", ["alpha", "layout", "thumbnail"])
+    def test_a_candidate_nothing_can_rewrite_is_the_skip_it_was_not_an_error(self, tools, photo, refusal):
+        """Review of v3.2: an RGBA scan with associated alpha that is not opaque, saved as ZIP
+        without a predictor, was `SKIP (Adobe Deflate)` without the option and an ERROR -- exit 1,
+        every run of a preset -- with it. The file is fine as it is: the SKIP it always was, with
+        the reason. A file that HAS to be compressed keeps today's ERROR, word for word."""
+        extra = ()
+        if refusal == "alpha":
+            tools.alpha_ok = False
+            why = "associated alpha that is not opaque"
+            error = (f"ERROR (associated alpha that is not opaque: ImageMagick would change it - "
+                     f"refused) | {photo.name}")
+        elif refusal == "layout":
+            tools.layout = None
+            why = "sample layout unreadable"
+            error = f"ERROR (sample layout unreadable) | {photo.name}"
+        else:
+            tools.thumb_safe = tw.ThumbSafe(False, 2, "would drop 1 extra page(s)")
+            extra = ("--generate-thumbnail",)
+            why = "--generate-thumbnail refused, would drop 1 extra page(s)"
+            error = f"ERROR (--generate-thumbnail refused) | {photo.name} | would drop 1 extra page(s)"
+        tools.comp = "Deflate"
+        r = job(recompress_run(*IN_PLACE, *extra), photo)
+        assert r.result == f"SKIP (Deflate: not rewritten - {why}) | {photo.name}", r.result
+        assert tw.result_kind(r.result) is tw.Kind.SKIP and not r.no_gain
+        assert tools.magick_calls == [] and photo.read_bytes() == b"ORIGINAL"
+        # an uncompressed file: the ERROR of today
+        tools.comp = "Uncompressed"
+        r = job(compress_run(*IN_PLACE, *extra), photo)
+        assert r.result == error, r.result
+
     @pytest.mark.parametrize("argv", [IN_PLACE, ("--mode", "9")], ids=["in-place", "mode9"])
     def test_a_rewrite_that_is_not_smaller_is_dropped_before_any_gate(self, tools, photo, argv):
         tools.comp, tools.magick_data = "Deflate", LARGER
@@ -1000,6 +1031,36 @@ class TestTheDateIsKept:
         os.utime(photo, ns=(OLD_NS, OLD_NS))
         tools.magick_data = SMALLER
         run = compress_run("--mode", "9")
+        f = tw.FoundFile(str(photo), photo.name, str(photo.parent), 8, OLD_NS)
+        t = cz._keep_original_job(run, f, str(photo), str(photo), "Uncompressed",
+                                  {str(photo).lower(): "Uncompressed"})
+        outcome = cz._run_group(run, [t], 1, {})
+        cz._archive_originals(run, [t], outcome)
+        backup = photo.parent / "OLD_TIFFs" / photo.name
+        assert photo.read_bytes() == SMALLER and backup.read_bytes() == b"ORIGINAL"
+        assert os.stat(photo).st_mtime_ns == OLD_NS == os.stat(backup).st_mtime_ns
+
+    def test_mode8_across_volumes_lands_the_copy_with_the_date(self, tools, photo, tmp_path, monkeypatch):
+        """The preset stages on another drive (E:, the photos on G:): the landing copies the
+        staged file next to the original (shutil.copy2) and renames it. The copy must carry the
+        date; a plain copy would not (review of v3.2: no test went through this path)."""
+        os.utime(photo, ns=(OLD_NS, OLD_NS))
+        stg = tmp_path / "stg"
+        stg.mkdir()
+        monkeypatch.setattr(tw, "_same_volume", lambda a, b: False)
+        run = compress_run("--mode", "8", "--staging-dir", str(stg))
+        tools.magick_data = SMALLER
+        t = cz.Job(src=str(photo), write_dst=str(stg / tw.staged_name(run.run_id, photo.name)),
+                   final_dst=str(photo), name=photo.name)
+        outcome = cz._run_group(run, [t], 1, {})
+        cz._move_staged(run, [t], str(photo.parent), outcome)
+        assert photo.read_bytes() == SMALLER and os.stat(photo).st_mtime_ns == OLD_NS
+        assert os.listdir(stg) == [], "the staged file was removed after the copy"
+
+    def test_mode0_lands_the_copy_with_the_date_and_archives_the_original(self, tools, photo):
+        os.utime(photo, ns=(OLD_NS, OLD_NS))
+        tools.magick_data = SMALLER
+        run = compress_run("--mode", "0")
         f = tw.FoundFile(str(photo), photo.name, str(photo.parent), 8, OLD_NS)
         t = cz._keep_original_job(run, f, str(photo), str(photo), "Uncompressed",
                                   {str(photo).lower(): "Uncompressed"})
@@ -1114,6 +1175,18 @@ class TestNoGainMemory:
         memory = cz.NoGainMemory.open(NoLog())
         assert Path(memory.path) == tmp_path / cz.NO_GAIN_FILE and memory.files == {}
 
+    def test_without_a_profile_folder_the_memory_is_off(self, monkeypatch, tmp_path):
+        """Review of v3.2: with USERPROFILE unset (a task started with an empty environment)
+        the profile was '~', unexpanded, and the memory went into a '~' folder of the current
+        one. Off instead, with a WARN."""
+        for var in (cz.NO_GAIN_ENV, "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.chdir(tmp_path)
+        log = NoLog()
+        assert cz.NoGainMemory.open(log) is None
+        assert any(level == "WARN" and "no user profile folder" in msg for level, msg in log.lines), log.lines
+        assert not (tmp_path / "~").exists()
+
     def test_an_interrupt_keeps_what_was_learned(self, tools, photo, tmp_path, monkeypatch):
         mem = self._memory(tmp_path, monkeypatch)
         run = recompress_run(*IN_PLACE)
@@ -1215,6 +1288,29 @@ class TestZipPredictorAuto:
         assert r.result.startswith("OK (Uncompressed -> ZIP, without predictor"), r.result
         writes = tiff_writes(tools)
         assert writes and all("tiff:predictor=1" in w for w in writes), tools.magick_calls
+
+    @pytest.mark.parametrize("layout, probed", [
+        (["rgb/3/32,32,32/"], False),       # float: ImageMagick writes predictor 3
+        (["p3/1/8/"], False),               # palette: no predictor
+        (["gray/1/1/"], False),             # 1 bit: no predictor
+        (["gray/1/16/"], True),
+        (["p5/4/8,8,8,8/"], True),          # CMYK
+        (["rgb/4/16,16,16,16/2"], True),    # RGBA
+    ], ids=["float", "palette", "1bit", "gray16", "cmyk", "rgba"])
+    def test_auto_chooses_only_where_imagemagick_writes_the_predictor(self, tools, photo, layout, probed):
+        """Review of v3.2: on a float file auto weighed predictor 2 against none, ImageMagick
+        wrote predictor 3 (its own for float), and the History said "zipcheck 1 predictor 2".
+        Where the horizontal predictor is not ImageMagick's default there is nothing to choose:
+        the file is written as `on` writes it, with no probe and no record."""
+        tools.layout, tools.magick_data, tools.probe = layout, SMALLER, (1000, 500)
+        r = job(compress_run(*IN_PLACE, "--zip-predictor", "auto"), photo)
+        assert bool(tools.probe_calls) is probed, r.result
+        if probed:
+            assert r.zipcheck == 1 and "zipcheck 1 predictor 1" in tools.history_params
+        else:
+            assert r.result == f"OK (Uncompressed -> ZIP) | {photo.name}", r.result
+            assert r.zipcheck is None and "zipcheck" not in tools.history_params
+            assert all("tiff:predictor=1" not in c for c in tools.magick_calls)
 
     def test_a_dry_run_says_auto_and_probes_nothing(self, tools, photo):
         r = job(compress_run(*IN_PLACE, "--zip-predictor", "auto", "--dry-run"), photo)
