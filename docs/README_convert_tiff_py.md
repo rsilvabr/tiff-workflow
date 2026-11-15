@@ -46,6 +46,16 @@ a backup, so it requires an explicit confirmation.
 
 **Workers** are clamped to 1-64, the range the backends accept.
 
+Two questions of step 4 exist only for compress (since v3.2):
+
+- `Recompress ZIP TIFFs saved without a predictor? [y/N]` -- `--recompress-zip`: Capture One's
+  exports, already ZIP but without a predictor, are rewritten when that makes them smaller
+  (usually 5-13 %; a file that would not shrink stays as it is and is remembered).
+  [More](README_compress_tiff_zip.md#recompressing-zip-tiffs-without-a-predictor---recompress-zip)
+- `Only folders named?` -- `--include-folders`: only the TIFFs inside a folder of one of these
+  `;`-separated names (`TIFF16`); `-` = every folder. Offered again on the next run, like the
+  exclusion before it.
+
 **Advanced options.** Right after the basic questions (Workers, staging, dry-run, safe mode,
 ...) every compress and Copy EXIF workflow asks `Advanced options? [y/N]`. The default is
 **No** and then nothing changes. On yes it lists the backend parameters no other step asks,
@@ -56,6 +66,8 @@ with what each one is right now (this run, the settings file, or the script's ow
 | `--magick-timeout` | compress, Copy EXIF | seconds one `magick` call may run before it is killed (whole number >= 1) |
 | `--worker-memory-fraction` | compress, Copy EXIF | share of the free memory the workers may use, `0`-`2` (`0` = no cap; above `1` trusts the memory estimate) |
 | `--srgb-profile` | compress | ICC file used to convert wide-gamut sources; empty = auto-detect |
+| `--recompress-min-saving` | compress | `--recompress-zip` keeps a rewritten file only when it is at least this many percent smaller, `0`-`50` |
+| `--zip-predictor` | compress | `on` (always the ZIP predictor, the default) or `auto` (a sample of each file decides with or without it, whichever is smaller; the file is still written once) |
 | `--fail-on-warn` | Copy EXIF | exit 1 when a file only produced a warning or had no JPEG |
 
 Type a number, then a value; `-` takes your change back; `0` is done. A value is checked
@@ -431,6 +443,8 @@ Config saved to `~/.convert_tiff_config.json`:
 - `presets` -- named snapshots of the journal above (menu 5 and `--run-preset`)
 - `last_exclude_folders` -- last `--exclude-folders` list. The wizard asks once per workflow and
   offers this as the default; a fresh install defaults to nothing excluded
+- `last_include_folders` -- the same for compress's `--include-folders`; a fresh install takes
+  every folder
 - `check_for_updates` -- `true` (default) lets the main menu look for a new release (see
   [New-release notice](#new-release-notice)); set it to `false` to turn that off
 - `update_checked_on` / `update_latest_seen` -- the day GitHub last answered and the tag it
@@ -498,7 +512,7 @@ type and range:
 
 | Section | Names |
 |---|---|
-| `compress_tiff_zip` | `zip_suffix`, `zip_subfolder_name`, `export_marker`, `export_zip_subfolder`, `export_tiff_subfolder` (folder/file names), `cap_workers` (0-64), `magick_timeout`, `thumb_size` (whole numbers >= 1), `thumb_quality` (1-100), `thumb_format` (name), `srgb_profile` (path or `null`), `worker_memory_fraction` (0-2) |
+| `compress_tiff_zip` | `zip_suffix`, `zip_subfolder_name`, `export_marker`, `export_zip_subfolder`, `export_tiff_subfolder` (folder/file names), `cap_workers` (0-64), `magick_timeout`, `thumb_size` (whole numbers >= 1), `thumb_quality` (1-100), `thumb_format` (name), `srgb_profile` (path or `null`), `worker_memory_fraction` (0-2), `recompress_min_saving` (0-50), `zip_predictor` (`on`, `auto`) |
 | `copy_exif` | `magick_timeout`, `worker_memory_fraction` |
 | `generate_thumbnails` | `size`, `quality`, `format`, `srgb_profile` |
 | `convert_tiff` | `WORKER_MEMORY_FRACTION`, `WORKER_MEMORY_LIMIT` (`both`, `commit`, `physical`), `DIAGNOSE_CACHE`, `CONVERT_TIMEOUT_S`, `COMPARE_TIMEOUT_S`, `TIMEOUT_S_PER_MB` |
@@ -506,8 +520,9 @@ type and range:
 **What it can never change:** anything that deletes, overwrites or is chosen per run -- `mode`,
 the input/output/staging folders, `workers`, `dry_run`, `safe_mode`, `skip_lzw_as_compressed`,
 `overwrite`, `delete_source`, `duplicate_action`, `force_parallel`/`force_sequential`,
-`restore_stranded`, the thumbnail on/off switches, `fail_on_warn`, `exclude_folders`. A name that is
-not in a script's table is ignored with a warning.
+`restore_stranded`, the thumbnail on/off switches, `fail_on_warn`, `exclude_folders`,
+`include_folders`, `recompress_zip`. A name that is not in a script's table is ignored with a
+warning.
 
 A folder name in the file can never turn a copy mode into an in-place replace either: when an
 overlay `zip_suffix`, `zip_subfolder_name` or `Export*` name makes an output resolve onto its own

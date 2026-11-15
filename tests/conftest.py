@@ -14,6 +14,9 @@ import os
 # convert_tiff applies its own overlay section when it is imported (test modules import it at
 # collection, before any fixture runs): switch the overlay off for that too.
 os.environ["TIFFWORKFLOW_SETTINGS"] = ""
+# compress --recompress-zip keeps a memory of the files it did not shrink in the user profile:
+# off for every test and every backend a test starts (a test of the memory names its own file).
+os.environ["TIFFWORKFLOW_NO_GAIN"] = ""
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +41,15 @@ def _no_settings_overlay(monkeypatch):
     backend a test starts: set-but-empty turns it OFF, so the owner's real file
     never reaches a test. A test that wants an overlay sets TIFFWORKFLOW_SETTINGS itself."""
     monkeypatch.setenv("TIFFWORKFLOW_SETTINGS", "")
+
+
+@pytest.fixture(autouse=True)
+def _no_no_gain_memory(monkeypatch):
+    """compress --recompress-zip remembers the files it did not shrink in
+    .tiff_workflow_no_gain.json in the user profile: set-but-empty turns that memory OFF, so no
+    test reads or writes the owner's real one. A test of the memory sets TIFFWORKFLOW_NO_GAIN
+    to a file of its own."""
+    monkeypatch.setenv("TIFFWORKFLOW_NO_GAIN", "")
 
 
 @pytest.fixture(autouse=True)

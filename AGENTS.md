@@ -39,7 +39,15 @@ starts it.
   (`_padded_pixels_status`) and OLD_PADDED backup are what make that safe unattended.
 - `tiff_workflow/compress_tiff_zip.py` -- TIFF -> ZIP/Deflate, modes 0-9 (`--mode` is
   required since v3.1; the legacy mode is gone), backups in `OLD_TIFFs/`, thumbnails,
-  `--exclude-folders`. ONE per-file worker, `process_job`, for every mode.
+  `--exclude-folders` / `--include-folders`, `--recompress-zip` (v3.2: a ZIP without a
+  predictor -- Capture One's exports -- rewritten and kept only when smaller; the files that do
+  not shrink are remembered in `.tiff_workflow_no_gain.json` in the profile, env
+  `TIFFWORKFLOW_NO_GAIN`, blank = off), `--zip-predictor on|auto` (auto: a SAMPLE of page 0,
+  `tw.predictor_probe`, decides with or without the predictor before the one write -- never the
+  whole TIFF written twice; the choice is recorded as ` - zipcheck 1 predictor N` at the end of
+  the History entry the rewrite writes anyway, and counts only while it is the file's LAST
+  entry). ONE per-file worker, `process_job`, for every mode; ONE skip decision,
+  `_compressed_skip`, for the plan of modes 0/9 and the worker.
 - `tiff_workflow/copy_exif_to_tiff.py` -- EXIF from the Fuji S3/S5 Pro JPEG (or RAF) into
   the TIFF, optionally compressing it (`--compress-zip`). Worker: `process_pair`.
 - `tiff_workflow/generate_thumbnails.py` -- sRGB thumbnails, standalone.
@@ -103,6 +111,11 @@ starts it.
   Every run reports originals left in `OLD_TIFFs/` with nothing in their place
   (`find_stranded_originals`); never delete or move an `OLD_TIFFs` backup whose place is
   empty (`tools/move_old_backups.py`, the wizard's Delete OLD_TIFFs).
+  Only an OK/WARN result lands (`_run_group`'s `unlanded_srcs`): a SKIP that drops its output
+  after writing it (`--recompress-zip`'s size gate) must not have a leftover landed.
+  A file that takes its original's place keeps the original's modification time
+  (`_keep_source_times`, set after the last write onto it; owner's decision 15/11/2026):
+  jxl-photo's smart sync re-encodes every master whose TIFF looks newer.
 - **Gates that authorise destroying data fail CLOSED**: a timeout, a non-zero
   exit or unparseable output is a failure, never a pass (`zip_integrity`,
   `tiff_page_count`, `pixel_identical`, `tiff_sample_layout`,
@@ -145,7 +158,8 @@ starts it.
   table are taken: **never add a safety or per-run parameter to one**
   (tests/test_settings_overlay.py T6 pins the forbidden list). A `--param` on
   the command line wins; a bad file or value changes nothing and warns. Tests
-  and the battery switch it off.
+  and the battery switch it off -- and compress's no-gain memory too
+  (`TIFFWORKFLOW_NO_GAIN` set but empty), so no test reads or writes the owner's files.
 - **Every backend parameter is in `REGISTRY` or in `NOT_OFFERED`** (with the
   reason) in the wizard; the argv comes from `_emit_all`, in REGISTRY
   order. `tests/test_wizard_registry.py` fails on a new parameter nobody
@@ -176,6 +190,10 @@ starts it.
   own, so its IPTC is copied onto itself first (`-tagsfromfile @ -IPTC:All`) and exiftool
   rewrites the whole block in the new charset -- without that a Latin caption is left
   mislabelled as UTF-8.
+- **An exiftool struct value takes no `, { } [ ] |`** (v3.2): `-XMP-xmpMM:History={...,
+  Parameters=ZIP (Deflate), recompressed}` stored `ZIP (Deflate)` and exited 0 with no warning
+  the History check sees. Keep every value `_history_assignment` writes free of them
+  (`test_the_history_entry_has_no_struct_character`).
 - **exiftool reads its command line in the ANSI code page -- an argfile PATH
   too** (round 27). Every call sends the argfile's CONTENT on stdin,
   `exiftool -@ -` (`tw.exiftool`, `_run_exiftool` in the wizard), with

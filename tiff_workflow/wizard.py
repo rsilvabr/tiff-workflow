@@ -523,6 +523,8 @@ class ToolConfig:
     # Lives in the local config, never hardcoded: a fresh install defaults to
     # empty so nobody silently skips folders they did not choose to skip.
     last_exclude_folders: Optional[str] = None
+    # The same for compress's --include-folders (only the folders of those names, v3.2).
+    last_include_folders: Optional[str] = None
     # Journal of the last executed workflow (for "Repeat last workflow").
     # Stores each command line as [subcommand, *args] (_journal_line) -- repeating
     # runs those arguments under this Python with the backend next to this wizard,
@@ -1717,6 +1719,14 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
     workflow["safe_mode"] = _ask_yes_no([("Safe mode?", "cyan"), " (skip multi-page TIFFs)"], safe_default)
     workflow["skip_lzw"] = _ask_yes_no([("Skip LZW as already compressed?", "cyan"),
                                         " (LZW files will be ignored)"], skip_default)
+    # compress only (v3.2): rewrite the ZIP files saved without a predictor -- Capture One's
+    # exports -- when that makes them smaller. --recompress-zip is a switch: off by type, so
+    # the default is No and only a yes is passed.
+    if _supports_cap_workers(workflow):
+        workflow["recompress_zip"] = _ask_yes_no(
+            [("Recompress ZIP TIFFs saved without a predictor?", "cyan"),
+             " (Capture One exports: usually 5-13% smaller; a file that would not shrink "
+             "stays as it is)"], False)
 
     # --cap-workers only exists on compress_tiff_zip.py; asking it for a Copy EXIF
     # workflow produced an answer that was silently dropped by the command builder.
@@ -1737,6 +1747,19 @@ def step_basic_params(cfg: "ConfigManager", workflow: Dict) -> bool:
     else:
         workflow["exclude_folders"] = excl
         cfg.config.last_exclude_folders = excl
+
+    # compress only (v3.2): the opposite filter, e.g. TIFF16 -- only the TIFFs inside a folder
+    # of one of those names. Offered again like the exclusion; '-' = every folder.
+    if _supports_cap_workers(workflow):
+        incl_default = cfg.config.last_include_folders or ""
+        incl = _ask([("Only folders named?", "cyan"), " (';'-separated folder names, '-' = all)"],
+                    incl_default or "-", style="")
+        if incl in ("-", "", "none"):
+            workflow["include_folders"] = ""
+            cfg.config.last_include_folders = None
+        else:
+            workflow["include_folders"] = incl
+            cfg.config.last_include_folders = incl
 
     # The backends work on several files at once; --force-sequential turns that off.
     if _ask_yes_no("Force sequential? (override parallelism)", False, "yellow"):
@@ -1876,6 +1899,11 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
         rows.append(["Cap workers:", str(workflow["cap_workers"])])
     if workflow.get("exclude_folders"):
         rows.append([("Excluding:", "yellow"), workflow["exclude_folders"]])
+    if workflow.get("include_folders"):
+        rows.append([("Only folders:", "yellow"), workflow["include_folders"]])
+    if workflow.get("recompress_zip"):
+        rows.append([("Recompress ZIP:", "yellow"),
+                     "ON -- ZIP files without a predictor are rewritten when smaller"])
     rows.append(["Staging:", str(workflow.get("staging") or "disabled")])
     rows.append(["Dry-run:", dry])
     if workflow.get("force_parallel"):
@@ -2111,6 +2139,9 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             "Clamp the parallel workers to this value; 0 = no cap."),
         Opt("exclude_folders", "exclude_folders", "value", "files", "asked", "Exclude folders",
             "';'-separated folder NAMES to skip during discovery."),
+        # passed like --exclude-folders: only when a name was given
+        Opt("include_folders", "include_folders", "value", "files", "asked", "Only folders",
+            "';'-separated folder NAMES: only the TIFFs inside a folder of one of them."),
         Opt("dry_run", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
         # Passed explicitly whenever the wizard decided it -- even when it equals the
         # default: omitting it let a backend whose own default was edited run with a
@@ -2119,6 +2150,9 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             "Skip multi-page TIFFs.", danger=True),
         Opt("skip_lzw_as_compressed", "skip_lzw", "bool", "files", "asked", "Skip LZW",
             "Treat LZW files as already compressed and ignore them."),
+        Opt("recompress_zip", "recompress_zip", "flag", "files", "asked", "Recompress ZIP",
+            "Rewrite TIFFs already ZIP-compressed without a predictor (Capture One exports) "
+            "when that makes them smaller."),
         Opt("overwrite", "overwrite", "flag", "safety", "internal", "Overwrite",
             "Replace an existing output.", danger=True),
         Opt("delete_source", "delete_source", "flag", "safety", "asked", "Delete source",
@@ -2146,6 +2180,15 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             "sRGB ICC profile", "ICC file used to convert wide-gamut sources; empty = "
             "auto-detect.", value_spec="path?"),
         _ADV_MEMORY,
+        Opt("recompress_min_saving", "advanced.recompress_min_saving", "notnone", "files",
+            "advanced", "Recompress: minimum saving (%)",
+            "--recompress-zip keeps a rewritten file only when it is at least this many "
+            "percent smaller.", value_spec="float:0:50"),
+        Opt("zip_predictor", "advanced.zip_predictor", "notnone", "files", "advanced",
+            "ZIP predictor (on / auto)",
+            "on = always the predictor; auto = a sample of each file decides with or without "
+            "it, whichever is smaller (the file is still written once).",
+            value_spec="choice:on|auto"),
         # Settings file only (decision 6: the discovery must know the folder names, so they
         # are not per-run):
         Opt("zip_suffix", "", "none", "files", "overlay", "ZIP suffix", "Mode 4 folder suffix."),

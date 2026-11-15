@@ -146,7 +146,26 @@ def test_every_name_of_v3_0_0_is_known(backend):
         "thumbnails": "InputDir Size OutputDir Remove DryRun Recursive Workers Page Quality "
                       "Format SrgbProfile ExcludeFolders",
     }[backend].split()
-    assert [legacy_args.legacy_name(p.name) for p in _params(backend)] == v300
+    params = _params(backend)
+    assert [legacy_args.legacy_name(p.name) for p in legacy_args._v300(params)] == v300
+    # every other parameter is one v3.2 added, which has no old form
+    assert {p.name for p in params} - {p.name for p in legacy_args._v300(params)} <= \
+        legacy_args.NEW_SINCE_V300
+
+
+def test_a_parameter_added_after_v3_0_0_has_no_old_form():
+    """v3.2 added --recompress-zip, --recompress-min-saving and --include-folders. The old
+    reader does not know them, so they never change what a line of v3.0.0 meant: -Re was
+    -RestoreStranded then and stays it (with the new names it would be ambiguous)."""
+    params = _params("compress")
+    assert legacy_args.translate(["-Re"], params) == ["--restore-stranded"]
+    for old in (["-RecompressZip"], ["-RecompressMinSaving", "5"], ["-IncludeFolders", "TIFF16"],
+                ["-ZipPredictor", "auto"]):
+        with pytest.raises(tw.UsageError, match="unknown parameter"):
+            legacy_args.translate(old, params)
+    values, bound = _old(["-Mode", "8"], params)
+    assert values["recompress_zip"] is False and values["include_folders"] == ""
+    assert bound == {"mode"}
 
 
 # --- the translation binds the same --------------------------------------------------------
@@ -167,22 +186,24 @@ def test_every_golden_line_binds_the_same_after_translation(backend, old):
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_every_form_of_every_parameter_binds_the_same(backend):
     params = _params(backend)
+    old_params = legacy_args._v300(params)
     wrong, n = [], 0
-    for p in params:
+    for p in old_params:
         for old in _forms(p, params):
             n += 1
             new = legacy_args.translate(old, params)
             if _new(new, params) != _old(old, params):
                 wrong.append((old, new))
     assert not wrong, f"{len(wrong)} of {n} lines bind differently: {wrong[:5]}"
-    assert n > 20 * len(params)
+    assert n > 20 * len(old_params)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
 def test_every_parameter_in_one_line_binds_the_same(backend):
     params = _params(backend)
+    old_params = legacy_args._v300(params)
     old = []
-    for p in params:
+    for p in old_params:
         if p.name == "input_dir_file":            # one of -InputDir / -InputDirFile is enough
             continue
         v = HOSTILE if p.kind == "str" and _accepted(p, HOSTILE) else _values(p)[-1]
@@ -190,7 +211,7 @@ def test_every_parameter_in_one_line_binds_the_same(backend):
         old += [f"-{name}:{v}"] if p.kind == "switch" else [f"-{name}", v]
     new = legacy_args.translate(old, params)
     assert _new(new, params) == _old(old, params)
-    assert _old(old, params)[1] == {p.name for p in params} - {"input_dir_file"}
+    assert _old(old, params)[1] == {p.name for p in old_params} - {"input_dir_file"}
 
 
 def test_the_last_of_a_repeated_parameter_wins_in_both():
@@ -229,8 +250,19 @@ def test_the_table_in_the_docs_is_every_option(backend):
     module = legacy_args.backend_module(backend)
     section = text.split(f"`convert_tiff.py {backend}`)", 1)[1].split("###", 1)[0]
     rows = [ln for ln in section.splitlines() if ln.startswith("| `-")]
-    assert len(rows) == len(module.PARAMS)
-    for p, row in zip(module.PARAMS, rows):
+    old_params = legacy_args._v300(module.PARAMS)
+    assert len(rows) == len(old_params)
+    # an option added since has its own row, without an old form
+    for p in module.PARAMS:
+        if p.name in legacy_args.NEW_SINCE_V300:
+            new = twc.cli_name(p.name)
+            shown = (f"`{new}` / `--no-{new[2:]}`" if p.kind in ("bool", "switch")
+                     else f"`{new} <value>`")
+            row = next((ln for ln in section.splitlines()
+                        if ln.startswith("| (new") and shown in ln), None)
+            assert row, f"docs/command_line.md: no row for {new}"
+            assert (f"`{p.name}`" in row) == (p.name in module.OVERLAY_SPECS), row
+    for p, row in zip(old_params, rows):
         old = "-" + legacy_name_of(p)
         new = twc.cli_name(p.name)
         if p.kind in ("bool", "switch"):

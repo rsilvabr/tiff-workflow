@@ -27,8 +27,9 @@ Fixtures (never modified -- everything is copied to a scratch folder first):
     <fixtures>/tiff_scan/*.tif a 2-page scan [image, reduced preview]
     <fixtures>/fuji_s3s5/<session>/   Fuji S3/S5 sessions: TIF + JPG and/or RAF
     <fixtures>/TIFF_tagless/S5Pro/    S5 Pro TIFFs without a single tag + their JPGs
+    <fixtures>/TIFF_scans_varied/     the uncompressed scans C17 names (C17_SCANS)
 
-A missing optional folder (raw_scan, tiff_scan, fuji_s3s5, TIFF_tagless) skips its section
+A missing optional folder (raw_scan, tiff_scan, fuji_s3s5, TIFF_tagless, TIFF_scans_varied) skips its section
 and the report says so. On the owner's machine the fixtures live in E:\\TESTE.
 
 The scratch folder (default <fixtures drive>\\tw_battery_<YYMMDD_HHMMSS>) is
@@ -61,6 +62,9 @@ sys.path.insert(0, str(REPO))
 # file must never change what the battery measures. Set before convert_tiff is imported, which
 # applies its own section on import.
 os.environ["TIFFWORKFLOW_SETTINGS"] = ""
+# compress --recompress-zip's memory of the files it did not shrink OFF too: the battery's
+# copies must never land in the owner's real memory file (C16 measures with it off).
+os.environ["TIFFWORKFLOW_NO_GAIN"] = ""
 from tiff_workflow import wizard as convert_tiff  # noqa: E402  (the repo root must be on sys.path first)
 
 try:  # folder names with Japanese characters must not kill the console print
@@ -879,6 +883,99 @@ def c15(A1, A2):
     shutil.rmtree(stage, ignore_errors=True)
 
 
+def c16(A1, A2):
+    """v3.2: the owner's preset on copies of real Capture One exports (Deflate at level 6, no
+    predictor, a 160 px thumbnail page): mode 8, --include-folders TIFF16, --recompress-zip.
+    Each file comes out smaller with the same pixels, tags and date -- or, when the predictor
+    does not pay, stays byte for byte; a copy outside TIFF16 is never touched; a second run
+    on its own output changes nothing."""
+    section(f"C16: --recompress-zip + --include-folders, mode 8 on Capture One exports [{CURRENT_LANE}]")
+    root = LANE_DIR / "c16 [x] s 1"
+    exp = root / "_EXPORT" / "TIFF16"
+    files = [cp(A1, exp / A1.name), cp(A2, exp / A2.name)]
+    side = cp(A1, root / "_EXPORT" / "sRGB" / A1.name)
+    refs = {f.name: cp(f, LANE_DIR / "c16_ref" / f.name) for f in files}
+    old_ns = 1_700_000_000 * 10 ** 9
+    for f in files:
+        os.utime(f, ns=(old_ns, old_ns))
+    side_md5 = md5(side)
+    args = ["--mode", "8", "--input-dir", str(root), "--include-folders", "TIFF16",
+            "--recompress-zip", "--staging-dir", str(LANE_DIR / "c16_stage")]
+    rc, out = run("c16_run1", "compress_tiff_zip.py", args)
+    check("C16: rc == 0", rc == 0, f"rc={rc}")
+    check("C16: the run counted what it saved", "Recompressed: " in out or "SKIP (no gain" in out)
+    for f in files:
+        r = refs[f.name]
+        before, after = r.stat().st_size, f.stat().st_size
+        if after < before:
+            check(f"C16: {f.name}: {before} -> {after} bytes "
+                  f"({(after - before) * 100.0 / before:+.1f}%), predictor added",
+                  exif_tag(f, "-IFD0:Predictor") == "Horizontal differencing")
+            check(f"C16: {f.name}: both pages pixel-identical to the export",
+                  pixels_equal(r, f, 0) and pixels_equal(r, f, 1))
+            check(f"C16: {f.name}: tags and ICC kept", meta(f) == meta(r))
+            check(f"C16: {f.name}: the export's date kept", f.stat().st_mtime_ns == old_ns,
+                  str(f.stat().st_mtime_ns))
+        else:
+            check(f"C16: {f.name}: not smaller, left byte for byte", md5(f) == md5(r)
+                  and "SKIP (no gain" in out)
+    check("C16: the copy outside TIFF16 untouched", md5(side) == side_md5)
+    sums = {f.name: md5(f) for f in files}
+    rc, out = run("c16_run2", "compress_tiff_zip.py", args)
+    check("C16: second run on its own output rc == 0", rc == 0, f"rc={rc}")
+    check("C16: second run changes nothing", all(md5(f) == sums[f.name] for f in files))
+
+
+#: C17: two real scans the ZIP predictor makes LARGER (41.9 % and 5.6 % smaller without it,
+#: written whole as compress writes them, 15/11/2026) and one it makes smaller (13 %), all
+#: uncompressed in the fixtures
+C17_SCANS = {"rgba16_unassoc_luminar__UN54_FX39ii_0008.tif": 1,
+             "rgbi16_vuescan_srgb__0019.tif": 1,
+             "rgb16_epsonrgb18__img012.tif": 2}
+
+
+def c17(varied):
+    """v3.2: --zip-predictor auto on real scans: the sample of each file decides, the file is
+    written once with the smaller choice, pixel-identical, its History records the choice, and
+    a later --recompress-zip skips the ones written without the predictor by that record."""
+    section(f"C17: --zip-predictor auto on real scans [{CURRENT_LANE}]")
+    root = LANE_DIR / "c17 [x] scans"
+    files, refs = {}, {}
+    for name in C17_SCANS:
+        files[name] = cp(varied / name, root / name)
+        refs[name] = cp(varied / name, LANE_DIR / "c17_ref" / name)
+    args = ["--mode", "8", "--input-dir", str(root), "--zip-predictor", "auto",
+            "--staging-dir", str(LANE_DIR / "c17_stage")]
+    rc, out = run("c17_run1", "compress_tiff_zip.py", args)
+    check("C17: rc == 0", rc == 0, f"rc={rc}")
+    for name, want in C17_SCANS.items():
+        f, r = files[name], refs[name]
+        pred = exif_tag(f, "-IFD0:Predictor")
+        got = 1 if pred in ("None", "") else 2 if pred == "Horizontal differencing" else None
+        check(f"C17: {name}: {'without' if want == 1 else 'with'} the predictor, as the whole "
+              f"file measured", got == want, f"Predictor: {pred!r}")
+        check(f"C17: {name}: pixel-identical to the scan", pixels_equal(r, f, 0))
+        check(f"C17: {name}: tags and ICC kept", meta(f) == meta(r))
+        history = exif_tag(f, "-XMP-xmpMM:HistoryParameters")
+        check(f"C17: {name}: the History records the choice",
+              history.endswith(f"zipcheck 1 predictor {want}"), history[-80:])
+    # the smaller of the two, really: the VueScan scan written WITH the predictor, by magick
+    name = "rgbi16_vuescan_srgb__0019.tif"
+    with_p = LANE_DIR / "c17_with_predictor.tif"
+    _exe(["magick", refs[name], "-type", "TrueColor", "-define", "tiff:predictor=2",
+          "-compress", "zip", with_p])
+    check(f"C17: {name}: smaller than with the predictor "
+          f"({files[name].stat().st_size} < {with_p.stat().st_size if with_p.exists() else '?'})",
+          with_p.exists() and files[name].stat().st_size < with_p.stat().st_size)
+    sums = {n: md5(f) for n, f in files.items()}
+    rc, out = run("c17_run2", "compress_tiff_zip.py", args + ["--recompress-zip"])
+    check("C17: second run with --recompress-zip rc == 0", rc == 0, f"rc={rc}")
+    for name, want in C17_SCANS.items():
+        if want == 1:
+            check(f"C17: {name}: skipped by its record", f"already the smaller - zipcheck) | {name}" in out)
+    check("C17: second run changes nothing", all(md5(f) == sums[n] for n, f in files.items()))
+
+
 def run_checks_for_lane(lane, fixtures, A1, A2, raw_scan, tiff_scan):
     global CURRENT_LANE, LANE_DIR, LOGS
     CURRENT_LANE = lane
@@ -910,6 +1007,13 @@ def run_checks_for_lane(lane, fixtures, A1, A2, raw_scan, tiff_scan):
     c13(A1, A2)
     c14(fixtures)
     c15(A1, A2)
+    c16(A1, A2)
+    varied = fixtures / "TIFF_scans_varied"
+    if all((varied / n).is_file() for n in C17_SCANS):
+        c17(varied)
+    else:
+        print("\n(no TIFF_scans_varied fixture: C17 skipped)")
+        skips.append(f"C17 skipped [{lane}]: TIFF_scans_varied lacks {', '.join(C17_SCANS)}")
 
 
 def pick_tiff16(fixtures):

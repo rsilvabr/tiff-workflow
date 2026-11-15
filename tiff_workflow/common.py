@@ -367,6 +367,12 @@ def _overlay_value(spec: str, value):
     return False, "a setting the overlay cannot change"
 
 
+def user_profile_dir():
+    """The user's profile folder (USERPROFILE on Windows, else the home folder): where the
+    settings overlay is looked for last and where compress keeps its no-gain memory."""
+    return (os.environ.get("USERPROFILE") if IS_WINDOWS else None) or os.path.expanduser("~")
+
+
 def settings_overlay_path(script_root):
     """The overlay file to read (it may not exist), or None when TIFFWORKFLOW_SETTINGS is
     set but blank (overlay OFF): the variable, then next to the scripts if the file is
@@ -378,8 +384,7 @@ def settings_overlay_path(script_root):
         portable = os.path.join(script_root, SETTINGS_OVERLAY_FILE)
         if os.path.isfile(portable):
             return portable
-    home = (os.environ.get("USERPROFILE") if IS_WINDOWS else None) or os.path.expanduser("~")
-    return os.path.join(home, SETTINGS_OVERLAY_FILE)
+    return os.path.join(user_profile_dir(), SETTINGS_OVERLAY_FILE)
 
 
 def read_settings_overlay(section, specs, script_root):
@@ -649,6 +654,23 @@ def path_excluded(directory, root, names):
     return any(seg and seg.lower() in lowered for seg in parts)
 
 
+def path_included(directory, root, names):
+    """--include-folders: True when `names` is empty, or when the scan root's own folder or
+    a folder BELOW it is named one of `names` (without case). The root's own name counts, so
+    pointing the tool AT a TIFF16 folder with --include-folders TIFF16 takes its files; the
+    folders ABOVE the root never count (the reason of round 14's exclusion rule: a name the
+    user did not point at must not decide a whole run). A directory that is not under the
+    root is left out: in doubt, the file is not touched."""
+    if not names:
+        return True
+    parts = segments_below(directory, root)
+    if parts is None:
+        return False
+    root_name = str(root).replace("/", "\\").rstrip("\\").rsplit("\\", 1)[-1]
+    lowered = {str(n).lower() for n in names}
+    return any(seg and seg.lower() in lowered for seg in [root_name] + parts)
+
+
 def resolve_output(f, mode, input_root, opt):
     """Where compress_tiff_zip writes the compressed copy of `f` (a FoundFile) in `mode`;
     None when the mode has no place for it (reported, never dropped silently). The output is
@@ -802,8 +824,9 @@ def find_stranded_originals(root, recurse, backup_names, exclude_names):
     return found
 
 
-def parse_exclude_folders(text):
-    """The ';'-separated folder NAMES of --exclude-folders, or raises UsageError for a path."""
+def parse_folder_names(text, option, example):
+    """The ';'-separated folder NAMES of a folder option (--exclude-folders,
+    --include-folders), or raises UsageError for a path."""
     names = []
     for entry in str(text or "").split(";"):
         entry = entry.strip()
@@ -811,10 +834,15 @@ def parse_exclude_folders(text):
             continue
         if "\\" in entry or "/" in entry:
             raise UsageError(
-                f"--exclude-folders takes folder NAMES, not paths: '{entry}'\n"
-                "       Use a ';'-separated list of bare names, e.g. --exclude-folders \"_EXPORT;temp\"")
+                f"{option} takes folder NAMES, not paths: '{entry}'\n"
+                f"       Use a ';'-separated list of bare names, e.g. {option} \"{example}\"")
         names.append(entry)
     return names
+
+
+def parse_exclude_folders(text):
+    """The ';'-separated folder NAMES of --exclude-folders, or raises UsageError for a path."""
+    return parse_folder_names(text, "--exclude-folders", "_EXPORT;temp")
 
 
 _FILE_ATTRIBUTE_HIDDEN = 0x2
@@ -1583,10 +1611,12 @@ def tiff_sample_layout(path):
 
 
 #: what tiff_facts and tiff_sample_layout read: the layout tags as numbers (`#`), the
-#: compression as the text the SKIP lines print.
+#: compression as the text the SKIP lines print, the size of page 0 (--zip-predictor's probe).
 _FACT_TAGS = ["-IFD0:Compression", "-SamplesPerPixel#", "-PhotometricInterpretation#",
-              "-ExtraSamples#", "-BitsPerSample#", "-SubfileType#"]
+              "-ExtraSamples#", "-BitsPerSample#", "-SubfileType#", "-IFD0:ImageWidth#",
+              "-IFD0:ImageHeight#"]
 _COMPRESSION_LINE = re.compile(r"^\[IFD0\]\s+Compression:\s*(.*?)\s*$")
+_DIMENSION_LINE = re.compile(r"^\[IFD0\]\s+(ImageWidth|ImageHeight):\s*(\d+)\s*$")
 
 
 def _read_tags(path, what):
@@ -1604,6 +1634,8 @@ class TiffFacts(NamedTuple):
     compression: str        # IFD0:Compression as text; "" when IFD0 has none
     pages: Optional[list]   # tiff_sample_layout's answer; None when it cannot vouch for one
     subfile_types: dict     # {ifd: SubfileType} of the IFDs that carry the tag
+    width: int = 0          # page 0's size in pixels; 0 when it was not read
+    height: int = 0
 
 
 def tiff_facts(path):
@@ -1618,12 +1650,16 @@ def tiff_facts(path):
     except ToolError:
         pages = None
     comp = ""
+    dims = {}
     for line in out.split("\n"):
         m = _COMPRESSION_LINE.match(line)
-        if m:
+        if m and not comp:
             comp = m.group(1)
-            break
-    return TiffFacts(comp, pages, _parse_subfile_types(out))
+        d = _DIMENSION_LINE.match(line)
+        if d:
+            dims.setdefault(d.group(1), int(d.group(2)))
+    return TiffFacts(comp, pages, _parse_subfile_types(out), dims.get("ImageWidth", 0),
+                     dims.get("ImageHeight", 0))
 
 
 def _parse_layout(out, path):
@@ -1746,25 +1782,197 @@ def is_compressed(comp, skip_lzw):
     return bool(re.search("Deflate|ZIP|Adobe|LZW" if skip_lzw else "Deflate|ZIP|Adobe", comp, re.I))
 
 
-def get_compression_map(paths, chunk_size=400):
-    """{lower-case full path: IFD0 compression or "-"}: one exiftool run per `chunk_size`
-    files instead of one per file. A file MISSING from the map is probed on its own by the
-    caller: a failed chunk never changes a SKIP/compress decision."""
+def _batch_tags(paths, tags, chunk_size=400):
+    """{lower-case full path: [the value of each of `tags`, "-" when absent]}: one exiftool
+    -T run per `chunk_size` files instead of one per file. A chunk exiftool fails on is left
+    out: its files are MISSING from the map, and the caller reads each one alone."""
     result = {}
     for off in range(0, len(paths), chunk_size):
         chunk = paths[off:off + chunk_size]
         try:
-            out = exiftool(["-T", "-Directory", "-FileName", "-IFD0:Compression"] + chunk)
+            out = exiftool(["-T", "-Directory", "-FileName"] + list(tags) + chunk)
         except ToolError:
             continue
         for line in out.split("\n"):
-            cols = line.split("\t", 2)
+            cols = line.split("\t")
             if len(cols) < 2:
                 continue
             full = norm_sep(join_path(cols[0], cols[1]))
-            comp = cols[2].strip() if len(cols) >= 3 else "-"
-            result[full.lower()] = comp
+            values = [c.strip() for c in cols[2:2 + len(tags)]]
+            result[full.lower()] = values + ["-"] * (len(tags) - len(values))
     return result
+
+
+def get_compression_map(paths, chunk_size=400):
+    """{lower-case full path: IFD0 compression or "-"}: one exiftool run per `chunk_size`
+    files instead of one per file. A file MISSING from the map is probed on its own by the
+    caller: a failed chunk never changes a SKIP/compress decision."""
+    return {k: v[0] for k, v in _batch_tags(paths, ["-IFD0:Compression"], chunk_size).items()}
+
+
+# --- --recompress-zip ---------------------------------------------------------------
+#
+# A TIFF already compressed with Deflate but WITHOUT a predictor (Capture One's exports:
+# level 6, no predictor, measured 15/11/2026) comes out 5-13 % smaller when ImageMagick
+# writes it again: it adds the horizontal predictor for 8 and 16 bits. Some images grow
+# instead (one Capture One export, +39 %), so compress keeps a recompressed file only when it
+# is smaller (its size gate).
+
+class RecompressFacts(NamedTuple):
+    """What decides whether a ZIP TIFF is worth recompressing: page 0's predictor, bits and
+    photometric as exiftool prints the numbers ("-" when the tag is absent), and the file's LAST
+    xmpMM:History entry (its agent and parameters: the zipcheck record, zipcheck_recorded)."""
+    predictor: str          # 1 none, 2 horizontal, 3 floating point
+    bits: str               # BitsPerSample, one number per sample: "16 16 16"
+    photometric: str        # 0/1 gray, 2 RGB, ...
+    last_agent: str = ""
+    last_params: str = ""
+
+
+#: JSON, not -T: the History is a list of structures, and a -T column joins every entry's
+#: fields with ", " -- other programs write commas in their Parameters.
+_RECOMPRESS_ARGS = ["-j", "-struct", "-IFD0:Predictor#", "-IFD0:BitsPerSample#",
+                    "-IFD0:PhotometricInterpretation#", "-XMP-xmpMM:History"]
+
+
+def is_zip_compression(comp):
+    """An IFD0:Compression value that is Deflate (8 "Adobe Deflate", 32946 "Deflate")."""
+    return bool(re.search("Deflate|ZIP", str(comp), re.I))
+
+
+def _recompress_facts_of(entry):
+    def text(key):
+        v = entry.get(key)
+        return "-" if v is None else str(v)
+    history = entry.get("History")
+    if isinstance(history, dict):
+        history = [history]
+    last = history[-1] if isinstance(history, list) and history and isinstance(history[-1], dict) else {}
+    return RecompressFacts(text("Predictor"), text("BitsPerSample"), text("PhotometricInterpretation"),
+                           str(last.get("SoftwareAgent") or ""), str(last.get("Parameters") or ""))
+
+
+def get_recompress_facts(paths, chunk_size=400):
+    """{lower-case full path: RecompressFacts}, one exiftool run per `chunk_size` files. A file
+    missing from the map (a chunk exiftool could not answer as JSON) is read alone
+    (recompress_facts)."""
+    result = {}
+    for off in range(0, len(paths), chunk_size):
+        chunk = paths[off:off + chunk_size]
+        try:
+            # one unreadable file must not lose the answers of the others
+            data = json.loads(exiftool(_RECOMPRESS_ARGS + chunk, check=False) or "[]")
+        except (ToolError, ValueError):
+            continue
+        for entry in data if isinstance(data, list) else []:
+            if isinstance(entry, dict) and entry.get("SourceFile") and not entry.get("Error"):
+                result[norm_sep(entry["SourceFile"]).lower()] = _recompress_facts_of(entry)
+    return result
+
+
+def recompress_facts(path):
+    """RecompressFacts of one file. Raises ToolError when exiftool fails or prints nothing
+    usable: the caller refuses the file, it never guesses a predictor."""
+    out = exiftool(_RECOMPRESS_ARGS + [path])
+    try:
+        data = json.loads(out)
+        entry = data[0]
+        if not isinstance(entry, dict) or entry.get("Error"):
+            raise ValueError("no answer for the file")
+    except (ValueError, IndexError, TypeError) as e:
+        raise ToolError(f"cannot read the predictor of {path}: {e}", out, 0) from e
+    return _recompress_facts_of(entry)
+
+
+# --- The zipcheck record and the predictor probe ------------------------------------
+#
+# A file whose predictor tiff-workflow CHOSE (--zip-predictor auto, or a recompression kept
+# because it was smaller than the original without one) says so in the xmpMM:History entry the
+# rewrite writes anyway: its Parameters end in " - zipcheck 1 predictor 2" (or 1). No extra
+# write, and the way jxl-photo keeps its own encode record (in its History entry; its reader
+# skips other programs' entries). The record counts only while that entry is the file's LAST
+# one: a later program's entry -- jxl-photo's encode and decode included, which carry the
+# History into the JXL and back -- means the file was rewritten since.
+
+ZIPCHECK_VERSION = 1
+_ZIPCHECK_RE = re.compile(r"\bzipcheck (\d+) predictor ([12])\b")
+
+
+def zipcheck_segment(predictor):
+    """The end of the History Parameters of a file whose predictor was chosen. No struct
+    character in it (see _history_assignment)."""
+    return f" - zipcheck {ZIPCHECK_VERSION} predictor {int(predictor)}"
+
+
+def zipcheck_recorded(facts):
+    """The predictor (1 or 2) a zipcheck record of this version names, when the file's LAST
+    History entry is tiff-workflow's and carries one; else None."""
+    if facts is None or not str(facts.last_agent).startswith("tiff-workflow "):
+        return None
+    m = _ZIPCHECK_RE.search(str(facts.last_params))
+    if not m or int(m.group(1)) != ZIPCHECK_VERSION:
+        return None
+    return int(m.group(2))
+
+
+#: The sample of page 0 the predictor probe writes: four full-width bands of 16 rows at
+#: 20/40/60/80 % of the height (measured 15/11/2026 on 31 varied scans and 22 Capture One
+#: exports, the whole files written as compress writes them: no choice against the whole file
+#: beyond the 2 % margin; on the 31 scans auto is 0.01 % from the best possible).
+_PROBE_BANDS = (0.2, 0.4, 0.6, 0.8)
+_PROBE_BAND_ROWS = 16
+
+
+def predictor_probe(src, width, height, timeout=30, load_factor=1.0, write_args=()):
+    """(bytes with the predictor, bytes without) of a SAMPLE of `src`'s page 0 written as ZIP:
+    one magick reads the page once and writes the sample twice, two small files in the temp
+    folder (a few MB for a 45 MP export), removed. The decision is taken on these so that the
+    TIFF itself is written ONCE -- writing it both ways and keeping the smaller would add a full
+    temporary TIFF per file. `write_args` are the write's own options (magick_keep_type_args):
+    the sample must have the channels the file will have -- without `-type TrueColor` a
+    scanner's IR channel is written another way and the sample measures another image (a
+    VueScan RGB+IR scan: -47 % without the predictor in such a sample, -5.6 % in the file).
+    None when the size is unknown or anything fails: the caller keeps the predictor, today's
+    choice."""
+    if width <= 0 or height <= 0:
+        return None
+    with_p, without_p = temp_file_path(".tif"), temp_file_path(".tif")
+    page0 = f"{magick_path_spec(src)}[0]"
+    if height <= _PROBE_BAND_ROWS * len(_PROBE_BANDS) * 2:
+        sample = [page0]
+    else:
+        sample = [page0, "-write", "mpr:twprobe", "+delete"]
+        for share in _PROBE_BANDS:
+            sample += ["(", "mpr:twprobe", "-crop",
+                       f"{width}x{_PROBE_BAND_ROWS}+0+{int(height * share)}", "+repage", ")"]
+        sample.append("-append")
+    args = (["-quiet"] + sample + ["+repage", "-compress", "zip"] + [str(a) for a in write_args]
+            + ["-define", "tiff:predictor=2", "-write", magick_path_spec(with_p),
+               "-define", "tiff:predictor=1", magick_path_spec(without_p)])
+    try:
+        r = magick_probe(args, _size_scaled_timeout(timeout, [src], load_factor))
+        if r.timed_out or r.exit_code != 0:
+            return None
+        return os.path.getsize(with_p), os.path.getsize(without_p)
+    except OSError:
+        return None
+    finally:
+        remove_quietly(with_p)
+        remove_quietly(without_p)
+
+
+def recompress_candidate(comp, facts):
+    """Whether --recompress-zip rewrites a file: Deflate on page 0, no predictor, 8 or 16
+    bits in every sample, gray or RGB (the layouts compress keeps; ImageMagick adds the
+    predictor only to those). Anything else stays the SKIP of an already compressed file."""
+    if not is_zip_compression(comp) or facts is None:
+        return False
+    if facts.predictor not in ("-", "", "1"):
+        return False
+    bits = facts.bits.split()
+    if not bits or any(b not in ("8", "16") for b in bits):
+        return False
+    return facts.photometric in ("0", "1", "2")
 
 
 # --- Memory ---------------------------------------------------------

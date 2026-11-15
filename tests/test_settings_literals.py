@@ -155,8 +155,10 @@ def test_run_free_compress_no_configure_adds_no_thumb_keys(tmp_path, monkeypatch
         "n",            # dry-run
         "",             # safe mode (default)
         "",             # skip LZW (default)
+        "",             # recompress ZIP (default No)
         "",             # cap workers (default)
         "",             # exclude folders
+        "",             # only folders (all)
         "",             # force sequential?
         "y",            # generate thumbnails?
         "n",            # configure thumbnail settings?
@@ -213,8 +215,9 @@ def test_text_safe_mode_unknown_answer_keeps_default(monkeypatch):
     used in Portuguese); pre-fix every unrecognised answer fell into the False branch
     and silently disabled the gate, so the backend processed multi-page TIFFs."""
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
-    # workers, staging, dry-run, safe mode, skip LZW, cap, exclude, force sequential
-    answers = iter(["4", "", "n", "s", "", "", "", ""])
+    # workers, staging, dry-run, safe mode, skip LZW, recompress ZIP, cap, exclude, only
+    # folders, force sequential
+    answers = iter(["4", "", "n", "s", "", "", "", "", "", ""])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
 
     # ConfigManager without disk: the probe's shape (no config file is read or written)

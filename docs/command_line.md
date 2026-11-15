@@ -101,6 +101,10 @@ the file can change.
 | `-WorkerMemoryFraction <value>` | `--worker-memory-fraction <value>` | `worker_memory_fraction` |
 | `-InputDirFile <value>` | `--input-dir-file <value>` |  |
 | `-RestoreStranded` / `-RestoreStranded:$false` | `--restore-stranded` / `--no-restore-stranded` |  |
+| (new in v3.2, no old form) | `--recompress-zip` / `--no-recompress-zip` |  |
+| (new in v3.2, no old form) | `--recompress-min-saving <value>` | `recompress_min_saving` |
+| (new in v3.2, no old form) | `--zip-predictor <value>` | `zip_predictor` |
+| (new in v3.2, no old form) | `--include-folders <value>` |  |
 
 ### tiff_workflow/copy_exif_to_tiff.py (`convert_tiff.py copy-exif`)
 

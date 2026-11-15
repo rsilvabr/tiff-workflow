@@ -14,10 +14,17 @@ tools/legacy_args.py translates a line of v3.0.0 or of the .ps1 (`-Name value`,
 input folder does not exist, 2 when the command line cannot run as written.
 docs/README_compress_tiff_zip.md has the reference.
 
+An already compressed TIFF is skipped. --recompress-zip also rewrites one compressed with
+ZIP/Deflate WITHOUT a predictor (Capture One's exports) and keeps the new file only when it is
+at least --recompress-min-saving percent smaller; --include-folders limits any mode to the
+folders of the given names (--include-folders TIFF16).
+
 The irreversible step comes last: an original leaves its place only after its replacement
 is written, checked and sitting next to it on the same volume, and the swap is one rename.
+A file that takes its original's place keeps the original's modification time.
 """
 
+import json
 import os
 import re
 import sys
@@ -52,6 +59,9 @@ PARAMS = (
     P("dry_run", "switch"),
     P("safe_mode", "bool", True, help="true = skip multi-page TIFFs"),
     P("skip_lzw_as_compressed", "bool", False, help="true = treat LZW as already compressed"),
+    P("recompress_zip", "switch", help="Also rewrite TIFFs already ZIP-compressed WITHOUT a predictor (Capture One exports); a file is kept only when it comes out smaller"),
+    P("recompress_min_saving", "float", 1.0, lo=0, hi=50, help="--recompress-zip keeps a rewritten file only when it is at least this many percent smaller"),
+    P("zip_predictor", "str", "on", choices=("on", "auto"), help="on = always the ZIP predictor; auto = a sample of each file decides with or without it, whichever is smaller (the file is still written once)"),
     P("overwrite", "switch"),
     P("delete_source", "switch"),
     P("force_parallel", "switch", help="accepted for old command lines; parallel is the default"),
@@ -60,6 +70,7 @@ PARAMS = (
     P("duplicate_action", "str", "Numbered", choices=("Skip", "Numbered", "Overwrite")),
     P("magick_timeout", "int", 30),
     P("exclude_folders", "str", "", help="';'-separated folder NAMES to skip during discovery (any mode)"),
+    P("include_folders", "str", "", help="';'-separated folder NAMES: only the TIFFs inside a folder of one of these names (any mode)"),
 
     # Thumbnail generation
     P("generate_thumbnail", "switch", help="Generate embedded thumbnail in TIFF"),
@@ -92,6 +103,8 @@ OVERLAY_SPECS = {
     "thumb_format": "name",
     "srgb_profile": "path?",
     "worker_memory_fraction": "float:0:2",
+    "recompress_min_saving": "float:0:50",
+    "zip_predictor": "choice:on|auto",
 }
 # OVERLAY-SPECS-END
 
@@ -120,6 +133,21 @@ _OVERLAY_PATH_NAMES = ("zip_suffix", "zip_subfolder_name", "export_marker", "exp
 MAX_PATH_CHARS = 259     # Windows refuses longer paths and magick.exe is not long-path aware
 TEMP_SIBLING_CHARS = 26  # ".<8 hex>_<12 hex>.tif"
 
+# --recompress-zip remembers the files whose rewrite was not kept (the predictor makes some
+# images larger: +39 % on one Capture One export), so a later run skips them without reading
+# them again. One file per user, in the profile; TIFFWORKFLOW_NO_GAIN names another file, and
+# set but blank turns the memory off (the tests and the battery). A file that changed (size or
+# write time) is tried again; deleting the memory file forgets everything.
+NO_GAIN_FILE = ".tiff_workflow_no_gain.json"
+NO_GAIN_ENV = "TIFFWORKFLOW_NO_GAIN"
+
+# The predictor probe (tw.predictor_probe) says "without the predictor" only when its sample
+# without it is more than this share smaller; a closer call keeps the predictor (today's
+# choice). Measured 15/11/2026 on 53 real files: the close calls were a Capture One export
+# (-0.6 % in the sample, -3.8 % on the file: written, and refused by the exact size gate) and a
+# Windows Photo file (0.8 % on the file): this margin sends both to the predictor.
+PREDICTOR_PROBE_MARGIN = 0.02
+
 
 class Run:
     """The state of one run: options, log, counters, and what an interrupt has to undo."""
@@ -131,6 +159,16 @@ class Run:
         self.run_id = tw.new_run_id()
         self.srgb_profile = None
         self.exclude_names = []
+        self.include_names = []
+        # --recompress-zip: the batch read of the ZIP files' predictors ({lower path:
+        # RecompressFacts}; a file missing from it is read alone), the no-gain memory (None
+        # when off), and the recompressed files that landed ({final_dst lower: (bytes before,
+        # bytes after)}) for the summary.
+        self.recompress_facts = {}
+        self.no_gain = None
+        self.recompressed = {}
+        # --zip-predictor auto: how many written files came out with / without the predictor
+        self.predictor_chosen = {2: 0, 1: 0}
         self.parallel = not opt["force_sequential"]
         # The staging folder of this run: --staging-dir, or mode 8's own folder
         # (_default_mode8_staging). Every step reads it HERE: the plan writing into one
@@ -185,6 +223,15 @@ class Run:
         dry = f" | {self.dry} dry-run (nothing written)" if self.dry > 0 else ""
         log(f"Done: {self.ok} OK | {self.skip} skipped | {self.multi} multi-page (not touched) | "
             f"{self.warn} warnings | {self.err} errors | {self.counter}/{self.total} processed{dry}")
+        if self.recompressed:
+            before = sum(b for b, _a in self.recompressed.values())
+            after = sum(a for _b, a in self.recompressed.values())
+            log(f"Recompressed: {len(self.recompressed)} file(s), {_size_text(before)} -> "
+                f"{_size_text(after)} ({_size_text(before - after)} saved, "
+                f"{_percent(after, before)})")
+        if self.predictor_chosen[1] or self.predictor_chosen[2]:
+            log(f"ZIP predictor chosen per file: {self.predictor_chosen[2]} with, "
+                f"{self.predictor_chosen[1]} without (the smaller in a sample of each)")
         if self.stranded > self.restored:
             log(f"STRANDED: {self.stranded - self.restored} original(s) still in OLD_TIFFs with "
                 f"nothing in their place -- see the STRANDED lines above", "WARN")
@@ -196,6 +243,110 @@ class Run:
             self.log("-- Multi-page TIFFs found (not compressed - review manually):")
             for p in sorted(self.multi_paths, key=str.lower):
                 self.log(f"   {p}", "WARN")
+
+
+def _size_text(n):
+    """A file size for the log: 234.8 MB, 2.45 GB (powers of ten, like the measurements of the
+    docs)."""
+    return f"{n / 1e9:.2f} GB" if abs(n) >= 1e9 else f"{n / 1e6:.1f} MB"
+
+
+def _percent(after, before):
+    """How much `after` differs from `before`: -10.7%, +39.4%."""
+    return f"{(after - before) * 100.0 / before:+.1f}%" if before else "?"
+
+
+# -- The no-gain memory of --recompress-zip ---------------------------
+
+class NoGainMemory:
+    """The files --recompress-zip rewrote and did not keep, so the next run does not read them
+    again: {lower-case path: {"size", "mtime_ns", "date", "release"}} in a JSON file. Read once
+    at the start; the caller's thread records each no-gain result (a worker never writes it)
+    and the run saves once, at its end or after an interrupt. A memory file that cannot be read
+    is an empty memory and a WARN, never a stopped run."""
+
+    VERSION = 1
+
+    def __init__(self, path, log):
+        self.path = path
+        self.log = log
+        self.files = {}         # what was read at the start
+        self.new = {}           # what this run found, saved by save()
+
+    @classmethod
+    def open(cls, log):
+        """The memory of this user (or TIFFWORKFLOW_NO_GAIN's file); None when the variable is
+        set but blank (no memory)."""
+        env = os.environ.get(NO_GAIN_ENV)
+        if env is not None and not env.strip():
+            return None
+        path = env.strip() if env is not None else os.path.join(tw.user_profile_dir(), NO_GAIN_FILE)
+        memory = cls(path, log)
+        memory.files = memory._read(warn=True)
+        return memory
+
+    def _read(self, warn):
+        try:
+            with open(self.path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            files = data.get("files") if isinstance(data, dict) else None
+            if not isinstance(files, dict):
+                raise ValueError("no 'files' object")
+            return {str(k).lower(): v for k, v in files.items() if isinstance(v, dict)}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as e:      # a JSONDecodeError is a ValueError
+            if warn:
+                self.log(f"no-gain memory {self.path}: not read ({e}); starting empty", "WARN")
+            return {}
+
+    def remembered(self, path):
+        """The date `path` was found not worth recompressing, when it has not changed since
+        (same size and write time); else None."""
+        entry = self.files.get(str(path).lower())
+        if not entry:
+            return None
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        if entry.get("size") != st.st_size or entry.get("mtime_ns") != st.st_mtime_ns:
+            return None
+        return str(entry.get("date") or "?")
+
+    def record(self, path):
+        """Remember `path` as it is now (a no-gain rewrite leaves it untouched)."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return
+        self.new[str(path).lower()] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                                       "date": datetime.now().strftime("%Y-%m-%d"),
+                                       "release": tw.TOOLKIT_VERSION}
+
+    def save(self):
+        """Write what this run found, merged into the file as it is now (another run may have
+        saved meanwhile): a temp file next to it, then one rename. A failure is a WARN."""
+        if not self.new:
+            return
+        files = self._read(warn=False)
+        files.update(self.new)
+        tmp = f"{self.path}.{tw.new_run_id()}.tmp"
+        try:
+            folder = os.path.dirname(self.path)
+            if folder:
+                os.makedirs(folder, exist_ok=True)
+            with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump({"version": self.VERSION, "files": files}, fh, ensure_ascii=False,
+                          indent=1, sort_keys=True)
+            tw.move_file_replacing(tmp, self.path)
+        except OSError as e:
+            tw.remove_quietly(tmp)
+            self.log(f"no-gain memory not saved ({e}): {self.path}", "WARN")
+            return
+        self.log(f"No-gain memory: {len(self.new)} file(s) added to {self.path}")
+        self.files = files
+        self.new = {}
 
 
 # -- Stranded originals ---------------------------------------------
@@ -381,6 +532,11 @@ class JobResult:
     can_delete: bool = False            # mode 8 -DeleteSource: every gate passed
     integrity_failed: bool = False
     integrity_reason: str = ""
+    no_gain: bool = False               # --recompress-zip did not keep it (or did not try it)
+    size_before: Optional[int] = None   # a kept recompression: the source's bytes ...
+    size_after: Optional[int] = None    # ... and the new file's
+    zipcheck: Optional[int] = None      # the predictor CHOSEN for the written file (1 or 2);
+                                        # None = not chosen (--zip-predictor on)
 
 
 class ThumbWrite(NamedTuple):
@@ -448,6 +604,63 @@ def _write_with_thumbnail(run, src, write_dst, type_args, name):
     return ThumbWrite(no_thumb=no_thumb)
 
 
+def _compressed_skip(run, path, name, comp):
+    """(the line that reports `path` instead of writing it, or None; whether the write is a
+    --recompress-zip of an already compressed file). ONE decision for the plan of modes 0/9
+    and the worker of the other modes (until v3.2 the same lines were written in both).
+
+    An uncompressed file is written. An already compressed one is skipped -- unless
+    --skip-compressed-with-thumb rewrites it to add a thumbnail, or --recompress-zip finds
+    Deflate without a predictor on page 0 (tw.recompress_candidate) that the no-gain memory
+    does not already know. A predictor that cannot be read is an ERROR: never guessed."""
+    opt = run.opt
+    if not tw.is_compressed(comp, opt["skip_lzw_as_compressed"]):
+        return None, False
+    if opt["skip_compressed_with_thumb"]:
+        if not tw.tiff_has_thumbnail_page(path, opt["magick_timeout"]):
+            return None, False      # compressed without a thumbnail: rewritten to add one
+        line = f"SKIP (compressed+thumb) | {name}"
+    else:
+        # Say WHY nothing was produced when a thumbnail was asked for: this SKIP runs before
+        # the thumbnail step.
+        note = (" [no thumbnail added: pass --skip-compressed-with-thumb]"
+                if opt["generate_thumbnail"] else "")
+        line = f"SKIP ({comp}) | {name}{note}"
+    if not opt["recompress_zip"] or not tw.is_zip_compression(comp):
+        return line, False
+    facts = run.recompress_facts.get(str(path).lower())
+    if facts is None:
+        try:
+            facts = tw.recompress_facts(path)
+        except tw.ToolError:
+            return f"ERROR (exiftool check) | {name} | cannot read the predictor", False
+    if not tw.recompress_candidate(comp, facts):
+        return line, False
+    # Written by tiff-workflow without the predictor because that was the smaller (its last
+    # History entry says so): already the best -- on any machine, after any rename.
+    if tw.zipcheck_recorded(facts) == 1:
+        return f"SKIP ({comp}: already the smaller - zipcheck) | {name}", False
+    when = run.no_gain.remembered(path) if run.no_gain is not None else None
+    if when:
+        return f"SKIP (no gain on {when} - not tried again) | {name}", False
+    return None, True
+
+
+def _keep_source_times(src, dst):
+    """Give `dst` the access and modification times of `src`: a file that takes its
+    original's place keeps the original's date (owner's decision, 15/11/2026). The image did
+    not change, and a tool that compares dates must not take a lossless rewrite for a new photo
+    -- jxl-photo's smart sync re-encodes every master whose TIFF looks newer, and then every
+    copy made from those masters. False when either call fails (the file is fine; the result
+    line says the date was not kept)."""
+    try:
+        st = os.stat(src)
+        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+        return True
+    except OSError:
+        return False
+
+
 def process_job(run, t, load):
     """Compress one TIFF (`t`, a Job). Runs on a worker thread: it never logs or counts.
     Returns a JobResult.
@@ -490,17 +703,10 @@ def _compress_job(run, t, load, own):
             comp = tw.ifd0_compression(src)
         except tw.ToolError:
             return res(f"ERROR (exiftool check) | {name} | cannot detect compression")
-    # The SKIP decision runs for pre-probed files too.
-    if tw.is_compressed(comp, opt["skip_lzw_as_compressed"]):
-        if opt["skip_compressed_with_thumb"]:
-            # Only skip when a thumbnail is already embedded; otherwise reprocess
-            if tw.tiff_has_thumbnail_page(src, timeout):
-                return res(f"SKIP (compressed+thumb) | {name}")
-        else:
-            # Say WHY nothing was produced when a thumbnail was asked for: this SKIP runs
-            # before the thumbnail step.
-            note = " [no thumbnail added: pass --skip-compressed-with-thumb]" if generate_thumb else ""
-            return res(f"SKIP ({comp}) | {name}{note}")
+    # The SKIP decision runs for pre-probed files too: the plan of modes 0/9 made the same one.
+    skip_line, recompress = _compressed_skip(run, src, name, comp)
+    if skip_line:
+        return res(skip_line)
 
     if os.path.exists(final_dst) and not opt["overwrite"] and not tw.same_path(final_dst, src):
         return res(f"SKIP (exists) | {name}")
@@ -526,7 +732,12 @@ def _compress_job(run, t, load, own):
             thumb_note = " [thumb replaced]"
 
     if opt["dry_run"]:
-        return res(f"DRY ({comp} -> ZIP){thumb_note} | {name}", fd=True)
+        what = f"{comp} -> ZIP"
+        if recompress:
+            what += ", recompress"
+        elif opt["zip_predictor"] == "auto":
+            what += ", predictor auto"
+        return res(f"DRY ({what}){thumb_note} | {name}", fd=True)
 
     # magick turned a neutral RGB file into a 1-channel gray one and every pixel gate said
     # OK (audit round 28). The source layout picks the -type that keeps it and is the
@@ -543,6 +754,33 @@ def _compress_job(run, t, load, own):
     type_args = tw.magick_keep_type_args(layout_pages)
     if not tw.associated_alpha_rewritable(src, layout_pages, timeout):
         return res(f"ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | {name}", fd=True)
+
+    # The predictor, decided BEFORE the one write (tw.predictor_probe: a sample of page 0
+    # written both ways, a few MB in the temp folder -- never the whole TIFF twice).
+    #   --zip-predictor auto: the sample's smaller wins; a close call keeps the predictor.
+    #   --recompress-zip: a sample that is clearly smaller WITHOUT the predictor means the
+    #   original (which has none) stays -- nothing is written; otherwise the write and the
+    #   exact size gate below decide.
+    # zipcheck = the predictor recorded in the History: only when it was CHOSEN.
+    predictor_args = []
+    zipcheck = None
+    sample_note = ""
+    if recompress or opt["zip_predictor"] == "auto":
+        probe = tw.predictor_probe(src, facts.width, facts.height, timeout, load, type_args)
+        without_wins = False
+        if probe:
+            with_size, without_size = probe
+            without_wins = without_size < with_size * (1.0 - PREDICTOR_PROBE_MARGIN)
+            sample_note = f"sample {_percent(without_size, with_size)} without it"
+        if recompress:
+            if without_wins:
+                return res(f"SKIP (no gain expected: {sample_note} - original kept) | {name}",
+                           no_gain=True)
+            zipcheck = 2          # the exact size gate compares it with the original
+        elif probe:
+            zipcheck = 1 if without_wins else 2
+            if without_wins:
+                predictor_args = ["-define", "tiff:predictor=1"]
 
     # When the output overwrites the input the original is gone by the time the EXIF
     # restore runs: park the metadata in a temp MIE container first (also for a '%' name).
@@ -573,7 +811,7 @@ def _compress_job(run, t, load, own):
     no_thumb_note = ""
 
     if generate_thumb:
-        written = _write_with_thumbnail(run, src, write_dst, type_args, name)
+        written = _write_with_thumbnail(run, src, write_dst, type_args + predictor_args, name)
         if written.error:
             tw.remove_quietly(meta_backup)
             if written.drop_output:
@@ -585,7 +823,7 @@ def _compress_job(run, t, load, own):
         # The input stays literal (magick opens a plain path verbatim); the OUTPUT is
         # escaped, or a '%' in the name silently redirects it.
         try:
-            tw.magick_run(["-quiet", src, "-compress", "zip"] + type_args
+            tw.magick_run(["-quiet", src, "-compress", "zip"] + type_args + predictor_args
                           + [tw.magick_path_spec(write_dst)])
         except tw.ToolError as e:
             tw.remove_quietly(meta_backup)
@@ -619,15 +857,54 @@ def _compress_job(run, t, load, own):
         markers = []        # the main image alone: one page, nothing stamped on it
     else:
         markers = tw.subfile_marker_args(src, facts.subfile_types, timeout)
+    # The History struct takes no , { } [ ] | in a value (tw._history_assignment): a comma
+    # here cut the entry short and nothing said so (v3.2's first draft, caught end to end).
     history = f"compress_tiff_zip mode {mode}: ZIP (Deflate)"
+    if predictor_args:
+        history += " without predictor"
+    if recompress:
+        history += " - recompressed with predictor"
     if thumb_page:
         history += " + thumbnail page"
+    if zipcheck is not None:
+        history += tw.zipcheck_segment(zipcheck)
     done = tw.finish_written_tiff(write_dst, meta_backup or src, markers, history)
     tw.remove_quietly(meta_backup)
     exif_warn = not done.metadata
     thumb_marker_failed = thumb_page and not done.markers
     subfile_restore_failed = not done.markers and not thumb_marker_failed
     history_failed = not done.history
+
+    # --recompress-zip: the new file is kept only when it is smaller by the minimum saving (the
+    # predictor makes some images LARGER). Measured on the final bytes, before the gates that
+    # read every pixel: a file that will not be kept is never compared. Not kept = the output
+    # is dropped and the source stays exactly as it was; the caller remembers it (no_gain).
+    sizes = None
+    if recompress:
+        try:
+            before, after = tw.file_size(src), tw.file_size(write_dst)
+        except OSError as e:
+            tw.remove_quietly(write_dst)
+            return res(f"ERROR (file size unreadable - output dropped, original untouched) | {name} | {e}")
+        if after >= before * (1.0 - opt["recompress_min_saving"] / 100.0):
+            tw.remove_quietly(write_dst)
+            return res(f"SKIP (no gain: {_size_text(before)} -> {_size_text(after)}, "
+                       f"{_percent(after, before)} - original kept) | {name}", no_gain=True)
+        sizes = (before, after)
+
+    # This output REPLACES the original when it is written in place (temp sibling) -- and
+    # also when it is staged (--staging-dir) for a destination that is the source itself
+    # (mode 2 with --output-dir on the input root, mode 5 inside ZIP/). Modes 0/9 keep the
+    # original in OLD_TIFFs/ and mode 8 has its own gate below.
+    replaces_source = bool(in_place_final) or (
+        1 <= mode <= 7 and tw.same_path(final_dst, src))
+
+    # A file that takes its original's place keeps the original's dates (_keep_source_times):
+    # set after the last write onto it (finish_written_tiff, above); the gates below only read
+    # it, and the landing (a rename, or shutil.copy2 from another volume) carries the dates.
+    date_note = ""
+    if (mode in (0, 8, 9) or replaces_source) and not _keep_source_times(src, write_dst):
+        date_note = " [date not kept]"
 
     # Modes 1-7 have no pixel gate: a rewrite that dropped pages is data loss (audit
     # round 16). Fail closed and drop an output this run created.
@@ -650,12 +927,6 @@ def _compress_job(run, t, load, own):
             return tw.thumb_output_matches_source(src, dst, 1 if no_thumb_note else 2, timeout)
         return tw.pixel_identical(src, dst, timeout, load)
 
-    # This output REPLACES the original when it is written in place (temp sibling) -- and
-    # also when it is staged (--staging-dir) for a destination that is the source itself
-    # (mode 2 with --output-dir on the input root, mode 5 inside ZIP/). Modes 0/9 keep the
-    # original in OLD_TIFFs/ and mode 8 has its own gate below.
-    replaces_source = bool(in_place_final) or (
-        1 <= mode <= 7 and tw.same_path(final_dst, src))
     if replaces_source:
         # Only a fully decoded, pixel-verified ZIP whose metadata was restored may replace
         # the original; on any failure the new file is dropped and the source stays.
@@ -699,16 +970,24 @@ def _compress_job(run, t, load, own):
             integrity_failed = True
 
     if exif_warn or thumb_marker_failed or subfile_restore_failed or history_failed:
-        text = ("WARN (exiftool failed, ZIP ok)" + no_thumb_note + thumb_note
+        text = ("WARN (exiftool failed, ZIP ok)" + no_thumb_note + thumb_note + date_note
                 + (" [thumb marker failed]" if thumb_marker_failed else "")
                 + (" [subfiletype restore failed]" if subfile_restore_failed else "")
                 + (" [history not written]" if history_failed else "")
                 + f" | {name}")
     else:
-        text = (f"OK ({comp} -> ZIP){no_thumb_note}{thumb_note}"
+        what = f"{comp} -> ZIP"
+        if sizes:
+            what += (f", recompressed: {_size_text(sizes[0])} -> {_size_text(sizes[1])}, "
+                     f"{_percent(sizes[1], sizes[0])}")
+        elif zipcheck is not None:
+            what += f", {'without' if zipcheck == 1 else 'with'} predictor ({sample_note})"
+        text = (f"OK ({what}){no_thumb_note}{thumb_note}{date_note}"
                 + (" [SOURCE DELETED]" if can_delete else "") + f" | {name}")
     return res(text, fd=True, staging_name=staging_name, can_delete=can_delete,
-               integrity_failed=integrity_failed, integrity_reason=integrity_reason)
+               integrity_failed=integrity_failed, integrity_reason=integrity_reason,
+               size_before=sizes[0] if sizes else None, size_after=sizes[1] if sizes else None,
+               zipcheck=zipcheck)
 
 
 def _job_result(t, result):
@@ -828,18 +1107,11 @@ def _keep_original_job(run, f, final_dst, write_dst, pre_comp, comp_map):
     if not comp:
         run.count(f"ERROR (exiftool check) | {f.name} | cannot detect compression")
         return None
-    if tw.is_compressed(comp, opt["skip_lzw_as_compressed"]):
-        # the same two lines as process_job gives the modes 1-8
-        if opt["skip_compressed_with_thumb"]:
-            # only skip when a thumbnail is already embedded; otherwise reprocess
-            if tw.tiff_has_thumbnail_page(f.path, opt["magick_timeout"]):
-                run.count(f"SKIP (compressed+thumb) | {f.name}")
-                return None
-        else:
-            note = (" [no thumbnail added: pass --skip-compressed-with-thumb]"
-                    if opt["generate_thumbnail"] else "")
-            run.count(f"SKIP ({comp}) | {f.name}{note}")
-            return None
+    # the decision process_job makes for the other modes (_compressed_skip, one copy)
+    skip_line, _recompress = _compressed_skip(run, f.path, f.name, comp)
+    if skip_line:
+        run.count(skip_line)
+        return None
 
     safe_checked = False
     if opt["safe_mode"]:
@@ -1012,7 +1284,8 @@ def _plan_jobs(run, files, comp_map):
 class _GroupOutcome(NamedTuple):
     """What the workers of one group left for the steps that land their files."""
     staging_map: dict               # final_dst (lower case) -> the name of the file written
-    error_srcs: set                 # the sources (lower case) whose result is an ERROR
+    unlanded_srcs: set              # the sources (lower case) whose output must not land:
+                                    # every result that is not OK/WARN, and a failed landing
     integrity_failed_dst: set       # the final_dst (lower case) whose output failed its gate
     results: list                   # [(Job, JobResult)], in the order the workers finished
 
@@ -1021,7 +1294,7 @@ def _run_group(run, group_tasks, workers, collision_notes):
     """Run the workers of one group. Each result is logged and counted here, on the
     caller's thread, as it arrives. Returns a _GroupOutcome."""
     staging_map = {}
-    error_srcs = set()
+    unlanded_srcs = set()
     integrity_failed_dst = set()
     results = []
     load = float(max(1, min(workers, len(group_tasks))))
@@ -1034,16 +1307,27 @@ def _run_group(run, group_tasks, workers, collision_notes):
         if r.multi:
             run.multi_paths.append(r.multi)
         text = r.result
-        if tw.result_kind(text) is tw.Kind.ERROR:
-            error_srcs.add(t.src.lower())
+        # Only an OK or WARN output ever lands. Until v3.2 only an ERROR kept its output from
+        # landing: a --recompress-zip SKIP drops its output after writing it, and a leftover
+        # the drop could not remove would have been landed by modes 0/9 -- and the original
+        # archived for it.
+        if tw.result_kind(text) not in (tw.Kind.OK, tw.Kind.WARN):
+            unlanded_srcs.add(t.src.lower())
         if r.integrity_failed:
             integrity_failed_dst.add(key_dst)
             text = (f"ERROR ({r.integrity_reason or 'ZIP integrity check failed'} - "
                     f"source preserved) | {r.name}")
+        elif t.src.lower() not in unlanded_srcs:
+            if r.size_before is not None:
+                run.recompressed[key_dst] = (r.size_before, r.size_after)
+            elif r.zipcheck in run.predictor_chosen:
+                run.predictor_chosen[r.zipcheck] += 1
+        if r.no_gain and run.no_gain is not None:
+            run.no_gain.record(t.src)
         if r.final_dst and key_dst in collision_notes:
             text += collision_notes[key_dst]
         run.count(text)
-    return _GroupOutcome(staging_map, error_srcs, integrity_failed_dst, results)
+    return _GroupOutcome(staging_map, unlanded_srcs, integrity_failed_dst, results)
 
 
 def _move_staged(run, group_tasks, group_dir, outcome):
@@ -1053,7 +1337,7 @@ def _move_staged(run, group_tasks, group_dir, outcome):
     staging = run.staging
     dry = run.opt["dry_run"]
     staging_map = outcome.staging_map
-    error_srcs = outcome.error_srcs
+    unlanded_srcs = outcome.unlanded_srcs
     integrity_failed_dst = outcome.integrity_failed_dst
     if staging and not dry:
         moved = 0
@@ -1064,19 +1348,24 @@ def _move_staged(run, group_tasks, group_dir, outcome):
             if key_dst not in staging_map:
                 continue
             stage_path = tw.join_path(staging, staging_map[key_dst])
-            if key_dst in integrity_failed_dst:
+            if key_dst in integrity_failed_dst or t.src.lower() in unlanded_srcs:
                 # a bad ZIP must not replace the original: drop the staged file
                 tw.remove_quietly(stage_path)
+                run.recompressed.pop(key_dst, None)
                 continue
             dest_path = t.final_dst
-            if not os.path.exists(stage_path) or tw.same_path(stage_path, dest_path):
+            if tw.same_path(stage_path, dest_path):
+                continue
+            if not os.path.exists(stage_path):
+                run.recompressed.pop(key_dst, None)
                 continue
             dest_name = os.path.basename(dest_path)
             failure = tw.land_staged_file(stage_path, dest_path, run.run_id)
             if failure is None:
                 moved += 1
                 continue
-            error_srcs.add(t.src.lower())
+            unlanded_srcs.add(t.src.lower())
+            run.recompressed.pop(key_dst, None)
             kind, detail = failure
             if kind == "missing":
                 run.error(f"ERROR (move failed) | {dest_name}")
@@ -1096,7 +1385,7 @@ def _archive_originals(run, group_tasks, outcome):
     staging = run.staging
     dry = run.opt["dry_run"]
     staging_map = outcome.staging_map
-    error_srcs = outcome.error_srcs
+    unlanded_srcs = outcome.unlanded_srcs
     integrity_failed_dst = outcome.integrity_failed_dst
     if not dry:
         kept = 0
@@ -1109,14 +1398,17 @@ def _archive_originals(run, group_tasks, outcome):
             else:
                 written = t.write_dst
             if not written or not os.path.exists(written):
+                run.recompressed.pop(key_dst, None)
                 continue
-            if t.src.lower() in error_srcs or key_dst in integrity_failed_dst:
+            if t.src.lower() in unlanded_srcs or key_dst in integrity_failed_dst:
                 tw.remove_quietly(written)
+                run.recompressed.pop(key_dst, None)
                 continue
             k_err = complete_keep_original(run, written, t.src, t.final_dst, t.keep_dir,
                                            t.src_length, t.src_mtime_ns)
             if k_err:
                 tw.remove_quietly(written)
+                run.recompressed.pop(key_dst, None)
                 run.error(f"ERROR (keep original) | {t.name} | {k_err}")
             else:
                 kept += 1
@@ -1140,7 +1432,7 @@ def _delete_sources(run, outcome):
                 # in place: the original was already replaced by the compressed file
                 continue
             src_name = os.path.basename(t.src)
-            if t.src.lower() in outcome.error_srcs:
+            if t.src.lower() in outcome.unlanded_srcs:
                 # Its landing failed (_move_staged, which counted the error): whatever sits at
                 # final_dst is not this run's file -- an older one would pass the check below
                 # (audit round 29).
@@ -1197,7 +1489,7 @@ def _collect_files(run, mode, input_roots):
     log = run.log
     all_files = []
     seen_files = set()
-    excluded = backups = leftovers = 0
+    excluded = backups = leftovers = outside = 0
     unreadable = []
     for root in input_roots:
         dir_files = discover(run, mode, root, unreadable)
@@ -1217,6 +1509,10 @@ def _collect_files(run, mode, input_roots):
             if tw.path_excluded(f.dir, root, run.exclude_names):
                 excluded += 1
                 continue
+            # --include-folders: only the folders of those names (the root's own name counts)
+            if not tw.path_included(f.dir, root, run.include_names):
+                outside += 1
+                continue
             f.input_root = root
             all_files.append(f)
         if len(input_roots) > 1 and dir_files:
@@ -1225,6 +1521,8 @@ def _collect_files(run, mode, input_roots):
         log(f"cannot read folder (skipped): {d}", "WARN")
     if run.exclude_names:
         log(f"Excluded {excluded} file(s) under: {'; '.join(run.exclude_names)}")
+    if run.include_names:
+        log(f"Left out {outside} file(s) not inside a folder named: {'; '.join(run.include_names)}")
     if backups > 0:
         log(f"Skipped {backups} file(s) in {'/'.join(SKIPPED_BACKUP_NAMES)} (this toolkit's own backups)")
     if leftovers > 0:
@@ -1302,6 +1600,15 @@ def run_modes(run, bound):
         f"OutputDir: {opt['output_dir'] or '(in-place/flat)'} | Staging: {run.staging or 'disabled'} | "
         f"DryRun: {dry} | SafeMode: {opt['safe_mode']} | SkipLzw: {opt['skip_lzw_as_compressed']} | "
         f"Overwrite: {overwrite} | DeleteSource: {'ON' if opt['delete_source'] else 'OFF'}")
+    if opt["recompress_zip"]:
+        memory = run.no_gain.path if run.no_gain is not None else "off"
+        log(f"RecompressZip: ON (ZIP without a predictor; kept when at least "
+            f"{opt['recompress_min_saving']:g}% smaller) | no-gain memory: {memory}")
+    if opt["zip_predictor"] == "auto":
+        log("ZipPredictor: auto (a sample of each file decides with or without the predictor; "
+            "the file is written once)")
+    if run.include_names:
+        log(f"Only folders named: {'; '.join(run.include_names)}")
 
     report_stranded(run, input_roots)
 
@@ -1322,6 +1629,14 @@ def run_modes(run, bound):
     comp_map = tw.get_compression_map([f.path for f in files])
     log(f"Compression probe: {len(comp_map)}/{run.total} file(s) in "
         f"{int((time.time() - probe_start) * 1000)}ms")
+    if opt["recompress_zip"]:
+        # The predictor of the ZIP files, the same way: one exiftool per ~400 of them.
+        zips = [f.path for f in files if tw.is_zip_compression(comp_map.get(f.path.lower(), ""))]
+        if zips:
+            probe_start = time.time()
+            run.recompress_facts = tw.get_recompress_facts(zips)
+            log(f"Predictor probe: {len(run.recompress_facts)}/{len(zips)} ZIP file(s) in "
+                f"{int((time.time() - probe_start) * 1000)}ms")
 
     # Mode 8 always stages: the original stays until its replacement is verified.
     if mode == 8 and not dry and not run.staging.strip():
@@ -1336,6 +1651,8 @@ def run_modes(run, bound):
         # expected outcome of a re-run.
         log(f"No tasks to process (mode {mode} filtered all {run.total} file(s))",
             "WARN" if run.err > 0 else "INFO")
+        if run.no_gain is not None:
+            run.no_gain.save()
         run.summary()
         log(f"Log: {log.path}")
         _remove_default_staging(run)
@@ -1368,6 +1685,8 @@ def run_modes(run, bound):
         _archive_originals(run, group_tasks, outcome)
         _delete_sources(run, outcome)
 
+    if run.no_gain is not None:
+        run.no_gain.save()
     run.summary()
     log(f"Log: {log.path}")
     _remove_default_staging(run)
@@ -1439,6 +1758,7 @@ def run_main(argv, state):
 
     try:
         exclude_names = tw.parse_exclude_folders(opt["exclude_folders"])
+        include_names = tw.parse_folder_names(opt["include_folders"], "--include-folders", "TIFF16")
     except tw.UsageError as e:
         tw.say(f"ERROR: {e}")
         return tw.EXIT_USAGE
@@ -1479,6 +1799,9 @@ def run_main(argv, state):
     run = Run(opt, log, overlay["applied"])
     run.srgb_profile = srgb
     run.exclude_names = exclude_names
+    run.include_names = include_names
+    if opt["recompress_zip"]:
+        run.no_gain = NoGainMemory.open(log)
     state["run"] = run
     if run.staging.strip():
         run.cleanup_dirs.append(run.staging)
@@ -1529,6 +1852,9 @@ def cleanup_after_stop(run):
             os.rmdir(run.staging)     # only when it is empty
         except OSError:
             pass
+    # what --recompress-zip learned before the stop is kept
+    if run.no_gain is not None:
+        run.no_gain.save()
 
 
 def main(argv=None):

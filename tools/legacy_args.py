@@ -35,6 +35,17 @@ BOOL_WORDS = {"$true": True, "true": True, "1": True,
               "$false": False, "false": False, "0": False}
 PARAM_TOKEN = re.compile(r"-([A-Za-z][A-Za-z0-9]*)(?::(.*))?", re.S)
 
+#: Parameters added after v3.0.0: they have no old form. The old reader does not know them,
+#: so they never make a prefix of v3.0.0 ambiguous (-Re stays -RestoreStranded although
+#: --recompress-zip came in v3.2).
+NEW_SINCE_V300 = frozenset({"recompress_zip", "recompress_min_saving", "include_folders",
+                            "zip_predictor"})
+
+
+def _v300(params):
+    """The parameters of `params` that the command line of v3.0.0 had."""
+    return [p for p in params if p.name not in NEW_SINCE_V300]
+
 
 def backend_module(word: str):
     """The backend module a subcommand name or a script name stands for; None for neither."""
@@ -51,7 +62,9 @@ def legacy_name(name):
 
 
 def resolve_param(word, params):
-    """The parameter `word` named then: without case, or an unambiguous prefix of it."""
+    """The parameter `word` named then: without case, or an unambiguous prefix of it. Only
+    the parameters v3.0.0 had count (NEW_SINCE_V300)."""
+    params = _v300(params)
     low = word.lower()
     for p in params:
         if legacy_name(p.name).lower() == low:

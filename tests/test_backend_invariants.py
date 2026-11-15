@@ -12,6 +12,7 @@ fail in a second when a gate is removed or reordered.
 """
 
 import ast
+import json
 import os
 import stat
 import subprocess
@@ -73,6 +74,12 @@ class FakeTools:
                                       # "fail" = no container (ToolError); else the answer
         self.magick_rc = 0
         self.magick_writes = True
+        self.magick_data = b"COMPRESSED"     # what a successful magick write puts in the file
+        # --recompress-zip: what the predictor read answers (None = exiftool fails)
+        self.facts = tw.RecompressFacts("-", "16 16 16", "2")
+        # the predictor probe: (bytes with, bytes without) of the sample, None = no answer
+        self.probe = None
+        self.probe_calls = []
         # one entry per magick call, in order, for a test that needs the calls to differ:
         # "ok", "fail" (exit 1, nothing written), "nofile" (exit 0, nothing written), "half"
         # (exit 1 after writing part of the output: a full disk) or an exception to raise.
@@ -107,6 +114,8 @@ class FakeTools:
         m.setattr(tw, "pixel_identical", self._pixels)
         m.setattr(tw, "thumb_output_matches_source", self._thumb_match)
         m.setattr(tw, "thumbnail_safe_source", lambda p, t=30: self.thumb_safe)
+        m.setattr(tw, "recompress_facts", self._recompress_facts)
+        m.setattr(tw, "predictor_probe", self._probe)
         real_replace = tw.move_file_replacing
 
         def replacing(src, dst):
@@ -155,7 +164,20 @@ class FakeTools:
             rc, writes = self.magick_rc, self.magick_writes
         return self._magick_write(args, rc, writes)
 
-    def _magick_write(self, args, rc, writes, data=b"COMPRESSED"):
+    def _recompress_facts(self, path):
+        self.events.append("predictor")
+        if self.facts is None:
+            tool_fails()
+        return self.facts
+
+    def _probe(self, src, width, height, timeout=30, load_factor=1.0, write_args=()):
+        self.events.append("probe")
+        self.probe_calls.append(str(src))
+        self.probe_write_args = list(write_args)
+        return self.probe
+
+    def _magick_write(self, args, rc, writes, data=None):
+        data = self.magick_data if data is None else data
         if rc == 0 and writes:
             out = str(args[-1]).replace("%%", "%")
             if ":" in out[:8] and not out[1:3] == ":\\":
@@ -805,6 +827,504 @@ class TestKeepOriginal:
         monkeypatch.setattr(tw, "zip_integrity", lambda *a, **k: True)
         cz.cleanup_after_stop(run)
         assert src.read_bytes() == b"GOOD COPY" and backup.read_bytes() == b"ORIGINAL"
+
+
+# ---------------------------------------------------------------------------
+# compress --recompress-zip, the kept date, --include-folders (v3.2)
+# ---------------------------------------------------------------------------
+
+SMALLER = b"Z"                          # a recompression that pays (the photo is 8 bytes)
+LARGER = b"RECOMPRESSED BUT LARGER"     # one that does not
+OLD_NS = 1_700_000_000 * 10 ** 9        # a modification time the photo had (NTFS keeps 100 ns)
+
+
+def recompress_run(*argv):
+    return compress_run(*argv, "--recompress-zip")
+
+
+class TestRecompressZip:
+    """--recompress-zip rewrites a TIFF compressed with Deflate WITHOUT a predictor (Capture
+    One's exports: zlib level 6, no predictor) and keeps the new file only when it is smaller:
+    the predictor makes some images LARGER (+39 % on one Capture One export, measured
+    15/11/2026). Everything else about an already compressed file stays as it was."""
+
+    def test_off_a_zip_file_is_skipped_as_before(self, tools, photo):
+        tools.comp = "Deflate"
+        r = job(compress_run(*IN_PLACE), photo)
+        assert r.result == f"SKIP (Deflate) | {photo.name}"
+        assert tools.magick_calls == [] and "predictor" not in tools.events
+
+    def test_a_zip_file_without_a_predictor_goes_the_way_of_an_uncompressed_one(self, tools, photo):
+        tools.comp, tools.magick_data = "Deflate", SMALLER
+        r = job(recompress_run(*IN_PLACE), photo)
+        assert r.result.startswith("OK (Deflate -> ZIP, recompressed: 0.0 MB -> 0.0 MB, -87.5%)"), r.result
+        assert photo.read_bytes() == SMALLER
+        assert (r.size_before, r.size_after, r.no_gain) == (8, 1, False)
+        ev = tools.events
+        assert (ev.index("predictor") < ev.index("magick") < ev.index("history")
+                < ev.index("integrity") < ev.index("pixels") < ev.index("replace")), ev
+        assert tools.history_params == ("compress_tiff_zip mode 2: ZIP (Deflate) - recompressed "
+                                        "with predictor - zipcheck 1 predictor 2")
+
+    @pytest.mark.parametrize("thumb", [False, True], ids=["plain", "thumbnail"])
+    def test_the_history_entry_has_no_struct_character(self, tools, photo, thumb):
+        """exiftool's struct syntax splits a value at , { } [ ] |: the first draft wrote
+        "ZIP (Deflate), recompressed ..." and the file's History said "ZIP (Deflate)" -- with
+        no warning (caught by the end-to-end test)."""
+        tools.comp, tools.magick_data = "Deflate", SMALLER
+        argv = (*IN_PLACE, "--generate-thumbnail") if thumb else IN_PLACE
+        r = job(recompress_run(*argv), photo)
+        assert r.result.startswith("OK "), r.result
+        assert "recompressed with predictor" in tools.history_params
+        assert not set(",{}[]|") & set(tools.history_params), tools.history_params
+
+    @pytest.mark.parametrize("comp,facts,extra", [
+        ("Adobe Deflate", tw.RecompressFacts("2", "16 16 16", "2"), ()),     # has a predictor
+        ("Adobe Deflate", tw.RecompressFacts("3", "32 32 32", "2"), ()),     # floating point
+        ("Deflate", tw.RecompressFacts("-", "1", "1"), ()),                  # 1 bit
+        ("Deflate", tw.RecompressFacts("-", "8", "3"), ()),                  # palette
+        ("LZW", tw.RecompressFacts("-", "16 16 16", "2"), ("--skip-lzw-as-compressed",)),
+    ], ids=["predictor", "float", "1bit", "palette", "lzw"])
+    def test_anything_else_stays_the_skip_of_today(self, tools, photo, comp, facts, extra):
+        tools.comp, tools.facts, tools.magick_data = comp, facts, SMALLER
+        r = job(recompress_run(*IN_PLACE, *extra), photo)
+        assert r.result == f"SKIP ({comp}) | {photo.name}"
+        assert tools.magick_calls == [] and photo.read_bytes() == b"ORIGINAL"
+
+    def test_a_predictor_that_cannot_be_read_is_an_error_and_nothing_is_written(self, tools, photo):
+        tools.comp, tools.facts = "Deflate", None
+        r = job(recompress_run(*IN_PLACE), photo)
+        assert r.result == f"ERROR (exiftool check) | {photo.name} | cannot read the predictor"
+        assert tools.magick_calls == [] and photo.read_bytes() == b"ORIGINAL"
+
+    @pytest.mark.parametrize("argv", [IN_PLACE, ("--mode", "9")], ids=["in-place", "mode9"])
+    def test_a_rewrite_that_is_not_smaller_is_dropped_before_any_gate(self, tools, photo, argv):
+        tools.comp, tools.magick_data = "Deflate", LARGER
+        r = job(recompress_run(*argv), photo)
+        assert r.result == (f"SKIP (no gain: 0.0 MB -> 0.0 MB, +187.5% - original kept) | "
+                            f"{photo.name}"), r.result
+        assert r.no_gain and r.staging_name is None and r.size_before is None
+        assert photo.read_bytes() == b"ORIGINAL" and leftovers(photo.parent) == []
+        for gate in ("integrity", "pixels", "replace"):
+            assert gate not in tools.events, f"{gate} ran for a file that is not kept"
+
+    def test_the_minimum_saving_is_the_option(self, tools, photo):
+        tools.comp, tools.magick_data = "Deflate", b"1234567"     # 7 of 8 bytes: -12.5 %
+        r = job(recompress_run(*IN_PLACE, "--recompress-min-saving", "20"), photo)
+        assert r.result.startswith("SKIP (no gain: ") and photo.read_bytes() == b"ORIGINAL"
+        r = job(recompress_run(*IN_PLACE, "--recompress-min-saving", "10"), photo)
+        assert r.result.startswith("OK (Deflate -> ZIP, recompressed: ") and photo.read_bytes() == b"1234567"
+        # the same size is no gain, even with no minimum
+        tools.magick_data = b"12345678"
+        photo.write_bytes(b"ORIGINAL")
+        r = job(recompress_run(*IN_PLACE, "--recompress-min-saving", "0"), photo)
+        assert r.result.startswith("SKIP (no gain: ") and photo.read_bytes() == b"ORIGINAL"
+
+    def test_the_dry_run_says_which_files_it_would_recompress(self, tools, photo):
+        tools.comp = "Deflate"
+        r = job(recompress_run(*IN_PLACE, "--dry-run"), photo)
+        assert r.result == f"DRY (Deflate -> ZIP, recompress) | {photo.name}"
+        assert tools.magick_calls == []
+
+    def test_modes_0_9_never_land_the_output_of_a_skip(self, tools, photo, monkeypatch):
+        """A no-gain SKIP drops the output it wrote. When the drop fails, the leftover must not
+        be taken for a written file: until v3.2 only an ERROR kept an output from landing, and
+        mode 9 would have archived the original and put the LARGER file in its place."""
+        tools.comp, tools.magick_data = "Deflate", LARGER
+        monkeypatch.setattr(tw, "remove_quietly", lambda path: None)
+        run = recompress_run("--mode", "9")
+        f = tw.FoundFile(str(photo), photo.name, str(photo.parent), 8, os.stat(photo).st_mtime_ns)
+        t = cz._keep_original_job(run, f, str(photo), str(photo), "Deflate",
+                                  {str(photo).lower(): "Deflate"})
+        assert t is not None and t.keep_dir
+        outcome = cz._run_group(run, [t], 1, {})
+        assert outcome.results[0][1].result.startswith("SKIP (no gain: ")
+        assert os.path.exists(t.write_dst), "the drop was sabotaged: the leftover is there"
+        cz._archive_originals(run, [t], outcome)
+        assert photo.read_bytes() == b"ORIGINAL"
+        assert not (photo.parent / "OLD_TIFFs").exists(), "the original was archived for a SKIP"
+
+    def test_a_landed_recompression_is_counted_and_a_failed_landing_is_not(self, tools, photo, tmp_path):
+        tools.comp, tools.magick_data = "Deflate", SMALLER
+        stg = tmp_path / "stg"
+        stg.mkdir()
+        run = recompress_run("--mode", "8", "--staging-dir", str(stg))
+        t = cz.Job(src=str(photo), write_dst=str(stg / tw.staged_name(run.run_id, photo.name)),
+                   final_dst=str(photo), name=photo.name)
+        outcome = cz._run_group(run, [t], 1, {})
+        assert run.recompressed == {str(photo).lower(): (8, 1)}
+        cz._move_staged(run, [t], str(photo.parent), outcome)
+        assert photo.read_bytes() == SMALLER and run.recompressed == {str(photo).lower(): (8, 1)}
+        run.summary()
+        assert ("INFO", "Recompressed: 1 file(s), 0.0 MB -> 0.0 MB (0.0 MB saved, -87.5%)") in run.log.lines
+        # the same once more, but the landing fails: not counted
+        photo.write_bytes(b"ORIGINAL")
+        again = recompress_run("--mode", "8", "--staging-dir", str(stg))
+        t = cz.Job(src=str(photo), write_dst=str(stg / tw.staged_name(again.run_id, photo.name)),
+                   final_dst=str(photo), name=photo.name)
+        outcome = cz._run_group(again, [t], 1, {})
+        os.remove(t.write_dst)
+        cz._move_staged(again, [t], str(photo.parent), outcome)
+        assert again.recompressed == {} and photo.read_bytes() == b"ORIGINAL"
+
+
+class TestTheDateIsKept:
+    """A file that takes its original's place keeps the original's modification time (owner's
+    decision, 15/11/2026): jxl-photo's smart sync re-encodes every master whose TIFF looks newer
+    -- ~4 000 masters and every copy made from them, for identical pixels. In every mode that
+    replaces the original, for a recompression and an ordinary compression alike."""
+
+    @pytest.mark.parametrize("recompress", [False, True], ids=["compress", "recompress"])
+    def test_an_in_place_write_keeps_the_date(self, tools, photo, recompress):
+        os.utime(photo, ns=(OLD_NS, OLD_NS))
+        tools.magick_data = SMALLER
+        if recompress:
+            tools.comp = "Deflate"
+        r = job((recompress_run if recompress else compress_run)(*IN_PLACE), photo)
+        assert r.result.startswith("OK ") and "[date not kept]" not in r.result, r.result
+        assert photo.read_bytes() == SMALLER and os.stat(photo).st_mtime_ns == OLD_NS
+
+    def test_mode8_lands_the_staged_file_with_the_date(self, tools, photo, tmp_path):
+        os.utime(photo, ns=(OLD_NS, OLD_NS))
+        stg = tmp_path / "stg"
+        stg.mkdir()
+        run = compress_run("--mode", "8", "--staging-dir", str(stg))
+        tools.magick_data = SMALLER
+        t = cz.Job(src=str(photo), write_dst=str(stg / tw.staged_name(run.run_id, photo.name)),
+                   final_dst=str(photo), name=photo.name)
+        outcome = cz._run_group(run, [t], 1, {})
+        cz._move_staged(run, [t], str(photo.parent), outcome)
+        assert photo.read_bytes() == SMALLER and os.stat(photo).st_mtime_ns == OLD_NS
+
+    def test_mode9_lands_the_copy_with_the_date_and_archives_the_original(self, tools, photo):
+        os.utime(photo, ns=(OLD_NS, OLD_NS))
+        tools.magick_data = SMALLER
+        run = compress_run("--mode", "9")
+        f = tw.FoundFile(str(photo), photo.name, str(photo.parent), 8, OLD_NS)
+        t = cz._keep_original_job(run, f, str(photo), str(photo), "Uncompressed",
+                                  {str(photo).lower(): "Uncompressed"})
+        outcome = cz._run_group(run, [t], 1, {})
+        cz._archive_originals(run, [t], outcome)
+        backup = photo.parent / "OLD_TIFFs" / photo.name
+        assert photo.read_bytes() == SMALLER and backup.read_bytes() == b"ORIGINAL"
+        assert os.stat(photo).st_mtime_ns == OLD_NS == os.stat(backup).st_mtime_ns
+
+    def test_a_copy_written_elsewhere_gets_a_date_of_its_own(self, tools, photo, tmp_path):
+        os.utime(photo, ns=(OLD_NS, OLD_NS))
+        out = tmp_path / "ZIP" / photo.name
+        out.parent.mkdir()
+        r = job(compress_run("--mode", "1"), photo, write_dst=out, final_dst=out)
+        assert r.result.startswith("OK "), r.result
+        assert os.stat(out).st_mtime_ns != OLD_NS and photo.read_bytes() == b"ORIGINAL"
+
+    def test_a_date_that_cannot_be_set_is_said_and_the_file_is_kept(self, tools, photo, monkeypatch):
+        def denied(*a, **k):
+            raise OSError("denied")
+        monkeypatch.setattr(cz.os, "utime", denied)
+        tools.magick_data = SMALLER
+        r = job(compress_run(*IN_PLACE), photo)
+        assert r.result == f"OK (Uncompressed -> ZIP) [date not kept] | {photo.name}"
+        assert photo.read_bytes() == SMALLER
+
+
+class TestNoGainMemory:
+    """--recompress-zip remembers the files it rewrote and did not keep, so the next run of a
+    preset does not read and rewrite them again: path + size + write time, in the user profile
+    (TIFFWORKFLOW_NO_GAIN names another file, blank = off)."""
+
+    def _memory(self, tmp_path, monkeypatch):
+        mem = tmp_path / "mem 伊豆沼 [x]" / "no gain 50%.json"
+        monkeypatch.setenv(cz.NO_GAIN_ENV, str(mem))
+        return mem
+
+    def test_a_file_that_did_not_shrink_is_not_read_again(self, tools, photo, tmp_path, monkeypatch):
+        mem = self._memory(tmp_path, monkeypatch)
+        tools.comp, tools.magick_data = "Deflate", LARGER
+        run = recompress_run(*IN_PLACE)
+        run.no_gain = cz.NoGainMemory.open(run.log)
+        t = cz.Job(src=str(photo), write_dst=str(photo), final_dst=str(photo), name=photo.name)
+        outcome = cz._run_group(run, [t], 1, {})
+        assert outcome.results[0][1].no_gain
+        assert not mem.exists(), "saved once, at the end of the run"
+        run.no_gain.save()
+        files = json.loads(mem.read_text(encoding="utf-8"))["files"]
+        assert list(files) == [str(photo).lower()]
+        assert files[str(photo).lower()]["size"] == 8
+        # the next run knows it and starts no magick for it
+        tools.magick_calls.clear()
+        again = recompress_run(*IN_PLACE)
+        again.no_gain = cz.NoGainMemory.open(again.log)
+        r = job(again, photo)
+        assert r.result.startswith("SKIP (no gain on ") and \
+            r.result.endswith(f" - not tried again) | {photo.name}"), r.result
+        assert tools.magick_calls == []
+        # ...the same in the plan of modes 0/9
+        nine = recompress_run("--mode", "9")
+        nine.no_gain = cz.NoGainMemory.open(nine.log)
+        f = tw.FoundFile(str(photo), photo.name, str(photo.parent), 8, os.stat(photo).st_mtime_ns)
+        assert cz._keep_original_job(nine, f, str(photo), str(photo), "Deflate",
+                                     {str(photo).lower(): "Deflate"}) is None
+        assert tools.magick_calls == []
+        # a file that changed since is tried again
+        os.utime(photo, ns=(OLD_NS, OLD_NS))
+        r = job(again, photo)
+        assert r.result.startswith("SKIP (no gain: ") and tools.magick_calls, r.result
+
+    def test_a_save_keeps_what_another_run_saved_meanwhile(self, tools, photo, tmp_path, monkeypatch):
+        mem = self._memory(tmp_path, monkeypatch)
+        first = cz.NoGainMemory.open(NoLog())
+        second = cz.NoGainMemory.open(NoLog())
+        other = photo.parent / "other.tif"
+        other.write_bytes(b"OTHER")
+        first.record(str(photo))
+        second.record(str(other))
+        first.save()
+        second.save()
+        assert sorted(json.loads(mem.read_text(encoding="utf-8"))["files"]) == \
+            sorted([str(photo).lower(), str(other).lower()])
+
+    def test_a_dry_run_reads_the_memory_and_never_writes_it(self, tools, photo, tmp_path, monkeypatch):
+        mem = self._memory(tmp_path, monkeypatch)
+        tools.comp = "Deflate"
+        run = recompress_run(*IN_PLACE, "--dry-run")
+        run.no_gain = cz.NoGainMemory.open(run.log)
+        t = cz.Job(src=str(photo), write_dst=str(photo), final_dst=str(photo), name=photo.name)
+        cz._run_group(run, [t], 1, {})
+        run.no_gain.save()
+        assert not mem.exists()
+
+    def test_an_unreadable_memory_is_an_empty_one_and_a_warning(self, tools, photo, tmp_path, monkeypatch):
+        mem = self._memory(tmp_path, monkeypatch)
+        mem.parent.mkdir()
+        mem.write_text("{not json", encoding="utf-8")
+        log = NoLog()
+        memory = cz.NoGainMemory.open(log)
+        assert memory.files == {}
+        assert any(level == "WARN" and "not read" in msg for level, msg in log.lines), log.lines
+        memory.record(str(photo))
+        memory.save()
+        assert list(json.loads(mem.read_text(encoding="utf-8"))["files"]) == [str(photo).lower()]
+
+    def test_blank_turns_it_off_and_by_default_it_is_in_the_profile(self, monkeypatch, tmp_path):
+        monkeypatch.setenv(cz.NO_GAIN_ENV, "")
+        assert cz.NoGainMemory.open(NoLog()) is None
+        monkeypatch.delenv(cz.NO_GAIN_ENV)
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        memory = cz.NoGainMemory.open(NoLog())
+        assert Path(memory.path) == tmp_path / cz.NO_GAIN_FILE and memory.files == {}
+
+    def test_an_interrupt_keeps_what_was_learned(self, tools, photo, tmp_path, monkeypatch):
+        mem = self._memory(tmp_path, monkeypatch)
+        run = recompress_run(*IN_PLACE)
+        run.no_gain = cz.NoGainMemory.open(run.log)
+        run.no_gain.record(str(photo))
+        cz.cleanup_after_stop(run)
+        assert list(json.loads(mem.read_text(encoding="utf-8"))["files"]) == [str(photo).lower()]
+
+
+class TestIncludeFolders:
+    """--include-folders TIFF16: only the TIFFs inside a folder of that name. The names are
+    matched from the scan root down: its own name counts (pointing AT a TIFF16 folder works),
+    a folder above it does not (round 14's reason for the exclusion)."""
+
+    def test_the_names_are_matched_from_the_root_down(self):
+        root = "E:\\写真 [x] 50%\\2026"
+        assert tw.path_included(root + "\\s 1\\_EXPORT\\TIFF16", root, ["tiff16"])
+        assert tw.path_included(root, root, ["2026"]), "the root's own name counts"
+        assert tw.path_included(root + "\\_EXPORT\\TIFF16\\sub", root, ["TIFF16"]), "and below it"
+        assert not tw.path_included("E:\\TIFF16\\2026", "E:\\TIFF16\\2026", ["TIFF16"]), \
+            "a folder ABOVE the root does not count"
+        assert not tw.path_included(root + "\\_EXPORT\\TIFF16_old", root, ["TIFF16"]), "whole names"
+        assert not tw.path_included("E:\\other", root, ["other"]), "not under the root: left out"
+        assert tw.path_included(root + "\\x", root, [])
+
+    def test_only_those_folders_are_collected(self, tmp_path):
+        root = tmp_path / "伊豆沼 [x] 50%"
+        for rel in ("s 1/_EXPORT/TIFF16/a.tif", "s 1/_EXPORT/sRGB/b.tif", "s 1/c.tif",
+                    "s 1/_EXPORT/TIFF16/OLD/d.tif", "s 1/_EXPORT/TIFF16/OLD_TIFFs/e.tif"):
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"x")
+        run = compress_run("--mode", "8")
+        run.include_names, run.exclude_names = ["TIFF16"], ["OLD"]
+        files = cz._collect_files(run, 8, [str(root)])
+        assert [Path(f.path).relative_to(root).as_posix() for f in files] == ["s 1/_EXPORT/TIFF16/a.tif"]
+        assert ("INFO", "Left out 2 file(s) not inside a folder named: TIFF16") in run.log.lines
+        assert ("INFO", "Excluded 1 file(s) under: OLD") in run.log.lines
+
+    def test_a_path_is_refused_before_anything_runs(self, capsys):
+        assert cz.run_main(["--mode", "8", "--include-folders", "_EXPORT\\TIFF16"], {}) == tw.EXIT_USAGE
+        out = capsys.readouterr().out
+        assert "--include-folders takes folder NAMES, not paths: '_EXPORT\\TIFF16'" in out
+        assert '--include-folders "TIFF16"' in out
+
+
+def tiff_writes(tools):
+    """The magick calls that write the TIFF itself (not the thumbnail's JPEG)."""
+    return [c for c in tools.magick_calls if not str(c[-1]).lower().startswith(("jpg:", "png:", "tif:"))
+            and "-compress" in c]
+
+
+class TestZipPredictorAuto:
+    """--zip-predictor auto: a sample of page 0 (tw.predictor_probe) decides with or without the
+    ZIP predictor BEFORE the one write -- writing the TIFF both ways would add a full temporary
+    TIFF per file (jxl-photo's I/O round, 14/11/2026). The choice is recorded in the History
+    entry the rewrite writes anyway (" - zipcheck 1 predictor N"), read back by
+    --recompress-zip."""
+
+    def test_on_never_probes_and_writes_what_it_always_wrote(self, tools, photo):
+        tools.magick_data = SMALLER
+        r = job(compress_run(*IN_PLACE), photo)
+        assert r.result == f"OK (Uncompressed -> ZIP) | {photo.name}"
+        assert tools.probe_calls == [] and r.zipcheck is None
+        assert all("tiff:predictor=1" not in c for c in tools.magick_calls)
+        assert tools.history_params == "compress_tiff_zip mode 2: ZIP (Deflate)"
+
+    def test_auto_writes_without_the_predictor_when_the_sample_says_so(self, tools, photo):
+        tools.magick_data, tools.probe = SMALLER, (1000, 900)
+        r = job(compress_run(*IN_PLACE, "--zip-predictor", "auto"), photo)
+        assert r.result == (f"OK (Uncompressed -> ZIP, without predictor (sample -10.0% without it)) "
+                            f"| {photo.name}"), r.result
+        assert r.zipcheck == 1
+        (write,) = tiff_writes(tools)
+        assert write[write.index("-define") + 1] == "tiff:predictor=1"
+        assert tools.events.index("probe") < tools.events.index("magick"), "decided BEFORE the write"
+        assert tools.probe_write_args == ["-type", "TrueColor"], \
+            "the sample is written with the write's own options (its channels)"
+        assert tools.history_params == ("compress_tiff_zip mode 2: ZIP (Deflate) without predictor"
+                                        " - zipcheck 1 predictor 1")
+
+    def test_auto_keeps_the_predictor_on_a_close_call(self, tools, photo):
+        tools.magick_data, tools.probe = SMALLER, (1000, 990)     # 1 %: inside the 2 % margin
+        r = job(compress_run(*IN_PLACE, "--zip-predictor", "auto"), photo)
+        assert r.result.startswith("OK (Uncompressed -> ZIP, with predictor (sample -1.0% without it))")
+        assert r.zipcheck == 2 and all("tiff:predictor=1" not in c for c in tools.magick_calls)
+        assert tools.history_params.endswith("ZIP (Deflate) - zipcheck 1 predictor 2")
+
+    def test_a_probe_without_an_answer_keeps_the_predictor_and_records_nothing(self, tools, photo):
+        tools.magick_data, tools.probe = SMALLER, None
+        r = job(compress_run(*IN_PLACE, "--zip-predictor", "auto"), photo)
+        assert r.result == f"OK (Uncompressed -> ZIP) | {photo.name}"
+        assert r.zipcheck is None and "zipcheck" not in tools.history_params
+        assert all("tiff:predictor=1" not in c for c in tools.magick_calls)
+
+    def test_the_thumbnail_path_writes_the_choice_too(self, tools, photo):
+        tools.magick_data, tools.probe = SMALLER, (1000, 500)
+        r = job(compress_run(*IN_PLACE, "--zip-predictor", "auto", "--generate-thumbnail"), photo)
+        assert r.result.startswith("OK (Uncompressed -> ZIP, without predictor"), r.result
+        writes = tiff_writes(tools)
+        assert writes and all("tiff:predictor=1" in w for w in writes), tools.magick_calls
+
+    def test_a_dry_run_says_auto_and_probes_nothing(self, tools, photo):
+        r = job(compress_run(*IN_PLACE, "--zip-predictor", "auto", "--dry-run"), photo)
+        assert r.result == f"DRY (Uncompressed -> ZIP, predictor auto) | {photo.name}"
+        assert tools.probe_calls == [] and tools.magick_calls == []
+
+    def test_a_recompression_the_sample_says_will_not_pay_is_never_written(self, tools, photo):
+        """The Capture One export the predictor makes larger: the probe answers first, so the
+        200 MB that would be written and dropped by the size gate are never written."""
+        tools.comp, tools.magick_data, tools.probe = "Deflate", SMALLER, (1000, 800)
+        r = job(recompress_run(*IN_PLACE), photo)
+        assert r.result == (f"SKIP (no gain expected: sample -20.0% without it - original kept) | "
+                            f"{photo.name}"), r.result
+        assert r.no_gain and tools.magick_calls == [] and photo.read_bytes() == b"ORIGINAL"
+        assert leftovers(photo.parent) == []
+
+    def test_a_recompression_the_sample_favours_is_written_and_the_gate_decides(self, tools, photo):
+        tools.comp, tools.magick_data, tools.probe = "Deflate", LARGER, (1000, 1010)
+        r = job(recompress_run(*IN_PLACE), photo)
+        assert r.result.startswith("SKIP (no gain: "), "the exact gate still has the last word"
+        tools.magick_data = SMALLER
+        photo.write_bytes(b"ORIGINAL")
+        r = job(recompress_run(*IN_PLACE), photo)
+        assert r.result.startswith("OK (Deflate -> ZIP, recompressed: ") and r.zipcheck == 2
+        assert tools.history_params.endswith(" - zipcheck 1 predictor 2")
+
+    def test_a_zipcheck_record_skips_the_candidate_without_a_probe(self, tools, photo):
+        tools.comp = "Deflate"
+        tools.facts = tw.RecompressFacts("-", "16 16 16", "2", "tiff-workflow 3.2.0 (https://x)",
+                                         "compress_tiff_zip mode 9: ZIP (Deflate) without predictor"
+                                         " - zipcheck 1 predictor 1")
+        r = job(recompress_run(*IN_PLACE), photo)
+        assert r.result == f"SKIP (Deflate: already the smaller - zipcheck) | {photo.name}"
+        assert tools.probe_calls == [] and tools.magick_calls == []
+
+    @pytest.mark.parametrize("agent, params", [
+        ("jxl-photo 2.30.2 (https://y)", "jxl_tiff_decoder: from image/jxl to image/tiff"),
+        ("tiff-workflow 3.2.0 (https://x)", "compress_tiff_zip mode 9: ZIP (Deflate) - zipcheck 1 predictor 2"),
+        ("tiff-workflow 9.0.0 (https://x)", "compress_tiff_zip mode 9: ZIP (Deflate) - zipcheck 2 predictor 1"),
+        ("Capture One 16", "export - zipcheck 1 predictor 1"),
+    ], ids=["another-program-wrote-after", "names-the-other-predictor", "another-version", "not-ours"])
+    def test_a_record_that_does_not_describe_the_file_as_it_is_does_not_count(self, tools, photo,
+                                                                               agent, params):
+        tools.comp, tools.magick_data, tools.probe = "Deflate", SMALLER, (1000, 1100)
+        tools.facts = tw.RecompressFacts("-", "16 16 16", "2", agent, params)
+        r = job(recompress_run(*IN_PLACE), photo)
+        assert tools.probe_calls, r.result
+        assert r.result.startswith("OK (Deflate -> ZIP, recompressed: "), r.result
+
+    def test_the_record_is_read_from_the_last_entry_only(self):
+        facts = tw.RecompressFacts("-", "16", "1", "tiff-workflow 3.2.0 (u)",
+                                   "compress_tiff_zip mode 8: ZIP (Deflate) without predictor"
+                                   " - zipcheck 1 predictor 1")
+        assert tw.zipcheck_recorded(facts) == 1
+        assert tw.zipcheck_recorded(facts._replace(last_params="...ZIP (Deflate)")) is None
+        assert tw.zipcheck_recorded(facts._replace(last_agent="")) is None
+        assert tw.zipcheck_recorded(None) is None
+        assert tw.zipcheck_segment(2) == " - zipcheck 1 predictor 2"
+        assert not set(",{}[]|") & set(tw.zipcheck_segment(1)), "struct characters (round of v3.2)"
+        # the History read: the LAST structure, whatever its fields
+        entry = {"SourceFile": "x", "Predictor": 1, "BitsPerSample": "16 16 16",
+                 "PhotometricInterpretation": 2,
+                 "History": [{"SoftwareAgent": "tiff-workflow 3.2.0 (u)",
+                              "Parameters": "a - zipcheck 1 predictor 1"},
+                             {"Action": "saved", "SoftwareAgent": "Photoshop", "Parameters": "x, y"}]}
+        f = tw._recompress_facts_of(entry)
+        assert (f.predictor, f.bits, f.photometric, f.last_agent) == ("1", "16 16 16", "2", "Photoshop")
+        assert tw.zipcheck_recorded(f) is None, "a program saved the file after tiff-workflow"
+        assert tw._recompress_facts_of({"SourceFile": "x"}) == tw.RecompressFacts("-", "-", "-", "", "")
+
+
+class TestPredictorProbe:
+    """tw.predictor_probe on its own: what it sends to magick, what it gives back, what it leaves."""
+
+    def _fake(self, monkeypatch, rc=0, sizes=(300, 200)):
+        calls = []
+
+        def probe(args, timeout=30):
+            calls.append([str(a) for a in args])
+            outs = [a for a in args if str(a).lower().endswith(".tif")]
+            if rc == 0:
+                for out, size in zip(outs, sizes):
+                    Path(str(out).replace("%%", "%")).write_bytes(b"x" * size)
+            return tw.MagickResult(False, rc, [])
+        monkeypatch.setattr(tw, "magick_probe", probe)
+        return calls
+
+    def test_one_command_reads_page_0_once_and_writes_the_sample_both_ways(self, monkeypatch, photo):
+        calls = self._fake(monkeypatch)
+        assert tw.predictor_probe(str(photo), 8000, 5000, write_args=["-type", "TrueColor"]) == (300, 200)
+        (args,) = calls
+        assert args.index("TrueColor") < args.index("tiff:predictor=2"), "the write's own options"
+        assert args[1] == tw.magick_path_spec(str(photo)) + "[0]", "page 0, '%' escaped (a spec)"
+        crops = [args[i + 1] for i, a in enumerate(args) if a == "-crop"]
+        assert crops == ["8000x16+0+1000", "8000x16+0+2000", "8000x16+0+3000", "8000x16+0+4000"]
+        i2, i1 = args.index("tiff:predictor=2"), args.index("tiff:predictor=1")
+        assert i2 < args.index("-write", i2) < i1, "the first output with the predictor, the second without"
+        outs = [a for a in args if a.lower().endswith(".tif")]
+        assert len(outs) == 2 and not any(Path(o).exists() for o in outs), "the sample is removed"
+
+    def test_a_small_page_is_its_own_sample(self, monkeypatch, photo):
+        calls = self._fake(monkeypatch)
+        assert tw.predictor_probe(str(photo), 640, 100) == (300, 200)
+        assert "-crop" not in calls[0]
+
+    def test_no_answer_is_no_decision(self, monkeypatch, photo):
+        calls = self._fake(monkeypatch, rc=1)
+        assert tw.predictor_probe(str(photo), 8000, 5000) is None
+        assert tw.predictor_probe(str(photo), 0, 0) is None
+        assert len(calls) == 1, "an unknown size starts no magick"
 
 
 # ---------------------------------------------------------------------------
@@ -1717,7 +2237,7 @@ class TestGroupSteps:
     archive the originals (modes 0/9), delete the sources (mode 8) -- each step on its own."""
 
     def _outcome(self, **given):
-        fields = dict(staging_map={}, error_srcs=set(), integrity_failed_dst=set(), results=[])
+        fields = dict(staging_map={}, unlanded_srcs=set(), integrity_failed_dst=set(), results=[])
         fields.update(given)
         return cz._GroupOutcome(**fields)
 
@@ -1780,14 +2300,14 @@ class TestGroupSteps:
 
     def test_mode8_keeps_the_source_whose_landing_failed(self, tmp_path, monkeypatch):
         """Audit round 29 (V1 of the final review of v3.1): the landing of a.tif failed
-        (_move_staged put a.tiff in error_srcs) while an older a.tif -- another photo, hidden
+        (_move_staged put a.tiff in unlanded_srcs) while an older a.tif -- another photo, hidden
         from the run -- sat at the destination and decoded. That file passed the check and the
         .tiff source was deleted; its compressed copy was left in the staging folder."""
         src, dst, job, result = self._tiff_and_tif(tmp_path)
         checked = []
         monkeypatch.setattr(tw, "zip_integrity", lambda p, t=30, load_factor=1.0: checked.append(p) or True)
         run = compress_run("--mode", "8", "--delete-source", "--overwrite")
-        cz._delete_sources(run, self._outcome(results=[(job, result)], error_srcs={str(src).lower()}))
+        cz._delete_sources(run, self._outcome(results=[(job, result)], unlanded_srcs={str(src).lower()}))
         assert src.read_bytes() == b"ORIGINAL" and dst.read_bytes() == b"COMPRESSED"
         assert ("WARN", f"  -> source preserved, its compressed copy did not land | {src.name}") \
             in run.log.lines
@@ -1874,7 +2394,7 @@ class TestGroupSteps:
         outcome = cz._run_group(run, [job], 1, {})
         assert error_lines(run) == [
             f"[1/1] ERROR (unexpected) | {photo.name} | RuntimeError: history exploded"]
-        assert outcome.error_srcs == {str(photo).lower()} and run.err == 1
+        assert outcome.unlanded_srcs == {str(photo).lower()} and run.err == 1
         assert not os.path.exists(sibling), "v3.1: the worker drops the copy it was writing"
         cz._archive_originals(run, [job], outcome)
         assert photo.read_bytes() == b"ORIGINAL" and not os.path.exists(sibling)
@@ -1894,7 +2414,7 @@ class TestGroupSteps:
         job = cz.Job(src=str(src), write_dst=str(written), final_dst=str(src), name=src.name,
                      keep_dir=str(d / "OLD_TIFFs"), src_length=st.st_size, src_mtime_ns=st.st_mtime_ns)
         run = compress_run("--mode", "9")
-        failed = (self._outcome(error_srcs={str(src).lower()}) if why == "error"
+        failed = (self._outcome(unlanded_srcs={str(src).lower()}) if why == "error"
                   else self._outcome(integrity_failed_dst={str(src).lower()}))
         cz._archive_originals(run, [job], failed)
         assert src.read_bytes() == b"ORIGINAL" and not written.exists()

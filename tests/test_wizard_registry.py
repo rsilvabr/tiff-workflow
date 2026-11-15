@@ -301,17 +301,21 @@ def test_T3_dash_takes_an_edit_back(monkeypatch, ui):
 @pytest.mark.parametrize("ui", UIS)
 def test_T3_combined_workflow_lists_both_backends_and_keeps_them_apart(monkeypatch, ui):
     wf = {"origin": "both", "mode": 9, "folders": [HOSTILE]}
-    # 1-3 compress (MagickTimeout, SrgbProfile, WorkerMemoryFraction), 4-6 copy_exif
-    # (MagickTimeout, WorkerMemoryFraction, FailOnWarn)
-    ui(monkeypatch, ["y", "4", "77", "6", "yes", "3", "0.25", "0"])
+    # 1-5 compress (MagickTimeout, SrgbProfile, WorkerMemoryFraction, RecompressMinSaving,
+    # ZipPredictor), 6-8 copy_exif (MagickTimeout, WorkerMemoryFraction, FailOnWarn)
+    ui(monkeypatch, ["y", "6", "77", "8", "yes", "3", "0.25", "4", "2.5", "5", "auto", "0"])
     REAL_ADVANCED(_cfg(), wf)
     assert wf["advanced"] == {"copy_exif": {"magick_timeout": 77, "fail_on_warn": True},
-                              "compress": {"worker_memory_fraction": 0.25}}
+                              "compress": {"worker_memory_fraction": 0.25,
+                                           "recompress_min_saving": 2.5, "zip_predictor": "auto"}}
     exif = convert_tiff.build_copy_exif_command(wf, [Path(HOSTILE)])
     comp = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
     assert exif[exif.index("--magick-timeout") + 1] == "77" and "--fail-on-warn" in exif
-    assert "--worker-memory-fraction" not in exif
+    assert "--worker-memory-fraction" not in exif and "--recompress-min-saving" not in exif
+    assert "--zip-predictor" not in exif
     assert comp[comp.index("--worker-memory-fraction") + 1] == "0.25"
+    assert comp[comp.index("--recompress-min-saving") + 1] == "2.5"
+    assert comp[comp.index("--zip-predictor") + 1] == "auto"
     assert "--magick-timeout" not in comp and "--fail-on-warn" not in comp
 
 
@@ -338,8 +342,9 @@ def test_T3_the_screen_comes_right_after_the_basic_params(monkeypatch):
     workflow can ask the basic questions and skip it (v3.1: was a text match on the
     three call sites)."""
     monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
-    # workers, staging, dry-run, safe mode, skip LZW, cap, exclude, force sequential
-    answers = iter(["4", "", "n", "", "", "", "", ""])
+    # workers, staging, dry-run, safe mode, skip LZW, recompress ZIP, cap, exclude, only
+    # folders, force sequential
+    answers = iter(["4", "", "n", "", "", "", "", "", "", ""])
     events = []
 
     def answer(*a, **k):
@@ -355,8 +360,51 @@ def test_T3_the_screen_comes_right_after_the_basic_params(monkeypatch):
     monkeypatch.setattr(convert_tiff, "step_advanced_options", advanced)
     workflow = {"origin": "free_compress", "dest": "zip"}
     assert convert_tiff.step_basic_params(_cfg(), workflow) is True
-    assert events == ["basic"] * 8 + ["advanced"], events
+    assert events == ["basic"] * 10 + ["advanced"], events
     assert seen == [workflow] and seen[0] is workflow
+
+
+@pytest.mark.parametrize("origin, asked", [("free_compress", 10), ("copy_exif", 7)])
+def test_v32_the_two_compress_questions_reach_the_command_line(monkeypatch, origin, asked):
+    """v3.2: "Recompress ZIP TIFFs saved without a predictor?" and "Only folders named?" are
+    asked in the compress workflows only, and their answers are the --recompress-zip and
+    --include-folders of the command line; the answer is remembered like the exclusion."""
+    monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
+    if origin == "free_compress":
+        # workers, staging, dry-run, safe mode, skip LZW, RECOMPRESS, cap, exclude, ONLY
+        # FOLDERS, force sequential
+        script = ["4", "", "n", "", "", "y", "", "", "TIFF16;写真 [x]", ""]
+    else:
+        # workers, staging, dry-run, safe mode, skip LZW, exclude, force sequential
+        script = ["4", "", "n", "", "", "", ""]
+    answers = iter(script)
+    seen = []
+
+    def answer(*a, **k):
+        seen.append(a[0] if a else "")
+        return next(answers)
+    monkeypatch.setattr("builtins.input", answer)
+    cfg = _cfg()
+    wf = {"origin": origin, "dest": "zip", "mode": 8}
+    assert convert_tiff.step_basic_params(cfg, wf) is True
+    assert len(seen) == asked
+    text = " ".join(str(s) for s in seen)
+    if origin == "copy_exif":
+        assert "Recompress" not in text and "Only folders" not in text
+        return
+    argv = convert_tiff.build_compress_command(wf, [Path(HOSTILE)])
+    assert "--recompress-zip" in argv
+    assert argv[argv.index("--include-folders") + 1] == "TIFF16;写真 [x]"
+    assert cfg.config.last_include_folders == "TIFF16;写真 [x]"
+    # the defaults: neither option on the line
+    wf2 = {"origin": origin, "dest": "zip", "mode": 8}
+    monkeypatch.setattr("builtins.input",
+                        lambda *a, **k: next(iter_defaults))
+    iter_defaults = iter(["4", "", "n", "", "", "", "", "", "-", ""])
+    assert convert_tiff.step_basic_params(cfg, wf2) is True
+    argv = convert_tiff.build_compress_command(wf2, [Path(HOSTILE)])
+    assert "--recompress-zip" not in argv and "--include-folders" not in argv
+    assert cfg.config.last_include_folders is None
 
 
 def test_T3_a_hand_edited_value_that_fails_its_spec_is_dropped_not_passed():

@@ -843,7 +843,8 @@ class TestThumbFormatPlainTextFallback:
             "0",            # mode
             str(tmp_path),  # input folder
             "n",            # generate manifest?
-            "", "", "n", "", "", "", "", "",  # workers/staging/dry/safe/skip_lzw/cap/exclude/force-parallel
+            # workers/staging/dry/safe/skip_lzw/recompress/cap/exclude/only-folders/force-parallel
+            "", "", "n", "", "", "", "", "", "", "",
             "y", "y",       # generate thumbnails? configure?
             "", "", "bmp",  # size, quality, FORMAT (invalid)
             "png",          # ... asked again
@@ -1037,8 +1038,9 @@ class TestPhase7SweepGaps:
         its parameter check."""
         monkeypatch.setattr(convert_tiff, "RICH_AVAILABLE", False)
         monkeypatch.setattr(convert_tiff, "step_advanced_options", lambda cfg, wf: True)
-        # workers, staging, dry-run, safe, skip-lzw, CAP, exclude, force-sequential
-        answers = iter(["", "", "", "", "", answer, "", ""])
+        # workers, staging, dry-run, safe, skip-lzw, recompress, CAP, exclude, only folders,
+        # force-sequential
+        answers = iter(["", "", "", "", "", "", answer, "", "", ""])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
         cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
         wf = {"origin": "free_compress", "dest": "zip"}

@@ -43,7 +43,7 @@ FORBIDDEN = ["mode", "input_dir", "input_dir_file", "output_dir", "staging_dir",
              "force_parallel", "force_sequential", "restore_stranded", "generate_thumbnail",
              "skip_compressed_with_thumb", "thumb_page", "page", "remove", "recursive",
              "skip_if_tiff_has_exif", "compress_zip", "auto_find", "folder_pattern", "fail_on_warn",
-             "icc_policy", "exclude_folders"]
+             "icc_policy", "exclude_folders", "include_folders", "recompress_zip"]
 
 
 # --- helpers ---------------------------------------------------------------------------------
@@ -168,7 +168,12 @@ def test_T6_the_tables_are_exactly_the_planned_ones():
         "zip_suffix": "name", "zip_subfolder_name": "name", "export_marker": "name",
         "export_zip_subfolder": "name", "export_tiff_subfolder": "name", "cap_workers": "int:0:64",
         "magick_timeout": "int:1:", "thumb_size": "int:1:", "thumb_quality": "intstr:1:100",
-        "thumb_format": "name", "srgb_profile": "path?", "worker_memory_fraction": "float:0:2"}
+        "thumb_format": "name", "srgb_profile": "path?", "worker_memory_fraction": "float:0:2",
+        # v3.2: a preference, like the thumbnail size -- whether a rewrite is worth keeping;
+        # every kept file still passes the pixel and metadata gates
+        "recompress_min_saving": "float:0:50",
+        # v3.2: on or auto -- how each file is compressed, never whether one is replaced
+        "zip_predictor": "choice:on|auto"}
     assert _table("generate_thumbnails.py") == {
         "size": "int:1:", "quality": "intstr:1:100", "format": "name", "srgb_profile": "path?"}
     assert _table("copy_exif_to_tiff.py") == {"magick_timeout": "int:1:",

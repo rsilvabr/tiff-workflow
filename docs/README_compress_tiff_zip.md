@@ -74,6 +74,9 @@ The defaults below are the `PARAMS` table at the top of `tiff_workflow/compress_
 | `--dry-run` | switch | off | Show what would be compressed, don't write anything |
 | `--safe-mode` / `--no-safe-mode` | yes/no | on | Skip multi-page TIFFs (scanner IR, Photoshop layers). Does NOT cap workers |
 | `--skip-lzw-as-compressed` / `--no-skip-lzw-as-compressed` | yes/no | off | Treat LZW as already compressed (skip re-compression) |
+| `--recompress-zip` | switch | off | Also rewrite TIFFs that are already ZIP **without a predictor** (Capture One's exports), keeping a file only when it comes out smaller. See [Recompressing ZIP TIFFs](#recompressing-zip-tiffs-without-a-predictor---recompress-zip) |
+| `--recompress-min-saving` | number | `1` | `--recompress-zip` keeps a rewritten file only when it is at least this many percent smaller (0-50). Settings file: `recompress_min_saving` |
+| `--zip-predictor` | `on` / `auto` | `on` | `on` = always the ZIP predictor (as every version before); `auto` = a sample of each file decides with or without it, whichever is smaller -- the file is still written once. See [Choosing the predictor](#choosing-the-predictor---zip-predictor-auto). Settings file: `zip_predictor` |
 | `--overwrite` | switch | off | Overwrite existing ZIP files |
 | `--delete-source` | switch | off | Delete source TIFF after successful compression (mode 8 only) |
 | `--force-parallel` | switch | off | Does nothing: parallel is the default. Still accepted, for old command lines and presets |
@@ -82,6 +85,7 @@ The defaults below are the `PARAMS` table at the top of `tiff_workflow/compress_
 | `--duplicate-action` | string | `"Numbered"` | Mode 2 collision handling: `Skip`, `Numbered` (v2, v3...), or `Overwrite` |
 | `--restore-stranded` | switch | off | Move originals stranded in `OLD_TIFFs/` (nothing left in their place, see [Stranded originals](#stranded-originals)) back where they came from, before this run's discovery -- so this run compresses them. Never over an existing file; a dry run only says what it would restore |
 | `--exclude-folders` | string | `""` | `';'`-separated folder **names** skipped during discovery, in every mode. Segment match (case-insensitive), evaluated **relative to `--input-dir`**: `_EXPORT` skips any `<root>\...\_EXPORT\...` tree but never `My_EXPORT_photos`, and never a folder *above* the root -- including the root's own name, so pointing the tool at `...\_EXPORT` to process it still works. Entries containing `\` or `/` are rejected -- names only, no paths. Every run logs `Excluded N file(s) under: ...` so an exclusion is never invisible |
+| `--include-folders` | string | `""` | The opposite: only the TIFFs inside a folder of one of these `';'`-separated **names** (`TIFF16`), in every mode. Whole names, case-insensitive; the root's own name counts (pointing the tool at a `TIFF16` folder takes its files) and the folders below it, never a folder *above* the root. `--exclude-folders` wins over it, and `OLD_TIFFs` stays out. Every run logs `Left out N file(s) not inside a folder named: ...` |
 
 > **Performance note:** the compression probe (Deflate or not?) reads only the IFD0 header tag, but it used to spawn one exiftool process per file. Probing is now batched (~400 files per exiftool invocation, logged as `Compression probe: N/M file(s) in Xms`); files a batch could not answer fall back to the per-file probe, so decisions are identical, just faster.
 
@@ -326,6 +330,128 @@ If any check fails, the source is preserved.
 
 ---
 
+## Recompressing ZIP TIFFs without a predictor (`--recompress-zip`)
+
+Capture One writes its TIFF exports with ZIP (Deflate) at zlib level 6 and **no predictor**
+(measured on real exports, 15/11/2026: the compressed blocks are byte for byte what zlib level 6
+writes). This script writes ZIP with ImageMagick, which adds the horizontal predictor for 8- and
+16-bit images: it stores the difference between neighbouring pixels instead of their values, and
+Deflate packs those much better. The pixels are the same, bit for bit.
+
+Measured on real 16-bit Capture One exports (45 MP, about 100-260 MB each):
+
+| export | before | after |
+|---|---|---|
+| A | 234.8 MB | 209.6 MB (-10.7 %) |
+| B | 220.0 MB | 194.7 MB (-11.5 %) |
+| C | 141.9 MB | 123.5 MB (-13.0 %) |
+| D | 103.8 MB | 95.4 MB (-8.1 %) |
+| E | 18.0 MB | 25.1 MB (**+39 %**: kept as it was) |
+
+So the gain is real but not the same for every image, and on some the predictor makes the file
+**larger**. `--recompress-zip` therefore:
+
+- takes a file that is already compressed only when page 0 is Deflate **without** a predictor, 8
+  or 16 bits per sample, gray or RGB. A file with a predictor (everything this script wrote), LZW,
+  32-bit or palette stays the `SKIP` it always was;
+- sends it through the normal path of the mode: the same safe-mode check, the same metadata
+  copy, the same gates (in mode 8 every pixel is compared before the swap), the same landing;
+- first writes a small SAMPLE of the image both ways (see [Choosing the
+  predictor](#choosing-the-predictor---zip-predictor-auto)): when it is clearly smaller without
+  the predictor, nothing is written at all -- `SKIP (no gain expected: sample -23.2% without it -
+  original kept)` -- and the file is remembered;
+- keeps the new file only when it is at least `--recompress-min-saving` percent smaller (default
+  1). Otherwise the new file is dropped before any pixel check and the line says
+  `SKIP (no gain: 18.0 MB -> 25.1 MB, +39.4% - original kept)`: the original is not touched;
+- **remembers** the files that did not shrink (path, size and modification time) in
+  `.tiff_workflow_no_gain.json` in your user profile, so the next run skips them without reading
+  them: `SKIP (no gain on 2026-11-15 - not tried again)`. A file that changed is tried again;
+  deleting the memory file forgets everything (the environment variable `TIFFWORKFLOW_NO_GAIN`
+  names another file, set but empty = no memory). A dry run reads it and never writes it.
+
+A kept file says `OK (Deflate -> ZIP, recompressed: 234.8 MB -> 209.6 MB, -10.7%)`, its
+`xmpMM:History` entry ends in `- recompressed with predictor - zipcheck 1 predictor 2`, and the
+run ends with `Recompressed: N file(s), X -> Y (Z saved, -P%)`. Running it again over its own
+output changes nothing: the files now have a predictor. A file `--zip-predictor auto` wrote
+WITHOUT the predictor (its History ends in `zipcheck 1 predictor 1`) is skipped as
+`SKIP (Adobe Deflate: already the smaller - zipcheck)`, on any machine and after any rename.
+
+The owner's preset -- every `TIFF16` folder of the exports of three years, replaced in place:
+
+```
+python convert_tiff.py compress --mode 8 --input-dir "G:\2024;G:\2025;G:\2026" --include-folders TIFF16 --recompress-zip --staging-dir E:\temp_tiff --workers 8 --safe-mode --no-skip-lzw-as-compressed --magick-timeout 180
+```
+
+A recursive mode finds the sessions added since the last run on its own. Things to know before
+the first run over a whole library:
+
+- the first run reads and writes every export once (about 15 s of work per 220 MB file); later
+  runs only read the headers;
+- the new files keep their dates (see [The file's date](#the-files-date)), but their **size**
+  changes: a backup tool that compares size copies each of them again once (photo-backup also
+  moves the previous copy to its versions folder);
+- jxl-photo's own checksum of the TIFF a master came from (`jxlphoto-srcsum`) no longer matches
+  the recompressed TIFF: its gates that delete a TIFF after proving the archive by content will
+  keep it.
+
+---
+
+## Choosing the predictor (`--zip-predictor auto`)
+
+The predictor is not always the better choice. On 31 varied real TIFFs (film scans from
+SilverFast, Epson, VueScan and Noritsu, camera exports from Lightroom, Photoshop, Capture One),
+each written whole as compress writes it, with and without the predictor (15/11/2026):
+
+| | files | |
+|---|---|---|
+| the predictor wins | 27 | 3-83 % smaller with it (most scans: 10-27 %) |
+| without it wins | 4 | a Luminar RGBA scan **42 %**, a Photoshop file 5.7 %, a VueScan RGB+IR scan 5.6 %, a Windows Photo file 0.8 % smaller without it |
+
+| the 31 files | total |
+|---|---|
+| always with the predictor (`on`) | 2.585 GB |
+| always without | 2.808 GB |
+| `auto` | **2.498 GB (-3.38 %)** |
+| the smaller of the two for every file (both written) | 2.497 GB (-3.39 %) |
+
+Which way an image goes cannot be told from its type (none of those four is a padded 8-bit
+file); it has to be measured.
+
+Writing the TIFF both ways and keeping the smaller would cost a full temporary TIFF per file.
+`--zip-predictor auto` measures a **sample** instead: one ImageMagick reads page 0 and writes four
+full-width bands of 16 rows (at 20/40/60/80 % of the height) both ways, a few MB in the temp
+folder, deleted at once -- with the write's own options, so the sample has the channels the
+file will have. The sample's smaller decides; a difference under 2 % keeps the predictor; the
+TIFF is then written **once**, as always. On the 31 scans and the 22 Capture One exports the
+sample never chose against the whole file where it mattered (the one miss: 0.8 % on a
+Windows Photo file, inside the margin); `auto` lands 0.01 % from the best possible. It costs
+about 0.1-1.7 s per file.
+
+The choice is recorded in the `xmpMM:History` entry the rewrite writes anyway -- no extra write:
+its Parameters end in ` - zipcheck 1 predictor 2` (with) or ` - zipcheck 1 predictor 1`
+(without). `--recompress-zip` reads it back: a ZIP file without a predictor whose LAST History
+entry is that one is already the smaller and is skipped. A later entry by another program (an
+edit, jxl-photo's decode back to TIFF), or a predictor that does not match the file, makes the
+record count for nothing. jxl-photo copies the History into the JXL with the rest of the XMP --
+there it is history, and jxl-photo's own reader skips other programs' entries.
+
+The default stays `on` (the predictor, as every version before): set `"zip_predictor": "auto"` in
+the settings file, or pick it on the wizard's Advanced screen, to make it yours.
+
+---
+
+## The file's date
+
+A compressed file that **takes its original's place** -- modes 0, 8 and 9, and a copy mode whose
+output is its own source -- keeps the original's modification (and access) time, since v3.2.
+The image did not change, and tools that decide by date must not take a lossless rewrite for a
+new photo: jxl-photo's smart sync re-encodes every master whose TIFF looks newer than it, and then
+every copy made from those masters. A copy written somewhere else (`ZIP/`, a flat folder) is a new
+file with a date of its own. Windows' "date created" of the replaced file is the date of the run.
+If the date cannot be set the file is still landed and the line ends in `[date not kept]`.
+
+---
+
 ## Parallel and Sequential Runs
 
 Every run works on several files at once (`--workers`), on any machine. The per-file work is the
@@ -355,7 +481,11 @@ Action=converted
 When=2026-11-10T22:04:16+09:00
 SoftwareAgent=tiff-workflow 3.0.0 (https://github.com/rsilvabr/tiff-workflow)
 Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (with a thumbnail:
-                                                             "... + thumbnail page")
+                                                             "... + thumbnail page";
+                                                             --recompress-zip: "... - recompressed
+                                                             with predictor"; a predictor that was
+                                                             CHOSEN ends in " - zipcheck 1
+                                                             predictor 2" or "... predictor 1")
 ```
 
 - Earlier entries (Capture One, scanner software) are kept, never doubled. The tag copy, the
