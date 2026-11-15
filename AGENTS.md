@@ -193,6 +193,13 @@ starts it.
   own, so its IPTC is copied onto itself first (`-tagsfromfile @ -IPTC:All`) and exiftool
   rewrites the whole block in the new charset -- without that a Latin caption is left
   mislabelled as UTF-8.
+- **exiftool gives an IPTC time without a zone the COMPUTER's zone** when it writes it (round
+  32; `WriteIPTC.pl`, no option): any copy that rewrites IPTC turned Capture One's `15:02:12`
+  into `+09:00` in Japan, `-03:00` in Brazil. ImageMagick carries the IPTC block byte for byte:
+  every metadata copy onto a file magick wrote leaves the five IPTC time tags out when that file
+  holds them as the source (`tw.iptc_times_kept_args`, `finish_written_tiff(...,
+  src_iptc_times=)`, the wizard's `_iptc_times_kept`), and copy-exif's self-copy leaves them
+  out. Do not "fix" a time by writing it again: `#` does not help, `-api TimeZone` neither.
 - **An exiftool struct value takes no `, { } [ ] |`** (v3.2): `-XMP-xmpMM:History={...,
   Parameters=ZIP (Deflate), recompressed}` stored `ZIP (Deflate)` and exited 0 with no warning
   the History check sees. Keep every value `_history_assignment` writes free of them

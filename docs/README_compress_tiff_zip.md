@@ -511,6 +511,12 @@ Parameters=compress_tiff_zip mode 1: ZIP (Deflate)          (with a thumbnail:
 - If the entry cannot be written the file is still a good ZIP: the line is a `WARN` ending
   in `[history not written]`, never an `ERROR`.
 
+The rest of the metadata is copied from the original. The IPTC times (TimeCreated and the
+others) are kept exactly as they were since v3.2: exiftool gives a time without a zone the zone
+of the computer it runs on, so until then a Capture One export's `15:02:12` came out
+`15:02:12+09:00` in Japan and `-03:00` in Brazil, wherever the photo was taken. Now a time
+without a zone stays without one, and one with the camera's zone keeps it.
+
 ---
 
 ## Logging

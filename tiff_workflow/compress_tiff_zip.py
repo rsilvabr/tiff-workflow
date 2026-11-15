@@ -893,7 +893,10 @@ def _compress_job(run, t, load, own):
         history += " + thumbnail page"
     if zipcheck is not None:
         history += tw.zipcheck_segment(zipcheck)
-    done = tw.finish_written_tiff(write_dst, meta_backup or src, markers, history)
+    # The IPTC times of the source stay as they are (audit round 32): from the source's own
+    # facts, not from the container, where exiftool already added the computer's zone.
+    done = tw.finish_written_tiff(write_dst, meta_backup or src, markers, history,
+                                  src_iptc_times=facts.iptc_times)
     tw.remove_quietly(meta_backup)
     exif_warn = not done.metadata
     thumb_marker_failed = thumb_page and not done.markers

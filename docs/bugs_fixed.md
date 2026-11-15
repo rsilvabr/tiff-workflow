@@ -12,6 +12,33 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.2.0 - Audit round 32: the IPTC times were given the computer's time zone
+
+Found by the independent review of v3.2.0 (2026-11-15), in the metadata copy every compress has
+made since v2.x; `--recompress-zip` was about to take it to every Capture One export of a library.
+
+### MEDIUM - compress, copy-exif, Diagnose: an IPTC time without a zone was given the computer's zone
+**Issue:** exiftool writes every IPTC time (TimeCreated, DigitalCreationTime, and TimeSent,
+ReleaseTime, ExpirationTime) through a conversion that completes a time without a zone with the
+zone of the computer running it (`WriteIPTC.pl`, "use local system timezone by default"; no
+option turns it off). The metadata copy rewrites every tag it copies, so a Capture One export's
+`15:02:12` -- Capture One leaves the zone out when the camera recorded none -- came out
+`15:02:12+09:00` on a computer in Japan and `-03:00` on one in Brazil, wherever the photo was
+taken; the XMP dates of the same file kept no zone. The same in compress's container path (a `%`
+in the name, an in-place write), in copy-exif's copy of the TIFF's own IPTC onto itself, and in
+the wizard's padded conversion. Nothing was lost; a time zone nobody recorded was added.
+- **Fix:** ImageMagick carries the IPTC block byte for byte, so the copy leaves the five IPTC
+  time tags out when the file it just wrote holds them exactly as the source
+  (`tw.iptc_times_kept_args`; the source's times come with `tiff_facts`, one exiftool read of the
+  written file more, no extra write): a time without a zone stays without one, one with the
+  camera's zone keeps it. When the written file lacks them (ImageMagick did not carry the block)
+  they are copied as before -- never lost. copy-exif's self-copy leaves them out; a time the
+  JPEG brings is still copied (a camera's JPEG has no IPTC). Files written by earlier versions
+  keep what they have: the zone they were given cannot be told from one a camera recorded.
+- **Files:** `tiff_workflow/common.py`, `tiff_workflow/compress_tiff_zip.py`,
+  `tiff_workflow/copy_exif_to_tiff.py`, `tiff_workflow/wizard.py`, `tests/test_iptc_times.py`,
+  `tests/test_backend_invariants.py`
+
 ## v3.1.1 - Audit round 31: what the check of the owner's install found
 
 The owner's presets, run on a copy of the config to check the install of v3.1.1 (2026-11-14),

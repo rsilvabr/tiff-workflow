@@ -1383,16 +1383,56 @@ def backup_tiff_metadata(src, write_dst):
     return meta
 
 
-def _restore_metadata_args(tag_source, dst):
+#: The IPTC times. exiftool writes each of them through IptcTime, which completes a time without
+#: a zone with the zone of the COMPUTER that runs the rewrite (WriteIPTC.pl, "use local system
+#: timezone by default"; no option turns it off): a Capture One export's 15:02:12 came out
+#: 15:02:12+09:00 in Japan and -03:00 in Brazil, wherever the photo was taken (audit round 32).
+#: ImageMagick carries the IPTC block byte for byte, so a copy that leaves these tags out keeps
+#: them exactly as they were: a time without a zone stays without one (the camera recorded none),
+#: one with the camera's zone keeps it (owner's decision, 15/11/2026).
+IPTC_TIME_TAGS = ("TimeSent", "ReleaseTime", "ExpirationTime", "TimeCreated", "DigitalCreationTime")
+IPTC_TIME_READ_ARGS = [f"-IPTC:{t}#" for t in IPTC_TIME_TAGS]
+_IPTC_TIME_LINE = re.compile(r"^\[IPTC\]\s+(" + "|".join(IPTC_TIME_TAGS) + r"):\s*(.*?)\s*$")
+
+
+def parse_iptc_times(out):
+    """The IPTC times in what exiftool -a -G1 -s -s printed: ((tag, value), ...) sorted by tag,
+    the value as exiftool converts the stored digits (15:02:12, 15:02:12+09:00); () for none."""
+    found = {}
+    for line in out.split("\n"):
+        m = _IPTC_TIME_LINE.match(line)
+        if m:
+            found.setdefault(m.group(1), m.group(2))
+    return tuple(sorted(found.items()))
+
+
+def iptc_times(path):
+    """The IPTC times of `path` (parse_iptc_times). Raises ToolError when exiftool fails."""
+    return parse_iptc_times(exiftool(["-a", "-G1", "-s", "-s"] + IPTC_TIME_READ_ARGS + [path]))
+
+
+def iptc_times_kept_args(src_times, dst_times):
+    """The exclusions that leave the IPTC times of a written file as they are: when the file
+    already holds every one of them exactly as its source (ImageMagick carried the block), the
+    metadata copy must not rewrite them -- exiftool would add the computer's zone to a time that
+    has none. [] when the source has none, or the written file lacks or changed one: then they
+    are copied as before, so a time is never lost."""
+    if src_times and tuple(dst_times) == tuple(src_times):
+        return [f"--IPTC:{t}" for t in IPTC_TIME_TAGS]
+    return []
+
+
+def _restore_metadata_args(tag_source, dst, keep=()):
     """The exiftool command that copies every tag of `tag_source` (the source TIFF, or the
-    container backup_tiff_metadata made) onto `dst`, a TIFF magick just wrote.
+    container backup_tiff_metadata made) onto `dst`, a TIFF magick just wrote. `keep`: the
+    exclusions of the tags `dst` already holds as they must stay (iptc_times_kept_args).
 
     ONE -q, not two: the second suppresses WARNINGS, and a warning is the only signal
     exiftool gives when the -tagsfromfile source could not be opened -- it still exits 0.
     IPTC:CodedCharacterSet is not part of -all:all: without it UTF-8 IPTC text was written
     back as Latin, every Japanese keyword a '?' (audit round 28)."""
-    return ["-q", "-overwrite_original", "-tagsfromfile", tag_source, "-all:all",
-            "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe", dst]
+    return (["-q", "-overwrite_original", "-tagsfromfile", tag_source, "-all:all"] + list(keep)
+            + ["-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe", dst])
 
 
 def _metadata_restored(r):
@@ -1534,13 +1574,18 @@ class Finished(NamedTuple):
     history: bool       # the xmpMM:History entry is written (True when none was asked for)
 
 
-def finish_written_tiff(dst, tag_source, markers, history=None):
+def finish_written_tiff(dst, tag_source, markers, history=None, src_iptc_times=()):
     """The writes onto a TIFF magick just wrote, in ONE exiftool command, so the file is
     rewritten ONCE: the metadata from `tag_source`, then the page `markers`
     (subfile_marker_args: [] = none to write, None = could not be read, so failed), then,
     with `history`, this rewrite in xmpMM:History (`history` is its Parameters text;
     _history_assignment says why it is `=`). Run before the gates, so they check the final
     bytes.
+
+    `src_iptc_times`: the IPTC times of the ORIGINAL source (tiff_facts) -- not of
+    `tag_source`, which may be the container, where exiftool already added the computer's
+    zone. When `dst` holds them unchanged they are left out of the copy (audit round 32): one
+    exiftool READ of `dst` more, never a write.
 
     Until v3.1.1-rc1 these were three commands, and exiftool writes the WHOLE file for each:
     a 215 MB ZIP of a 45 MP scan was written four times (magick + three), 861 MB on the
@@ -1552,7 +1597,13 @@ def finish_written_tiff(dst, tag_source, markers, history=None):
     opened), the markers by the status, the History by the status and no "error" in what
     exiftool printed -- a warning about any part now fails the History too (the safe side).
     FAIL-CLOSED: exiftool that cannot be started fails all three; never raises for it."""
-    command = _restore_metadata_args(tag_source, dst)
+    keep = []
+    if src_iptc_times:
+        try:
+            keep = iptc_times_kept_args(src_iptc_times, iptc_times(dst))
+        except ToolError:
+            keep = []       # cannot tell: copied as before, never lost
+    command = _restore_metadata_args(tag_source, dst, keep)
     extra = list(markers or [])
     if history is not None:
         extra.append(_history_assignment(history))
@@ -1611,10 +1662,11 @@ def tiff_sample_layout(path):
 
 
 #: what tiff_facts and tiff_sample_layout read: the layout tags as numbers (`#`), the
-#: compression as the text the SKIP lines print, the size of page 0 (--zip-predictor's probe).
+#: compression as the text the SKIP lines print, the size of page 0 (--zip-predictor's probe),
+#: the IPTC times (the metadata copy leaves them as they are, audit round 32).
 _FACT_TAGS = ["-IFD0:Compression", "-SamplesPerPixel#", "-PhotometricInterpretation#",
               "-ExtraSamples#", "-BitsPerSample#", "-SubfileType#", "-IFD0:ImageWidth#",
-              "-IFD0:ImageHeight#"]
+              "-IFD0:ImageHeight#"] + IPTC_TIME_READ_ARGS
 _COMPRESSION_LINE = re.compile(r"^\[IFD0\]\s+Compression:\s*(.*?)\s*$")
 _DIMENSION_LINE = re.compile(r"^\[IFD0\]\s+(ImageWidth|ImageHeight):\s*(\d+)\s*$")
 
@@ -1636,6 +1688,7 @@ class TiffFacts(NamedTuple):
     subfile_types: dict     # {ifd: SubfileType} of the IFDs that carry the tag
     width: int = 0          # page 0's size in pixels; 0 when it was not read
     height: int = 0
+    iptc_times: tuple = ()  # ((tag, value), ...): parse_iptc_times
 
 
 def tiff_facts(path):
@@ -1659,7 +1712,7 @@ def tiff_facts(path):
         if d:
             dims.setdefault(d.group(1), int(d.group(2)))
     return TiffFacts(comp, pages, _parse_subfile_types(out), dims.get("ImageWidth", 0),
-                     dims.get("ImageHeight", 0))
+                     dims.get("ImageHeight", 0), parse_iptc_times(out))
 
 
 def _parse_layout(out, path):

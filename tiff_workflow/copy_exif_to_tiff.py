@@ -211,13 +211,16 @@ def _jpeg_copy_args(source, tag_source, icc_tag, target):
     on the TIFF as Latin: every Japanese keyword a '?' (audit round 28). The charset is
     copied by name (only when the JPEG has one), and the TIFF's OWN IPTC is copied onto
     itself first ('-tagsfromfile @'): exiftool then writes the whole block in the new
-    charset, so a Latin caption the TIFF already had is not left mislabelled as UTF-8."""
-    tags = ["-tagsfromfile", "@", "-IPTC:All",
-            "-tagsfromfile", tag_source, "-EXIF:All", "-XMP:All", "-IPTC:All",
-            "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet",
-            "--ImageWidth", "--ImageHeight", "--ImageLength",
-            "--ExifImageWidth", "--ExifImageHeight", "--PixelXDimension", "--PixelYDimension",
-            "--Orientation", "--ThumbnailImage", "--PreviewImage", "--JpgFromRaw"]
+    charset, so a Latin caption the TIFF already had is not left mislabelled as UTF-8. The
+    IPTC times stay out of that self-copy: rewritten, a time without a zone gets the computer's
+    (audit round 32); left alone, it stays as it was. A time the JPEG brings is still copied
+    (exiftool then adds the zone: a camera's JPEG has no IPTC)."""
+    tags = (["-tagsfromfile", "@", "-IPTC:All"] + [f"--IPTC:{t}" for t in tw.IPTC_TIME_TAGS]
+            + ["-tagsfromfile", tag_source, "-EXIF:All", "-XMP:All", "-IPTC:All",
+               "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet",
+               "--ImageWidth", "--ImageHeight", "--ImageLength",
+               "--ExifImageWidth", "--ExifImageHeight", "--PixelXDimension", "--PixelYDimension",
+               "--Orientation", "--ThumbnailImage", "--PreviewImage", "--JpgFromRaw"])
     # A RAF's EXIF describes its embedded 1440x960 preview: the focal-plane resolution
     # (630 vs 1861 px/cm on an S5 Pro) is wrong for the TIFF.
     if source == "RAF":
@@ -285,7 +288,9 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
         if tiff_meta:
             own.append(tiff_meta)
         markers = tw.subfile_marker_args(tiff_target, facts.subfile_types, timeout)
-        done = tw.finish_written_tiff(write_dst, tiff_meta or tiff_target, markers)
+        # its IPTC times stay as they are (audit round 32)
+        done = tw.finish_written_tiff(write_dst, tiff_meta or tiff_target, markers,
+                                      src_iptc_times=facts.iptc_times)
         tw.remove_quietly(tiff_meta)
     if not done.metadata:
         drop_staged()

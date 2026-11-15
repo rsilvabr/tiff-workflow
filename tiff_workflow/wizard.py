@@ -1496,6 +1496,31 @@ def _safe_tag_source(path: Path):
     return tmp, tmp
 
 
+def _iptc_times_of(path) -> Optional[tuple]:
+    """The IPTC times of `path` (tw.parse_iptc_times), read through this wizard's own exiftool
+    runner; None when exiftool fails."""
+    try:
+        r = _run_exiftool(["-a", "-G1", "-s", "-s"] + tw.IPTC_TIME_READ_ARGS + [str(path)],
+                          _work_timeout(30, path), text=True)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    return tw.parse_iptc_times(r.stdout or "")
+
+
+def _iptc_times_kept(src, written) -> List[str]:
+    """The exclusions that keep the IPTC times of `written` -- the copy magick just made of
+    `src`, carrying its IPTC block byte for byte -- as `src` had them: rewritten by the
+    metadata copy, a time without a zone gets the computer's zone (audit round 32; the backends'
+    rule, tw.iptc_times_kept_args). [] -- copied as before, never lost -- when either file
+    cannot be read or the times differ."""
+    src_times, written_times = _iptc_times_of(src), _iptc_times_of(written)
+    if src_times is None or written_times is None:
+        return []
+    return tw.iptc_times_kept_args(src_times, written_times)
+
+
 def _file_digest(path: Path) -> str:
     """SHA-256 of a file, streamed so large TIFF sidecars do not land in memory."""
     h = hashlib.sha256()
@@ -3984,12 +4009,14 @@ def _process_single_padded(tiff_path, staging) -> PaddedResult:
             else:
                 exif_result = _run_exiftool(
                     ["-q", "-overwrite_original",
-                     "-tagsfromfile", tag_source, "-all:all",
-                     # audit round 28: -all:all does not copy IPTC:CodedCharacterSet, so
-                     # UTF-8 IPTC (伊豆沼) was re-encoded as Latin and came back '???'.
-                     "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe",
-                     "--Compression", "--BitsPerSample", "--SampleFormat",
-                     str(tmp8)],
+                     "-tagsfromfile", tag_source, "-all:all"]
+                    # audit round 32: the IPTC times magick carried stay as they were
+                    + _iptc_times_kept(tiff_path, tmp8)
+                    + [  # audit round 28: -all:all does not copy IPTC:CodedCharacterSet, so
+                         # UTF-8 IPTC (伊豆沼) was re-encoded as Latin and came back '???'.
+                        "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-unsafe",
+                        "--Compression", "--BitsPerSample", "--SampleFormat",
+                        str(tmp8)],
                     _work_timeout(30, tiff_path), text=True
                 )
                 # ONE -q above, not two: the second suppresses warnings, and an unreadable

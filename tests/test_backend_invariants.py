@@ -68,6 +68,8 @@ class FakeTools:
         self.pages = 1
         self.only_subfile = True
         self.layout = list(RGB)       # None = unreadable (ToolError)
+        self.iptc = ()                # the IPTC times tiff_facts reads of the source
+        self.finish_iptc = None       # what finish_written_tiff was given of them
         self.layout_kept = True
         self.alpha_ok = True
         self.meta = "auto"            # "auto" = what backup_tiff_metadata would decide;
@@ -129,7 +131,8 @@ class FakeTools:
 
     def _facts(self, path):
         self.events.append("facts")
-        return tw.TiffFacts(self.comp, None if self.layout is None else list(self.layout), {})
+        return tw.TiffFacts(self.comp, None if self.layout is None else list(self.layout), {},
+                            iptc_times=self.iptc)
 
     def _layout(self, path):
         if self.layout is None:
@@ -193,10 +196,11 @@ class FakeTools:
         self.exif_calls.append([str(a) for a in args])
         return self.exif_result
 
-    def _finish(self, dst, tag_source, markers, history=None):
+    def _finish(self, dst, tag_source, markers, history=None, src_iptc_times=()):
         """finish_written_tiff: the metadata restore goes through the exiftool double (a test
         that sabotages that call still reaches it); the markers and the history entry answer
         from the knobs. The events keep the order of the real commands."""
+        self.finish_iptc = src_iptc_times
         try:
             out = tw.exiftool(tw._restore_metadata_args(tag_source, dst), merge_stderr=True)
             metadata = tw._metadata_restored(tw.ExifResult(0, out))
@@ -492,6 +496,17 @@ class TestGatesPerMode:
         assert r.result == (f"WARN (exiftool failed, ZIP ok) [subfiletype restore failed]"
                                f" [history not written] | {photo.name}")
         assert r.staging_name == "o.tif"
+
+    @pytest.mark.parametrize("argv", [IN_PLACE, ("--mode", "9")], ids=["in-place", "mode9"])
+    def test_the_source_iptc_times_reach_the_metadata_copy(self, tools, photo, argv):
+        """Audit round 32: the times to keep are the ORIGINAL's, read with its facts -- never the
+        container's (the photo's name has a '%': its metadata goes through one, where exiftool
+        already added the computer's zone)."""
+        tools.iptc = (("TimeCreated", "15:02:12"),)
+        r = job(compress_run(*argv), photo, write_dst=str(photo) + ".abcd1234_0123456789ab.tif"
+                if argv != IN_PLACE else None)
+        assert r.result.startswith(("OK ", "WARN ")), r.result
+        assert tools.finish_iptc == (("TimeCreated", "15:02:12"),)
 
     def test_history_names_the_mode(self, tools, photo, tmp_path):
         job(compress_run("--mode", "9"), photo, write_dst=str(photo) + ".abcd1234_0123456789ab.tif")
@@ -1468,15 +1483,18 @@ class TestCopyExif:
         tags, the charset by name after -IPTC:All, the geometry and the embedded images
         excluded by name, the file last."""
         args = cx._jpeg_copy_args("JPEG", "C:\\t\\tw_0123.mie", "-ICC_Profile", "E:\\伊豆沼 [x]\\a 50%.tif")
-        assert args[:5] == ["-tagsfromfile", "@", "-IPTC:All", "-tagsfromfile", "C:\\t\\tw_0123.mie"]
-        assert args[5:8] == ["-EXIF:All", "-XMP:All", "-IPTC:All"]
-        assert args[8] == "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet"
+        times = [f"--IPTC:{t}" for t in tw.IPTC_TIME_TAGS]
+        assert args[:3] == ["-tagsfromfile", "@", "-IPTC:All"]
+        assert args[3:8] == times, "the self-copy leaves the IPTC times alone (audit round 32)"
+        assert args[8:10] == ["-tagsfromfile", "C:\\t\\tw_0123.mie"]
+        assert args[10:13] == ["-EXIF:All", "-XMP:All", "-IPTC:All"]
+        assert args[13] == "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet"
         assert args[-2:] == ["-ICC_Profile", "E:\\伊豆沼 [x]\\a 50%.tif"]
         assert "-unsafe" not in args and not [a for a in args if a.startswith("--FocalPlane")]
         geometry = {"--ImageWidth", "--ImageHeight", "--ImageLength", "--ExifImageWidth",
                     "--ExifImageHeight", "--PixelXDimension", "--PixelYDimension", "--Orientation",
                     "--ThumbnailImage", "--PreviewImage", "--JpgFromRaw"}
-        assert {a for a in args if a.startswith("--")} == geometry
+        assert {a for a in args if a.startswith("--")} == geometry | set(times)
         raf = cx._jpeg_copy_args("RAF", "x.RAF", "", "a.tif")
         assert raf[-4:] == ["--FocalPlaneXResolution", "--FocalPlaneYResolution",
                             "--FocalPlaneResolutionUnit", "a.tif"]
@@ -2853,6 +2871,58 @@ class TestGatesFailClosed:
         monkeypatch.setattr(tw, "exiftool_commands", tool_fails)
         assert tw.finish_written_tiff(dst, src, ["-IFD0:SubfileType#=0"], "x") == \
             tw.Finished(False, False, False)
+
+    @pytest.mark.parametrize("written, kept", [
+        ("same", True),             # magick carried the IPTC block: left as it is
+        ("none", False),            # magick dropped it: copied as before, never lost
+        ("other", False),           # something else there: the source wins, as before
+        ("unreadable", False),      # cannot tell: copied as before
+    ])
+    def test_the_iptc_times_are_left_out_only_when_the_written_file_has_them(self, monkeypatch,
+                                                                             written, kept):
+        """Audit round 32: rewritten by the copy, an IPTC time without a zone gets the
+        computer's zone. Left out of the copy only when the written file already holds every one
+        of them exactly as the source -- otherwise copied as before."""
+        src_times = (("DigitalCreationTime", "15:02:12"), ("TimeCreated", "15:02:12"))
+        seen = []
+        monkeypatch.setattr(tw, "exiftool_commands", lambda cmds: seen.append(cmds) or
+                            [tw.ExifResult(0, "") for _ in cmds])
+
+        def read(path):
+            assert path == dst, "the times are read of the WRITTEN file"
+            if written == "unreadable":
+                tool_fails()
+            return {"same": src_times, "none": (),
+                    "other": (("TimeCreated", "15:02:12+09:00"),)}[written]
+        monkeypatch.setattr(tw, "iptc_times", read)
+        dst, src = "E:\\伊豆沼 [x]\\a 50%.tif", "C:\\t\\tw_0123.mie"
+        assert tw.finish_written_tiff(dst, src, [], "x", src_iptc_times=src_times) == \
+            tw.Finished(True, True, True)
+        cmd = seen[-1][0]
+        excluded = [f"--IPTC:{t}" for t in tw.IPTC_TIME_TAGS]
+        if kept:
+            i = cmd.index("-all:all")
+            assert cmd[i + 1:i + 1 + len(excluded)] == excluded, cmd
+        else:
+            assert not set(excluded) & set(cmd), cmd
+
+    def test_a_source_without_iptc_times_reads_nothing_more(self, monkeypatch):
+        monkeypatch.setattr(tw, "exiftool_commands", lambda cmds: [tw.ExifResult(0, "") for _ in cmds])
+        monkeypatch.setattr(tw, "iptc_times", lambda p: pytest.fail("no read without times to keep"))
+        assert tw.finish_written_tiff("E:\\a.tif", "E:\\b.tif", [], "x") == tw.Finished(True, True, True)
+        assert tw.finish_written_tiff("E:\\a.tif", "E:\\b.tif", [], "x", src_iptc_times=()) == \
+            tw.Finished(True, True, True)
+
+    def test_the_iptc_times_are_parsed_from_the_facts_read(self, monkeypatch):
+        out = ("[IFD0]          Compression: Uncompressed\n[IFD0]          PhotometricInterpretation: 2\n"
+               "[IPTC]          TimeCreated: 15:02:12\n[IPTC]          DigitalCreationTime: 15:02:12\n"
+               "[IPTC]          TimeCreated: 99:99:99\n")
+        monkeypatch.setattr(tw, "exiftool", lambda args, **k: out)
+        facts = tw.tiff_facts("x")
+        assert facts.iptc_times == (("DigitalCreationTime", "15:02:12"), ("TimeCreated", "15:02:12")), \
+            "the first of a repeated tag, sorted by name"
+        assert tw.iptc_times("x") == facts.iptc_times
+        assert all(a in tw._FACT_TAGS for a in tw.IPTC_TIME_READ_ARGS), "read in the same exiftool call"
 
 class TestResultKinds:
     """v3.1 (B3): one parser of the result lines, tw.result_kind, for the three tallies."""
