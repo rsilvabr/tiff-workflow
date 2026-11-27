@@ -19,7 +19,7 @@ import review_golden as rg  # noqa: E402
 GOLDEN = json.loads((ROOT / "tests" / "data" / "review_default_argv.json").read_text(encoding="utf-8"))
 UIS = ["plain", "rich"]
 #: the tasks on the review screen: answered with just `r` (the others: Enter everywhere)
-REVIEW_TASKS = {"compress"}
+REVIEW_TASKS = {"compress", "copy_exif", "fuji_compress", "both"}
 
 
 def test_the_golden_was_captured_from_v321_and_covers_every_case():
@@ -40,7 +40,10 @@ def test_enter_everywhere_gives_the_command_lines_of_v321(tmp_path, monkeypatch,
     if flow == "review":
         # only what cannot have a default, then the screen once (and mode 8's question)
         assert [q for q in asked if q.startswith("Review")] == [asked[-2 if mode == 8 else -1]], asked
-        assert len(asked) == (4 if mode == 8 else 3), asked
+        # Compress: the mode, the folder; Fuji: the pattern, the root, AutoFind's yes;
+        # Thumbnails: the folder, create or remove
+        first = {"compress": 2, "thumbnails": 2, "thumbnails_remove": 2}.get(task, 3)
+        assert len(asked) == first + 1 + (mode == 8), asked
 
 
 # --- the review screen itself ------------------------------------------------------------
@@ -268,3 +271,56 @@ def test_every_asked_option_is_a_row_or_asked_first():
             row_keys = set().union(*(keys_of.get(t, set()) for t in backend_tasks[backend]))
             assert opt.key in row_keys or opt.param in ct._REVIEW_NOT_ROWS.get(backend, {}), \
                 f"{backend} {opt.param}: asked by no row and not named in _REVIEW_NOT_ROWS"
+
+
+# --- the Fuji tasks ----------------------------------------------------------------------
+
+def _fuji(tmp_path, monkeypatch, ui, task, answers, rcs=None):
+    from types import SimpleNamespace
+    lib = rg.make_tree(tmp_path)
+    seq = _Seq(["", str(lib), ""] + list(answers))      # pattern 1 (S5pro), the root, AutoFind yes
+    rg._script(monkeypatch, ct, ui, seq)
+    ran = []
+    codes = iter(rcs or [])
+    monkeypatch.setattr(ct, "run_subprocess", lambda cmd, timeout=None, stdin=None:
+                        ran.append([str(a) for a in cmd]) or next(codes, 0))
+    cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
+    origin = {"fuji_compress": "compress"}.get(task, task)
+    result = ct._run_exif_or_compress(cfg, origin)
+    assert not seq.answers, f"answers left: {seq.answers}"
+    return result, ran, seq.asked, cfg
+
+
+@pytest.mark.parametrize("ui", UIS)
+def test_both_shows_its_two_command_lines(tmp_path, monkeypatch, ui):
+    if ui == "rich":
+        pytest.importorskip("rich")
+    shown = []
+    monkeypatch.setattr(ct, "_say", lambda text, style="": shown.append(ct._plain(text)))
+    ok, ran, asked, cfg = _fuji(tmp_path, monkeypatch, ui, "both", ["c", "q"])
+    assert ran == [] and ok is False
+    lines = [s for s in shown if " copy-exif --input-dir " in s or " compress --mode 9 " in s]
+    assert len(lines) == 2 and "copy-exif" in lines[0] and "compress" in lines[1], shown
+
+
+@pytest.mark.parametrize("ui", UIS)
+def test_both_dry_then_run_keeps_the_gate(tmp_path, monkeypatch, ui):
+    if ui == "rich":
+        pytest.importorskip("rich")
+    ok, ran, asked, cfg = _fuji(tmp_path, monkeypatch, ui, "both", ["d", "r"], rcs=[0, 0, 1])
+    assert ok is False and len(ran) == 3, "compress ran after the real Copy EXIF failed"
+    assert "--dry-run" in ran[0] and "--dry-run" in ran[1] and "--dry-run" not in ran[2]
+
+
+@pytest.mark.parametrize("ui", UIS)
+def test_fuji_b_goes_back_to_the_pattern_with_the_answers_kept(tmp_path, monkeypatch, ui):
+    if ui == "rich":
+        pytest.importorskip("rich")
+    w = str(next(i for i, r in enumerate(ct._review_rows({"origin": "copy_exif"}), 1)
+                 if r.key == "workers"))
+    lib = rg.make_tree(tmp_path)
+    ok, ran, asked, cfg = _fuji(tmp_path, monkeypatch, ui, "copy_exif",
+                                [w, "5", "b", "", str(lib), "", "r"])
+    (cmd,) = ran
+    assert _arg(cmd, "--workers") == "5"
+    assert sum(q.startswith("Choice") for q in asked) == 2

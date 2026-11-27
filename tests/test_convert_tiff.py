@@ -1092,10 +1092,8 @@ class TestWorkflow4TwoSteps:
         monkeypatch.setattr(convert_tiff, "step_pattern", lambda cfg: ["S5pro"])
         monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a: tmp_path)
         monkeypatch.setattr(convert_tiff, "step_autofind", lambda cfg, p, root: sessions)
-        monkeypatch.setattr(convert_tiff, "step_basic_params",
-                            lambda cfg, wf: wf.update(workers=2, dry_run=True) or True)
-        monkeypatch.setattr(convert_tiff, "step_confirm", lambda wf, cfg: True)
-        ran = self._wizard(monkeypatch, [0, 0, 1], ["y"])
+        # v3.4, the review screen: d (both steps, dry), then r (Copy EXIF fails)
+        ran = self._wizard(monkeypatch, [0, 0, 1], ["d", "r"])
         cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
         assert convert_tiff._run_exif_or_compress(cfg, "both") is False
         assert len(ran) == 3, "compress ran after the real Copy EXIF failed"

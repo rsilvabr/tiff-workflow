@@ -6074,110 +6074,80 @@ def run_free_compress(cfg: "ConfigManager") -> bool:
 
 
 def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
-    """
-    Shared implementation for Copy EXIF (2), Compress ZIP (3), Both (4).
-    workflow_type: "copy_exif" | "compress" | "both"
-    """
-    workflow = {
+    """Copy EXIF (2), Compress ZIP (3), Both (4): the pattern, the root folder and AutoFind,
+    then the review screen (`c` shows both command lines of Both). workflow_type: "copy_exif"
+    | "compress" | "both"."""
+    workflow: Dict = {
         "origin": workflow_type,
         "dest": "zip" if workflow_type in ("compress", "both") else "tiff",
         "folders": [],
-        "workers": cfg.config.default_workers,
-        "staging": "",
         "dry_run": False,
         "pattern": None,
         "mode": 9 if workflow_type in ("compress", "both") else 0,
     }
-
-    # Pattern selection
-    patterns = step_pattern(cfg)
-    if patterns is None:
-        return False
-    workflow["pattern"] = patterns
-
-    # Root folder for AutoFind
-    root = step_folder(cfg)
-    if root is None:
-        return False
-    workflow["input_dir"] = str(root)
-
-    # AutoFind
-    found_folders = step_autofind(cfg, patterns, root)
-    if not found_folders:
-        _say("No folders found matching pattern. Workflow cancelled.", "yellow")
-        return False
-    workflow["folders"] = found_folders
-
-    # Basic params
-    step_basic_params(cfg, workflow)
-
-    # Summary + confirm
-    if not step_confirm(workflow, cfg):
-        return False
-
-    cfg.config.last_workers = workflow["workers"]
-    cfg.save_config()
-
-    def run_and_prompt(cmd_list, folders):
-        _echo_command(cmd_list)
-        run_result = run_subprocess(cmd_list)
-        if workflow.get("dry_run"):
-            def real():
-                workflow["dry_run"] = False
-                return run_subprocess(
-                    build_compress_command(workflow, folders=folders)
-                    if "compress" in workflow_type or workflow_type == "both"
-                    else build_copy_exif_command(workflow, folders=folders))
-            _offer_real_run(run_result != 0, "Run for real now?", "Running for real...", real)
-
-    journal_wf = dict(workflow)
-    journal_wf["dry_run"] = False
-    wf_names = {"copy_exif": "Fuji: Copy EXIF", "compress": "Fuji: Compress", "both": "Fuji: Copy + Compress"}
-    label = (f"{wf_names[workflow_type]} -- pattern '{';'.join(patterns)}' under "
-             f"{truncate_path(root, 60)} ({len(found_folders)} folders)")
-    if workflow_type == "copy_exif":
-        journal_cmds = [build_copy_exif_command(journal_wf, folders=found_folders)]
-    elif workflow_type == "compress":
-        journal_cmds = [build_compress_command(journal_wf, folders=found_folders)]
-    else:
-        journal_step1 = dict(journal_wf)
-        journal_step1["compress_zip"] = False
-        journal_cmds = [
-            build_copy_exif_command(journal_step1, folders=found_folders),
-            build_compress_command(journal_wf, folders=found_folders),
-        ]
-    _save_last_run(cfg, workflow_type, label, journal_cmds,
-                   autofind={"root": str(root), "patterns": list(patterns)})
-
-    if workflow_type == "copy_exif":
-        cmd = build_copy_exif_command(workflow, folders=found_folders)
-        run_and_prompt(cmd, found_folders)
-        return True
-    elif workflow_type == "compress":
-        cmd = build_compress_command(workflow, folders=found_folders)
-        run_and_prompt(cmd, found_folders)
-        return True
-    else:  # both
-        step1_workflow = workflow.copy()
-        step1_workflow["compress_zip"] = False
-        rc_copy, rc_compress = _run_exif_then_compress(
-            build_copy_exif_command(step1_workflow, folders=found_folders),
-            build_compress_command(workflow, folders=found_folders))
-        if rc_compress is None:
+    edited: set = set()
+    wf_names = {"copy_exif": "Fuji: Copy EXIF", "compress": "Fuji: Compress",
+                "both": "Fuji: Copy + Compress"}
+    while True:
+        patterns = step_pattern(cfg)
+        if patterns is None:
             return False
+        workflow["pattern"] = patterns
+        root = step_folder(cfg)
+        if root is None:
+            return False
+        workflow["input_dir"] = str(root)
+        found_folders = step_autofind(cfg, patterns, root)
+        if not found_folders:
+            _say("No folders found matching pattern. Workflow cancelled.", "yellow")
+            return False
+        workflow["folders"] = found_folders
+        label = (f"{wf_names[workflow_type]} -- pattern '{';'.join(patterns)}' under "
+                 f"{truncate_path(root, 60)} ({len(found_folders)} folders)")
+        autofind = {"root": str(root), "patterns": list(patterns)}
 
-        if workflow.get("dry_run"):
-            def real():
-                workflow["dry_run"] = False
-                copy_workflow = workflow.copy()
-                copy_workflow["compress_zip"] = False
-                return _run_exif_then_compress(
-                    build_copy_exif_command(copy_workflow, folders=found_folders),
-                    build_compress_command(workflow, folders=found_folders))[1] is not None
-            if _offer_real_run(rc_compress != 0, "Run both steps for real now?", "Running for real...",
-                               real) is False:
-                return False
-        return True
+        def commands(dry: bool, found=found_folders) -> List[List[str]]:
+            wf = dict(workflow, dry_run=dry)
+            if workflow_type == "copy_exif":
+                return [build_copy_exif_command(wf, folders=found)]
+            if workflow_type == "compress":
+                return [build_compress_command(wf, folders=found)]
+            return [build_copy_exif_command(dict(wf, compress_zip=False), folders=found),
+                    build_compress_command(wf, folders=found)]
+
+        def run(dry: bool, commands=commands, label=label, autofind=autofind) -> Tuple[int, bool]:
+            """(exit code, Both's step 2 skipped because step 1 failed)"""
+            _review_remember(cfg, workflow)
+            cfg.save_config()
+            _save_last_run(cfg, workflow_type, label, commands(False), autofind=autofind)
+            cmds = commands(dry)
+            if workflow_type == "both":
+                rc_copy, rc_compress = _run_exif_then_compress(cmds[0], cmds[1])
+                return (rc_copy, True) if rc_compress is None else (rc_compress, False)
+            _echo_command(cmds[0])
+            return run_subprocess(cmds[0]), False
+
+        def run_dry(run=run) -> None:
+            if run(True)[0] != 0:
+                _say("Dry-run completed with errors. Review the output above before running "
+                     "for real.", "yellow")
+
+        def save(commands=commands, label=label, autofind=autofind) -> None:
+            _review_remember(cfg, workflow)
+            _review_save_preset(cfg, workflow_type, label, commands(False), autofind=autofind)
+
+        pattern_str = ", ".join(patterns)
+        header = [["Task:", wf_names[workflow_type]], ["Pattern:", pattern_str],
+                  ["Folder:", str(root)], ["Sessions:", f"{len(found_folders)} folder(s)"]]
+        action = _review_screen(cfg, workflow, root, header, commands, run_dry, save, edited)
+        if action == "b":
+            continue
+        if action == "q":
+            _say("Cancelled.", "dim")
+            return False
+        workflow["dry_run"] = False
+        # Both: step 2 runs only when step 1 exited 0 (_run_exif_then_compress)
+        return not run(False)[1]
 
 
 def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
