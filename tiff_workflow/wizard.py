@@ -2131,6 +2131,16 @@ def _thumb_on(workflow: Dict) -> bool:
     return bool(workflow.get("generate_thumbnail"))
 
 
+def _thumbs_create(workflow: Dict) -> bool:
+    """Thumbnails task: creating (the size, quality, format, page and workers are passed), not
+    removing."""
+    return not workflow.get("remove")
+
+
+def _thumbs_recursive(workflow: Dict) -> bool:
+    return bool(workflow.get("recursive"))
+
+
 def _advanced_value(workflow: Dict, backend: str, param: str):
     """The Advanced screen's value for `param`, or None. A malformed `advanced` entry (a
     hand-edited preset) is None, never an error."""
@@ -2341,18 +2351,29 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             value_spec="bool"),
     ),
     "thumbnails": (
-        # Registered for the coverage test only: run_generate_thumbnails builds its two
-        # command lines inline (not through the workflow dict).
-        Opt("input_dir", "", "none", "run", "asked", "Input folder", "Where the TIFFs are."),
-        Opt("size", "", "none", "thumbnail", "asked", "Size", "Pixels."),
-        Opt("quality", "", "none", "thumbnail", "asked", "Quality", "JPEG quality 1-100."),
-        Opt("format", "", "none", "thumbnail", "asked", "Format", "jpg, png, ..."),
-        Opt("page", "", "none", "thumbnail", "asked", "Page", "0 = first, or all."),
-        Opt("workers", "", "none", "performance", "asked", "Workers", "Parallel workers."),
-        Opt("output_dir", "", "none", "files", "asked", "Output folder",
+        # Through the workflow dict since v3.4 (item 13, commit 2): the order is the order
+        # run_generate_thumbnails emitted by hand, for creating (input, size, quality, format,
+        # page, workers, output, exclusion, recursive, dry run) and for removing (input,
+        # --remove, output, recursive, dry run).
+        Opt("input_dir", "folders", "input", "run", "asked", "Input folder", "Where the TIFFs are."),
+        Opt("remove", "remove", "flag", "run", "asked", "Remove thumbnails",
+            "Remove the thumbnails this script made instead of creating them."),
+        Opt("size", "size", "value", "thumbnail", "asked", "Size", "Pixels.", when=_thumbs_create),
+        Opt("quality", "quality", "value", "thumbnail", "asked", "Quality", "JPEG quality 1-100.",
+            when=_thumbs_create),
+        Opt("format", "format", "value", "thumbnail", "asked", "Format", "jpg, png, ...",
+            when=_thumbs_create),
+        Opt("page", "page", "value", "thumbnail", "asked", "Page", "0 = first, or all.",
+            when=_thumbs_create),
+        Opt("workers", "workers", "workers", "performance", "asked", "Workers", "Parallel workers.",
+            when=_thumbs_create),
+        Opt("output_dir", "output_dir", "value", "files", "asked", "Output folder",
             "Empty = next to each TIFF."),
-        Opt("exclude_folders", "", "none", "files", "asked", "Exclude folders",
-            "';'-separated folder NAMES to skip."),
+        Opt("exclude_folders", "exclude_folders", "value", "files", "asked", "Exclude folders",
+            "';'-separated folder NAMES to skip.", when=_thumbs_recursive),
+        Opt("recursive", "recursive", "flag", "files", "asked", "Recursive",
+            "The subfolders too."),
+        Opt("dry_run", "dry_run", "flag", "run", "asked", "Dry-run", "Plan and report; change nothing."),
         Opt("srgb_profile", "", "none", "thumbnail", "overlay", "sRGB ICC profile",
             "ICC file used to convert wide-gamut sources; empty = auto-detect."),
     ),
@@ -2370,11 +2391,7 @@ NOT_OFFERED: Dict[str, Dict[str, str]] = {
         "folder_pattern": "the wizard runs its own AutoFind",
         "icc_policy": "no documented values; the backend only captures it",
     },
-    "thumbnails": {
-        "remove": "own flow, the remove branch of run_generate_thumbnails",
-        "recursive": "asked inline by run_generate_thumbnails, not through the workflow dict",
-        "dry_run": "asked inline by run_generate_thumbnails, not through the workflow dict",
-    },
+    "thumbnails": {},
 }
 
 #: backend key -> the script(s) whose PARAMS tables the coverage test compares with it
@@ -2388,6 +2405,11 @@ REGISTRY_SCRIPTS = {
 def build_compress_command(workflow: Dict, folders: Optional[List[Path]] = None) -> List[str]:
     """The command line for compress_tiff_zip.py (the argv comes from REGISTRY)."""
     return _backend_command("compress_tiff_zip.py", _emit_all("compress", workflow, folders))
+
+
+def build_thumbnails_command(workflow: Dict, folders: Optional[List[Path]] = None) -> List[str]:
+    """The command line for generate_thumbnails.py (the argv comes from REGISTRY)."""
+    return _backend_command("generate_thumbnails.py", _emit_all("thumbnails", workflow, folders))
 
 
 def build_copy_exif_command(workflow: Dict, folders: Optional[List[Path]] = None,
@@ -5845,21 +5867,17 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
             return None
         return value
 
+    folders = [Path(input_dir)]
     if remove_mode:
         out_dir = _ask_output_dir()
         if out_dir is None:
             return False
         recursive, dry_run = _ask_recursive_and_dry()
-        cmd = _backend_command("generate_thumbnails.py", tw.cli_value("input_dir", input_dir)
-                               + [tw.cli_switch("remove", True)])
-        if out_dir:
-            cmd += tw.cli_value("output_dir", out_dir)
-        if recursive:
-            cmd += [tw.cli_switch("recursive", True)]
-        if dry_run:
-            cmd += [tw.cli_switch("dry_run", True)]
+        workflow = {"origin": "thumbnails", "remove": True, "output_dir": out_dir,
+                    "recursive": recursive, "dry_run": dry_run}
+        cmd = build_thumbnails_command(workflow, folders)
         _save_last_run(cfg, "thumbnails_remove", f"Thumbnails: REMOVE under {truncate_path(p, 60)}",
-                       [[a for a in cmd if a != tw.cli_switch("dry_run", True)]])
+                       [build_thumbnails_command({**workflow, "dry_run": False}, folders)])
         _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
         return run_subprocess(cmd) == 0
 
@@ -5899,25 +5917,14 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     recursive, dry_run = _ask_recursive_and_dry()
     exclude_folders = _ask_exclude_folders() if recursive else ""
 
-    cmd = _backend_command("generate_thumbnails.py",
-                           tw.cli_value("input_dir", input_dir)
-                           + tw.cli_value("size", size)
-                           + tw.cli_value("quality", quality_str)
-                           + tw.cli_value("format", fmt)
-                           + tw.cli_value("page", page)
-                           + tw.cli_value("workers", clamp_workers(cfg.config.last_workers
-                                                                   or cfg.config.default_workers)))
-    if out_dir:
-        cmd += tw.cli_value("output_dir", out_dir)
-    if exclude_folders:
-        cmd += tw.cli_value("exclude_folders", exclude_folders)
-    if recursive:
-        cmd += [tw.cli_switch("recursive", True)]
-    if dry_run:
-        cmd += [tw.cli_switch("dry_run", True)]
-
+    workflow = {"origin": "thumbnails", "remove": False, "size": size, "quality": quality_str,
+                "format": fmt, "page": page,
+                "workers": cfg.config.last_workers or cfg.config.default_workers,
+                "output_dir": out_dir, "exclude_folders": exclude_folders,
+                "recursive": recursive, "dry_run": dry_run}
+    cmd = build_thumbnails_command(workflow, folders)
     _save_last_run(cfg, "thumbnails", f"Thumbnails: {size}px {fmt} under {truncate_path(p, 60)}",
-                   [[a for a in cmd if a != tw.cli_switch("dry_run", True)]])
+                   [build_thumbnails_command({**workflow, "dry_run": False}, folders)])
 
     _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
     return run_subprocess(cmd) == 0
