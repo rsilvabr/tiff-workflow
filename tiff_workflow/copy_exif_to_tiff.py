@@ -111,6 +111,18 @@ class Run:
         self.err += 1
         self.log(text, "ERROR")
 
+    def uncount(self, line):
+        """The mirror of count: take back the OK or WARN of a result whose staged ZIP did not
+        land after all (the ERROR that says so is counted by error()). `counter` is not
+        touched: the file was processed. Caller's thread only (audit round 34)."""
+        kind = tw.result_kind(line)
+        if kind is tw.Kind.OK:
+            self.ok -= 1
+            if line.startswith("OK+SKIP-ZIP"):
+                self.zip_skip -= 1
+        elif kind is tw.Kind.WARN:
+            self.warn -= 1
+
     def names_in(self, directory):
         """{lower-case name: real name} of the files in a folder (cached)."""
         key = directory.lower()
@@ -231,12 +243,19 @@ def _jpeg_copy_args(source, tag_source, icc_tag, target):
     return tags
 
 
+class ZipStaged(NamedTuple):
+    """What _zip_staged did. Neither field set: the staged file may be registered for the move.
+    `error`: the ERROR result line -- the staged file is gone, and so is the copy in
+    --output-dir. `skip`: why the ZIP step was not even tried; nothing was written, the EXIF
+    copy (and the copy in --output-dir) stays: OK+SKIP-ZIP."""
+    error: str = ""
+    skip: str = ""
+
+
 def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, drop_copy, own):
     """The ZIP half of process_pair: write `tiff_target` as ZIP to the staged file
-    `write_dst` and prove it. Returns None when the staged file may be registered for the
-    move, else the ERROR result line -- by then the staged file is gone, and so is the copy
-    in --output-dir (`drop_copy`). `facts`: tiff_target's tw.tiff_facts. `own`: see
-    process_pair."""
+    `write_dst` and prove it. Returns a ZipStaged. `facts`: tiff_target's tw.tiff_facts.
+    `drop_copy` removes the copy in --output-dir; `own`: see process_pair."""
     own.append(write_dst)       # a staged name carries this run's id: this pair's, half written too
     # magick turned a neutral RGB TIFF into a 1-channel gray one with the RGB profile still
     # in it, and the pixel gate below cannot see that (audit round 28). The source layout
@@ -244,11 +263,13 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
     src_pages = facts.pages
     if src_pages is None:
         drop_copy()
-        return f"ERROR (sample layout unreadable) | {name}"
+        return ZipStaged(error=f"ERROR (sample layout unreadable) | {name}")
     type_args = tw.magick_keep_type_args(src_pages)
     if not tw.associated_alpha_rewritable(tiff_target, src_pages, timeout):
-        drop_copy()
-        return f"ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | {name}"
+        # The EXIF is in; only the ZIP cannot be made without changing the alpha. Nothing is
+        # wrong with the file: the ZIP step is skipped and the copy kept (audit round 34;
+        # until then an ERROR on every run).
+        return ZipStaged(skip="associated alpha that is not opaque")
 
     def drop_staged():
         tw.remove_quietly(write_dst)
@@ -266,14 +287,14 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
                    else f"magick reported success but wrote no file (expected: {write_dst})")
     if failure is not None:
         drop_staged()
-        return f"ERROR (magick ZIP) | {name} | {failure}"
+        return ZipStaged(error=f"ERROR (magick ZIP) | {name} | {failure}")
 
     # The staged ZIP is moved ON TOP of the TIFF it came from and there is no OLD_TIFFs
     # backup on this path, so it must be proven pixel-identical first. A zero exit from
     # magick is not proof: a page-short or truncated file still exits 0 and still decodes.
     if not tw.tiff_sample_layout_kept(src_pages, write_dst):
         drop_staged()
-        return f"ERROR (sample layout changed: {' '.join(src_pages)} - original untouched) | {name}"
+        return ZipStaged(error=f"ERROR (sample layout changed: {' '.join(src_pages)} - original untouched) | {name}")
 
     # The metadata and the page markers go in BEFORE the pixel gate, so the gate reads the
     # bytes that land, as in compress (audit round 29; until then the gate ran first and
@@ -294,14 +315,14 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
         tw.remove_quietly(tiff_meta)
     if not done.metadata:
         drop_staged()
-        return f"ERROR (exiftool metadata restore failed - original untouched) | {name}"
+        return ZipStaged(error=f"ERROR (exiftool metadata restore failed - original untouched) | {name}")
     if not done.markers:
         drop_staged()
-        return f"ERROR (subfiletype restore failed - original untouched) | {name}"
+        return ZipStaged(error=f"ERROR (subfiletype restore failed - original untouched) | {name}")
     if not tw.pixel_identical(tiff_target, write_dst, timeout, load_factor):
         drop_staged()
-        return f"ERROR (ZIP pixel verification failed - original untouched) | {name}"
-    return None
+        return ZipStaged(error=f"ERROR (ZIP pixel verification failed - original untouched) | {name}")
+    return ZipStaged()
 
 
 def process_pair(run, p, write_dir, final_dir, load_factor):
@@ -468,9 +489,13 @@ def _copy_pair(run, p, write_dir, final_dir, load_factor, own):
 
     # The staged file is registered for the move ONLY after every gate has passed: a staged
     # ZIP whose metadata restore failed was once moved ON TOP of the EXIF-bearing original.
-    error = _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, drop_copy, own)
-    if error:
-        return PairResult(error)
+    zipped = _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, drop_copy, own)
+    if zipped.error:
+        return PairResult(zipped.error)
+    if zipped.skip:
+        head = (f"WARN (heuristic JPEG match, {zipped.skip} -- ZIP skipped)" if heur
+                else f"OK+SKIP-ZIP ({zipped.skip})")
+        return PairResult(f"{head} | {name}{heur_suffix}{raw_suffix}")
 
     drop_copy()
     head = "WARN (heuristic JPEG match)" if heur else "OK+ZIP"
@@ -495,10 +520,12 @@ def _dest_name(run, tif, final_dir):
     return dest_name
 
 
-def _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir):
+def _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir, counted=None):
     """Move the staged ZIPs of a group to their final destination. Only what this run
     registered: an unprefixed file of the same name in the staging folder belongs to
-    somebody else."""
+    somebody else. `counted`: {TIFF path, lower case: the result line counted for it}; a
+    staged ZIP that does not land takes its OK/WARN back (audit round 34)."""
+    counted = counted or {}
     opt = run.opt
     if not (opt["compress_zip"] and not opt["dry_run"]):
         return
@@ -530,10 +557,25 @@ def _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir
                 except OSError:
                     pass
             moved += 1
-        elif failure[0] == "error":
-            run.error(f"ERROR (move failed) | {tif.name}: {failure[1]}")
         else:
-            run.error(f"ERROR (move failed) | {tif.name}")
+            line = counted.get(tif.path.lower())
+            if line is not None:
+                run.uncount(line)
+            # In place the EXIF went into the TIFF itself, which stays as it is; with
+            # --output-dir the copy there was dropped once the ZIP was made from it.
+            if tw.same_path(dest_path, tif.path):
+                what = "EXIF copied, the TIFF stays uncompressed"
+            else:
+                what = f"nothing written to {final_dir}, the source is as it was"
+            detail = f": {failure[1]}" if failure[0] == "error" else ""
+            run.error(f"ERROR (move failed) | {tif.name}{detail} | {what}")
+            # The staged ZIP goes, while its TIFF is there (fail closed: otherwise it may be
+            # the only copy).
+            if os.path.exists(stage_path):
+                if os.path.isfile(tif.path):
+                    tw.remove_quietly(stage_path)
+                else:
+                    run.log(f"  the TIFF is missing: its ZIP copy stays in {stage_path}", "WARN")
     if moved > 0:
         run.log(f"  -> Moved {moved} file(s) -> {final_dir}")
 
@@ -603,6 +645,14 @@ def process_folder(run, root):
                 kind=match.kind if match else None,
                 source=match.source if match else None))
 
+        # What a killed run left next to the files this group writes: the TIFF itself (the
+        # EXIF copy, exiftool's _exiftool_tmp) and its ZIP's destination (audit round 34).
+        swept = tw.sweep_leftovers(
+            [(p.tiff, p.tiff) for p in pairs]
+            + [(tw.join_path(final_dir, p.dest_name), p.tiff) for p in pairs],
+            run.run_id, opt["dry_run"])
+        tw.report_swept(log, swept, opt["dry_run"])
+
         # The cap is about how many ImageMagick processes run at once; --dry-run starts none.
         workers = opt["workers"]
         if not opt["dry_run"]:
@@ -612,6 +662,7 @@ def process_folder(run, root):
         load = float(max(1, min(workers, len(pairs))))   # workers running at once share the disk
 
         staging_map = {}
+        counted = {}
         for p, result in tw.run_tasks(pairs,
                                       # this group's folders and load, bound now
                                       lambda q, wd=write_dir, fd=final_dir, lf=load:
@@ -623,9 +674,10 @@ def process_folder(run, root):
                 run.multi_paths.append(result.multi)
             if result.staged:
                 staging_map[p.tiff.lower()] = result.staged
+                counted[p.tiff.lower()] = result.line
             run.count(result.line)
 
-        _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir)
+        _move_staged(run, group_files, staging_map, dest_names, write_dir, final_dir, counted)
 
 
 def _input_dirs(opt, log):
@@ -689,7 +741,7 @@ def run_main(argv, state):
         return tw.EXIT_USAGE
 
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
-                                        tw.INSTALL_DIR)
+                                        tw.INSTALL_DIR, PARAMS)
     if overlay["info"]:
         tw.say(overlay["info"])
     for w in overlay["warnings"]:
@@ -763,6 +815,16 @@ def run_main(argv, state):
         f"SkipIfTiffHasExif: {opt['skip_if_tiff_has_exif']} | "
         f"OutputDir: {opt['output_dir'] or '(overwrite in place)'} | "
         f"Staging: {opt['staging_dir'] or 'disabled'} | DryRun: {opt['dry_run']}")
+
+    if not opt["dry_run"]:
+        n = tw.sweep_temp_files()
+        if n:
+            log(f"Removed {n} temp file(s) an interrupted run left in the temp folder")
+    if opt["staging_dir"] and opt["compress_zip"]:
+        count, size = tw.staged_leftovers(opt["staging_dir"], run.run_id)
+        if count:
+            log(f"NOTE: {count} file(s) ({size / 1e6:.1f} MB) left in the staging folder by an "
+                f"earlier run: {opt['staging_dir']}", "WARN")
 
     for root in input_dirs:
         if opt["auto_find"]:

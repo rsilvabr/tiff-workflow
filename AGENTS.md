@@ -113,7 +113,15 @@ starts it.
   (`_land_padded_conversion` in the wizard).
   Every run reports originals left in `OLD_TIFFs/` with nothing in their place
   (`find_stranded_originals`); never delete or move an `OLD_TIFFs` backup whose place is
-  empty (`tools/move_old_backups.py`, the wizard's Delete OLD_TIFFs).
+  empty (`tools/move_old_backups.py`, the wizard's Delete OLD_TIFFs). A timestamped (or
+  `_vN`) backup is read by ONE rule (`tw.STAMPED_BACKUP_RE`, `backup_counterparts`), and a base
+  backup goes only once no renamed sibling of it is left in its folder (round 34).
+  What a KILLED run left (staged file, temp sibling, `<name>_exiftool_tmp`, `tw_*` temp files)
+  is removed by `tw.sweep_leftovers` only when all five hold: a leftover shape of a file THIS
+  run writes in that folder; another run's id; a regular file, not a link; older than
+  `LEFTOVER_MIN_AGE_S` by write AND creation time (a safety constant, never a setting); its
+  source a file right now. A shared `--staging-dir` is only reported, never swept (round 34).
+  A file that did not land is never also counted OK: `Run.uncount` takes its line back.
   Only an OK/WARN result lands (`_run_group`'s `unlanded_srcs`): a SKIP that drops its output
   after writing it (`--recompress-zip`'s size gate) must not have a leftover landed.
   A file that takes its original's place keeps the original's modification time

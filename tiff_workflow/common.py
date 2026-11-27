@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime
 from enum import Enum
@@ -368,6 +369,24 @@ def _overlay_value(spec: str, value):
     return False, "a setting the overlay cannot change"
 
 
+def overlay_checked(spec: str, value, p=None):
+    """_overlay_value, then the range of the parameter `p` (its P's lo/hi) for a number: the
+    overlay refuses what the command line refuses, where the file is read (audit round 34: a
+    thumbnail size of 16 in the file passed "int:1:" and stopped every run of the backend with
+    exit 2). The spec stays as it is; the limit's one copy is the P."""
+    ok, checked = _overlay_value(spec, value)
+    if not ok or p is None or p.kind not in ("int", "float") or isinstance(checked, str):
+        return ok, checked
+    if (p.lo is not None and checked < p.lo) or (p.hi is not None and checked > p.hi):
+        what = "a whole number" if p.kind == "int" else "a number"
+        if p.lo is not None and p.hi is not None:
+            return False, f"{what} from {p.lo} to {p.hi}"
+        if p.lo is not None:
+            return False, f"{what} of at least {p.lo}"
+        return False, f"{what} of at most {p.hi}"
+    return ok, checked
+
+
 def user_profile_dir():
     """The user's profile folder (USERPROFILE on Windows, else the home folder): where the
     settings overlay is looked for last and where compress keeps its no-gain memory."""
@@ -388,10 +407,12 @@ def settings_overlay_path(script_root):
     return os.path.join(user_profile_dir(), SETTINGS_OVERLAY_FILE)
 
 
-def read_settings_overlay(section, specs, script_root):
+def read_settings_overlay(section, specs, script_root, params=()):
     """{"path", "values": {name: checked value}, "warnings": [text]} of `section` of the
-    overlay file. NEVER raises: a file that cannot be read changes nothing and says so."""
+    overlay file. NEVER raises: a file that cannot be read changes nothing and says so.
+    `params`: the script's PARAMS, whose ranges a number must also be in (overlay_checked)."""
     result = {"path": "", "values": {}, "warnings": []}
+    by_name = {p.name: p for p in params}
     try:
         path = settings_overlay_path(script_root)
         if path is None:
@@ -414,7 +435,7 @@ def read_settings_overlay(section, specs, script_root):
                 result["warnings"].append(
                     f"{name} is not a setting the overlay can change in {section}; ignored")
                 continue
-            ok, checked = _overlay_value(spec, value)
+            ok, checked = overlay_checked(spec, value, by_name.get(name))
             if not ok:
                 result["warnings"].append(
                     f"{name} = {json.dumps(value, ensure_ascii=False)} is not valid "
@@ -427,11 +448,12 @@ def read_settings_overlay(section, specs, script_root):
     return result
 
 
-def apply_settings_overlay(section, specs, values, bound, script_root):
+def apply_settings_overlay(section, specs, values, bound, script_root, params=()):
     """Apply the overlay to `values` (the parsed parameters), before anything reads one. A
-    parameter given on the command line (`bound`) always beats it. Returns
-    {"path", "applied": [names], "warnings": [text], "info": the line to print or ""}."""
-    overlay = read_settings_overlay(section, specs, script_root)
+    parameter given on the command line (`bound`) always beats it. `params`: the script's
+    PARAMS (their ranges). Returns {"path", "applied": [names], "warnings": [text], "info": the
+    line to print or ""}."""
+    overlay = read_settings_overlay(section, specs, script_root, params)
     applied = []
     for name, value in overlay["values"].items():
         if name in bound or name not in values:
@@ -747,6 +769,51 @@ def resolve_output(f, mode, input_root, opt):
     return None
 
 
+#: A backup renamed by its writer because one of that name was already there, in the stem
+#: (group "base"): compress modes 0/9 add a date stamp in OLD_TIFFs (complete_keep_original:
+#: photo_20260805_101500[_1].tif), the wizard's padded conversion adds _vN in OLD_PADDED
+#: (_finalize_padded: photo_v2.tif). A name of that shape is a RENAME only while its base
+#: backup <base>.tif/.tiff is in the same folder (backup_base_stem): otherwise the suffix is part
+#: of the photo's own name (IMG_20190815_143000.tif from a phone, portrait_v2.tif). One rule for
+#: the stranded check, the wizard's Delete OLD_TIFFs and tools/move_old_backups.py (audit
+#: round 34).
+STAMPED_BACKUP_RE = re.compile(r"^(?P<base>.+)_\d{8}_\d{6}(?:_\d+)?$")
+PADDED_RENAMED_RE = re.compile(r"^(?P<base>.+)_v\d+$")
+_TIFF_EXTS = (".tif", ".tiff")
+
+
+def backup_base_stem(backup_dir, stem, renamed_re):
+    """The stem of the backup a renamed backup collided with -- `stem` without its rename
+    suffix -- when `renamed_re` matches it AND <base>.tif or <base>.tiff is a file in
+    `backup_dir`; else None."""
+    m = renamed_re.match(stem)
+    if not m:
+        return None
+    base = m.group("base")
+    if any(os.path.isfile(long_path(os.path.join(backup_dir, base + e))) for e in _TIFF_EXTS):
+        return base
+    return None
+
+
+def backup_counterparts(backup_path, renamed_re):
+    """The places, in the folder above the backup folder, where the file this backup was made
+    from can be, in order: the same name; for a TIFF the same stem with the other extension
+    too (a .tiff source is written as .tif), then the base stem of a renamed backup
+    (backup_base_stem) with both. A sidecar (not a TIFF) has only its own name."""
+    backup_dir = os.path.dirname(backup_path)
+    parent = os.path.dirname(backup_dir)
+    name = os.path.basename(backup_path)
+    stem, ext = os.path.splitext(name)
+    if not TIFF_EXT_RE.match(ext):
+        return [os.path.join(parent, name)]
+    other = ".tiff" if ext.lower() == ".tif" else ".tif"
+    places = [os.path.join(parent, name), os.path.join(parent, stem + other)]
+    base = backup_base_stem(backup_dir, stem, renamed_re)
+    if base:
+        places += [os.path.join(parent, base + e) for e in _TIFF_EXTS]
+    return places
+
+
 def find_stranded_originals(root, recurse, backup_names, exclude_names):
     """Backups in OLD_TIFFs/ whose original place is EMPTY: the only copy of that image.
 
@@ -798,9 +865,6 @@ def find_stranded_originals(root, recurse, backup_names, exclude_names):
             stack.append(plain)
     backup_dirs.sort(key=str.lower)
 
-    def is_file(directory, name):
-        return os.path.isfile(long_path(os.path.join(directory, name)))
-
     for d in backup_dirs:
         parent = os.path.dirname(d)
         if exclude_names and path_excluded(parent, root, exclude_names):
@@ -814,14 +878,13 @@ def find_stranded_originals(root, recurse, backup_names, exclude_names):
             stem, ext = os.path.splitext(b_name)
             if not TIFF_EXT_RE.match(ext):
                 continue
-            stems = [stem]
-            m = re.fullmatch(r"(.+)_\d{8}_\d{6}(_\d+)?", stem)
-            if m and any(is_file(d, m.group(1) + e) for e in (".tif", ".tiff")):
-                stems.append(m.group(1))
-            present = any(is_file(parent, s + e) for s in stems for e in (".tif", ".tiff"))
+            backup = os.path.join(d, b_name)
+            present = any(os.path.isfile(long_path(c))
+                          for c in backup_counterparts(backup, STAMPED_BACKUP_RE))
             if not present:
-                found.append({"backup": os.path.join(d, b_name),
-                              "target": os.path.join(parent, stems[-1] + ext)})
+                base = backup_base_stem(d, stem, STAMPED_BACKUP_RE)
+                found.append({"backup": backup,
+                              "target": os.path.join(parent, (base or stem) + ext)})
     return found
 
 
@@ -1212,6 +1275,22 @@ def temp_file_path(suffix):
     return os.path.join(tempfile.gettempdir(), f"tw_{uuid.uuid4().hex[:16]}{suffix}")
 
 
+def metadata_container_path(*near):
+    """A new name for a metadata container (`tw_<16 hex>.mie`, the shape sweep_leftovers and
+    sweep_temp_files know; .mie is not a TIFF, discovery never takes it) in the first folder
+    whose full path has no '%': the temp folder, then the folder of each `near` path in order.
+    exiftool expands '%' in `-o` and in `-tagsfromfile`, so a container there would be
+    written, or read, somewhere else. Until audit round 34 only the temp folder was tried: a
+    '%' in it refused every file with a '%' in its name. None fits -> ToolError (the caller
+    refuses the write, as before)."""
+    folders = [tempfile.gettempdir()] + [os.path.dirname(full_path(str(n))) for n in near if n]
+    for folder in folders:
+        if "%" not in full_path(folder):
+            return os.path.join(folder, f"tw_{uuid.uuid4().hex[:16]}.mie")
+    raise ToolError("no metadata container: every folder it could go in has a '%' in its "
+                    "path (" + "; ".join(folders) + ")")
+
+
 def remove_quietly(path):
     """Delete a file; never raises. A read-only file is deleted too."""
     if not path:
@@ -1372,15 +1451,14 @@ def backup_tiff_metadata(src, write_dst):
     doubling the '%' does not escape it). The file operand is not expanded, so dumping FROM
     the '%' name works. The caller deletes the container.
 
+    Where: metadata_container_path -- the temp folder, else the folder of `write_dst` (a
+    staging folder before the photo's), else the folder of `src`.
+
     FAIL-CLOSED: raises ToolError when the container is needed and could not be written;
     the caller must refuse the write, which would strip every tag."""
     if not same_path(write_dst, src) and "%" not in str(src):
         return None
-    meta = temp_file_path(".mie")
-    # `-o` is format-expanded like `-tagsfromfile`: a '%' in the temp folder would send the
-    # container somewhere else.
-    if "%" in meta:
-        raise ToolError(f"no metadata container: the temp folder has a '%' in its name ({meta})")
+    meta = metadata_container_path(write_dst, src)
     try:
         out = exiftool(["-q", "-q", "-all:all",
                         "-IPTC:CodedCharacterSet<IPTC:CodedCharacterSet", "-o", meta, src])
@@ -2321,6 +2399,183 @@ def cleanup_run_files(dirs, run_id):
                     shutil.rmtree(target, ignore_errors=True)
                 else:
                     remove_quietly(target)
+
+
+# --- What a killed run left behind (audit round 34) -------------------
+#
+# A run that is KILLED (not Ctrl+C: cleanup_run_files never runs) leaves its files where they
+# were: a staged file, a temp sibling next to the photo, exiftool's `<name>_exiftool_tmp` (with
+# it there, every later exiftool write of that photo fails: "Temporary file already exists"),
+# and the temp files of the temp folder. None of them is ever the only copy of a photo: an
+# original leaves its place only by the rename that consumes its staged or temp file. The
+# risks are a CONCURRENT run's file in flight and a photo that merely looks like a leftover,
+# so a name is removed only when ALL of these hold (sweep_leftovers):
+#   1. it is exactly one of the shapes built from the name of a file THIS run is about to
+#      write in that folder (or a metadata container `tw_<16 hex>.mie` in such a folder);
+#   2. its run id is not this run's;
+#   3. it is a regular file, not a link;
+#   4. it is old: LEFTOVER_MIN_AGE_S since its last write AND its creation (a staged file is
+#      given its original's old write time);
+#   5. the source of that file is a regular file right now.
+# A SAFETY constant, not a setting: never in an OVERLAY_SPECS table.
+LEFTOVER_MIN_AGE_S = 3600
+
+_SWEEP_TEMP_SIBLING = re.compile(r"^(?P<target>.+)\.(?P<id>[0-9a-f]{8})_[0-9a-f]{12}\.tif$", re.I)
+_SWEEP_STAGED = re.compile(r"^(?P<id>[0-9a-f]{8})_[0-9a-f]{12}_(?P<target>.+)$", re.I)
+_SWEEP_EXIFTOOL_TMP = re.compile(r"^(?P<target>.+)_exiftool_tmp$", re.I)
+#: The temp files of this toolkit (temp_file_path): metadata containers, predictor samples,
+#: thumbnails.
+TEMP_FILE_RE = re.compile(r"^tw_[0-9a-f]{16}\.(mie|tif|tiff|jpg|jpeg|png)$", re.I)
+
+
+class Swept(NamedTuple):
+    """What sweep_leftovers did: the paths removed (or, in a dry run, that would be), and the
+    leftover-shaped ones kept, as (path, why)."""
+    removed: list
+    kept: list
+
+
+def _leftover_old_enough(st, now):
+    return now - max(st.st_mtime, st.st_ctime) >= LEFTOVER_MIN_AGE_S
+
+
+def sweep_leftovers(pairs, run_id, dry_run):
+    """Remove what a killed run left next to the files this run is about to write. `pairs`:
+    (the file this run writes, the source it is made from). One listing per folder of a
+    target. The five conditions are in the comment above; anything else of a leftover's shape
+    is kept and reported. Never raises: a delete that fails is "kept"."""
+    folders = {}
+    for target, source in pairs:
+        d = os.path.dirname(str(target))
+        entry = folders.setdefault(d.lower(), (d, {}))
+        entry[1].setdefault(os.path.basename(str(target)).lower(), str(source))
+    removed, kept = [], []
+    now = time.time()
+    for d, targets in folders.values():
+        try:
+            with os.scandir(long_path(d)) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for e in entries:
+            source = None
+            other_run = True
+            for rx in (_SWEEP_TEMP_SIBLING, _SWEEP_STAGED, _SWEEP_EXIFTOOL_TMP):
+                m = rx.match(e.name)
+                if m and m.group("target").lower() in targets:
+                    source = targets[m.group("target").lower()]
+                    if "id" in rx.groupindex:
+                        other_run = m.group("id").lower() != run_id.lower()
+                    break
+            if source is None and e.name.lower().endswith(".mie") and TEMP_FILE_RE.match(e.name):
+                # a metadata container (metadata_container_path) next to the photos: any
+                # source of this folder that is there
+                source = next((s for s in targets.values()
+                               if os.path.isfile(long_path(s))), next(iter(targets.values())))
+            if source is None:
+                continue
+            path = os.path.join(d, e.name)
+            why = _leftover_kept_why(e, now, other_run, source)
+            if why:
+                kept.append((path, why))
+                continue
+            if not dry_run:
+                try:
+                    os.remove(long_path(path))
+                except OSError as err:
+                    kept.append((path, f"not removed: {err}"))
+                    continue
+            removed.append(path)
+    return Swept(removed, kept)
+
+
+def report_swept(log, swept, dry_run):
+    """The lines of a sweep_leftovers result, on the caller's thread: what was removed (up to
+    ten names) and what of that shape was kept."""
+    if swept.removed:
+        verb = "Would remove" if dry_run else "Removed"
+        log(f"{verb} {len(swept.removed)} leftover file(s) of an interrupted run")
+        for path in swept.removed[:10]:
+            log(f"  {path}")
+        if len(swept.removed) > 10:
+            log(f"  ... and {len(swept.removed) - 10} more")
+    kept = [(p, why) for p, why in swept.kept if why != "this run's own"]
+    if kept:
+        log(f"Kept {len(kept)} file(s) shaped like the leftovers of an interrupted run (too "
+            f"recent, or their original is missing): {kept[0][0]} ({kept[0][1]})"
+            + (f" and {len(kept) - 1} more" if len(kept) > 1 else ""), "WARN")
+
+
+def _leftover_kept_why(entry, now, other_run, source):
+    """Why a leftover-shaped entry stays, or "" when it may go."""
+    if not other_run:
+        return "this run's own"
+    try:
+        if not entry.is_file(follow_symlinks=False) or entry_flags(entry)[1]:
+            return "not a regular file"
+        st = entry.stat(follow_symlinks=False)
+    except OSError:
+        return "unreadable"
+    if not _leftover_old_enough(st, now):
+        return "too recent"
+    if not os.path.isfile(long_path(source)):
+        return "its original is missing"
+    return ""
+
+
+def sweep_temp_files(dry_run=False):
+    """Remove this toolkit's own temp files (TEMP_FILE_RE) older than LEFTOVER_MIN_AGE_S from
+    the temp folder: what a killed run left there. Returns how many. Never raises."""
+    folder = tempfile.gettempdir()
+    count = 0
+    now = time.time()
+    try:
+        with os.scandir(folder) as it:
+            entries = list(it)
+    except OSError:
+        return 0
+    for e in entries:
+        if not TEMP_FILE_RE.match(e.name):
+            continue
+        try:
+            if not e.is_file(follow_symlinks=False) or entry_flags(e)[1]:
+                continue
+            if not _leftover_old_enough(e.stat(follow_symlinks=False), now):
+                continue
+            if not dry_run:
+                os.remove(os.path.join(folder, e.name))
+            count += 1
+        except OSError:
+            continue
+    return count
+
+
+def staged_leftovers(staging_dir, run_id):
+    """(how many, bytes) of the files in a --staging-dir that an EARLIER run left there: the
+    staged shape, another run id, old. REPORTED, never removed: a staging folder is shared by
+    presets of different folders, and a staged file waits there until its group ends -- hours
+    on a big folder -- so age alone proves nothing (audit round 34)."""
+    count = size = 0
+    now = time.time()
+    try:
+        with os.scandir(long_path(staging_dir)) as it:
+            entries = list(it)
+    except OSError:
+        return 0, 0
+    for e in entries:
+        m = _SWEEP_STAGED.match(e.name)
+        if not m or m.group("id").lower() == run_id.lower():
+            continue
+        try:
+            if not e.is_file(follow_symlinks=False):
+                continue
+            st = e.stat(follow_symlinks=False)
+        except OSError:
+            continue
+        if _leftover_old_enough(st, now):
+            count += 1
+            size += st.st_size
+    return count, size
 
 
 # --- Running the per-file work --------------------------------------

@@ -110,6 +110,13 @@ alone. `--dry-run` skips the cap entirely (nothing runs).
 6. If `--compress-zip` is set, compress the TIFF (with EXIF) to ZIP format; the ZIP replaces the
    TIFF only after it is proven pixel-identical to it
 7. A file whose EXIF copy failed is reported as `ERROR`, and the run ends with exit code 1
+8. With `--compress-zip`, a TIFF with associated alpha that is not opaque keeps its EXIF and is
+   not compressed: `OK+SKIP-ZIP (associated alpha that is not opaque)` (ImageMagick would change
+   the alpha; an ERROR until v3.2). A ZIP that cannot be moved into place (the TIFF held open by
+   another program) is `ERROR (move failed) | <name> | EXIF copied, the TIFF stays uncompressed`,
+   and its staged file is removed
+9. What a killed run left next to the TIFFs (a staged file, exiftool's `<name>_exiftool_tmp`)
+   is removed by the next run under the rules of compress (`docs/README_compress_tiff_zip.md`)
 
 Each run writes its log to `Logs\Copy-S5Pro-Exif\<timestamp>.log` under the **current
 folder** (the one you start it from), like the other backends -- through the wizard, that is

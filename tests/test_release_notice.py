@@ -242,3 +242,77 @@ def test_the_menu_run_does_ask(mgr, monkeypatch, capsys):
     assert calls == ["tiff-workflow"]
     assert shown and shown[0] and shown[0][0] == _bump(patch=1)
     assert "A new release is out" in capsys.readouterr().out
+
+
+# --- audit round 34: the notice follows the newest answer; `u` is `U` ------------------------
+
+def _menu_draw(mgr, monkeypatch, capsys, answer="0"):
+    """One draw of the main menu, answered `answer`: (its Option texts, what it printed)."""
+    shown = []
+    monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+    monkeypatch.setattr(ct, "_table", lambda cols, rows, **kw: shown.extend(r[1] for r in rows))
+    monkeypatch.setattr("builtins.input", lambda prompt="": answer)
+    choice = ct.show_main_menu(mgr)
+    return choice, shown, capsys.readouterr().out
+
+
+def test_a_kept_notice_goes_when_the_fresh_answer_says_up_to_date(mgr, monkeypatch, capsys):
+    """An earlier run kept "v(next) is out"; that release was retired and the fresh answer
+    today is this copy's own. v3.2.1 kept advertising it for the whole session."""
+    mgr.save_update_answer("2000-01-01", _bump(patch=1))
+    mgr.update_available = (_bump(patch=1), "url")        # what main() set at start-up
+    mgr.save_update_answer(TODAY, "v" + MINE)             # the fresh answer is in
+    mgr.update_poll = lambda wait=0.0: ct._kept_update_notice(mgr)
+    _choice, rows, _out = _menu_draw(mgr, monkeypatch, capsys)
+    assert not any(r.startswith("Update available") for r in rows), rows
+    assert mgr.update_available is None
+
+
+def test_a_fresh_newer_answer_keeps_the_row_and_says_it_once(mgr, monkeypatch, capsys):
+    mgr.save_update_answer(TODAY, _bump(patch=1))
+    mgr.update_poll = lambda wait=0.0: ct._kept_update_notice(mgr)
+    _c, rows, out = _menu_draw(mgr, monkeypatch, capsys)
+    assert any(r.startswith(f"Update available: {_bump(patch=1)}") for r in rows), rows
+    assert out.count("A new release is out") == 1, out
+    _c, rows, out = _menu_draw(mgr, monkeypatch, capsys)
+    assert any(r.startswith("Update available") for r in rows)
+    assert "A new release is out" not in out, "said again on every draw"
+
+
+def test_menu_4_without_network_keeps_what_was_known(mgr, monkeypatch):
+    mgr.save_update_answer("2000-01-01", _bump(patch=1))
+    _answering(monkeypatch, None)
+    line, notice = ct._update_check_now(mgr)
+    assert "did not answer" in line
+    assert notice is not None and notice[1].endswith("/releases/latest")
+
+
+@pytest.mark.parametrize("screen", ["plain", "rich"])
+@pytest.mark.parametrize("typed", ["u", "U"])
+def test_u_opens_the_release_page_in_either_case(mgr, monkeypatch, screen, typed):
+    """`u` was refused ("Please select one of the available options") on both screens."""
+    opened = []
+    mgr.update_available = (_bump(patch=1), "https://example.invalid/releases/latest")
+    answers = iter([typed, "0"])
+    monkeypatch.setattr(ct, "_table", lambda *a, **k: None)
+    if screen == "rich":
+        pytest.importorskip("rich")
+        monkeypatch.setattr(ct, "RICH_AVAILABLE", True)
+        monkeypatch.setattr(ct, "console", type("C", (), {"print": staticmethod(lambda *a, **k: None)})())
+        import rich.console
+        real = ct._CaselessPrompt
+
+        def ask(prompt, choices=None, **k):
+            # the real check of the subclass, the answer typed
+            p = real(prompt, choices=choices, console=rich.console.Console(file=__import__("io").StringIO()))
+            value = next(answers)
+            assert p.check_choice(value), f"{value!r} refused"
+            return value
+        monkeypatch.setattr(ct.Prompt, "ask", staticmethod(ask))
+    else:
+        monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
+        monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    import webbrowser
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url))
+    ct._menu_loop(mgr)
+    assert opened == ["https://example.invalid/releases/latest"]

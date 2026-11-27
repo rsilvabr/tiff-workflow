@@ -240,6 +240,27 @@ One exclusion list now covers every mode.
 Staged and temporary files left behind by an interrupted run are skipped the same way, and both
 counts are logged.
 
+Since v3.3 (audit round 34) the next run over the same files also REMOVES what a killed run left
+next to them -- the temp sibling `<name>.<8 hex>_<12 hex>.tif`, a staged file, exiftool's
+`<name>_exiftool_tmp` (with it there every later exiftool write of that photo fails) -- but only
+when all of these hold: it is the leftover shape of a file this run writes in that folder,
+another run made it, it is a regular file, it is at least an hour old (write and creation time:
+another run working on the same folder at the same time keeps its files), and its original is
+there. Anything else of that shape is kept and named in the log; `--dry-run` says
+`Would remove`. The toolkit's own `tw_*` temp files older than an hour go from the temp folder.
+A `--staging-dir` is shared by presets of different folders: what an earlier run left there is
+only reported (`NOTE: N file(s) ... left in the staging folder by an earlier run`).
+
+A TIFF with associated alpha that is not opaque (ImageMagick would change the alpha) is a
+`SKIP (not rewritten - associated alpha that is not opaque: ImageMagick would change it)` in
+every mode, the file as it was (an ERROR until v3.2).
+
+Mode 8: the result line says what the worker did; a deleted `.tiff` source is the line
+`-> Deleted N source file(s) after successful move`, written after the delete (until v3.2 the
+worker's line said `[SOURCE DELETED]` before anything was deleted). A file another program holds
+open is one `ERROR (move exception) | <name>: ... | not landed: <name> is as it was before the
+run`, not also an OK, and its staged file does not stay in the staging folder.
+
 ### When the original moves (modes 0/9, since round 26)
 
 The original stays in its place until its compressed copy exists: the copy is written to a

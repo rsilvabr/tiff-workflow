@@ -32,15 +32,40 @@ Audit round 28: a name counts as RENAMED only in the folder whose writer makes t
 Otherwise the suffix is part of the photo's own name: OLD_TIFFs\portrait_v2.tif, or
 IMG_20190815_143000.tif from a phone, with nothing in its place but an unrelated
 portrait.tif / IMG.tif next to it, was moved off the disk as a spare copy.
+
+Audit round 34: that rule is the toolkit's own (tiff_workflow/common.py: STAMPED_BACKUP_RE,
+PADDED_RENAMED_RE, backup_base_stem, backup_counterparts), imported from the installation --
+the folder of this script (the owner's _LOCAL keeps it next to tiff_workflow/), else the folder
+above it (the repo's tools/). A sidecar (not a TIFF) has only its own name. And a base backup
+goes only with its renamed siblings: the renamed ones move first, and a base is moved only
+when no renamed sibling of it is left in its folder (a sibling skipped or failed keeps its base:
+without the base next to it, the renamed one would read as a photo of its own name, stranded).
 """
 import argparse
 import hashlib
 import io
 import os
-import re
 import sys
 import time
 from pathlib import Path
+from typing import Any
+
+
+def _find_installation():
+    """The folder that holds tiff_workflow/common.py: this script's own, then the one above."""
+    here = Path(__file__).resolve().parent
+    for folder in (here, here.parent):
+        if (folder / "tiff_workflow" / "common.py").is_file():
+            return folder
+    return None
+
+
+_INSTALL = _find_installation()
+tw: Any = None          # tiff_workflow.common, or None: main() then says so and exits 2
+if _INSTALL is not None:
+    if str(_INSTALL) not in sys.path:
+        sys.path.insert(0, str(_INSTALL))
+    from tiff_workflow import common as tw
 
 DEFAULT_SOURCE = "G:\\"
 DEFAULT_ROOTS = [f"{y}" for y in range(2015, 2024)]   # folders below the source drive
@@ -50,24 +75,40 @@ DEFAULT_DESTS = {
     "OLD_TIFFs": "H:\\OLD_TIFFS_BCK",
 }
 TIFF_EXTS = (".tif", ".tiff")
-# Renamed backups, per folder: name_v2 (padded conversion, OLD_PADDED), name_20260803_081300[_1]
-# (compress modes 0/9, OLD_TIFFs). Keys are upper-case folder names.
-_RENAMED = {
-    "OLD_PADDED": re.compile(r"^(?P<base>.+)_v\d+$"),
-    "OLD_TIFFS": re.compile(r"^(?P<base>.+)_\d{8}_\d{6}(?:_\d+)?$"),
-}
+
+
+def _renamed_re(backup: Path):
+    """The rename the writer of this backup's folder makes (the module docstring), or None:
+    name_v2 in OLD_PADDED (padded conversion), name_20260803_081300[_1] in OLD_TIFFs (compress
+    modes 0/9)."""
+    return {"OLD_PADDED": tw.PADDED_RENAMED_RE,
+            "OLD_TIFFS": tw.STAMPED_BACKUP_RE}.get(backup.parent.name.upper())
 
 
 def _renamed_base(backup: Path):
     """The base name a renamed backup was made from, or None (see the module docstring:
     the folder's own rename, and only next to the backup it collided with)."""
-    rx = _RENAMED.get(backup.parent.name.upper())
-    m = rx.match(backup.stem) if rx else None
-    if not m:
+    rx = _renamed_re(backup)
+    if rx is None or backup.suffix.lower() not in TIFF_EXTS:
         return None
-    base = m["base"]
-    if any(os.path.exists(_long(backup.parent / f"{base}{e}")) for e in TIFF_EXTS):
-        return base
+    return tw.backup_base_stem(str(backup.parent), backup.stem, rx)
+
+
+def renamed_sibling(backup: Path):
+    """A renamed backup of `backup`'s stem still in its folder (read on the disk now), or None:
+    while one is there, `backup` is its base and stays (audit round 34)."""
+    rx = _renamed_re(backup)
+    if rx is None or backup.suffix.lower() not in TIFF_EXTS:
+        return None
+    try:
+        names = sorted(os.listdir(_long(backup.parent)), key=str.lower)
+    except OSError:
+        return None
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        m = rx.match(stem)
+        if m and ext.lower() in TIFF_EXTS and m.group("base").lower() == backup.stem.lower()                 and os.path.isfile(_long(backup.parent / name)):
+            return name
     return None
 
 
@@ -90,16 +131,12 @@ def _fmt(seconds: float) -> str:
 
 
 def counterparts(backup: Path):
-    """Where the file this backup was made from lives (or lived): the folder above OLD_*."""
-    parent = backup.parent.parent
-    ext = backup.suffix.lower()
-    if ext not in TIFF_EXTS:
-        return [parent / backup.name]
-    stems = [backup.stem]
-    base = _renamed_base(backup)
-    if base:
-        stems.append(base)
-    return [parent / f"{s}{e}" for s in stems for e in TIFF_EXTS]
+    """Where the file this backup was made from lives (or lived): the folder above OLD_*
+    (tw.backup_counterparts; a sidecar: its own name only)."""
+    rx = _renamed_re(backup)
+    if rx is None or backup.suffix.lower() not in TIFF_EXTS:
+        return [backup.parent.parent / backup.name]
+    return [Path(c) for c in tw.backup_counterparts(str(backup), rx)]
 
 
 def place_is_empty(backup: Path) -> bool:
@@ -137,6 +174,10 @@ def main(argv=None) -> int:
                     help="backup root (default: DEFAULT_DESTS for --folder)")
     ap.add_argument("--go", action="store_true", help="really move (default: dry run)")
     a = ap.parse_args(argv)
+    if tw is None:
+        print("ERROR: tiff_workflow/common.py not found next to this script or in the folder "
+              "above it: keep this script in the toolkit's installation (or its tools/ folder).")
+        return 2
     source = Path(a.source)
     dest = Path(a.dest if a.dest else DEFAULT_DESTS[a.folder])
     roots = []
@@ -189,9 +230,14 @@ def main(argv=None) -> int:
         size = os.path.getsize(_long(src))
         try:
             # Checked again right before the move: the original may have gone meanwhile.
+            sibling = renamed_sibling(src)
             if place_is_empty(src):
                 skipped += 1
                 status = "KEPT: nothing in its original place any more -- the only copy"
+            elif sibling:
+                skipped += 1
+                what = "timestamped" if src.parent.name.upper() == "OLD_TIFFS" else "renamed"
+                status = f"KEPT (its {what} sibling {sibling} is still here)"
             else:
                 os.makedirs(_long(dst.parent), exist_ok=True)
                 if os.path.exists(_long(dst)):

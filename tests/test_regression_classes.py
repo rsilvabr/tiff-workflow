@@ -1680,7 +1680,9 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
         old_dir = folder / "OLD_TIFFs"
         old_dir.mkdir(parents=True)
         (old_dir / "img.tif").write_bytes(b"tiffdata")
-        (old_dir / "img_20260101_010101.tif").write_bytes(b"orphan")
+        # nothing of this name in the parent folder (audit round 34: a timestamped backup is
+        # no orphan any more -- it is checked against its base's file in place)
+        (old_dir / "gone 50%.tif").write_bytes(b"orphan")
         (folder / "img.tif").write_bytes(b"tiffdata")
 
         def fake_run(cmd, **kwargs):
@@ -1740,7 +1742,7 @@ class TestPurgeKeepsOrphansInsteadOfAborting:
     def test_verified_files_are_purged_and_the_orphan_is_kept(self, tmp_path, monkeypatch):
         folder, old_dir = self._run_purge(tmp_path, monkeypatch, answers=True)
         assert not (old_dir / "img.tif").exists(), "the verified backup should have been purged"
-        assert (old_dir / "img_20260101_010101.tif").exists(), (
+        assert (old_dir / "gone 50%.tif").exists(), (
             "a backup with no parent counterpart is the only copy left -- it must be kept"
         )
         assert (folder / "img.tif").exists()
@@ -2028,7 +2030,9 @@ class TestMode8ThumbnailGate:
 
         assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
         assert "integrity check failed" not in result.stdout, result.stdout
-        assert "SOURCE DELETED" in result.stdout, result.stdout
+        # a .tif in place: replaced, nothing deleted, and no line claims a delete (audit
+        # round 34: the worker printed [SOURCE DELETED] for it)
+        assert "SOURCE DELETED" not in result.stdout and "Deleted" not in result.stdout, result.stdout
         out = work / "a.tif"
         assert out.exists(), "no output for a mode 8 + thumbnail run"
         assert page_count(out) == 2, "main image + generated thumbnail expected"

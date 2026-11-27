@@ -141,7 +141,13 @@ def test_plain_questions(monkeypatch, capsys):
     answer("")
     assert ct._ask("Preset name") == ""
     assert asked[-2:] == ["Output folder [D:\\out 伊豆沼]: ", "Preset name: "]
-    answer("overwrite", "Skip")                       # not a choice: asked again, as on Rich
+    answer("overwrit", "Skip")                        # not a choice: asked again, as on Rich
+    assert ct._ask("Duplicate filenames", "Numbered", choices=["Numbered", "Skip", "Overwrite"]) == "Skip"
+    assert asked[-2:] == ["Duplicate filenames (Numbered/Skip/Overwrite) [Numbered]: "] * 2
+    assert "Please select one of the available options" in capsys.readouterr().out
+    answer("overwrite")                               # audit round 34: without case, as written
+    assert ct._ask("Duplicate filenames", "Numbered", choices=["Numbered", "Skip", "Overwrite"]) == "Overwrite"
+    answer("overwrit", "Skip")
     assert ct._ask("Duplicate filenames", "Numbered", choices=["Numbered", "Skip", "Overwrite"]) == "Skip"
     assert asked[-2:] == ["Duplicate filenames (Numbered/Skip/Overwrite) [Numbered]: "] * 2
     assert "Please select one of the available options" in capsys.readouterr().out

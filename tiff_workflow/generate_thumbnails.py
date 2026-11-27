@@ -25,7 +25,7 @@ from .common import P
 # and put them in .tiff_workflow_settings.json (the names in OVERLAY_SPECS).
 PARAMS = (
     P("input_dir", "str", "."),
-    P("size", "int", 256),
+    P("size", "int", 256, lo=32, hi=4096, help="Thumbnail size in pixels"),
     P("output_dir", "str", ""),
     P("remove", "switch"),
     P("dry_run", "switch"),
@@ -246,17 +246,14 @@ def run(argv):
     # The overlay is applied before anything reads a parameter. A --param given on the command
     # line always beats it; an invalid entry never stops the run.
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
-                                        tw.INSTALL_DIR)
+                                        tw.INSTALL_DIR, PARAMS)
     if overlay["info"]:
         tw.say(overlay["info"])
     for w in overlay["warnings"]:
         tw.say(f"WARNING: settings overlay: {w}")
 
-    # What the command line alone shows (v3.1, T5: exit 2, before a log exists).
-    if opt["size"] < 32 or opt["size"] > 4096:
-        tw.say(f"ERROR: thumbnail size {opt['size']} is not supported (--size): "
-               f"it must be from 32 to 4096")
-        return tw.EXIT_USAGE
+    # What the command line alone shows (v3.1, T5: exit 2, before a log exists). The size's
+    # range is its P's (lo/hi): argparse refuses it, and the settings file's reader too.
     if opt["format"].lower() not in FORMATS:
         tw.say(f"ERROR: thumbnail format {opt['format']} is not supported (--format): "
                f"jpg, png, tif or tiff")

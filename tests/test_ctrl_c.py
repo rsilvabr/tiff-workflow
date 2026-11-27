@@ -214,7 +214,8 @@ def test_compress_mode8_interrupted_deletes_nothing(tmp_path, slow_magick):
     assert rc == 130, out
     assert "Interrupted! Cleaning up staging files..." in out, out
     assert slow.read_bytes() == before, "the photo in flight was replaced or deleted"
-    assert fast.exists() and "SOURCE DELETED" not in out.split("b slow.tif")[-1]
+    # two .tif sources in place: nothing is ever deleted, and no line says so
+    assert fast.exists() and "Deleted" not in out.split("b slow.tif")[-1]
     assert leftovers(work) == [], out
     assert sorted(p.name for p in work.iterdir()) == [fast.name, slow.name], \
         f"the run's staging folder stayed: {sorted(p.name for p in work.iterdir())}"

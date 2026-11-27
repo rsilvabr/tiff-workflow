@@ -229,9 +229,9 @@ def test_T6_the_overlay_is_applied_before_anything_reads_a_parameter(
         opt, bound = real_parse(argv, params)
         return Watched(opt), bound
 
-    def apply(sec, specs, values, bound, root):
+    def apply(sec, specs, values, bound, root, params=()):
         applied.append(sec)
-        return real_apply(sec, specs, values, bound, root)
+        return real_apply(sec, specs, values, bound, root, params)
     monkeypatch.setattr(twc, "parse_args", parse_args)
     monkeypatch.setattr(twc, "apply_settings_overlay", apply)
     root = tmp_path / HOSTILE

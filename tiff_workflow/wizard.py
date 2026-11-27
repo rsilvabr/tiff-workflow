@@ -132,6 +132,16 @@ try:
                 return False
             raise InvalidResponse(self.validate_error_message)
 
+    class _CaselessPrompt(Prompt):
+        """Rich's question whose choices are matched without case (`u` is the menu's `U`;
+        audit round 34). Rich's own case_sensitive= needs 13.9: not depended on. `ask` is not
+        overridden, so a test double of Prompt.ask still answers it; _ask maps the answer to
+        the choice as written."""
+
+        def check_choice(self, value: str) -> bool:
+            assert self.choices is not None
+            return value.strip().casefold() in [c.casefold() for c in self.choices]
+
     RICH_AVAILABLE = True
     console: Optional[Console] = Console(force_terminal=True)
 except ImportError:
@@ -206,20 +216,30 @@ def _ask(question, default: Optional[str] = None, style: str = "cyan",
          choices: Optional[List[str]] = None) -> str:
     """A question answered with a line of text, stripped. Enter gives `default` (shown
     after the question, also when empty; None = nothing shown, Enter gives ""). With
-    `choices`, an answer that is not one of them is asked again, on both screens."""
+    `choices`, an answer that is not one of them is asked again, on both screens; a choice is
+    matched without case and returned as written in `choices` (audit round 34: `u` was refused
+    by a menu that offers `U`)."""
+    def as_written(answer: str) -> str:
+        for c in choices or ():
+            if c.casefold() == answer.casefold():
+                return c
+        return answer
+
     if RICH_AVAILABLE and console:
         kw: Dict[str, Any] = {} if default is None else {"default": default}
         if choices is not None:
             kw["choices"] = choices
+            return as_written(_CaselessPrompt.ask(_rich_text(question, style), **kw).strip())
         return Prompt.ask(_rich_text(question, style), **kw).strip()
     shown = _plain(question) + (f" ({'/'.join(choices)})" if choices else "")
     prompt = f"{shown}: " if default is None else f"{shown} [{default}]: "
+    folded = [c.casefold() for c in choices] if choices is not None else None
     while True:
         answer = input(prompt).strip()
         if not answer and default is not None:
             return default            # unchecked against the choices, as Rich does
-        if choices is None or answer in choices:
-            return answer             # Enter without a default: "" -- unless there are choices
+        if folded is None or answer.casefold() in folded:
+            return as_written(answer)  # Enter without a default: "" -- unless there are choices
         print("Please select one of the available options")
 
 
@@ -433,6 +453,19 @@ def _backend_tables(script_name: str) -> Tuple[Tuple["tw.P", ...], Tuple[Tuple[s
     return tuple(params), tuple(specs)
 
 
+def _backend_param(script_name: str, name: str) -> Optional["tw.P"]:
+    """The P of a backend parameter (its range: lo/hi), or None."""
+    return next((p for p in _backend_tables(script_name)[0] if p.name == name), None)
+
+
+def _setting_checked(script_name: Optional[str], name: str, spec: str, value):
+    """A settings-file or Advanced value checked as the backend's reader checks it: the spec,
+    then the range of its P (tw.overlay_checked; audit round 34). `script_name` None: this
+    wizard's own settings (no P)."""
+    p = _backend_param(script_name, name) if script_name else None
+    return tw.overlay_checked(spec, value, p)
+
+
 def _backend_overlay_specs(script_name: str) -> Dict[str, str]:
     """{name: spec} of a backend's OVERLAY_SPECS table; {} when the file cannot be read or
     has none."""
@@ -457,7 +490,7 @@ def _overlay_scan(script_name: str):
             warnings.append(f"{name} is not a setting the overlay can change in "
                             f"{_OVERLAY_SECTIONS[script_name]}; ignored")
             continue
-        ok, checked = _overlay_value(spec, value)
+        ok, checked = _setting_checked(script_name, name, spec, value)
         if not ok:
             warnings.append(f"{name} = {json.dumps(value, ensure_ascii=False)} is not "
                             f"valid ({checked}); the script's value is kept")
@@ -827,7 +860,9 @@ def _update_check_now(cfg) -> Tuple[str, Optional[Tuple[str, str]]]:
                 f"{_UPDATE_ENV}).", None)
     tag = _latest_release_tag(_update_repo())
     if not tag:
-        return (f"Release check: GitHub did not answer (this copy is {TOOLKIT_VERSION}).", None)
+        # what was known stays known (audit round 34: the U line went away with no answer)
+        return (f"Release check: GitHub did not answer (this copy is {TOOLKIT_VERSION}).",
+                _kept_update_notice(cfg, checked_before=True))
     try:
         cfg.save_update_answer(date.today().isoformat(), tag)
     except Exception:
@@ -1473,11 +1508,11 @@ def _safe_tag_source(path: Path):
     """
     if "%" not in str(path):
         return str(path), None
-    fd, tmp = tempfile.mkstemp(suffix=".mie")
-    os.close(fd)
-    os.unlink(tmp)
-    if "%" in tmp:
-        # `-o` is format-expanded too, so a '%' anywhere in the temp dir breaks the container.
+    # `-o` is format-expanded too: the first folder without a '%' in its path -- the temp
+    # folder, else the photo's own (tw.metadata_container_path; audit round 34).
+    try:
+        tmp = tw.metadata_container_path(path)
+    except tw.ToolError:
         return None, None
     try:
         # audit round 28: the container does not carry IPTC:CodedCharacterSet unless it is
@@ -1808,7 +1843,7 @@ def _advanced_backends(workflow: Dict) -> List[str]:
     return backends
 
 
-def _backend_script(cfg: "ConfigManager", backend: str) -> str:
+def _backend_script(cfg: Optional["ConfigManager"], backend: str) -> str:
     return "compress_tiff_zip.py" if backend == "compress" else "copy_exif_to_tiff.py"
 
 
@@ -1879,7 +1914,8 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
         except ValueError as e:
             _say(f"Not changed: {e}.")
             continue
-        ok, checked = _overlay_value(opt.value_spec, parsed)
+        ok, checked = _setting_checked(_backend_script(cfg, backend), opt.param,
+                                       opt.value_spec, parsed)
         if not ok:
             _say(f"Not changed: {tw.cli_name(opt.param)} must be {checked}.")
             continue
@@ -1891,6 +1927,31 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
 
 
 # --- Summary Panel ------------------------------------------------
+
+def _advanced_summary_rows(workflow: Dict) -> List[list]:
+    """The Summary's rows for the Advanced options this run edited, in REGISTRY order:
+    [["Advanced:", "[compress] --magick-timeout = 180"], ["", ...]] -- [] when none was
+    edited. A value _emit_opt would DROP (it fails its spec: a preset edited by hand) is shown
+    as "(ignored: not valid)": the Summary never promises what the command line will not carry
+    (audit round 34: the edited options were not shown at all)."""
+    texts: List[str] = []
+    for backend in _advanced_backends(workflow):
+        for opt in REGISTRY[backend]:
+            if opt.level != "advanced":
+                continue
+            v = _advanced_value(workflow, backend, opt.param)
+            if v is None:
+                continue
+            if v == "" and opt.value_spec == "path?":
+                shown = _advanced_shown(v, opt)
+            elif opt.value_spec and not _advanced_checked(backend, opt, v)[0]:
+                shown = f"{v!r} (ignored: not valid)"
+            else:
+                shown = _advanced_shown(_advanced_checked(backend, opt, v)[1] if opt.value_spec
+                                        else v, opt)
+            texts.append(f"[{backend}] {tw.cli_name(opt.param)} = {shown}")
+    return [["Advanced:" if i == 0 else "", t] for i, t in enumerate(texts)]
+
 
 def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
     """Show summary and confirm."""
@@ -1938,6 +1999,7 @@ def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
 
     if origin == "free_compress" and mode == 8:
         rows.append([("Delete source:", "red"), "ON -- originals will be DELETED"])
+    rows += _advanced_summary_rows(workflow)
 
     _table([{"style": "bold cyan"}, {}], rows,
            panel={"title": ("Summary", "bold"), "border_style": "green"},
@@ -2104,7 +2166,7 @@ def _emit_opt(opt: Opt, workflow: Dict, folders: Optional[List[Path]] = None,
         if v == "" and opt.value_spec == "path?" and kind == "value":
             return tw.cli_value(p, "")
         if v is not None and opt.value_spec:
-            ok, v = _overlay_value(opt.value_spec, v)
+            ok, v = _advanced_checked(backend, opt, v)
             if not ok:
                 return []
     else:
@@ -2126,6 +2188,11 @@ def _emit_opt(opt: Opt, workflow: Dict, folders: Optional[List[Path]] = None,
     if kind == "true_bool":
         return [tw.cli_switch(p, True)] if v else []
     raise ValueError(f"unknown option kind {kind!r} for {tw.cli_name(opt.param)}")
+
+
+def _advanced_checked(backend: str, opt: Opt, value):
+    """An Advanced value checked as the backend checks it (_setting_checked)."""
+    return _setting_checked(_backend_script(None, backend), opt.param, opt.value_spec, value)
 
 
 def _emit_all(backend: str, workflow: Dict, folders: Optional[List[Path]] = None) -> List[str]:
@@ -2528,8 +2595,8 @@ def run_subprocess(cmd: List[str], timeout: Optional[int] = None,
 
 
 # --- Undo OLD_TIFFs ------------------------------------------------
-
-_TIMESTAMPED_BACKUP_RE = re.compile(r"^(?P<base>.+)_\d{8}_\d{6}(?:_\d+)?$")
+# A timestamped backup is read by the one rule of tiff_workflow/common.py
+# (tw.STAMPED_BACKUP_RE; audit round 34 removed an unused copy of it here).
 
 
 def _restore_stranded_only(stranded) -> bool:
@@ -4426,19 +4493,55 @@ def _size_and_time(path: Path):
 _MISSING_PARENT = "parent file missing"
 
 
+def _purge_counterpart(backup: Path) -> Path:
+    """The file in the parent folder a backup is checked against (audit round 34): the first
+    that exists of tw.backup_counterparts -- the same name, the other TIFF extension (a .tiff
+    source is written as .tif), the base name of a timestamped backup whose base is still in
+    OLD_TIFFs. For the purge only, a stamp-shaped name whose base backup is gone is also tried
+    against <base>.tif/.tiff: an earlier version deleted the base and left the stamped one
+    behind. The name only picks what to compare; the content gate (_compare_tiff_metadata)
+    decides. None found -> the file of the backup's own name (absent: an orphan, kept)."""
+    places = [Path(c) for c in tw.backup_counterparts(str(backup), tw.STAMPED_BACKUP_RE)]
+    if tw.is_tiff_name(backup.name):
+        m = tw.STAMPED_BACKUP_RE.match(backup.stem)
+        if m:
+            places += [backup.parent.parent / (m.group("base") + e) for e in (".tif", ".tiff")]
+    for place in places:
+        if os.path.isfile(tw.long_path(str(place))):
+            return place
+    return backup.parent.parent / backup.name
+
+
 def _purge_collect(folder: Path) -> Tuple[List[Path], List[Tuple[Path, Path, int]]]:
-    """(the OLD_TIFFs folders below `folder`, every file in them as (backup, the file of that
-    name in the parent folder, backup size))."""
+    """(the OLD_TIFFs folders below `folder`, every file in them as (backup, the file in the
+    parent folder it is checked against -- _purge_counterpart --, backup size))."""
     # Find all OLD_TIFFs folders recursively (case-insensitive for Unix)
     old_dirs = sorted([d for d in folder.rglob("*") if d.is_dir() and d.name.lower() == "old_tiffs"])
     items = []
     for od in old_dirs:
-        parent = od.parent
         for f in sorted(od.glob("*")):
             if not f.is_file():
                 continue
-            items.append((f, parent / f.name, f.stat().st_size))
+            items.append((f, _purge_counterpart(f), f.stat().st_size))
     return old_dirs, items
+
+
+def _stamped_sibling(backup: Path) -> Optional[str]:
+    """The name of a timestamped backup of `backup`'s stem still in its folder -- read on the
+    disk now --, or None. While one is there `backup` is its base and is not deleted: without it
+    the stamped one reads as a photo of its own name, stranded (audit round 34)."""
+    if not tw.is_tiff_name(backup.name):
+        return None
+    try:
+        names = sorted(os.listdir(tw.long_path(str(backup.parent))), key=str.lower)
+    except OSError:
+        return None
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        m = tw.STAMPED_BACKUP_RE.match(stem)
+        if m and tw.is_tiff_name(name) and m.group("base").lower() == backup.stem.lower()                 and os.path.isfile(tw.long_path(str(backup.parent / name))):
+            return name
+    return None
 
 
 def _purge_verdict(item) -> Optional[Tuple[Path, Path, str]]:
@@ -4514,9 +4617,11 @@ def _purge_report(folder: Path, old_dirs: list, items: list, orphans: list, mism
     orphan_keys = {(o[0], o[1]) for o in orphans}
     mismatch_detail = {(m[0], m[1]): m[2] for m in mismatches}
     for old_file, new_file, old_size in items:
+        # the file it was checked against, when its name is another (audit round 34)
+        against = f" (vs {new_file.name})" if new_file.name != old_file.name else ""
         if new_file.exists():
             new_size = new_file.stat().st_size
-            size_info = f"{_format_size(old_size)} -> {_format_size(new_size)}"
+            size_info = f"{_format_size(old_size)} -> {_format_size(new_size)}{against}"
         else:
             size_info = f"{_format_size(old_size)} (parent missing)"
         detail = ""
@@ -4539,8 +4644,7 @@ def _purge_report(folder: Path, old_dirs: list, items: list, orphans: list, mism
 
     if orphans:
         note = (f"{len(orphans)} file(s) have no counterpart in the parent folder and will be "
-                f"KEPT (a mode 0/9 backup is renamed when one of that name already exists, and "
-                f"a .tiff source produces a .tif output, so the names need not line up).")
+                f"KEPT: each is the only copy of that image.")
         _say(f"\n{note}", "yellow")
         for old_file, _new_file, _reason in orphans:
             _say(f"  = {old_file.relative_to(folder)}", "yellow")
@@ -4581,8 +4685,17 @@ def _purge_delete(folder: Path, old_dirs: list, deletable: list, checked_as: Dic
     6, W-O16). (deleted, the backups kept for that)."""
     deleted = 0
     changed = []
+    # The timestamped backups first: a base goes only once no stamped sibling of it is left
+    # (audit round 34; checked on the disk below, so a sibling kept for any reason keeps it).
+    deletable = sorted(deletable, key=lambda it: tw.STAMPED_BACKUP_RE.match(it[0].stem) is None)
     for old_file, new_file, _ in deletable:
         if not old_file.exists():
+            continue
+        sibling = _stamped_sibling(old_file)
+        if sibling:
+            changed.append(old_file)
+            _say(f"  KEPT (its timestamped sibling {sibling} is still here): "
+                 f"{old_file.relative_to(folder)}", "yellow")
             continue
         # Changed since the check (an edit, another run, the copy gone): kept, and listed.
         if (_size_and_time(old_file), _size_and_time(new_file)) != checked_as[(old_file, new_file)] \
@@ -4656,8 +4769,8 @@ def run_purge_old_tiffs(cfg: "ConfigManager") -> bool:
     deleted, changed = _purge_delete(folder, old_dirs, deletable, checked_as)
     _say(f"\nDone. Deleted {deleted} file(s).", "green")
     if changed:
-        _say(f"{len(changed)} kept: they changed after the check -- run Delete OLD_TIFFs again to "
-             "check them anew.", "yellow")
+        _say(f"{len(changed)} kept: they changed after the check, or a timestamped sibling of "
+             "theirs is still there -- run Delete OLD_TIFFs again to check them anew.", "yellow")
     return not mismatches
 
 
@@ -4792,13 +4905,20 @@ def show_main_menu(cfg) -> str:
         ("5", f"Presets ({len(presets)} saved)", True),
         ("6", "Script settings", True),
     ]
-    # An answer that came in while an earlier screen was busy (the check runs in the background).
+    # The check runs in the background: its answer is ALWAYS the newest one -- a notice, or
+    # none when the fresh answer says this copy is up to date (audit round 34: the answer an
+    # earlier run kept stood for the whole session, a retired release advertised with it).
+    # The yellow line is said when the notice is new or changed.
     poll = getattr(cfg, "update_poll", None)
-    if poll and not getattr(cfg, "update_available", None):
-        late = poll()
-        if late:
-            _say(late[0], "yellow")
-            cfg.update_available = (cfg.config.update_latest_seen, late[1])
+    if poll:
+        now = poll()
+        if now:
+            notice = (cfg.config.update_latest_seen, now[1])
+            if notice != getattr(cfg, "update_available", None):
+                _say(now[0], "yellow")
+            cfg.update_available = notice
+        else:
+            cfg.update_available = None
     if getattr(cfg, "update_available", None):
         options.append(("U", f"Update available: {cfg.update_available[0]} -- open the release page",
                         True))
@@ -5392,6 +5512,9 @@ def run_manifest_workflow(cfg) -> bool:
         workflow["duplicate_action"] = _ask("Duplicate filenames (mode 2)", dup_default,
                                             choices=["Numbered", "Skip", "Overwrite"])
 
+    advanced = _advanced_summary_rows(workflow)
+    if advanced:
+        _table([{"style": "bold cyan"}, {}], advanced, box=None, show_header=False, pad_edge=False)
     if not confirm_manifest_entries(manifest_path, entries):
         return False
 
@@ -5755,14 +5878,17 @@ def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
     format_default = _backend_default("generate_thumbnails.py", "format")
     page_default = _backend_default("generate_thumbnails.py", "page")
 
-    # Thumbnail size (backend accepts 32-4096)
-    size_str = _ask("Thumbnail size (px, 32-4096)", str(size_default))
+    # Thumbnail size: the range is the backend's (its P's lo/hi), never a copy of it
+    size_p = _backend_param("generate_thumbnails.py", "size")
+    lo, hi = (size_p.lo, size_p.hi) if size_p is not None else (None, None)
+    span = f"{lo}-{hi}" if lo is not None and hi is not None else "px"
+    size_str = _ask(f"Thumbnail size (px, {span})", str(size_default))
     try:
         size = int(size_str)
     except ValueError:
         size = size_default
-    if not (32 <= size <= 4096):
-        _say(f"Size {size} out of range (32-4096), using {size_default}.", "yellow")
+    if (lo is not None and size < lo) or (hi is not None and size > hi):
+        _say(f"Size {size} out of range ({span}), using {size_default}.", "yellow")
         size = size_default
 
     # Quality: the backend validates 1-100 and refuses to start otherwise
@@ -6113,7 +6239,7 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
                 f"'file' = this settings file):")
         for n, (name, spec, script_value, help_text) in enumerate(rows, 1):
             if name in sect:
-                ok, _checked = _overlay_value(spec, sect[name])
+                ok, _checked = _setting_checked(script, name, spec, sect[name])
                 file_part = json.dumps(sect[name], ensure_ascii=False) + ("" if ok else "  (REFUSED: the scripts keep their own value)")
             else:
                 file_part = "-"
@@ -6154,7 +6280,7 @@ def _edit_overlay_section(path: Path, section: str, label: str, script: Optional
             except ValueError as e:
                 _say(f"Not changed: {e}.")
                 continue
-            ok, checked = _overlay_value(spec, parsed)
+            ok, checked = _setting_checked(script, name, spec, parsed)
             if not ok:
                 _say(f"Not changed: {name} must be {checked}.")
                 continue

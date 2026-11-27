@@ -12,6 +12,108 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.3.0 - Audit round 34: what a held file, a killed run and an old backup left behind
+
+From the planner's pending list of 27/11/2026 (`AI_tools`, local): a mode-8 probe and an exiftool
+probe run on v3.2.1, and items carried over from the reviews of v3.1 and v3.2.
+
+### MEDIUM - compress mode 8: a file another program held open was reported OK and error, and its staged file stayed
+**Issue:** `--mode 8 --delete-source --staging-dir`, two files held open by another program
+(run on v3.2.1): every line said `OK (...) [SOURCE DELETED]` -- printed by the worker before
+anything was deleted, and for a `.tif` in place, where mode 8 never deletes anything. The held
+`.tif` could not be replaced: `ERROR (move exception)`, yet still counted OK (`Done: 3 OK ...
+2 errors`), and its staged file stayed in the user's staging folder for ever. The held `.tiff`
+landed as `.tif` and could not be deleted: `ERROR (failed to delete source after move)`, which
+did not say that both files were there. The photos themselves were safe.
+- **Fix:** the worker never says `[SOURCE DELETED]`: the delete is the line `-> Deleted N source
+  file(s)` written after it happened. A new `Run.uncount` (both backends) takes back the OK/WARN
+  of a file whose landing failed (`_move_staged`, modes 0/9's `ERROR (keep original)`, copy-exif's
+  `ERROR (move failed)`), on the caller's thread and only for a line that was counted. The
+  failed move's line says `not landed: <name> is as it was before the run` (copy-exif: `EXIF
+  copied, the TIFF stays uncompressed`, or with `--output-dir` `nothing written to <folder>`),
+  and the staged file is dropped -- only while its source is a file (otherwise it is kept and
+  the line says where). The undeleted source: `ERROR (source not deleted: <error>) | b.tiff |
+  its compressed copy b.tif is in place, both files are there`.
+- **Files:** `tiff_workflow/compress_tiff_zip.py`, `tiff_workflow/copy_exif_to_tiff.py`,
+  `tests/test_audit_round34.py`, `tests/test_backend_invariants.py`, `tests/test_ctrl_c.py`,
+  `tests/test_regression_classes.py`
+
+### MEDIUM - Delete OLD_TIFFs and move_old_backups.py: a timestamped backup was left behind without its base
+**Issue:** modes 0/9 archive an original as `photo_YYYYMMDD_HHMMSS.tif` when `OLD_TIFFs\photo.tif`
+is already there (the base is an OLDER original). The wizard's Delete OLD_TIFFs paired every
+backup with the file of its own name: the stamped one -- the original of the file in place --
+was an orphan and kept, while the base was compared and deleted. From then on the stamped backup
+had no base next to it, every compress run printed `STRANDED` for it, and `--restore-stranded`
+would have put `photo_20260805_101500.tif` into the folder as a new photo. A `.tiff` backup of a
+`.tif` output was an orphan too. `tools/move_old_backups.py` moved renamed backups first, but one
+that was skipped (a different file of its name on the backup drive) still let its base go.
+- **Fix:** one rule in `tiff_workflow/common.py`: `STAMPED_BACKUP_RE`, `PADDED_RENAMED_RE`,
+  `backup_base_stem`, `backup_counterparts` (`find_stranded_originals` now stands on them,
+  behaviour unchanged). Delete OLD_TIFFs checks a backup against the first file in place of
+  those counterparts -- and, for a stamp-shaped name whose base backup an earlier version
+  deleted, against `<base>.tif/.tiff`: the content gate decides, never the name. The group rule,
+  read on the disk at delete/move time in the wizard and in the tool: stamped/renamed backups go
+  first, and a base goes only when no renamed sibling of it is left (`KEPT (its timestamped
+  sibling <name> is still here)`). An older base that does not match the file in place stays a
+  MISMATCH: it is the only copy of that version. `move_old_backups.py` imports the common module
+  from the installation (its own folder, as in the owner's `_LOCAL`, or the folder above; neither
+  -> exit 2 with the reason).
+- **Files:** `tiff_workflow/common.py`, `tiff_workflow/wizard.py`, `tools/move_old_backups.py`,
+  `tests/test_audit_round34.py`, `tests/test_regression_classes.py`
+
+### MEDIUM - what a killed run left next to the photos stayed, and exiftool's temp file failed every later run
+**Issue:** a run that is killed (not Ctrl+C) leaves its staged file, the temp sibling of an
+in-place write, exiftool's `<name>_exiftool_tmp` and its temp files. With `x.tif_exiftool_tmp`
+there, every later exiftool write of `x.tif` fails (`Temporary file already exists`): copy-exif
+reported `ERROR (exiftool EXIF)` on that photo on every run until someone deleted it by hand.
+- **Fix:** `tw.sweep_leftovers`, called by compress after its plan and by copy-exif per group,
+  removes such a file only when all five hold: it is exactly a leftover shape of a file THIS run
+  writes in that folder (or a metadata container `tw_<16 hex>.mie` there), its run id is another
+  run's, it is a regular file and not a link, it is at least `LEFTOVER_MIN_AGE_S` (one hour, a
+  safety constant) old by its write AND creation time, and its source is a file right now. What
+  is kept is reported; `--dry-run` says `Would remove`. The toolkit's own temp files older than
+  an hour go from the temp folder. A `--staging-dir` is shared by presets of different folders
+  and a staged file waits there until its group ends: an earlier run's files there are reported
+  (`NOTE: N file(s) ... left in the staging folder by an earlier run`), never removed.
+- **Files:** `tiff_workflow/common.py`, `tiff_workflow/compress_tiff_zip.py`,
+  `tiff_workflow/copy_exif_to_tiff.py`, `tests/test_audit_round34.py`, `AGENTS.md`
+
+### LOW - associated, non-opaque alpha: an ERROR on every run for a file nothing is wrong with
+**Issue:** v3.2.0 made it a SKIP only for a `--recompress-zip` candidate. An uncompressed TIFF
+with associated alpha that is not opaque (ImageMagick would change the alpha) was still `ERROR
+(... refused)`, exit 1, on every run -- in compress and in copy-exif `--compress-zip`, where the
+copy in `--output-dir` was dropped too.
+- **Fix:** compress: `SKIP (not rewritten - associated alpha that is not opaque: ImageMagick would
+  change it)` in every mode. copy-exif: the EXIF is in, `OK+SKIP-ZIP (associated alpha that is
+  not opaque)`, the copy kept; `_zip_staged` returns a `ZipStaged(error, skip)`. Proved on a crop
+  of the owner's real associated-RGBA scan and on a synthetic one.
+- **Files:** `tiff_workflow/compress_tiff_zip.py`, `tiff_workflow/copy_exif_to_tiff.py`,
+  `tests/test_audit_round34.py`, `tests/test_backend_invariants.py`, `tests/test_round28_backends.py`
+
+### LOW - '%' in the temp folder refused every file with '%' in its name
+**Issue:** the metadata container went to the temp folder only; with a '%' in its path
+(exiftool expands '%' in `-o` and `-tagsfromfile`) every '%'-named file was refused. Fail
+closed, but on such a machine those photos could never be compressed.
+- **Fix:** `tw.metadata_container_path`: the first folder whose path has no '%' -- the temp
+  folder, the staging folder, the photo's folder -- else the refusal of before. The wizard's
+  `_safe_tag_source` asks the same function.
+- **Files:** `tiff_workflow/common.py`, `tiff_workflow/wizard.py`, `tests/test_audit_round34.py`
+
+### Smaller
+- **Menu:** `u` is the menu's `U` (a choice is matched without case on both screens, and returned
+  as written); the "new release" line follows the newest answer of the background check (a
+  retired release was advertised for the whole session); menu 4 without network keeps the
+  known notice. (`tiff_workflow/wizard.py`, `tests/test_release_notice.py`, `tests/test_wizard_ui.py`)
+- **Summary:** the Advanced options a run edited are listed (`[compress] --magick-timeout = 180`);
+  a value the command line would drop is shown `(ignored: not valid)`. (`tiff_workflow/wizard.py`)
+- **Thumbnail size:** `"size": 16` in the settings file passed its spec and stopped every run
+  of generate_thumbnails with exit 2. The range is now in `size`'s `P` (32-4096, its one copy);
+  the settings-file readers check a number against its parameter's range too
+  (`tw.overlay_checked`), and the wizard asks the range from the table.
+  (`tiff_workflow/common.py`, `tiff_workflow/generate_thumbnails.py`, `tiff_workflow/wizard.py`,
+  `tests/test_settings_overlay.py`)
+- **Tidy (9c):** the rule of a renamed backup has one copy (above).
+
 ## v3.2.1 - Audit round 33: Python 3.13 writes a program's input from a thread
 
 Found by running the whole suite once per installed Python, 3.9 to 3.15 (2026-11-27): the rule

@@ -194,7 +194,8 @@ class TestLayoutGate:
 
     def test_translucent_associated_alpha_is_refused(self, tmp_path, lane):
         """magick un-premultiplies and re-premultiplies: the alpha samples come back changed
-        (1791 of a real scan's) and no gate sees it. Refused, original untouched."""
+        (1791 of a real scan's) and no gate sees it. Refused, original untouched -- a SKIP with
+        the reason since audit round 34 (an ERROR until then, exit 1 on every run)."""
         root = tmp_path / "root"
         cam = root / HOSTILE / "A"
         cam.mkdir(parents=True)
@@ -205,8 +206,8 @@ class TestLayoutGate:
         tifffile.imwrite(str(src), np.dstack([c, a]), photometric="rgb", extrasamples=[1])
         orig = src.read_bytes()
         r, out = run(lane, COMPRESS, ["--input-dir", root, "--mode", 9, "--workers", 2], tmp_path)
-        assert r.returncode == 1, out[-3000:]
-        assert "associated alpha that is not opaque" in out
+        assert r.returncode == 0, out[-3000:]
+        assert "SKIP (not rewritten - associated alpha that is not opaque" in out
         assert src.read_bytes() == orig
 
 

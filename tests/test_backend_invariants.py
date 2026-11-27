@@ -441,7 +441,9 @@ class TestGatesPerMode:
         stg.mkdir()
         run = compress_run("--mode", "8", "--delete-source")
         ok = job(run, photo, write_dst=stg / "a.tif")
-        assert ok.can_delete is True and "[SOURCE DELETED]" in ok.result
+        # the worker only says the gates passed; the delete is said after it happened
+        # (audit round 34: the tag was printed before anything was deleted)
+        assert ok.can_delete is True and "SOURCE DELETED" not in ok.result
         assert not ok.integrity_failed
         tools.pixels = False
         bad = job(run, photo, write_dst=stg / "b.tif")
@@ -454,7 +456,7 @@ class TestGatesPerMode:
 
     def test_mode8_without_delete_source_never_asks_for_a_delete(self, tools, photo, tmp_path):
         r = job(compress_run("--mode", "8"), photo, write_dst=tmp_path / "a.tif")
-        assert r.can_delete is False and "[SOURCE DELETED]" not in r.result
+        assert r.can_delete is False and "SOURCE DELETED" not in r.result
 
     def test_mode8_thumbnail_output_is_checked_on_page_zero(self, tools, photo, tmp_path):
         """Round 15: whole-file identity refused EVERY --generate-thumbnail file in mode 8."""
@@ -922,8 +924,9 @@ class TestRecompressZip:
         if refusal == "alpha":
             tools.alpha_ok = False
             why = "associated alpha that is not opaque"
-            error = (f"ERROR (associated alpha that is not opaque: ImageMagick would change it - "
-                     f"refused) | {photo.name}")
+            # audit round 34: a SKIP for an uncompressed file too (nothing is wrong with it)
+            error = (f"SKIP (not rewritten - associated alpha that is not opaque: ImageMagick "
+                     f"would change it) | {photo.name}")
         elif refusal == "layout":
             tools.layout = None
             why = "sample layout unreadable"
@@ -1592,6 +1595,20 @@ class TestCopyExif:
         assert ev.index("layout") < ev.index("subfile") < ev.index("pixels"), ev
         assert last_exif < ev.index("pixels"), ev
 
+    def test_associated_alpha_skips_the_zip_and_keeps_the_copy(self, tools, photo, tmp_path):
+        """Audit round 34: the EXIF is in, only the ZIP cannot be made without changing the
+        alpha: OK+SKIP-ZIP, the copy in --output-dir kept (as for an already compressed TIFF),
+        nothing written by magick. Until then an ERROR on every run, and the copy dropped."""
+        tools.alpha_ok = False
+        out, r = self._to_outputdir(photo, tmp_path, "--compress-zip")
+        assert r.line == f"OK+SKIP-ZIP (associated alpha that is not opaque) | {photo.name}", r.line
+        assert r.staged is None and tools.magick_calls == []
+        assert os.listdir(out) == [photo.name]
+        assert photo.read_bytes() == b"ORIGINAL"
+        run = exif_run("--compress-zip")
+        run.count(r.line)
+        assert (run.ok, run.zip_skip, run.err) == (1, 1, 0)
+
     def _to_outputdir(self, photo, tmp_path, *argv):
         out = tmp_path / "out 伊豆沼 [x] 100%"
         r = cx.process_pair(exif_run("--output-dir", str(out), *argv), pair(photo, photo.with_suffix(".jpg")),
@@ -1603,7 +1620,6 @@ class TestCopyExif:
         ("jpeg_container", "ERROR (metadata container failed - EXIF copy refused) |"),
         ("compression", "ERROR (exiftool check) |"),
         ("layout", "ERROR (sample layout unreadable) |"),
-        ("alpha_ok", "ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) |"),
         ("magick_rc", "ERROR (magick ZIP) |"),
         ("magick_writes", "ERROR (magick ZIP) |"),
         ("layout_kept", "ERROR (sample layout changed: rgb/3/8,8,8/ - original untouched) |"),
@@ -1910,32 +1926,42 @@ class TestStagedMoveFailures:
     NAME = "photo 50%off.tif"
 
     @pytest.mark.parametrize("kind,text", [
-        ("missing", f"ERROR (move failed) | {NAME}"),
-        ("size", f"ERROR (size mismatch after move) | {NAME}"),
-        ("error", f"ERROR (move exception) | {NAME}: move failed: boom"),
+        ("missing", f"ERROR (move failed) | {NAME} | the move reported success and nothing is there"),
+        ("size", f"ERROR (size mismatch after move) | {NAME} | what is there has another size "
+                 f"than the file written: check it"),
+        ("error", f"ERROR (move exception) | {NAME}: move failed: boom | not landed: {NAME} is as "
+                  f"it was before the run"),
     ])
     def test_modes(self, tools, photo, tmp_path, monkeypatch, kind, text):
         monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
+        stg = tmp_path / "stg"
         run = compress_run("--mode", "1", "--input-dir", str(photo.parent),
-                           "--staging-dir", str(tmp_path / "stg"), "--force-sequential")
+                           "--staging-dir", str(stg), "--force-sequential")
         assert cz.run_modes(run, {"mode", "input_dir", "staging_dir", "force_sequential"}) == 1
         assert error_lines(run) == [text]
-        assert (run.err, run.ok) == (1, 1)
+        # audit round 34: the file did not land, so it is not ALSO an OK; and its staged
+        # file does not stay in the staging folder for ever
+        assert (run.err, run.ok, run.counter) == (1, 0, 1)
+        assert os.listdir(stg) == []
         assert not [m for _lv, m in run.log.lines if "Moved" in m]
         assert photo.read_bytes() == b"ORIGINAL"
 
-    @pytest.mark.parametrize("kind,text", [
-        ("missing", f"ERROR (move failed) | {NAME}"),
-        ("size", f"ERROR (move failed) | {NAME}"),
-        ("error", f"ERROR (move failed) | {NAME}: move failed: boom"),
+    @pytest.mark.parametrize("kind,detail", [
+        ("missing", ""),
+        ("size", ""),
+        ("error", ": move failed: boom"),
     ])
-    def test_copy_exif(self, tools, photo, tmp_path, monkeypatch, kind, text):
+    def test_copy_exif(self, tools, photo, tmp_path, monkeypatch, kind, detail):
         photo.with_suffix(".jpg").write_bytes(b"JPEG")
         monkeypatch.setattr(tw, "move_file_into_place", failing_move(kind))
-        run = exif_run("--compress-zip", "--output-dir", str(tmp_path / "out [x]"), "--workers", "1")
+        out = tmp_path / "out [x]"
+        run = exif_run("--compress-zip", "--output-dir", str(out), "--workers", "1")
         cx.process_folder(run, str(photo.parent))
-        assert error_lines(run) == [text]
-        assert (run.err, run.ok) == (1, 1)
+        assert error_lines(run) == [f"ERROR (move failed) | {self.NAME}{detail} | nothing written "
+                                    f"to {out}, the source is as it was"]
+        assert (run.err, run.ok, run.counter) == (1, 0, 1)
+        staged = [n for n in os.listdir(photo.parent) if tw.LEFTOVER_NAME_RE.search(n)]
+        assert staged == [], "the staged ZIP stayed next to the photo"
         assert not [m for _lv, m in run.log.lines if "Moved" in m]
         assert photo.read_bytes() == b"ORIGINAL"
 
@@ -2363,7 +2389,7 @@ class TestGroupSteps:
         dst.write_bytes(b"COMPRESSED")
         job = cz.Job(src=str(src), write_dst=str(tmp_path / "stg" / "x.tif"), final_dst=str(dst),
                      name=src.name)
-        return src, dst, job, cz.JobResult("OK (Uncompressed -> ZIP) [SOURCE DELETED] | p 50%.tiff",
+        return src, dst, job, cz.JobResult("OK (Uncompressed -> ZIP) | p 50%.tiff",
                                            src.name, str(src), can_delete=True)
 
     def test_mode8_checks_the_file_where_it_landed_before_it_deletes_the_source(
@@ -2806,8 +2832,10 @@ class TestGatesFailClosed:
             tw.backup_tiff_metadata("a.tif", "a.tif")
         assert not os.path.exists(calls[-1][calls[-1].index("-o") + 1])
         monkeypatch.setattr(tw.tempfile, "gettempdir", lambda: str(tmp_path / "100% temp"))
-        with pytest.raises(tw.ToolError, match="'%' in its name"):
-            tw.backup_tiff_metadata("a.tif", "a.tif")
+        # audit round 34: the folder of the file is tried next; with a '%' everywhere, refused
+        pct = tmp_path / "伊豆沼 50% [x]"
+        with pytest.raises(tw.ToolError, match="'%' in its path"):
+            tw.backup_tiff_metadata(str(pct / "a.tif"), str(pct / "a.tif"))
 
     def test_subfile_markers(self, monkeypatch):
         """v3.1 phase 4: the markers to write come from tiff_facts' read of the source; the

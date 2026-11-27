@@ -213,6 +213,18 @@ class Run:
         self.err += 1
         self.log(text, "ERROR")
 
+    def uncount(self, line):
+        """The mirror of count: take back the OK or WARN of a result whose file did not land
+        after all (its landing failed; the ERROR that says so is counted by error()). The
+        file was still processed: `counter` is not touched. Called on the caller's thread,
+        only for a line count() took (audit round 34: a file held open by another program
+        was counted OK and error at once)."""
+        kind = tw.result_kind(line)
+        if kind is tw.Kind.OK:
+            self.ok -= 1
+        elif kind is tw.Kind.WARN:
+            self.warn -= 1
+
     def summary(self):
         """The end-of-run tally plus the multi-page list. Also printed by the early
         "nothing to do" exits: a folder where every file was correctly skipped must not end
@@ -774,8 +786,13 @@ def _compress_job(run, t, load, own):
     layout_pages = [src_pages[0]] if generate_thumb else list(src_pages)
     type_args = tw.magick_keep_type_args(layout_pages)
     if not tw.associated_alpha_rewritable(src, layout_pages, timeout):
-        return refused(f"ERROR (associated alpha that is not opaque: ImageMagick would change it - refused) | {name}",
-                       "associated alpha that is not opaque")
+        # Nothing can write this file without changing it, and nothing is wrong with it: a
+        # SKIP with the reason, in every mode (audit round 34; until then an ERROR, exit 1, on
+        # every run of a preset over it).
+        if recompress:
+            return refused("", "associated alpha that is not opaque")
+        return res(f"SKIP (not rewritten - associated alpha that is not opaque: ImageMagick "
+                   f"would change it) | {name}")
 
     # The predictor, decided BEFORE the one write (tw.predictor_probe: a sample of page 0
     # written both ways, a few MB in the temp folder -- never the whole TIFF twice).
@@ -1010,8 +1027,9 @@ def _compress_job(run, t, load, own):
                      f"{_percent(sizes[1], sizes[0])}")
         elif zipcheck is not None:
             what += f", {'without' if zipcheck == 1 else 'with'} predictor ({sample_note})"
-        text = (f"OK ({what}){no_thumb_note}{thumb_note}{date_note}"
-                + (" [SOURCE DELETED]" if can_delete else "") + f" | {name}")
+        # Never "[SOURCE DELETED]" here (audit round 34): nothing is deleted yet, and in place
+        # nothing ever is. The delete is said by _delete_sources, after it happened.
+        text = f"OK ({what}){no_thumb_note}{thumb_note}{date_note} | {name}"
     return res(text, fd=True, staging_name=staging_name, can_delete=can_delete,
                integrity_failed=integrity_failed, integrity_reason=integrity_reason,
                size_before=sizes[0] if sizes else None, size_after=sizes[1] if sizes else None,
@@ -1358,6 +1376,14 @@ def _run_group(run, group_tasks, workers, collision_notes):
     return _GroupOutcome(staging_map, unlanded_srcs, integrity_failed_dst, results)
 
 
+def _counted_lines(outcome):
+    """{id(Job): the result line _run_group counted as OK or WARN}: the lines Run.uncount may
+    take back when that job's file then does not land. A result whose gate failed was counted
+    as an ERROR and is not in it."""
+    return {id(t): r.result for t, r in outcome.results
+            if not r.integrity_failed and tw.result_kind(r.result) in (tw.Kind.OK, tw.Kind.WARN)}
+
+
 def _move_staged(run, group_tasks, group_dir, outcome):
     """Move the staged files of a group to their final destination (modes 0/9 land in
     _archive_originals). A staged file whose gate failed is dropped, never moved."""
@@ -1367,6 +1393,7 @@ def _move_staged(run, group_tasks, group_dir, outcome):
     staging_map = outcome.staging_map
     unlanded_srcs = outcome.unlanded_srcs
     integrity_failed_dst = outcome.integrity_failed_dst
+    counted = _counted_lines(outcome)
     if staging and not dry:
         moved = 0
         for t in group_tasks:
@@ -1394,13 +1421,30 @@ def _move_staged(run, group_tasks, group_dir, outcome):
                 continue
             unlanded_srcs.add(t.src.lower())
             run.recompressed.pop(key_dst, None)
+            # Its OK/WARN was counted when the worker finished: the file did not land, so it
+            # is this error and nothing else (audit round 34).
+            if id(t) in counted:
+                run.uncount(counted[id(t)])
             kind, detail = failure
             if kind == "missing":
-                run.error(f"ERROR (move failed) | {dest_name}")
+                run.error(f"ERROR (move failed) | {dest_name} | the move reported success and "
+                          f"nothing is there")
             elif kind == "size":
-                run.error(f"ERROR (size mismatch after move) | {dest_name}")
+                run.error(f"ERROR (size mismatch after move) | {dest_name} | what is there has "
+                          f"another size than the file written: check it")
             else:
-                run.error(f"ERROR (move exception) | {dest_name}: {detail}")
+                # A failed move leaves the destination whole (one rename, or a copy to a temp
+                # sibling first): what is there is what was there.
+                run.error(f"ERROR (move exception) | {dest_name}: {detail} | not landed: "
+                          f"{dest_name} is as it was before the run")
+            # The staged file would stay in the staging folder for ever. It goes only while
+            # its source is there: otherwise it may be the only copy (fail closed).
+            if os.path.exists(stage_path):
+                if os.path.isfile(t.src):
+                    tw.remove_quietly(stage_path)
+                else:
+                    run.log(f"  the source is missing: the compressed copy stays in "
+                            f"{stage_path}", "WARN")
         if moved > 0:
             log(f"  -> Moved {moved} file(s) -> {group_dir}")
 
@@ -1415,6 +1459,7 @@ def _archive_originals(run, group_tasks, outcome):
     staging_map = outcome.staging_map
     unlanded_srcs = outcome.unlanded_srcs
     integrity_failed_dst = outcome.integrity_failed_dst
+    counted = _counted_lines(outcome)
     if not dry:
         kept = 0
         for t in group_tasks:
@@ -1437,6 +1482,8 @@ def _archive_originals(run, group_tasks, outcome):
             if k_err:
                 tw.remove_quietly(written)
                 run.recompressed.pop(key_dst, None)
+                if id(t) in counted:
+                    run.uncount(counted[id(t)])     # it did not land (audit round 34)
                 run.error(f"ERROR (keep original) | {t.name} | {k_err}")
             else:
                 kept += 1
@@ -1477,8 +1524,11 @@ def _delete_sources(run, outcome):
             try:
                 tw.remove_file(t.src)     # a read-only source is deleted too
                 deleted += 1
-            except OSError:
-                run.error(f"ERROR (failed to delete source after move) | {src_name}")
+            except OSError as e:
+                # The compressed copy DID land: its OK stands, and the line says what is on
+                # disk (audit round 34).
+                run.error(f"ERROR (source not deleted: {e}) | {src_name} | its compressed copy "
+                          f"{os.path.basename(t.final_dst)} is in place, both files are there")
         if deleted > 0:
             log(f"  -> Deleted {deleted} source file(s) after successful move")
 
@@ -1673,6 +1723,7 @@ def run_modes(run, bound):
 
     plan = _plan_jobs(run, files, comp_map)
     tasks = plan.jobs
+    _sweep_leftovers(run, tasks)
 
     if not tasks:
         # INFO when nothing went wrong: every file skipped as already compressed is the
@@ -1721,6 +1772,25 @@ def run_modes(run, bound):
     return 1 if run.err > 0 else 0
 
 
+def _sweep_leftovers(run, tasks):
+    """What a killed run left next to the files this run writes (tw.sweep_leftovers: removed
+    only on all five conditions), the temp folder's own temp files, and a note about the files
+    an earlier run left in a --staging-dir (reported, never removed). On the caller's thread,
+    before the first group (audit round 34)."""
+    dry = run.opt["dry_run"]
+    swept = tw.sweep_leftovers([(t.final_dst, t.src) for t in tasks], run.run_id, dry)
+    tw.report_swept(run.log, swept, dry)
+    if not dry:
+        n = tw.sweep_temp_files()
+        if n:
+            run.log(f"Removed {n} temp file(s) an interrupted run left in {tempfile.gettempdir()}")
+    if run.staging and not run.created_default_staging:
+        count, size = tw.staged_leftovers(run.staging, run.run_id)
+        if count:
+            run.log(f"NOTE: {count} file(s) ({_size_text(size)}) left in the staging folder by an "
+                    f"earlier run: {run.staging}", "WARN")
+
+
 def _is_interactive():
     try:
         return sys.stdin is not None and sys.stdin.isatty() and sys.stdout.isatty()
@@ -1762,7 +1832,7 @@ def run_main(argv, state):
     # The overlay is applied before anything reads a parameter. A -Param given on the command
     # line always beats it; an invalid entry never stops the run.
     overlay = tw.apply_settings_overlay(SCRIPT_NAME, OVERLAY_SPECS, opt, bound,
-                                        tw.INSTALL_DIR)
+                                        tw.INSTALL_DIR, PARAMS)
     if overlay["info"]:
         tw.say(overlay["info"])
     for w in overlay["warnings"]:
