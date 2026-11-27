@@ -583,7 +583,9 @@ def test_rich_prints_a_folder_name_with_markup_as_it_is(tmp_path, monkeypatch):
     # v3.3: the review screen replaced step_confirm's Summary
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
     assert ct._review_screen(cfg, workflow, Path("E:\\" + name), [["Folder:", "E:\\" + name]],
-                             lambda dry: [], lambda: None, lambda: None, set()) == "q"
+                             lambda dry: [], lambda: None, lambda: None,
+                             # answers the user gave: an unedited row shows its default
+                             {"staging", "exclude_folders", "workers"}) == "q"
     text = out.getvalue()
     assert name in text and "[red]stg" in text and "[/i]RAW" in text, text
 
