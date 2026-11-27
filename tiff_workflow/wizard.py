@@ -594,15 +594,17 @@ class ToolConfig:
     update_latest_seen: str = ""      # the tag it answered
 
 
-def _write_json_file(path: Path, data, prefix: str, ensure_ascii: bool = True) -> None:
+def _write_json_file(path: Path, data, prefix: str, ensure_ascii: bool = True,
+                     indent: Optional[int] = 2) -> None:
     """`data` as the JSON file `path`, in UTF-8: a temp file in the same folder, then one
     replacing rename (tw.move_file_replacing). The file is whole at every moment -- a run
-    killed mid-write leaves the old one. Raises OSError."""
+    killed mid-write leaves the old one. `indent` None: one line (the Diagnose cache, which
+    can hold many thousand files). Raises OSError."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=prefix, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
-            json.dump(data, f, indent=2, ensure_ascii=ensure_ascii)
+            json.dump(data, f, indent=indent, ensure_ascii=ensure_ascii)
             f.write("\n")
         tw.move_file_replacing(tmp, str(path))
     except BaseException:
@@ -3550,12 +3552,12 @@ def _load_diagnose_cache() -> Dict:
 
 
 def _save_diagnose_cache(cache: Dict) -> None:
+    """The cache through the config's own writer (a temp file, then one replacing rename): a
+    save that fails leaves the old file whole, and is a warning, never a stop. Until v3.3 it
+    had its own temp file and the wizard's one os.replace outside tw.move_file_replacing."""
     path = _diagnose_cache_path()
-    tmp = path.with_name(path.name + ".tmp")
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(cache, f)
-        os.replace(tmp, path)
+        _write_json_file(path, cache, ".convert_tiff_diagnose_cache.", indent=None)
     except OSError as e:
         _say(f"WARNING: could not save the Diagnose cache {path}: {e}", "yellow")
 
@@ -4127,22 +4129,11 @@ def _process_single_padded(tiff_path, staging) -> PaddedResult:
             # This gate authorises replacing the original with a LOSSY 16 -> 8-bit conversion,
             # so every branch fails CLOSED. Previously an unreadable identify (non-zero exit or
             # unparseable output) fell through to status = "ok" and the original was replaced
-            # with nothing verified.
-            def _read_dims(path) -> Optional[tuple]:
-                r = _run_captured(
-                    ["magick", "identify", "-ping", "-format", "%w %h\n", f"{_magick_spec(path)}[0]"],
-                    _work_timeout(30, path), text=True
-                )
-                if r.returncode != 0 or not r.stdout:
-                    return None
-                parts = r.stdout.splitlines()[0].strip().split()
-                if len(parts) < 2:
-                    return None
-                return (parts[0], parts[1])
-
-            new_dims = _read_dims(tmp8)
-            orig_dims = _read_dims(tiff_path)
-            if new_dims is None or orig_dims is None:
+            # with nothing verified. The module's own readers since v3.3 (they had nested
+            # copies here): (None, None) / None when unreadable.
+            new_dims = _tiff_dimensions(tmp8)
+            orig_dims = _tiff_dimensions(tiff_path)
+            if None in new_dims or None in orig_dims:
                 status = "dimension_unreadable"
                 return res(status)
             if new_dims != orig_dims:
@@ -4151,20 +4142,8 @@ def _process_single_padded(tiff_path, staging) -> PaddedResult:
 
             # Page-count parity: -depth 8 on a multi-page TIFF can drop pages, and the
             # dimension check above only looks at page [0].
-            def _read_pages(path) -> Optional[int]:
-                r = _run_captured(
-                    ["magick", "identify", "-ping", "-format", "%n\n", str(path)],
-                    _work_timeout(30, path), text=True
-                )
-                if r.returncode != 0 or not r.stdout:
-                    return None
-                try:
-                    return int(r.stdout.splitlines()[0].strip())
-                except ValueError:
-                    return None
-
-            new_pages = _read_pages(tmp8)
-            orig_pages = _read_pages(tiff_path)
+            new_pages = _tiff_page_count(tmp8)
+            orig_pages = _tiff_page_count(tiff_path)
             if new_pages is None or orig_pages is None or new_pages != orig_pages:
                 status = "page_count_mismatch"
                 return res(status)

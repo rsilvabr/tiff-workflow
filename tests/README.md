@@ -174,6 +174,9 @@ pytest tests --cov=..
 ### `test_audit_round34.py` covers
 - Audit round 34, real files in hostile folders, both lanes: mode 8 with two files held open by another handle (one result each, no `[SOURCE DELETED]` promise, nothing left in the staging folder, the next run compresses the held file); Delete OLD_TIFFs with a timestamped backup and its base (the stamped one checked against the file in place, an older base kept as MISMATCH, a stamped one changed after the check keeps its base, a `.tiff` backup of a `.tif`, a lone stamped one) and `tools/move_old_backups.py` (a base waits for its skipped sibling; run from a copy laid out like `_LOCAL`, and alone: exit 2); `tw.sweep_leftovers`, each of its five conditions failing alone, and a copy-exif folder a killed run left (staged file, temp sibling, `_exiftool_tmp`); associated non-opaque alpha a SKIP in modes 8/9 and copy-exif (a crop of the owner's real scan when `E:\TESTE` is there); the Summary's Advanced rows (both screens); a thumbnail size out of range in the settings file; a `%` in the temp folder
 
+### `test_tidy_v330.py` covers
+- v3.3 tidy: the padded gate refuses when its dimension or page reader (the module's `_tiff_dimensions` / `_tiff_page_count`) cannot read either file -- the original stays; the Diagnose cache written by v3.2.1 still loads, is written on one line through `_write_json_file`, and a save that fails leaves the old file whole and no temp file
+
 ### `test_lint.py` covers
 - v3.1 (T11): `ruff check` and `mypy` find nothing in `convert_tiff.py`, the package and `tools/`, with the settings of `pyproject.toml` (ruff: pyflakes, pycodestyle's errors, bugbear; mypy 1.x against Python 3.9, the annotated functions). Skipped in a Python without them (`python -m pip install ruff "mypy<2"`); proved by mutation with them installed: an unused import, a type error at the entry point, the copy_exif loop closure unbound
 
