@@ -50,6 +50,24 @@ def wizard_uses_install(monkeypatch, ct, install):
     ct._backend_tables.cache_clear()
     return install
 
+
+def stdin_bytes(kwargs):
+    """What a stand-in for subprocess.run would read on stdin, from the keyword arguments it
+    was called with: `input=` when given, else the bytes of the `stdin=` file (tw.run_captured
+    hands exiftool's argfile over as a temp FILE since audit round 33; read from the start and
+    put back where it was), else b""."""
+    if kwargs.get("input") is not None:
+        return kwargs["input"]
+    f = kwargs.get("stdin")
+    if not hasattr(f, "read"):
+        return b""
+    pos = f.tell()
+    f.seek(0)
+    data = f.read()
+    f.seek(pos)
+    return data
+
+
 LANES = ["parallel", "sequential"]
 
 

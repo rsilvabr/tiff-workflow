@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 def _fake_round28_exiftool(cmd, kwargs):
     if not cmd or str(cmd[0]) != "exiftool":
         return None
-    data = kwargs.get("input") or b""
+    data = stdin_bytes(kwargs)
     if isinstance(data, str):
         data = data.encode("utf-8")
     if b"-SamplesPerPixel" in data:
@@ -62,7 +62,7 @@ from tiff_workflow.wizard import (
 )
 
 REPO = Path(__file__).resolve().parent.parent
-from backends import BACKENDS, LANES, backend_cmd, run_backend  # noqa: E402
+from backends import BACKENDS, LANES, backend_cmd, run_backend, stdin_bytes  # noqa: E402
 
 PS_SCRIPTS = list(BACKENDS)
 
@@ -2717,7 +2717,7 @@ class TestAuditRound16PurgeMetadataGate:
             if cmd[0] == "exiftool" and "-@" in cmd:
                 # _run_exiftool sends everything as a UTF-8 argfile on stdin (`-@ -`); read it back
                 assert cmd[cmd.index("-@") + 1] == "-", "the argfile must go on stdin, not by path"
-                lines = kwargs["input"].decode("utf-8").splitlines()
+                lines = stdin_bytes(kwargs).decode("utf-8").splitlines()
                 cmd = ["exiftool"] + [a for a in lines if a not in ("-charset", "filename=utf8")]
             if cmd[0] == "exiftool":
                 name = cmd[-1]

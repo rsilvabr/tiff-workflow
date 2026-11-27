@@ -105,6 +105,23 @@ def test_run_captured_starts_no_thread(monkeypatch):
     assert "ImageMagick" in r.stdout
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows writer thread")
+def test_run_exiftool_starts_no_thread(monkeypatch):
+    """T2b (audit round 33): every exiftool call of the wizard sends its argfile on stdin
+    under a timeout; from Python 3.13 subprocess.run(input=, timeout=) writes stdin from a
+    thread. _run_exiftool must work with thread creation forbidden."""
+    if shutil.which("exiftool") is None:
+        pytest.skip("needs exiftool")
+
+    def guard_start(self, *args, **kwargs):
+        raise AssertionError("a thread was started")
+
+    monkeypatch.setattr(threading.Thread, "start", guard_start)
+    r = ct._run_exiftool(["-ver"], 30, text=True)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip().replace(".", "").isdigit(), r.stdout
+
+
 # ---------------------------------------------------------------------------
 # T3 - text decoding and timeout propagation
 # ---------------------------------------------------------------------------

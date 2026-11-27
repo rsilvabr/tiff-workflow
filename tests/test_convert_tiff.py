@@ -16,6 +16,7 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tiff_workflow import wizard as convert_tiff
+from backends import stdin_bytes  # noqa: E402
 # audit round 28: the padded conversion and the purge gate also read the per-page sample
 # layout (exiftool -SamplesPerPixel ...) and the XMP/IPTC values (exiftool -j). Test doubles
 # that answer every exiftool call with "" have to answer those two as well.
@@ -25,7 +26,7 @@ _FAKE_LAYOUT = ("[IFD0]  SamplesPerPixel: 3\n[IFD0]  PhotometricInterpretation: 
 
 def _fake_exiftool_round28(kwargs):
     """The answer of a round-28 exiftool read, or None for any other call."""
-    data = kwargs.get("input") or b""
+    data = stdin_bytes(kwargs)
     if isinstance(data, str):
         data = data.encode("utf-8")
     if b"-SamplesPerPixel" in data:

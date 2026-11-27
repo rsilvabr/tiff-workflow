@@ -12,6 +12,48 @@ This document tracks critical and significant bug fixes applied to the TIFF Work
 > that way now. Rounds 8-14 shipped after v2.2 and make up **v2.3**. Rounds 15-16 make up **v2.4**,
 > rounds 17-22 **v2.5**.
 
+## v3.2.1 - Audit round 33: Python 3.13 writes a program's input from a thread
+
+Found by running the whole suite once per installed Python, 3.9 to 3.15 (2026-11-27): the rule
+of round 21 failed on 3.13, 3.14 and 3.15, and the suite itself no longer ran on 3.9.
+
+### LOW - wizard, Python 3.13+: every exiftool call started a thread
+**Issue:** round 21 took every reader thread out of the tool calls: under memory exhaustion a
+thread can fail in its bootstrap before it signals "started", and `Thread.start()` then waits
+forever, before the timeout is armed (jxl-photo, 2026-10-04: one worker hung 60 min).
+`run_captured` sends exiftool its argfile on stdin (`input=`, round 27). Python 3.13 changed
+`Popen._communicate` on Windows: when a timeout is given, `input=` is written by a writer
+thread (`_writerthread`) so that the timeout also covers the write. The wizard's
+`_run_exiftool` passes a timeout, so from 3.13 every exiftool call of the wizard -- the padded
+conversion, the purge gate, the Diagnose -- started a thread again.
+`test_run_captured_starts_no_thread` had pinned it since round 21 and failed on 3.13-3.15,
+nobody had run it there. The backends' exiftool calls pass no timeout and take the thread-free
+path of `communicate()`; the Windows program is built with Python 3.12: neither was affected.
+- **Fix:** `run_captured` writes `input` to a temp FILE and hands it over as `stdin=`, the way
+  stdout and stderr already were: no pipe, so no thread on any Python, with the timeout and the
+  kill unchanged. `input` must be bytes (a `TypeError` otherwise; every caller encodes).
+  Two new tests run with thread creation forbidden: a 4 MiB input under a timeout reaches the
+  program intact (length + SHA-256), and the wizard's real `_run_exiftool`. The test doubles
+  that patch `subprocess.run` read stdin through one helper, `tests/backends.py`
+  `stdin_bytes`; with it returning nothing, 27 tests fail -- none passes without seeing the
+  argfile. The three tests fail on HEAD's `common.py` under Python 3.13 (`3 failed`) and pass
+  on 3.12 and 3.9 there, as expected.
+- **Files:** `tiff_workflow/common.py`, `tests/backends.py`, `tests/test_backend_invariants.py`,
+  `tests/test_memory_subprocess.py`, `tests/test_convert_tiff.py`, `tests/test_regression_classes.py`
+
+### LOW - tests: the suite did not run on Python 3.9
+**Issue:** the backends run on Python 3.9, but five test files and the real-photo battery wrote
+their fixtures with `Path.write_text(..., newline=)`, a keyword of 3.10: on 3.9, 20 tests failed
+before reaching the code they test.
+- **Fix:** the same bytes written with `write_bytes`. A fixture of `test_io_rewrites.py` that
+  failed its own precondition in 24 of 200 builds (random pixels: the damaged bytes in mid-strip
+  often still decoded as valid Deflate) now damages page 0's first strip from its zlib header:
+  0 of 200. The whole suite passes on 3.9, 3.10, 3.13, 3.14 and 3.15; the real-photo battery
+  464/464 on 3.13.
+- **Files:** `tests/test_ctrl_c.py`, `tests/test_inputdir_file.py`, `tests/test_round28_backends.py`,
+  `tests/test_settings_literals.py`, `tests/test_v31_backends.py`, `tests/test_io_rewrites.py`,
+  `tools/real_photo_battery.py`
+
 ## v3.2.0 - Audit round 32: the IPTC times were given the computer's time zone
 
 Found by the independent review of v3.2.0 (2026-11-15), in the metadata copy every compress has

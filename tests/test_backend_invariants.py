@@ -3606,6 +3606,26 @@ class TestSourceRules:
         with pytest.raises(subprocess.TimeoutExpired):
             tw.run_captured([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
 
+    def test_a_large_stdin_with_a_timeout_starts_no_thread(self, monkeypatch):
+        """Audit round 33: from Python 3.13, subprocess.run(input=..., timeout=...) writes the
+        input from a thread on Windows. run_captured hands stdin over as a temp FILE: an input
+        far larger than a pipe buffer (4 MB) reaches the program intact, under a timeout, with
+        thread creation forbidden."""
+        import hashlib
+        import threading
+
+        data = bytes(range(256)) * (16 * 1024)   # 4 MiB, every byte value
+        assert len(data) == 4 * 1024 * 1024
+
+        def no_thread(self, *a, **k):
+            raise AssertionError("a thread was started")
+        monkeypatch.setattr(threading.Thread, "start", no_thread)
+        code = ("import sys, hashlib; d = sys.stdin.buffer.read(); "
+                "sys.stdout.write(str(len(d)) + ' ' + hashlib.sha256(d).hexdigest())")
+        rc, out, err = tw.run_captured([sys.executable, "-c", code], timeout=60, input=data)
+        assert rc == 0, err
+        assert out.decode("ascii").split() == [str(len(data)), hashlib.sha256(data).hexdigest()]
+
     @pytest.mark.parametrize("name", ALL_FILES)
     def test_probes_have_a_timeout_and_conversions_do_not_probe(self, name):
         """A bare identify/compare has no timeout: a corrupted file hung the whole run."""

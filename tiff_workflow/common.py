@@ -23,6 +23,7 @@ Rules this module keeps (docs/bugs_fixed.md has the history of each):
 """
 
 import argparse
+import contextlib
 import ctypes
 import json
 import math
@@ -1013,11 +1014,23 @@ def run_captured(cmd, timeout=None, input=None):
     Windows; under memory exhaustion a thread can fail in its bootstrap before it signals
     "started", and Thread.start() then waits forever -- before the timeout is armed
     (jxl-photo, 2026-10-04: one worker hung 60 min). With files there is no thread.
+    `input` (bytes) reaches stdin through a temp FILE too: from Python 3.13 subprocess writes
+    `input=` from a thread whenever a timeout is given (audit round 33).
     Raises OSError when the program cannot be started and subprocess.TimeoutExpired when
     `timeout` seconds pass (the program is killed first)."""
-    stdin_kw = {"stdin": subprocess.DEVNULL} if input is None else {"input": input}
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        r = subprocess.run(cmd, stdout=out, stderr=err, timeout=timeout, **stdin_kw)
+    if input is not None and not isinstance(input, (bytes, bytearray)):
+        raise TypeError("run_captured: input must be bytes")
+    with contextlib.ExitStack() as files:
+        out = files.enter_context(tempfile.TemporaryFile())
+        err = files.enter_context(tempfile.TemporaryFile())
+        inp = None
+        if input is not None:
+            inp = files.enter_context(tempfile.TemporaryFile())
+            inp.write(input)
+            inp.flush()
+            inp.seek(0)
+        r = subprocess.run(cmd, stdin=subprocess.DEVNULL if inp is None else inp,
+                           stdout=out, stderr=err, timeout=timeout)
         out.seek(0)
         err.seek(0)
         # A real run leaves r.stdout None (the output is in the files); a stand-in for
