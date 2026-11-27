@@ -140,34 +140,25 @@ def test_run_free_compress_no_configure_adds_no_thumb_keys(tmp_path, monkeypatch
     keys (it used to write 256/"85"/jpg, overriding the backend's defaults)."""
     monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
     captured = {}
+    real_screen = ct._review_screen
 
-    def fake_step_confirm(workflow, cfg):
+    def screen(cfg, workflow, *a, **k):
+        action = real_screen(cfg, workflow, *a, **k)
         captured.update(workflow)
-        return False
-
-    monkeypatch.setattr(ct, "step_confirm", fake_step_confirm)
+        return action
+    monkeypatch.setattr(ct, "_review_screen", screen)
+    gen = next(i for i, r in enumerate(ct._review_rows({"origin": "free_compress", "mode": 0}), 1)
+               if r.key == "generate_thumbnail")
     answers = iter([
         "0",            # mode
         str(tmp_path),  # input folder
-        "n",            # generate manifest?
-        "",             # workers
-        "",             # staging
-        "n",            # dry-run
-        "",             # safe mode (default)
-        "",             # skip LZW (default)
-        "",             # recompress ZIP (default No)
-        "",             # cap workers (default)
-        "",             # exclude folders
-        "",             # only folders (all)
-        "",             # force sequential?
-        "y",            # generate thumbnails?
-        "n",            # configure thumbnail settings?
-        "n",            # skip compressed with thumb?
+        str(gen), "y",  # v3.4, the review screen: thumbnails yes, nothing else edited
+        "q",            # cancel
     ])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
 
-    assert ct.run_free_compress(cfg) is False  # cancelled at the (stubbed) summary
+    assert ct.run_free_compress(cfg) is False  # cancelled on the screen
     assert captured.get("generate_thumbnail") is True
     assert "thumb_size" not in captured
     assert "thumb_quality" not in captured

@@ -44,10 +44,15 @@ def test_enter_at_the_mode8_delete_question_runs_nothing(tmp_path, monkeypatch, 
     ran = []
     monkeypatch.setattr(ct, "step_mode", lambda cfg: 8)
     monkeypatch.setattr(ct, "step_folder", lambda cfg, *a, **k: folder)
-    monkeypatch.setattr(ct, "step_basic_params", lambda cfg, wf: None)
-    monkeypatch.setattr(ct, "_ask_thumbnails", lambda wf: None)
-    monkeypatch.setattr(ct, "step_confirm", lambda wf, cfg: ran.append("confirm") or True)
     monkeypatch.setattr(ct, "run_subprocess", lambda *a, **k: ran.append(a) or 0)
+    # v3.4: the review screen; `r` asks mode 8's question, Enter (no) comes back to the
+    # screen, `q` leaves. Every other question is Enter.
+    reviews = iter(["r", "q"])
+
+    def answer(prompt=""):
+        enter.append(str(prompt))
+        return next(reviews) if str(prompt).startswith("Review") else ""
+    monkeypatch.setattr("builtins.input", answer)
     assert ct.run_free_compress(_cfg()) is False
     assert ran == [], "Enter at the mode 8 question went on"
     assert any("Mode 8 will DELETE source TIFFs" in p for p in enter), enter

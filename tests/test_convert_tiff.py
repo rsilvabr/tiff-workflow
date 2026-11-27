@@ -840,17 +840,17 @@ class TestThumbFormatPlainTextFallback:
             return 0
 
         monkeypatch.setattr(convert_tiff, "run_subprocess", fake_run_subprocess)
+        wf_on = {"origin": "free_compress", "mode": 0, "generate_thumbnail": True}
+        rows = convert_tiff._review_rows(wf_on)
+        gen = next(i for i, r in enumerate(rows, 1) if r.key == "generate_thumbnail")
+        fmt = next(i for i, r in enumerate(rows, 1) if r.key == "thumb_format")
         answers = iter([
             "0",            # mode
             str(tmp_path),  # input folder
-            "n",            # generate manifest?
-            # workers/staging/dry/safe/skip_lzw/recompress/cap/exclude/only-folders/force-parallel
-            "", "", "n", "", "", "", "", "", "", "",
-            "y", "y",       # generate thumbnails? configure?
-            "", "", "bmp",  # size, quality, FORMAT (invalid)
+            str(gen), "y",  # the review screen (v3.4): the thumbnail row, yes
+            str(fmt), "bmp",  # the format row: not offered ...
             "png",          # ... asked again
-            "n",            # skip compressed with thumb?
-            "y",            # proceed?
+            "r",            # run
         ])
         monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))
 

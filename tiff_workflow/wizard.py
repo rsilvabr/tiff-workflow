@@ -1889,6 +1889,14 @@ def step_advanced_options(cfg: "ConfigManager", workflow: Dict) -> bool:
     wanted = _ask_yes_no([("Advanced options?", "cyan"), " (timeouts, memory share, ...)"], False)
     if not wanted:
         return True
+    return _advanced_screen(cfg, workflow)
+
+
+def _advanced_screen(cfg: "ConfigManager", workflow: Dict) -> bool:
+    """The Advanced options' own screen (step_advanced_options after its yes; the review
+    screen's `a` key): a number, a value; 0 = done."""
+    backends = _advanced_backends(workflow)
+    rows = [(b, o) for b in backends for o in REGISTRY[b] if o.level == "advanced"]
     while True:
         _say("Advanced options (only the ones you change are passed to the script):")
         for n, (backend, opt) in enumerate(rows, 1):
@@ -5627,84 +5635,442 @@ def _ask_thumbnails(workflow: Dict) -> None:
         "Skip already-compressed TIFFs that have thumbnails?", False, "cyan")
 
 
-def run_free_compress(cfg: "ConfigManager") -> bool:
-    """Workflow 1: Free compress with modes 0-9."""
-    workflow = {
-        "origin": "free_compress",
-        "dest": "zip",
-        "mode": None,
-        "folders": [],
-        "workers": cfg.config.default_workers,
-        "staging": "",
-        "dry_run": False,
-    }
+# --- The review screen (the wizard by task, v3.4) ----------------------------------
+#
+# A task asks only what cannot have a default -- the task, the folder (Fuji: the pattern and
+# AutoFind), the mode for Compress, create or remove for Thumbnails -- and then shows ONE
+# screen with every answer as a numbered row (#, Option, Value, From). A number edits that row;
+# a = all options (the Advanced screen), c = the command line(s), d = a dry run and back here,
+# s = save as preset, r = run, b = back to the first questions (the answers kept), q = cancel.
+# The screen only fills the workflow dict: REGISTRY, _emit_all and the journal are those of the
+# question-by-question flow it replaced, and answered with just `r` it gives the same command
+# lines as that flow answered with Enter everywhere (tests/data/review_default_argv.json,
+# captured from v3.2.1). Danger is never a row: mode 8's question and its --delete-source are
+# asked at `r`.
 
-    # Mode selection
-    mode = step_mode(cfg)
-    if mode is None:
-        return False
-    workflow["mode"] = mode
-    cfg.config.last_mode = mode
+@dataclass(frozen=True)
+class ReviewRow:
+    key: str                  # the workflow key it edits
+    label: str
+    editor: str               # how the row is edited (_review_edit)
+    tasks: Tuple[str, ...]    # the tasks that show it (_review_task)
+    when: Optional[Callable[[Dict], bool]] = None
 
-    # Folder
-    folder = step_folder(cfg)
-    if folder is None:
-        return False
-    workflow["input_dir"] = str(folder)
 
-    # Offer to generate a manifest CSV of subfolders instead of running now.
-    # The user edits it in Excel, then runs it from the main menu option [3].
-    if _ask_yes_no("Generate a manifest CSV for this folder instead of running now?", False, "cyan"):
-        manifest_path = generate_manifest(folder, mode)
-        if manifest_path:
-            cfg.config.last_manifest_path = manifest_path
-            cfg.save_config()
-            _say([("Manifest saved to:", "green"), f" {manifest_path}"])
-            _say("Edit in Excel, then run it from the main menu: [3] Run from manifest", "dim")
+_COMPRESSING = ("compress", "fuji_compress", "both")
+_BATCH = ("compress", "fuji_compress", "both", "copy_exif")
+_THUMBS = ("thumbnails", "thumbnails_remove")
+
+
+def _flat_mode(workflow: Dict) -> bool:
+    return workflow.get("mode") == 2
+
+
+#: The rows, in the order the question-by-question flow asked them.
+_REVIEW_ROWS: Tuple[ReviewRow, ...] = (
+    ReviewRow("output_dir", "Output folder (mode 2 merges all TIFFs here)", "flat_output",
+              ("compress",), _flat_mode),
+    ReviewRow("duplicate_action", "Duplicate filenames", "duplicate", ("compress",), _flat_mode),
+    ReviewRow("size", "Thumbnail size (px)", "thumbs_size", ("thumbnails",)),
+    ReviewRow("quality", "JPEG quality (1-100)", "quality", ("thumbnails",)),
+    ReviewRow("format", "Format", "choice:jpg|png|tif", ("thumbnails",)),
+    ReviewRow("page", "Page", "choice:0|all", ("thumbnails",)),
+    ReviewRow("output_dir", "Output folder (empty = next to each TIFF)", "output_dir", _THUMBS),
+    ReviewRow("recursive", "Recursive", "bool", _THUMBS),
+    ReviewRow("exclude_folders", "Exclude folders", "names", ("thumbnails",), _thumbs_recursive),
+    ReviewRow("workers", "Workers", "workers", _BATCH + ("thumbnails",)),
+    ReviewRow("staging", "Staging folder (SSD for faster I/O)", "staging", _BATCH),
+    ReviewRow("safe_mode", "Safe mode (skip multi-page TIFFs)", "bool", _BATCH),
+    ReviewRow("skip_lzw", "Skip LZW as already compressed", "bool", _BATCH),
+    ReviewRow("recompress_zip", "Recompress ZIP TIFFs saved without a predictor", "bool",
+              _COMPRESSING),
+    ReviewRow("cap_workers", "Cap workers (0 = no cap)", "cap", _COMPRESSING),
+    ReviewRow("exclude_folders", "Exclude folders", "names", _BATCH),
+    ReviewRow("include_folders", "Only folders named", "names", _COMPRESSING),
+    ReviewRow("force_sequential", "Force sequential (one file at a time)", "bool", _COMPRESSING),
+    ReviewRow("generate_thumbnail", "Generate embedded thumbnails", "bool", ("compress",)),
+    ReviewRow("thumb_size", "Thumbnail size (px)", "thumb_size", ("compress",), _thumb_on),
+    ReviewRow("thumb_quality", "Thumbnail JPEG quality", "quality", ("compress",), _thumb_on),
+    ReviewRow("thumb_format", "Thumbnail format", "choice:jpg|png|tif", ("compress",), _thumb_on),
+    ReviewRow("skip_compressed_with_thumb", "Skip already-compressed TIFFs that have thumbnails",
+              "bool", ("compress",), _thumb_on),
+)
+
+#: The REGISTRY options a wizard step asks that are NOT a row: {backend: {param: where}}.
+#: tests/test_review_screen.py fails on an asked option that is neither (a question dropped).
+_REVIEW_NOT_ROWS: Dict[str, Dict[str, str]] = {
+    "compress": {"input_dir": "the folder, asked first", "dry_run": "the d key",
+                 "delete_source": "mode 8's question, at r"},
+    "copy_exif": {"input_dir": "the folder and AutoFind, asked first", "dry_run": "the d key",
+                  "output_dir": "not offered: the Fuji tasks write next to the photos"},
+    "thumbnails": {"input_dir": "the folder, asked first", "dry_run": "the d key",
+                   "remove": "create or remove, asked first"},
+}
+
+
+def _review_task(workflow: Dict) -> str:
+    """The task a workflow is, as the rows name it."""
+    origin = workflow.get("origin")
+    if origin == "free_compress":
+        return "compress"
+    if origin == "compress":
+        return "fuji_compress"
+    if origin == "thumbnails":
+        return "thumbnails_remove" if workflow.get("remove") else "thumbnails"
+    return str(origin)
+
+
+def _review_rows(workflow: Dict) -> List[ReviewRow]:
+    task = _review_task(workflow)
+    return [r for r in _REVIEW_ROWS if task in r.tasks and (r.when is None or r.when(workflow))]
+
+
+def _review_defaults(cfg: "ConfigManager", workflow: Dict, folder: Path) -> Dict[str, Tuple[object, str]]:
+    """{key: (the value Enter gave in the question-by-question flow, where it comes from)} for
+    the rows of this workflow's task: the remembered answers of the last run, the settings
+    file, the scripts' own defaults."""
+    task = _review_task(workflow)
+    c = cfg.config
+    out: Dict[str, Tuple[object, str]] = {}
+
+    def backend(script, param):
+        over = _overlay_values(script).get(param) if script in _OVERLAY_SECTIONS else None
+        return _backend_default(script, param), ("settings file" if over is not None else "script")
+
+    comp = "compress_tiff_zip.py"
+    ref = comp if task in _COMPRESSING else "copy_exif_to_tiff.py"
+    out["workers"] = (c.last_workers or c.default_workers,
+                      "last run" if c.last_workers else "config")
+    out["staging"] = (_staging_default(cfg), "last run" if c.last_staging
+                      else ("config" if c.staging_dir else "-"))
+    out["safe_mode"] = backend(ref, "safe_mode")
+    out["skip_lzw"] = (backend(comp, "skip_lzw_as_compressed") if task in _COMPRESSING
+                       else (False, "script"))
+    out["recompress_zip"] = (False, "script")
+    out["cap_workers"] = backend(comp, "cap_workers")
+    out["exclude_folders"] = (c.last_exclude_folders or "",
+                              "last run" if c.last_exclude_folders else "-")
+    out["include_folders"] = (c.last_include_folders or "",
+                              "last run" if c.last_include_folders else "-")
+    out["force_sequential"] = (False, "-")
+    out["generate_thumbnail"] = (False, "-")
+    out["skip_compressed_with_thumb"] = (False, "-")
+    for key, param in (("thumb_size", "thumb_size"), ("thumb_quality", "thumb_quality"),
+                       ("thumb_format", "thumb_format")):
+        out[key] = backend(comp, param)
+    out["output_dir"] = ((str(folder / "ZIP_flat"), "-") if task == "compress" else ("", "-"))
+    out["duplicate_action"] = backend(comp, "duplicate_action")
+    gt = "generate_thumbnails.py"
+    for key in ("size", "quality", "format", "page"):
+        out[key] = backend(gt, key)
+    out["recursive"] = (False, "-")
+    return out
+
+
+#: The keys whose row shows a value the backend is NOT given until it is edited (the backend
+#: then runs on its own setting, as "Configure? No" did): the thumbnail size, quality, format.
+_REVIEW_UNSET_UNTIL_EDITED = ("thumb_size", "thumb_quality", "thumb_format")
+
+
+def _review_init(cfg: "ConfigManager", workflow: Dict, folder: Path, edited: set) -> None:
+    """Fill what the rows show, keeping what is already there (b comes back here with the
+    answers kept). A row its `when` hides takes its key away, an edit of it too: mode 2's
+    output folder must not reach mode 9 after a b. The thumbnail size, quality and format of
+    Compress are set only when edited (the backend's own setting otherwise, as "Configure? No"
+    did)."""
+    defaults = _review_defaults(cfg, workflow, folder)
+    task = _review_task(workflow)
+    shown = {r.key for r in _review_rows(workflow)}
+    for row in _REVIEW_ROWS:
+        if task not in row.tasks:
+            continue
+        if row.key not in shown:
+            workflow.pop(row.key, None)
+            edited.discard(row.key)
+            continue
+        if row.key in workflow or row.key in _REVIEW_UNSET_UNTIL_EDITED:
+            continue
+        workflow[row.key] = defaults[row.key][0]
+
+
+def _review_value(workflow: Dict, row: ReviewRow, defaults) -> Tuple[object, str]:
+    if row.key in workflow:
+        return workflow[row.key], ""
+    return defaults[row.key]
+
+
+def _review_shown(row: ReviewRow, value) -> str:
+    if row.editor == "bool":
+        return "yes" if value else "no"
+    if row.key == "staging":
+        return value or "none"
+    if row.key == "output_dir" and row.editor == "flat_output":
+        return value or "(the input folder: in place, no backup)"
+    if row.key == "output_dir":
+        return value or "(next to each TIFF)"
+    if row.editor == "names":
+        return value or "-"
+    return str(value)
+
+
+def _review_names(text: str) -> str:
+    return "" if text.strip() in ("-", "", "none") else text.strip()
+
+
+def _review_edit(cfg: "ConfigManager", workflow: Dict, row: ReviewRow, value) -> bool:
+    """Ask the new value of one row; True when the workflow changed. A wrong answer says why
+    and changes nothing; a number out of range is clamped and the clamp is said."""
+    ed = row.editor
+    if ed == "bool":
+        workflow[row.key] = _ask_yes_no(row.label + "?", bool(value), "cyan")
         return True
-
-    if mode == 2 and not _ask_flat_output(folder, workflow):
-        return False
-
-    # Basic params
-    step_basic_params(cfg, workflow)
-
-    _ask_thumbnails(workflow)
-
-    # For mode 8: confirm delete
-    if mode == 8:
-        if not _ask_yes_no("Mode 8 will DELETE source TIFFs after compression. Are you sure?", False, "red"):
-            _say("Cancelled.", "dim")
+    if ed == "workers":
+        workflow[row.key] = _read_workers(_ask("Workers", str(value)), cfg)
+        return True
+    if ed == "staging":
+        workflow[row.key] = _read_staging(
+            _ask("Staging folder (SSD for faster I/O; '-' = none)", value or "-"), cfg)
+        return True
+    if ed == "cap":
+        text = _ask([("Cap workers?", "cyan"), " (0 = no cap)"], str(value), style="")
+        try:
+            n = int(text)
+        except ValueError:
+            _say(f"Not a number: {text!r} -- not changed.", "yellow")
             return False
-        workflow["delete_source"] = True
-    else:
-        workflow["delete_source"] = False
+        clamped = max(0, min(n, MAX_WORKERS))
+        if clamped != n:
+            _say(f"Cap workers {n} is out of range (0-{MAX_WORKERS}): using {clamped}.", "yellow")
+        workflow[row.key] = clamped
+        return True
+    if ed == "names":
+        workflow[row.key] = _review_names(
+            _ask([(row.label + "?", "cyan"), " (';'-separated folder names, '-' = none)"],
+                 value or "-", style=""))
+        return True
+    if ed in ("flat_output", "output_dir"):
+        text = _ask(row.label, value or "")
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+            text = text[1:-1]
+        if ";" in text:
+            _error(f"Output path contains ';' which is not supported: {text}")
+            return False
+        if ed == "flat_output":
+            folder = Path(workflow.get("input_dir", ""))
+            if text and Path(text).resolve() == folder.resolve():
+                warn = ("Output folder is the input folder: TIFFs will be recompressed in "
+                        "place, without a backup.")
+                if not _ask_yes_no(f"{warn} Continue?", False, "yellow"):
+                    return False
+                workflow.pop(row.key, None)
+                return True
+            if not text:
+                _say("Mode 2 needs an output folder.", "yellow")
+                return False
+        workflow[row.key] = text
+        return True
+    if ed == "duplicate":
+        workflow[row.key] = _ask("Duplicate filenames", str(value),
+                                 choices=["Numbered", "Skip", "Overwrite"])
+        return True
+    if ed.startswith("choice:"):
+        workflow[row.key] = _ask(row.label, str(value), choices=ed[len("choice:"):].split("|"))
+        return True
+    if ed == "quality":
+        text = _ask(row.label, str(value))
+        if not (text.isdigit() and 1 <= int(text) <= 100):
+            _say(f"Invalid quality {text!r} (must be 1-100): not changed.", "yellow")
+            return False
+        workflow[row.key] = text
+        return True
+    if ed in ("thumb_size", "thumbs_size"):
+        script = "generate_thumbnails.py" if ed == "thumbs_size" else "compress_tiff_zip.py"
+        p = _backend_param(script, "size" if ed == "thumbs_size" else "thumb_size")
+        lo, hi = (p.lo, p.hi) if p is not None else (None, None)
+        text = _ask(row.label + (f" ({lo}-{hi})" if lo is not None and hi is not None else ""),
+                    str(value))
+        try:
+            n = int(text)
+        except ValueError:
+            _say(f"Not a number: {text!r} -- not changed.", "yellow")
+            return False
+        if (lo is not None and n < lo) or (hi is not None and n > hi):
+            _say(f"Size {n} out of range ({lo}-{hi}): not changed.", "yellow")
+            return False
+        if n < 1:
+            _say(f"Size {n} is not a size: not changed.", "yellow")
+            return False
+        workflow[row.key] = n
+        return True
+    raise ValueError(f"unknown review editor {ed!r}")
 
-    # Summary + confirm
-    if not step_confirm(workflow, cfg):
-        return False
 
-    cfg.config.last_workers = workflow["workers"]
+def _review_screen(cfg: "ConfigManager", workflow: Dict, folder: Path, header: List[list],
+                   commands: Callable[[bool], List[List[str]]],
+                   run_dry: Callable[[], None], save_preset: Callable[[], None],
+                   edited: set, extra_keys: Optional[Dict[str, str]] = None) -> str:
+    """The screen. Returns "r", "b", "q" or a key of `extra_keys` (Compress: "m", a manifest
+    instead); `d`, `s`, `c`, `a` and the numbers are handled here and the screen is drawn
+    again."""
+    keys = {"a": "all options", "c": "command line", "d": "dry run", "s": "save as preset",
+            "r": "run", "b": "back", "q": "cancel"}
+    keys.update(extra_keys or {})
+    while True:
+        _review_init(cfg, workflow, folder, edited)
+        defaults = _review_defaults(cfg, workflow, folder)
+        rows = _review_rows(workflow)
+        table = []
+        for n, row in enumerate(rows, 1):
+            value, where = _review_value(workflow, row, defaults)
+            if row.key in edited:
+                where = "you"
+            elif row.key in _REVIEW_UNSET_UNTIL_EDITED:
+                where = f"{where} (not passed)"
+            table.append([str(n), row.label, _review_shown(row, value), (where or "-", "dim")])
+        _table([{"style": "bold cyan"}, {}], header, box=None, show_header=False, pad_edge=False)
+        _table([{"name": "#", "justify": "right", "style": "dim"}, {"name": "Option"},
+                {"name": "Value", "style": "green"}, {"name": "From"}],
+               table, panel={"title": ("Review", "bold"), "border_style": "green"},
+               show_header=True, header_style="bold cyan")
+        for adv in _advanced_summary_rows(workflow):
+            _say(f"  {adv[0] or '         '} {adv[1]}", "dim")
+        _say("  ".join(f"[{k}] {v}" for k, v in keys.items()), "dim")
+        choice = _ask("Review -- a number edits that row", style="",
+                      choices=[str(i) for i in range(1, len(rows) + 1)] + list(keys))
+        if choice.isdigit():
+            row = rows[int(choice) - 1]
+            value, _w = _review_value(workflow, row, defaults)
+            if _review_edit(cfg, workflow, row, value):
+                edited.add(row.key)
+            continue
+        if choice == "a":
+            if not _advanced_backends(workflow):
+                _say("This task has no other options.", "yellow")
+            else:
+                _advanced_screen(cfg, workflow)
+            continue
+        if choice == "c":
+            for cmd in commands(False):
+                _say(" ".join(cmd), "dim")
+            continue
+        if choice == "d":
+            run_dry()
+            continue
+        if keys[choice] == "save as preset":    # by its meaning: "s" is also a yes word
+            save_preset()
+            continue
+        return choice
+
+
+def _review_remember(cfg: "ConfigManager", workflow: Dict) -> None:
+    """What the next run offers again (the question-by-question flow remembered them as they
+    were answered): the workers, the staging folder, the folder names."""
+    task = _review_task(workflow)
+    c = cfg.config
+    if task in _BATCH:
+        c.last_staging = workflow.get("staging") or ""
+        c.last_exclude_folders = workflow.get("exclude_folders") or None
+        if task in _COMPRESSING:
+            c.last_include_folders = workflow.get("include_folders") or None
+        c.last_workers = workflow.get("workers")
+    elif task == "thumbnails" and workflow.get("recursive"):
+        c.last_exclude_folders = workflow.get("exclude_folders") or None
+
+
+def _review_save_preset(cfg: "ConfigManager", kind: str, label: str, commands: List[List[str]],
+                        autofind: Optional[Dict] = None) -> None:
+    """The `s` key: the journal of the current answers saved as a preset, without running (a
+    mode-8 preset asks whether it may run unattended, _ask_unattended_replace)."""
+    name = _clean_preset_name(_ask("Preset name", style=""))
+    if not name:
+        _say("Invalid name (empty, too long, or contains control characters).", "red")
+        return
+    presets = dict(cfg.config.presets or {})
+    if name in presets and not _ask_yes_no("Replace it?", False):
+        return
+    entry = {"kind": kind, "label": label, "commands": [_journal_line(c) for c in commands],
+             "time": time.strftime("%Y-%m-%d %H:%M:%S"), "manifest_path": None,
+             "manifest_workflow": None, "manifest_default_mode": None, "autofind": autofind,
+             "diagnose": None, "saved_at": time.strftime("%Y-%m-%d %H:%M")}
+    presets[name] = _ask_unattended_replace(entry)
+    cfg.config.presets = presets
     cfg.save_config()
+    _say(f"Preset '{name}' saved.", "green")
 
-    cmd = build_compress_command(workflow, folders=[folder])
-    journal_wf = dict(workflow)
-    journal_wf["dry_run"] = False
-    journal_cmd = build_compress_command(journal_wf, folders=[folder])
-    label = f"Compress TIFFs -- mode {mode} -- {truncate_path(folder, 60)}"
-    if workflow.get("delete_source"):
-        label += " [DELETES SOURCES]"
-    _save_last_run(cfg, "compress", label, [journal_cmd])
-    _echo_command(cmd)
-    result = run_subprocess(cmd)
 
-    if workflow.get("dry_run"):
-        def real():
+def run_free_compress(cfg: "ConfigManager") -> bool:
+    """Workflow 1: Compress, modes 0-9. The mode and the folder, then the review screen (`b`
+    comes back to the mode with every answer kept; `m` writes a manifest CSV instead)."""
+    workflow: Dict = {"origin": "free_compress", "dest": "zip", "mode": None, "folders": [],
+                      "dry_run": False}
+    edited: set = set()
+    while True:
+        mode = step_mode(cfg)
+        if mode is None:
+            return False
+        folder = step_folder(cfg)
+        if folder is None:
+            return False
+        workflow["mode"] = mode
+        workflow["input_dir"] = str(folder)
+        cfg.config.last_mode = mode
+        label = f"Compress TIFFs -- mode {mode} -- {truncate_path(folder, 60)}"
+        if mode == 8:
+            label += " [DELETES SOURCES]"
+
+        def commands(dry: bool, mode=mode, folder=folder) -> List[List[str]]:
+            # mode 8 carries --delete-source, tied to its question at `r` (a dry run deletes
+            # nothing and shows what the run would do)
+            wf = dict(workflow, dry_run=dry, delete_source=mode == 8)
+            return [build_compress_command(wf, folders=[folder])]
+
+        def run_dry(commands=commands, label=label) -> None:
+            _review_remember(cfg, workflow)
+            cfg.save_config()
+            _save_last_run(cfg, "compress", label, commands(False))
+            (cmd,) = commands(True)
+            _echo_command(cmd)
+            if run_subprocess(cmd) != 0:
+                _say("Dry-run completed with errors. Review the output above before running "
+                     "for real.", "yellow")
+
+        def save(commands=commands, label=label) -> None:
+            _review_remember(cfg, workflow)
+            _review_save_preset(cfg, "compress", label, commands(False))
+
+        header = [["Task:", "Compress TIFFs"], ["Mode:", f"{mode} - {MODE_NAMES.get(mode, '?')}"],
+                  ["Folder:", str(folder)]]
+        while True:
+            action = _review_screen(cfg, workflow, folder, header, commands, run_dry, save,
+                                    edited, {"m": "a manifest CSV instead"})
+            if action == "q":
+                _say("Cancelled.", "dim")
+                return False
+            if action == "b":
+                break
+            if action == "m":
+                manifest_path = generate_manifest(folder, mode)
+                if manifest_path:
+                    cfg.config.last_manifest_path = manifest_path
+                    cfg.save_config()
+                    _say([("Manifest saved to:", "green"), f" {manifest_path}"])
+                    _say("Edit in Excel, then run it from the main menu: [3] Run from manifest",
+                         "dim")
+                return True
+            # r. Mode 8's question: --delete-source is tied to it, never a row.
+            if mode == 8 and not _ask_yes_no("Mode 8 will DELETE source TIFFs after compression. "
+                                             "Are you sure?", False, "red"):
+                _say("Not run.", "dim")
+                continue
+            workflow["delete_source"] = mode == 8
             workflow["dry_run"] = False
-            return run_subprocess(build_compress_command(workflow, folders=[folder]))
-        _offer_real_run(result != 0, "Run for real now?", "Running for real (DryRun disabled)...", real)
-
-    return True
+            _review_remember(cfg, workflow)
+            cfg.save_config()
+            _save_last_run(cfg, "compress", label, commands(False))
+            (cmd,) = commands(False)
+            _echo_command(cmd)
+            run_subprocess(cmd)
+            return True
 
 
 def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:

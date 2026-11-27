@@ -127,7 +127,8 @@ def capture(ct, root: Path, ui: str, flow: str, monkeypatch, task, mode):
     start()
     journal = [[str(a).replace(str(root), "<ROOT>") for a in line]
                for line in (cfg.config.last_run_commands or [])]
-    return {"run": _relative(ran, root, ct), "journal": journal}
+    # "_asked": the questions, in order (not part of the golden: main() leaves it out)
+    return {"run": _relative(ran, root, ct), "journal": journal, "_asked": answers.asked}
 
 
 def main(install, out):
@@ -147,6 +148,7 @@ def main(install, out):
                 mp.setenv("TIFFWORKFLOW_SETTINGS", "")
                 mp.setattr(ct, "step_advanced_options", lambda cfg, wf: True)
                 got = capture(ct, root, ui, "enter", mp, task, mode)
+                got.pop("_asked")
             key = case_id(task, mode)
             if ui == "plain":
                 result["cases"][key] = got
