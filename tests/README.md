@@ -183,6 +183,9 @@ pytest tests --cov=..
 ### `test_review_screen.py` covers
 - The wizard by task: the command lines (and the journal) the wizard gives when every question gets Enter -- Compress in each mode 0-9 (mode 8 with its yes), the three Fuji tasks, Thumbnails create and remove, both screens -- equal `tests/data/review_default_argv.json`, captured ONCE from v3.2.1's code by `tests/review_golden.py` (never regenerated, the rule of the registry golden)
 
+### `test_preset_unattended_replace.py` covers
+- v3.3, owner's decision: a mode-8 preset runs unattended only with the saved `"unattended_replace": true` (a bool; "yes", 1, false refuse), never with `--delete-source`; the refusal names the way out; menu 5 asks once when a mode-8 workflow is saved (default No; yes takes `--delete-source` out), `[U]` gives an existing preset the answer and takes it back; a non-mode-8 preset is not asked; Repeat last never carries it; `--list-presets` marks it; a real `--run-preset` twice on a hostile folder
+
 ### `test_lint.py` covers
 - v3.1 (T11): `ruff check` and `mypy` find nothing in `convert_tiff.py`, the package and `tools/`, with the settings of `pyproject.toml` (ruff: pyflakes, pycodestyle's errors, bugbear; mypy 1.x against Python 3.9, the annotated functions). Skipped in a Python without them (`python -m pip install ruff "mypy<2"`); proved by mutation with them installed: an unused import, a type error at the entry point, the copy_exif loop closure unbound
 

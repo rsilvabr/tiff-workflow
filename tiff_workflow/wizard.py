@@ -6013,6 +6013,51 @@ def _run_manifest_journal(cfg, entry: Dict, title: str, unattended: bool, dry_ru
     return 0 if ok else 1
 
 
+#: The key of a preset saved with the owner's explicit yes to running mode 8 unattended
+#: (v3.3, owner's decision 27/11/2026). Only the JSON value true counts.
+UNATTENDED_REPLACE_KEY = "unattended_replace"
+_UNATTENDED_QUESTION = ("Allow this preset to run unattended (--run-preset)? It replaces each "
+                        "TIFF in place, with no backup.")
+
+
+def _unattended_replace_allowed(entry: Dict, steps: List[JournalStep]) -> bool:
+    """Whether a journal may replace sources with nobody there to confirm: it carries the saved
+    yes (exactly True, a bool: a hand-edited "yes" is not one), and no step deletes anything
+    (--delete-source is refused unattended whatever the preset says). What it may then do is
+    mode 8 without --delete-source: each TIFF replaced by a file proven pixel-identical,
+    staged, swapped by one rename -- nothing else removed."""
+    return (entry.get(UNATTENDED_REPLACE_KEY) is True
+            and not any(s.values.get("delete_source") for s in steps))
+
+
+def _mode8_steps(commands) -> Tuple[bool, bool]:
+    """(a step runs compress mode 8, a step passes --delete-source) of saved journal lines."""
+    steps = [s for s in (_journal_step(c) for c in commands or []) if s is not None]
+    return (any(s.values.get("mode") == 8 for s in steps),
+            any(s.values.get("delete_source") for s in steps))
+
+
+def _ask_unattended_replace(entry: Dict) -> Dict:
+    """For a preset that runs mode 8: the question (default No). Yes stores the answer -- and
+    takes --delete-source out of its lines, which can never run unattended (a .tiff source then
+    stays next to its .tif). No (or no mode 8) takes an earlier yes away. Returns the entry."""
+    entry = dict(entry)
+    mode8, deletes = _mode8_steps(entry.get("commands"))
+    entry.pop(UNATTENDED_REPLACE_KEY, None)
+    if not mode8:
+        return entry
+    question = _UNATTENDED_QUESTION
+    if deletes:
+        question += " --delete-source is taken out of it (a .tiff source stays next to its .tif)."
+    if not _ask_yes_no(question, False, "red"):
+        return entry
+    if deletes:
+        switch = tw.cli_switch("delete_source", True)
+        entry["commands"] = [[a for a in line if a != switch] for line in entry["commands"]]
+    entry[UNATTENDED_REPLACE_KEY] = True
+    return entry
+
+
 def _redo_autofind(entry: Dict, steps: List[JournalStep]) -> Optional[int]:
     """AutoFind is redone on every Fuji journal run: the root and the patterns were saved
     with it, so a scheduled preset sees the sessions added since it was saved (a journal from
@@ -6084,10 +6129,14 @@ def _run_command_journal(entry: Dict, title: str, unattended: bool, dry_run: boo
             if not s.values.get("dry_run"):
                 s.args.append(tw.cli_switch("dry_run", True))
     if unattended and deletes:
-        _say("Refused: this preset deletes or replaces source files (--delete-source or "
-             "mode 8). That needs a confirmation, which cannot be given unattended -- run "
-             "it from the menu, or pass --dry-run.", "red")
-        return 1
+        if not _unattended_replace_allowed(entry, steps):
+            _say("Refused: this preset deletes or replaces source files (--delete-source or "
+                 "mode 8). That needs a confirmation, which cannot be given unattended -- run "
+                 "it from the menu, or pass --dry-run. A mode-8 preset without --delete-source "
+                 "may run unattended once it is allowed: main menu 5, [U].", "red")
+            return 1
+        _say("This preset was saved with the permission to replace TIFFs in place unattended "
+             "(mode 8, no --delete-source).", "yellow")
 
     run_cmds = [_backend_command(s.script, s.args) for s in steps]
 
@@ -6353,7 +6402,8 @@ def presets_menu(cfg) -> None:
         else:
             _say("\nNo presets saved yet.", "dim")
         _say([("[number]", "bold"), " run  ", ("[S]", "bold"), " save last workflow as preset  ",
-              ("[D]", "bold"), " delete  ", ("[B]", "bold"), " back"])
+              ("[U]", "bold"), " allow mode 8 unattended  ", ("[D]", "bold"), " delete  ",
+              ("[B]", "bold"), " back"])
         choice = _ask("Presets", style="")
 
         upper = choice.upper()
@@ -6373,10 +6423,30 @@ def presets_menu(cfg) -> None:
                 continue
             if name in presets and not _ask_yes_no("Replace it?", False):
                 continue
-            presets[name] = {**snapshot, "saved_at": time.strftime("%Y-%m-%d %H:%M")}
+            presets[name] = _ask_unattended_replace(
+                {**snapshot, "saved_at": time.strftime("%Y-%m-%d %H:%M")})
             cfg.config.presets = presets
             cfg.save_config()
             _say(f"Preset '{name}' saved.", "green")
+            continue
+
+        if upper == "U":
+            if not names:
+                continue
+            target = _ask("Which number?", style="")
+            if not target.isdigit() or not 1 <= int(target) <= len(names):
+                _say("No preset with that number.", "red")
+                continue
+            name = names[int(target) - 1]
+            if not _mode8_steps(presets[name].get("commands"))[0]:
+                _say(f"Preset '{name}' does not run mode 8: it needs no permission.", "yellow")
+                continue
+            presets[name] = _ask_unattended_replace(presets[name])
+            cfg.config.presets = presets
+            cfg.save_config()
+            allowed = presets[name].get(UNATTENDED_REPLACE_KEY) is True
+            _say(f"Preset '{name}': " + ("may run unattended (--run-preset)." if allowed
+                                         else "runs from the menu only."), "green")
             continue
 
         if upper == "D":
@@ -6461,6 +6531,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             preset = presets[name]
             saved = preset.get("saved_at", "")
             line = f"    {preset.get('label', '')}" + (f"  (saved {saved})" if saved else "")
+            if preset.get(UNATTENDED_REPLACE_KEY) is True:
+                line += "  [runs unattended: replaces in place]"
             print(f"{name}\n{line}")
         sys.exit(0)
 

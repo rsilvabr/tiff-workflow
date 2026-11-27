@@ -346,7 +346,16 @@ a closed stdin), so a prompt left on the path is a refusal, not a hang.
   bind -- any case, an abbreviation such as `-DeleteS`, `--delete-source` -- compress
   mode 8, or a manifest with a mode-8 row) is **refused** unattended (exit 1) unless you
   pass `--dry-run`: the confirmation cannot be given without a console. Run those from the
-  menu.
+  menu. **Since v3.3 one exception:** a compress mode-8 preset WITHOUT `--delete-source` runs
+  unattended when it was saved with an explicit yes to `Allow this preset to run unattended
+  (--run-preset)? It replaces each TIFF in place, with no backup.` (default No; asked when a
+  mode-8 workflow is saved as a preset, and for an existing preset by `[U]` in menu 5, which
+  also takes the yes back). Mode 8 replaces each TIFF only with a file proven pixel-identical,
+  staged and swapped by one rename. Answering yes takes `--delete-source` out of the preset (a
+  `.tiff` source then stays next to its `.tif`): `--delete-source` is refused unattended
+  whatever the preset says. The answer is stored as `"unattended_replace": true` (exactly
+  `true`: a hand-edited `"yes"` is no yes); `--list-presets` marks such a preset `[runs
+  unattended: replaces in place]`; Repeat last never carries it.
 - There is no `--overwrite`: the stored command already carries `--overwrite` if the
   wizard asked for it, and an override has no clear meaning for the backends. A preset
   runs exactly as it was saved.
