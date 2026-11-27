@@ -9,7 +9,7 @@ Unified TIFF processing toolkit with four complementary workflows:
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
-**Current version: v3.2.0** (2026-11-15) · [What's new](#whats-new-in-v320) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
+**Current version: v3.2.1** (2026-11-27) · [What's new](#whats-new-in-v321) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
 
 **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; ExifTool and ImageMagick included.
 
@@ -172,14 +172,14 @@ One line each; the detail is behind each link.
 
 ---
 
-## What's new in v3.2.0
+## What's new in v3.2.1
 
-2026-11-15. Nothing to change if you run v3.1.1; the new options are off until you ask for them.
+2026-11-27. Nothing to change if you run v3.2.0.
 
-- **Capture One exports about 10 % smaller, the same pixels:** `--recompress-zip` rewrites TIFFs saved as ZIP without a predictor and keeps a file only when it shrinks; `--include-folders TIFF16` takes only the folders of that name; `--zip-predictor auto` picks, file by file, ZIP with or without the predictor.
-- **Dates and times kept:** a compressed file that takes its original's place keeps the original's date, so date-based sync and backups see no new photo; the IPTC times are no longer given the computer's time zone (audit round 32).
+- **Checked on every Python from 3.9 to 3.15:** the whole test suite passes on each.
+- **Python 3.13 and newer:** the wizard's exiftool calls start no thread again, so a run with the memory exhausted cannot hang there (audit round 33).
 
-[Every change](docs/CHANGELOG.md#v320) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
+[Every change](docs/CHANGELOG.md#v321) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
 
 ---
 

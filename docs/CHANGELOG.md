@@ -10,6 +10,17 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v3.2.1
+
+2026-11-27. **Checked on every Python from 3.9 to 3.15.** Nothing to change for whoever runs
+v3.2.0: the same command line, presets, settings and files. The Windows program is built with
+Python 3.12 and was not affected; it follows the release.
+
+- **Python 3.13 and newer:** the wizard's exiftool calls start no thread again (audit round 33). Python 3.13 changed how a program's input is sent when a time limit is set: it now writes it from a thread, the thing round 21 removed because, with the memory exhausted, starting a thread can hang forever. The input now reaches exiftool through a temporary file, as its output already did, on every Python version
+- **The test suite runs on Python 3.9 again**, the oldest version the toolkit supports: some tests used a 3.10 feature to write their fixtures. Every version from 3.9 to 3.15 now passes the whole suite, and a test that failed now and then (a damaged-pixels fixture that was sometimes not damaged enough) passes every time
+
+---
+
 ## v3.2.0
 
 2026-11-15. Nothing to change for whoever runs v3.1.1: the same command line, presets and
