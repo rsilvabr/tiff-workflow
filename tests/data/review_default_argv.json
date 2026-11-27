@@ -1,0 +1,523 @@
+{
+ "captured_from": "3.2.1",
+ "cases": {
+  "compress-mode0": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "0",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "0",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode1": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "1",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "1",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode2": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "2",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--output-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\ZIP_flat",
+     "--duplicate-action",
+     "Numbered",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "2",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--output-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\ZIP_flat",
+     "--duplicate-action",
+     "Numbered",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode3": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "3",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "3",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode4": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "4",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "4",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode5": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "5",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "5",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode6": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "6",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "6",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode7": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "7",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "7",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "compress-mode8": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "8",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed",
+     "--delete-source"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "8",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed",
+     "--delete-source"
+    ]
+   ]
+  },
+  "compress-mode9": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "9",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "9",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "copy_exif": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "copy-exif",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--safe-mode"
+    ]
+   ],
+   "journal": [
+    [
+     "copy-exif",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--safe-mode"
+    ]
+   ]
+  },
+  "fuji_compress": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "9",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "compress",
+     "--mode",
+     "9",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "both": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "copy-exif",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--safe-mode"
+    ],
+    [
+     "<PY>",
+     "<ENTRY>",
+     "compress",
+     "--mode",
+     "9",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ],
+   "journal": [
+    [
+     "copy-exif",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--safe-mode"
+    ],
+    [
+     "compress",
+     "--mode",
+     "9",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x\\070101 S5pro [1];<ROOT>\\伊豆沼 [FINAL] 50% x\\070102 S5pro (2)",
+     "--workers",
+     "8",
+     "--cap-workers",
+     "0",
+     "--safe-mode",
+     "--no-skip-lzw-as-compressed"
+    ]
+   ]
+  },
+  "thumbnails": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "thumbnails",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--size",
+     "256",
+     "--quality",
+     "85",
+     "--format",
+     "jpg",
+     "--page",
+     "0",
+     "--workers",
+     "8"
+    ]
+   ],
+   "journal": [
+    [
+     "thumbnails",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--size",
+     "256",
+     "--quality",
+     "85",
+     "--format",
+     "jpg",
+     "--page",
+     "0",
+     "--workers",
+     "8"
+    ]
+   ]
+  },
+  "thumbnails_remove": {
+   "run": [
+    [
+     "<PY>",
+     "<ENTRY>",
+     "thumbnails",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--remove"
+    ]
+   ],
+   "journal": [
+    [
+     "thumbnails",
+     "--input-dir",
+     "<ROOT>\\伊豆沼 [FINAL] 50% x",
+     "--remove"
+    ]
+   ]
+  }
+ }
+}

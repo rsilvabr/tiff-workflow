@@ -180,6 +180,9 @@ pytest tests --cov=..
 ### `test_zip_level.py` covers
 - v3.3 `--zip-level` (compress, copy-exif, settings file `zip_level`, the wizard's Advanced) and `PADDED_ZIP_LEVEL`: one setting per backend with its range; every ZIP write and the predictor sample pass `tw.zip_level_args(<the option>)`, never a literal; the wizard passes it only when edited; on real files lower levels are larger and the pixels identical; the settings file sets it; level 7 is byte for byte what magick writes untold
 
+### `test_review_screen.py` covers
+- The wizard by task: the command lines (and the journal) the wizard gives when every question gets Enter -- Compress in each mode 0-9 (mode 8 with its yes), the three Fuji tasks, Thumbnails create and remove, both screens -- equal `tests/data/review_default_argv.json`, captured ONCE from v3.2.1's code by `tests/review_golden.py` (never regenerated, the rule of the registry golden)
+
 ### `test_lint.py` covers
 - v3.1 (T11): `ruff check` and `mypy` find nothing in `convert_tiff.py`, the package and `tools/`, with the settings of `pyproject.toml` (ruff: pyflakes, pycodestyle's errors, bugbear; mypy 1.x against Python 3.9, the annotated functions). Skipped in a Python without them (`python -m pip install ruff "mypy<2"`); proved by mutation with them installed: an unused import, a type error at the entry point, the copy_exif loop closure unbound
 
