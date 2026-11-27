@@ -2285,16 +2285,27 @@ def new_run_id():
     return uuid.uuid4().hex[:8]
 
 
+def _name_hex(run_id):
+    """The 12 hex characters of a staged or temp-sibling name: never, together with the run id,
+    decimal digits only. A name of digits only is a date or a counter, and sweep_leftovers
+    never removes one (review of v3.3.0: `20190815_201908151430_scan.tif` is a photo), so a
+    leftover of this toolkit must not have that shape."""
+    while True:
+        h = uuid.uuid4().hex[:12]
+        if not (run_id + h).isdigit():
+            return h
+
+
 def new_temp_sibling_path(path, run_id):
     """A temporary name next to `path` (same folder, so same volume):
     <path>.<run id>_<12 hex>.tif. LEFTOVER_NAME_RE matches it, so a copy an interrupted run
     leaves behind is never taken for a photo (nor for a stranded original)."""
-    return f"{path}.{run_id}_{uuid.uuid4().hex[:12]}.tif"
+    return f"{path}.{run_id}_{_name_hex(run_id)}.tif"
 
 
 def staged_name(run_id, name):
     """<run id>_<12 hex>_<name>: the name of a file in the staging folder."""
-    return f"{run_id}_{uuid.uuid4().hex[:12]}_{name}"
+    return f"{run_id}_{_name_hex(run_id)}_{name}"
 
 
 def is_read_only(path):
@@ -2425,13 +2436,43 @@ def cleanup_run_files(dirs, run_id):
 #   3. it is a regular file, not a link;
 #   4. it is old: LEFTOVER_MIN_AGE_S since its last write AND its creation (a staged file is
 #      given its original's old write time);
-#   5. the source of that file is a regular file right now.
+#   5. the source of that file is a regular file right now;
+#   6. its run id and 12 hex characters are not decimal digits only (review of v3.3.0): a
+#      photo named `20190815_201908151430_scan.tif` next to `scan.tif` -- a date and a time
+#      put in front by a renaming tool -- has the staged shape. This toolkit never writes such
+#      a name (_name_hex); one is not a leftover, and is neither removed nor reported.
+# exiftool's `_exiftool_tmp` of a staged file or a temp sibling (exiftool killed while writing
+# it) is that file's leftover: the same conditions, with that file's run id.
 # A SAFETY constant, not a setting: never in an OVERLAY_SPECS table.
 LEFTOVER_MIN_AGE_S = 3600
 
-_SWEEP_TEMP_SIBLING = re.compile(r"^(?P<target>.+)\.(?P<id>[0-9a-f]{8})_[0-9a-f]{12}\.tif$", re.I)
-_SWEEP_STAGED = re.compile(r"^(?P<id>[0-9a-f]{8})_[0-9a-f]{12}_(?P<target>.+)$", re.I)
+_SWEEP_TEMP_SIBLING = re.compile(
+    r"^(?P<target>.+)\.(?P<id>[0-9a-f]{8})_(?P<hex>[0-9a-f]{12})\.tif$", re.I)
+_SWEEP_STAGED = re.compile(r"^(?P<id>[0-9a-f]{8})_(?P<hex>[0-9a-f]{12})_(?P<target>.+)$", re.I)
 _SWEEP_EXIFTOOL_TMP = re.compile(r"^(?P<target>.+)_exiftool_tmp$", re.I)
+
+
+def _sweep_match(name, targets):
+    """(the source, the run id or None) when `name` is a leftover shape built from the name of
+    a target (`targets`: {lower-case name: source}); else None. Condition 6 is here: a name
+    whose id and hex are digits only is no leftover."""
+    m = _SWEEP_EXIFTOOL_TMP.match(name)
+    if m:
+        inner = m.group("target")
+        if inner.lower() in targets:
+            return targets[inner.lower()], None
+        return _sweep_match_named(inner, targets)
+    return _sweep_match_named(name, targets)
+
+
+def _sweep_match_named(name, targets):
+    for rx in (_SWEEP_TEMP_SIBLING, _SWEEP_STAGED):
+        m = rx.match(name)
+        if m and m.group("target").lower() in targets:
+            if (m.group("id") + m.group("hex")).isdigit():
+                return None
+            return targets[m.group("target").lower()], m.group("id")
+    return None
 #: The temp files of this toolkit (temp_file_path): metadata containers, predictor samples,
 #: thumbnails.
 TEMP_FILE_RE = re.compile(r"^tw_[0-9a-f]{16}\.(mie|tif|tiff|jpg|jpeg|png)$", re.I)
@@ -2451,7 +2492,7 @@ def _leftover_old_enough(st, now):
 def sweep_leftovers(pairs, run_id, dry_run):
     """Remove what a killed run left next to the files this run is about to write. `pairs`:
     (the file this run writes, the source it is made from). One listing per folder of a
-    target. The five conditions are in the comment above; anything else of a leftover's shape
+    target. The six conditions are in the comment above; anything else of a leftover's shape
     is kept and reported. Never raises: a delete that fails is "kept"."""
     folders = {}
     for target, source in pairs:
@@ -2469,13 +2510,10 @@ def sweep_leftovers(pairs, run_id, dry_run):
         for e in entries:
             source = None
             other_run = True
-            for rx in (_SWEEP_TEMP_SIBLING, _SWEEP_STAGED, _SWEEP_EXIFTOOL_TMP):
-                m = rx.match(e.name)
-                if m and m.group("target").lower() in targets:
-                    source = targets[m.group("target").lower()]
-                    if "id" in rx.groupindex:
-                        other_run = m.group("id").lower() != run_id.lower()
-                    break
+            found = _sweep_match(e.name, targets)
+            if found is not None:
+                source, its_id = found
+                other_run = its_id is None or its_id.lower() != run_id.lower()
             if source is None and e.name.lower().endswith(".mie") and TEMP_FILE_RE.match(e.name):
                 # a metadata container (metadata_container_path) next to the photos: any
                 # source of this folder that is there
@@ -2573,7 +2611,8 @@ def staged_leftovers(staging_dir, run_id):
         return 0, 0
     for e in entries:
         m = _SWEEP_STAGED.match(e.name)
-        if not m or m.group("id").lower() == run_id.lower():
+        if (not m or m.group("id").lower() == run_id.lower()
+                or (m.group("id") + m.group("hex")).isdigit()):
             continue
         try:
             if not e.is_file(follow_symlinks=False):
@@ -2585,6 +2624,21 @@ def staged_leftovers(staging_dir, run_id):
             count += 1
             size += st.st_size
     return count, size
+
+
+def size_text(n):
+    """A file size for the log: 234.8 MB, 2.45 GB (powers of ten, like the measurements of the
+    docs)."""
+    return f"{n / 1e9:.2f} GB" if abs(n) >= 1e9 else f"{n / 1e6:.1f} MB"
+
+
+def report_staged_leftovers(log, staging_dir, run_id):
+    """The NOTE both backends give for what an earlier run left in a --staging-dir
+    (staged_leftovers): reported, never removed."""
+    count, size = staged_leftovers(staging_dir, run_id)
+    if count:
+        log(f"NOTE: {count} file(s) ({size_text(size)}) left in the staging folder by an "
+            f"earlier run: {staging_dir}", "WARN")
 
 
 # --- Running the per-file work --------------------------------------

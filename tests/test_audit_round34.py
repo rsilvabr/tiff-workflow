@@ -346,7 +346,7 @@ def _shapes(photo: Path, run_id=OTHER_ID):
 
 
 class TestSweepLeftovers:
-    """tw.sweep_leftovers removes a name only when all five conditions hold; each failing
+    """tw.sweep_leftovers removes a name only when all six conditions hold; each failing
     alone keeps it."""
 
     def test_all_five_hold_and_the_three_shapes_go(self, tmp_path, monkeypatch):
@@ -408,6 +408,60 @@ class TestSweepLeftovers:
         swept = tw.sweep_leftovers([(str(photo), str(photo))], RUN_ID, False)
         assert swept == tw.Swept([], [])
         assert other.read_bytes() == b"OTHER" and scan.read_bytes() == b"A PHOTO"
+
+    def test_a_photo_named_with_digits_next_to_its_target_is_never_touched(self, tmp_path,
+                                                                          monkeypatch):
+        """Review of v3.3.0 (M1): a date and a time put in front of a name by a renaming tool
+        give the staged shape (digits are hex), and the photo it names is right there. A name
+        of digits only is no leftover: neither removed nor reported. A real leftover next to
+        it still goes."""
+        monkeypatch.setattr(tw, "LEFTOVER_MIN_AGE_S", -60)  # any age
+        folder = tmp_path / HOSTILE
+        photo = _photo(folder, "scan 50% [1].tif")
+        lookalikes = [_photo(folder, f"20190815_201908151430_{photo.name}", b"PHOTO 2"),
+                      _photo(folder, f"{photo.name}.20190815_201908151430.tif", b"PHOTO 3"),
+                      _photo(folder, f"20190815_201908151430_{photo.name}_exiftool_tmp", b"P4")]
+        real = _shapes(photo)
+        swept = tw.sweep_leftovers([(str(photo), str(photo))], RUN_ID, False)
+        assert sorted(swept.removed) == sorted(str(m) for m in real)
+        assert swept.kept == []
+        assert [p.read_bytes() for p in lookalikes] == [b"PHOTO 2", b"PHOTO 3", b"P4"]
+        assert photo.read_bytes() == b"PHOTO"
+
+    def test_exiftools_temp_of_a_staged_file_or_a_temp_sibling(self, tmp_path, monkeypatch):
+        """Review of v3.3.0 (N2): exiftool killed while writing a staged file or a temp sibling
+        leaves `<that name>_exiftool_tmp`: it goes with that name's run id -- kept when it is
+        this run's."""
+        monkeypatch.setattr(tw, "LEFTOVER_MIN_AGE_S", -60)  # any age
+        photo = _photo(tmp_path / HOSTILE)
+        d = photo.parent
+        theirs = [d / f"{OTHER_ID}_0123456789ab_{photo.name}_exiftool_tmp",
+                  d / f"{photo.name}.{OTHER_ID}_0123456789ab.tif_exiftool_tmp"]
+        own = d / f"{RUN_ID}_0123456789ab_{photo.name}_exiftool_tmp"
+        for p in theirs + [own]:
+            p.write_bytes(b"LEFTOVER")
+        swept = tw.sweep_leftovers([(str(photo), str(photo))], RUN_ID, False)
+        assert sorted(swept.removed) == sorted(str(p) for p in theirs)
+        assert swept.kept == [(str(own), "this run's own")] and own.exists()
+
+    def test_the_toolkit_never_writes_a_name_of_digits_only(self, monkeypatch):
+        """Condition 6 must never keep a leftover of this toolkit: its names always carry a
+        hex letter (uuid4 gives digits only once in ~12 000 names)."""
+        import uuid as _uuid
+        hexes = iter(["0" * 32, "1" * 32, "0123456789ab" + "0" * 20])
+        monkeypatch.setattr(tw.uuid, "uuid4", lambda: _uuid.UUID(next(hexes)))
+        assert tw.staged_name("12345678", "x.tif") == "12345678_0123456789ab_x.tif"
+        hexes = iter(["0" * 32, "abc" + "0" * 29])
+        assert tw.new_temp_sibling_path("x.tif", "12345678") == "x.tif.12345678_abc000000000.tif"
+        hexes = iter(["0" * 32])
+        assert tw.staged_name("1234567a", "x.tif") == "1234567a_000000000000_x.tif"
+
+    def test_the_staging_report_skips_a_name_of_digits_only(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(tw, "LEFTOVER_MIN_AGE_S", -60)  # any age
+        stg = tmp_path / HOSTILE
+        _photo(stg, "20190815_201908151430_scan.tif", b"12345")
+        _photo(stg, f"{OTHER_ID}_0123456789ab_scan.tif", b"123")
+        assert tw.staged_leftovers(str(stg), RUN_ID) == (1, 3)
 
     def test_a_tiff_source_with_a_tif_target(self, tmp_path, monkeypatch):
         monkeypatch.setattr(tw, "LEFTOVER_MIN_AGE_S", -60)  # any age (a file time can be a hair ahead of time.time())

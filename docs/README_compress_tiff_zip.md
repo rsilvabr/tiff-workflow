@@ -246,11 +246,19 @@ next to them -- the temp sibling `<name>.<8 hex>_<12 hex>.tif`, a staged file, e
 `<name>_exiftool_tmp` (with it there every later exiftool write of that photo fails) -- but only
 when all of these hold: it is the leftover shape of a file this run writes in that folder,
 another run made it, it is a regular file, it is at least an hour old (write and creation time:
-another run working on the same folder at the same time keeps its files), and its original is
-there. Anything else of that shape is kept and named in the log; `--dry-run` says
-`Would remove`. The toolkit's own `tw_*` temp files older than an hour go from the temp folder.
-A `--staging-dir` is shared by presets of different folders: what an earlier run left there is
-only reported (`NOTE: N file(s) ... left in the staging folder by an earlier run`).
+another run working on the same folder at the same time keeps its files), its original is
+there, and its 8 + 12 hex characters are not all digits (the toolkit never writes such a name:
+`20190815_201908151430_scan.tif` next to `scan.tif` is a photo renamed with a date and a time,
+and is never touched). Anything else of that shape is kept and named in the log; `--dry-run`
+says `Would remove`. The toolkit's own `tw_*` temp files older than an hour go from the temp
+folder. A `--staging-dir` is shared by presets of different folders: what an earlier run left
+there is only reported (`NOTE: N file(s) ... left in the staging folder by an earlier run`).
+
+Do not start a second run over a folder while the first is still working on it for more than
+an hour: copy-exif `--compress-zip` without a staging folder keeps its staged ZIPs next to the
+photos until its group ends, and modes 0/9 keep their temp siblings there likewise; the second
+run removes those once they are an hour old. No photo is lost (the first run refuses to land a
+file that is gone), but the first run reports errors for those files.
 
 A TIFF with associated alpha that is not opaque (ImageMagick would change the alpha) is a
 `SKIP (not rewritten - associated alpha that is not opaque: ImageMagick would change it)` in
@@ -390,9 +398,11 @@ So the gain is real but not the same for every image, and on some the predictor 
 - keeps the new file only when it is at least `--recompress-min-saving` percent smaller (default
   1). Otherwise the new file is dropped before any pixel check and the line says
   `SKIP (no gain: 18.0 MB -> 25.1 MB, +39.4% - original kept)`: the original is not touched;
-- **remembers** the files that did not shrink (path, size and modification time) in
-  `.tiff_workflow_no_gain.json` in your user profile, so the next run skips them without reading
-  them: `SKIP (no gain on 2026-11-15 - not tried again)`. A file that changed is tried again;
+- **remembers** the files that did not shrink (path, size, modification time and the
+  `--zip-level`) in `.tiff_workflow_no_gain.json` in your user profile, so the next run at that
+  level skips them without reading them: `SKIP (no gain on 2026-11-15 at ZIP level 7 - not tried
+  again)`. A run at another level tries them again (since v3.3; an entry of v3.2 counts as level
+  7, what v3.2 wrote). A file that changed is tried again;
   deleting the memory file forgets everything (the environment variable `TIFFWORKFLOW_NO_GAIN`
   names another file, set but empty = no memory). A dry run reads it and never writes it.
 

@@ -114,6 +114,42 @@ closed, but on such a machine those photos could never be compressed.
   `tests/test_settings_overlay.py`)
 - **Tidy (9c):** the rule of a renamed backup has one copy (above).
 
+### Found by the review of v3.3.0, fixed before the release
+- 🟠 **MEDIUM - the new leftover cleanup could delete a photo by its name alone.**
+  **Issue:** a folder holding `scan.tif` and the owner's own `20190815_201908151430_scan.tif` (a
+  date and a time put in front by a renaming tool; digits are hex) -- any run that wrote
+  `scan.tif` removed the second photo once it was an hour old: it had the staged shape, and the
+  five conditions above all held. Found by the reviewer's probe before anything was published.
+  - **Fix:** a sixth condition: the 8 + 12 hex characters are not all digits. Such a name is no
+    leftover -- neither removed nor reported -- and the toolkit never writes one (`_name_hex`
+    draws again; the wizard's padded conversion uses the same name builder). exiftool's
+    `_exiftool_tmp` of a staged file or a temp sibling is now that file's leftover (it matched no
+    shape and stayed).
+  - **Files:** `tiff_workflow/common.py`, `tiff_workflow/wizard.py`, `tests/test_audit_round34.py`,
+    `AGENTS.md`, `docs/README_compress_tiff_zip.md`
+- 🟡 **LOW - the review screen's `From` column said `-` for every row** (the remembered workers,
+  staging folder and exclusions never said `last run`), and an unedited row kept the default of
+  the first folder after `b` to another one (mode 2's `ZIP_flat`). An unedited row now takes its
+  default again on every draw and says where it comes from. (`tiff_workflow/wizard.py`,
+  `tests/test_review_screen.py`)
+- 🟡 **LOW - mode 2 into its own input folder:** the confirmed answer was replaced by
+  `<input>\ZIP_flat` while the row said `you`. The screen refuses it with a sentence (it would
+  recompress every TIFF in place with no backup; mode 9 is the in-place mode with a backup).
+- 🟡 **LOW - an unattended mode-8 preset kept `[DELETES SOURCES]`** after the yes took
+  `--delete-source` out, and a No did not put it back. The label follows the lines (`[REPLACES
+  IN PLACE]`), the yes keeps the lines as saved and a No restores them exactly; `[U]` on a
+  manifest preset says it cannot be allowed. (`tiff_workflow/wizard.py`,
+  `tests/test_preset_unattended_replace.py`)
+- 🟡 **LOW - `--recompress-zip`'s no-gain memory ignored `--zip-level`:** a file that did not
+  shrink at level 3 was never tried at 9. Entries list their levels (`zip_levels`); a v3.2 entry
+  counts as level 7, what v3.2 wrote. (`tiff_workflow/compress_tiff_zip.py`,
+  `tests/test_backend_invariants.py`)
+- **Tests:** the two "the staged file stays while its source is gone" branches and the modes 0/9
+  uncount had none (their mutants survived the suite); they have now.
+- **Smaller:** two line continuations lost to the heredoc trap restored; the staging-folder NOTE
+  has one copy (`tw.report_staged_leftovers`); the docs say what a second run over a folder still
+  in its first run's group does.
+
 ## v3.2.1 - Audit round 33: Python 3.13 writes a program's input from a thread
 
 Found by running the whole suite once per installed Python, 3.9 to 3.15 (2026-11-27): the rule

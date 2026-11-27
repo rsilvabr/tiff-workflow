@@ -169,6 +169,82 @@ def test_b_goes_back_to_the_mode_with_the_answers_kept(tmp_path, monkeypatch, ui
 
 
 @pytest.mark.parametrize("ui", UIS)
+def test_from_says_where_each_value_comes_from(tmp_path, monkeypatch, ui):
+    """Review of v3.3.0 (S1): every row said "-" (or "you"). The remembered answers of the last
+    run say `last run`, a settings-file value `settings file`, a script default `script`, the
+    config's workers `config`; an edit says `you`."""
+    if ui == "rich":
+        pytest.importorskip("rich")
+    from types import SimpleNamespace
+    drawn = _rows(monkeypatch, ui)
+    stg = tmp_path / "stg 一時 [x]"
+    stg.mkdir()
+    real_overlay = ct._overlay_values
+    monkeypatch.setattr(ct, "_overlay_values", lambda script: (
+        {"cap_workers": 2} if script == "compress_tiff_zip.py" else real_overlay(script)))
+    monkeypatch.setattr(ct, "_backend_default", lambda script, param, _real=ct._backend_default:
+                        2 if (script, param) == ("compress_tiff_zip.py", "cap_workers")
+                        else _real(script, param))
+    remembered = ct.ToolConfig()
+    remembered.last_workers, remembered.last_staging = 12, str(stg)
+    remembered.last_exclude_folders = "OLD;_tmp x"
+    cfg = SimpleNamespace(config=remembered, save_config=lambda: None)
+    w = _row_number("Workers")
+    ok, ran, asked, cfg, lib = _compress(tmp_path, monkeypatch, ui, [w, "3", "q"], cfg=cfg)
+    first, after = drawn[0], drawn[-1]
+    assert first["Workers"] == ("12", "last run")
+    assert first["Staging folder (SSD for faster I/O)"] == (str(stg), "last run")
+    assert first["Exclude folders"] == ("OLD;_tmp x", "last run")
+    assert first["Only folders named"] == ("-", "-")
+    assert first["Cap workers (0 = no cap)"] == ("2", "settings file")
+    assert first["Safe mode (skip multi-page TIFFs)"][1] == "script"
+    assert after["Workers"] == ("3", "you")
+    assert after["Staging folder (SSD for faster I/O)"] == (str(stg), "last run")
+    # nothing remembered: the config's workers
+    drawn.clear()
+    _compress(tmp_path / "2", monkeypatch, ui, ["q"])
+    assert drawn[0]["Workers"][1] == "config"
+
+
+@pytest.mark.parametrize("ui", UIS)
+def test_mode2_into_its_own_input_folder_is_refused_and_said(tmp_path, monkeypatch, ui):
+    """Review of v3.3.0 (S2): the answer "the input folder" was confirmed, then silently
+    replaced by <input>\\ZIP_flat while the row said `you`. The screen does not offer it: the
+    answer is refused with a sentence, the row keeps its default and its source."""
+    if ui == "rich":
+        pytest.importorskip("rich")
+    said = []
+    real_say = ct._say
+    monkeypatch.setattr(ct, "_say", lambda text, style="": said.append(ct._plain(text))
+                        or real_say(text, style))
+    drawn = _rows(monkeypatch, ui)
+    out = _row_number("Output folder", mode=2)
+    lib = rg.make_tree(tmp_path)
+    ok, ran, asked, cfg, lib = _compress(tmp_path, monkeypatch, ui,
+                                         [out, str(lib), "r"], mode=2)
+    (cmd,) = ran
+    assert _arg(cmd, "--output-dir") == str(lib / "ZIP_flat")
+    assert any("cannot write into its own input folder" in s for s in said), said
+    label = "Output folder (mode 2 merges all TIFFs here)"
+    assert drawn[-1][label][0] == str(lib / "ZIP_flat") and drawn[-1][label][1] != "you"
+    assert not any("Continue?" in q for q in asked)
+
+
+@pytest.mark.parametrize("ui", UIS)
+def test_b_to_another_folder_moves_the_flat_default_with_it(tmp_path, monkeypatch, ui):
+    """An unedited row takes its default again after `b`: mode 2's ZIP_flat follows the new
+    folder (it stayed in the first one)."""
+    if ui == "rich":
+        pytest.importorskip("rich")
+    lib = rg.make_tree(tmp_path)
+    other = lib / "070101 S5pro [1]"
+    ok, ran, asked, cfg, lib = _compress(tmp_path, monkeypatch, ui,
+                                         ["b", "2", str(other), "r"], mode=2)
+    (cmd,) = ran
+    assert _arg(cmd, "--output-dir") == str(other / "ZIP_flat")
+
+
+@pytest.mark.parametrize("ui", UIS)
 def test_q_cancels_and_runs_nothing(tmp_path, monkeypatch, ui):
     if ui == "rich":
         pytest.importorskip("rich")

@@ -122,10 +122,12 @@ starts it.
   `_vN`) backup is read by ONE rule (`tw.STAMPED_BACKUP_RE`, `backup_counterparts`), and a base
   backup goes only once no renamed sibling of it is left in its folder (round 34).
   What a KILLED run left (staged file, temp sibling, `<name>_exiftool_tmp`, `tw_*` temp files)
-  is removed by `tw.sweep_leftovers` only when all five hold: a leftover shape of a file THIS
+  is removed by `tw.sweep_leftovers` only when all six hold: a leftover shape of a file THIS
   run writes in that folder; another run's id; a regular file, not a link; older than
   `LEFTOVER_MIN_AGE_S` by write AND creation time (a safety constant, never a setting); its
-  source a file right now. A shared `--staging-dir` is only reported, never swept (round 34).
+  source a file right now; its id and hex not digits only (a date-prefixed PHOTO has the staged
+  shape; `_name_hex` never writes such a name -- review of v3.3.0). A shared `--staging-dir`
+  is only reported, never swept (round 34).
   A file that did not land is never also counted OK: `Run.uncount` takes its line back.
   Only an OK/WARN result lands (`_run_group`'s `unlanded_srcs`): a SKIP that drops its output
   after writing it (`--recompress-zip`'s size gate) must not have a leftover landed.

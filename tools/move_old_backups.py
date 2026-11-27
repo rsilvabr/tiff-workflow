@@ -107,7 +107,8 @@ def renamed_sibling(backup: Path):
     for name in names:
         stem, ext = os.path.splitext(name)
         m = rx.match(stem)
-        if m and ext.lower() in TIFF_EXTS and m.group("base").lower() == backup.stem.lower()                 and os.path.isfile(_long(backup.parent / name)):
+        if m and ext.lower() in TIFF_EXTS and m.group("base").lower() == backup.stem.lower() \
+                and os.path.isfile(_long(backup.parent / name)):
             return name
     return None
 

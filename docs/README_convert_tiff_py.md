@@ -36,9 +36,10 @@ numbered row: `#`, the option, its value, and where the value comes from (`last 
 
 ```
  #  Option                                   Value                From
- 1  Workers                                  8                    config
- 2  Staging folder (SSD for faster I/O)      none                 -
+ 1  Workers                                  12                   last run
+ 2  Staging folder (SSD for faster I/O)      D:\stage             last run
  3  Safe mode (skip multi-page TIFFs)        yes                  script
+ 4  Skip LZW as already compressed           no                   settings file
  ...
 [a] all options  [c] command line  [d] dry run  [s] save as preset  [r] run  [b] back  [q] cancel
 ```
@@ -67,8 +68,10 @@ Full TIFF ZIP compression with modes 0-9: the mode, the folder, then the review 
 
 **Mode 2** merges every TIFF into one folder, so its screen has two more rows: where that
 folder is (default `<input>\ZIP_flat`) and how to handle duplicate filenames (`Numbered`
-(default), `Skip`, `Overwrite`). Choosing the input folder itself means recompressing in place
-without a backup, so it requires an explicit confirmation.
+(default), `Skip`, `Overwrite`). The input folder itself is refused (`Mode 2 cannot write into
+its own input folder ... not changed`): that would recompress every TIFF in place with no
+backup. For in place, use mode 9 (the originals kept in `OLD_TIFFs`). Until v3.2 the wizard
+allowed it after a confirmation.
 
 **Workers** are clamped to 1-64, the range the backends accept.
 
@@ -334,7 +337,8 @@ compression) can coexist instead of overwriting each other:
 - **`[number]`** runs a preset. It goes through the same questions as
   "Repeat last workflow" (`Run it now?`, the mode-8 warning), because it is the same
   runner — the two cannot drift apart.
-- A workflow that deletes sources keeps `[DELETES SOURCES]` in its label.
+- A workflow that deletes sources keeps `[DELETES SOURCES]` in its label. A mode-8 preset
+  allowed to run unattended says `[REPLACES IN PLACE]` instead: its label follows its lines.
 - Presets live in the same `~/.convert_tiff_config.json` as the rest of the settings.
 - A preset runs the backends next to the wizard that starts it, not the ones of the
   folder it was saved from: it keeps working after the toolkit is moved or updated
@@ -375,8 +379,10 @@ a closed stdin), so a prompt left on the path is a refusal, not a hang.
   mode-8 workflow is saved as a preset, and for an existing preset by `[U]` in menu 5, which
   also takes the yes back). Mode 8 replaces each TIFF only with a file proven pixel-identical,
   staged and swapped by one rename. Answering yes takes `--delete-source` out of the preset (a
-  `.tiff` source then stays next to its `.tif`): `--delete-source` is refused unattended
-  whatever the preset says. The answer is stored as `"unattended_replace": true` (exactly
+  `.tiff` source then stays next to its `.tif`, from the menu too), and its label then ends in
+  `[REPLACES IN PLACE]`: `--delete-source` is refused unattended whatever the preset says. A
+  No later (`[U]`) puts `--delete-source` back exactly as it was saved. `[U]` on a manifest
+  preset says it cannot be allowed. The answer is stored as `"unattended_replace": true` (exactly
   `true`: a hand-edited `"yes"` is no yes); `--list-presets` marks such a preset `[runs
   unattended: replaces in place]`; Repeat last never carries it.
 - There is no `--overwrite`: the stored command already carries `--overwrite` if the
@@ -436,7 +442,7 @@ echo === %date% %time%  done
   must stop everything after it.
 - `rem` disables a line without deleting it.
 - Do not list presets that delete sources: they are refused unattended (exit 1) and only
-  clutter the log.
+  clutter the log. A mode-8 preset allowed with `[U]` (`[REPLACES IN PLACE]`) runs.
 
 Then point one task at the batch file:
 

@@ -259,10 +259,7 @@ class Run:
                 self.log(f"   {p}", "WARN")
 
 
-def _size_text(n):
-    """A file size for the log: 234.8 MB, 2.45 GB (powers of ten, like the measurements of the
-    docs)."""
-    return f"{n / 1e9:.2f} GB" if abs(n) >= 1e9 else f"{n / 1e6:.1f} MB"
+_size_text = tw.size_text
 
 
 def _percent(after, before):
@@ -274,23 +271,32 @@ def _percent(after, before):
 
 class NoGainMemory:
     """The files --recompress-zip rewrote and did not keep, so the next run does not read them
-    again: {lower-case path: {"size", "mtime_ns", "date", "release"}} in a JSON file. Read once
-    at the start; the caller's thread records each no-gain result (a worker never writes it)
-    and the run saves once, at its end or after an interrupt. A memory file that cannot be read
-    is an empty memory and a WARN, never a stopped run."""
+    again: {lower-case path: {"size", "mtime_ns", "date", "release", "zip_levels"}} in a JSON
+    file. Read once at the start; the caller's thread records each no-gain result (a worker
+    never writes it) and the run saves once, at its end or after an interrupt. A memory file
+    that cannot be read is an empty memory and a WARN, never a stopped run.
+
+    The ZIP level counts (v3.3, review): a file that did not shrink at one --zip-level is tried
+    again at another, and its entry then lists both levels. An entry written by v3.2 has no
+    "zip_levels": v3.2 wrote without -quality, ImageMagick's own level, which level 7 writes
+    byte for byte (V32_LEVEL)."""
 
     VERSION = 1
+    #: The level of an entry without "zip_levels" (v3.2): a fact about what v3.2 wrote, not a
+    #: setting -- the default is opt["zip_level"], from the PARAMS table.
+    V32_LEVEL = 7
 
-    def __init__(self, path, log):
+    def __init__(self, path, log, zip_level):
         self.path = path
         self.log = log
+        self.zip_level = zip_level
         self.files = {}         # what was read at the start
         self.new = {}           # what this run found, saved by save()
 
     @classmethod
-    def open(cls, log):
-        """The memory of this user (or TIFFWORKFLOW_NO_GAIN's file); None when the variable is
-        set but blank (no memory)."""
+    def open(cls, log, zip_level):
+        """The memory of this user (or TIFFWORKFLOW_NO_GAIN's file), for a run that writes at
+        `zip_level`; None when the variable is set but blank (no memory)."""
         env = os.environ.get(NO_GAIN_ENV)
         if env is not None and not env.strip():
             return None
@@ -305,9 +311,23 @@ class NoGainMemory:
                     "--recompress-zip is off for this run", "WARN")
                 return None
             path = os.path.join(home, NO_GAIN_FILE)
-        memory = cls(path, log)
+        memory = cls(path, log, zip_level)
         memory.files = memory._read(warn=True)
         return memory
+
+    @classmethod
+    def _levels(cls, entry):
+        """The ZIP levels an entry was found no gain at (v3.2's entry: V32_LEVEL)."""
+        levels = entry.get("zip_levels")
+        if levels is None:
+            return {cls.V32_LEVEL}
+        if not isinstance(levels, list):
+            return set()
+        return {n for n in levels if isinstance(n, int) and not isinstance(n, bool)}
+
+    @staticmethod
+    def _same_file(entry, size, mtime_ns):
+        return entry.get("size") == size and entry.get("mtime_ns") == mtime_ns
 
     def _read(self, warn):
         try:
@@ -325,8 +345,8 @@ class NoGainMemory:
             return {}
 
     def remembered(self, path):
-        """The date `path` was found not worth recompressing, when it has not changed since
-        (same size and write time); else None."""
+        """The date `path` was found not worth recompressing at this run's ZIP level, when it
+        has not changed since (same size and write time); else None."""
         entry = self.files.get(str(path).lower())
         if not entry:
             return None
@@ -334,19 +354,31 @@ class NoGainMemory:
             st = os.stat(path)
         except OSError:
             return None
-        if entry.get("size") != st.st_size or entry.get("mtime_ns") != st.st_mtime_ns:
+        if not self._same_file(entry, st.st_size, st.st_mtime_ns):
+            return None
+        if self.zip_level not in self._levels(entry):
             return None
         return str(entry.get("date") or "?")
 
+    def _merged(self, entry, earlier):
+        """`entry` with the levels of `earlier` when both describe the same file."""
+        if earlier and self._same_file(earlier, entry["size"], entry["mtime_ns"]):
+            levels = self._levels(entry) | self._levels(earlier)
+            return dict(entry, zip_levels=sorted(levels))
+        return entry
+
     def record(self, path):
-        """Remember `path` as it is now (a no-gain rewrite leaves it untouched)."""
+        """Remember `path` as it is now (a no-gain rewrite leaves it untouched), at this run's
+        ZIP level -- with the levels it was already remembered at."""
         try:
             st = os.stat(path)
         except OSError:
             return
-        self.new[str(path).lower()] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
-                                       "date": datetime.now().strftime("%Y-%m-%d"),
-                                       "release": tw.TOOLKIT_VERSION}
+        key = str(path).lower()
+        entry = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                 "date": datetime.now().strftime("%Y-%m-%d"), "release": tw.TOOLKIT_VERSION,
+                 "zip_levels": [self.zip_level]}
+        self.new[key] = self._merged(entry, self.files.get(key))
 
     def save(self):
         """Write what this run found, merged into the file as it is now (another run may have
@@ -354,7 +386,8 @@ class NoGainMemory:
         if not self.new:
             return
         files = self._read(warn=False)
-        files.update(self.new)
+        for key, entry in self.new.items():
+            files[key] = self._merged(entry, files.get(key))
         tmp = f"{self.path}.{tw.new_run_id()}.tmp"
         try:
             folder = os.path.dirname(self.path)
@@ -668,7 +701,8 @@ def _compressed_skip(run, path, name, comp):
         return f"SKIP ({comp}: already the smaller - zipcheck) | {name}", False
     when = run.no_gain.remembered(path) if run.no_gain is not None else None
     if when:
-        return f"SKIP (no gain on {when} - not tried again) | {name}", False
+        return (f"SKIP (no gain on {when} at ZIP level {opt['zip_level']} - not tried again) "
+                f"| {name}"), False
     return None, True
 
 
@@ -1791,10 +1825,7 @@ def _sweep_leftovers(run, tasks):
         if n:
             run.log(f"Removed {n} temp file(s) an interrupted run left in {tempfile.gettempdir()}")
     if run.staging and not run.created_default_staging:
-        count, size = tw.staged_leftovers(run.staging, run.run_id)
-        if count:
-            run.log(f"NOTE: {count} file(s) ({_size_text(size)}) left in the staging folder by an "
-                    f"earlier run: {run.staging}", "WARN")
+        tw.report_staged_leftovers(run.log, run.staging, run.run_id)
 
 
 def _is_interactive():
@@ -1905,7 +1936,7 @@ def run_main(argv, state):
     run.exclude_names = exclude_names
     run.include_names = include_names
     if opt["recompress_zip"]:
-        run.no_gain = NoGainMemory.open(log)
+        run.no_gain = NoGainMemory.open(log, opt["zip_level"])
     state["run"] = run
     if run.staging.strip():
         run.cleanup_dirs.append(run.staging)

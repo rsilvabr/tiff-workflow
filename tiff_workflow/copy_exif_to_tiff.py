@@ -824,10 +824,7 @@ def run_main(argv, state):
         if n:
             log(f"Removed {n} temp file(s) an interrupted run left in the temp folder")
     if opt["staging_dir"] and opt["compress_zip"]:
-        count, size = tw.staged_leftovers(opt["staging_dir"], run.run_id)
-        if count:
-            log(f"NOTE: {count} file(s) ({size / 1e6:.1f} MB) left in the staging folder by an "
-                f"earlier run: {opt['staging_dir']}", "WARN")
+        tw.report_staged_leftovers(log, opt["staging_dir"], run.run_id)
 
     for root in input_dirs:
         if opt["auto_find"]:

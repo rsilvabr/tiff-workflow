@@ -4193,8 +4193,7 @@ def _land_padded_conversion(tmp8: Path, final_dst: Path, backup_path: Path):
     Never shutil.move: on a locked file it falls back to copy + delete and left a full
     copy in OLD_PADDED/ while reporting the backup as failed.
     """
-    sibling = final_dst.with_name(
-        f"{final_dst.name}.{uuid.uuid4().hex[:8]}_{uuid.uuid4().hex[:12]}.tif")
+    sibling = Path(tw.new_temp_sibling_path(str(final_dst), tw.new_run_id()))
     try:
         try:
             os.replace(str(tmp8), str(sibling))
@@ -4503,7 +4502,8 @@ def _stamped_sibling(backup: Path) -> Optional[str]:
     for name in names:
         stem, ext = os.path.splitext(name)
         m = tw.STAMPED_BACKUP_RE.match(stem)
-        if m and tw.is_tiff_name(name) and m.group("base").lower() == backup.stem.lower()                 and os.path.isfile(tw.long_path(str(backup.parent / name))):
+        if m and tw.is_tiff_name(name) and m.group("base").lower() == backup.stem.lower() \
+                and os.path.isfile(tw.long_path(str(backup.parent / name))):
             return name
     return None
 
@@ -5655,8 +5655,8 @@ _REVIEW_UNSET_UNTIL_EDITED = ("thumb_size", "thumb_quality", "thumb_format")
 
 
 def _review_init(cfg: "ConfigManager", workflow: Dict, folder: Path, edited: set) -> None:
-    """Fill what the rows show, keeping what is already there (b comes back here with the
-    answers kept). A row its `when` hides takes its key away, an edit of it too: mode 2's
+    """Fill what the rows show: an edited row keeps its answer (b comes back here with the
+    answers kept), every other row takes its default again. A row its `when` hides takes its key away, an edit of it too: mode 2's
     output folder must not reach mode 9 after a b. The thumbnail size, quality and format of
     Compress are set only when edited (the backend's own setting otherwise, as "Configure? No"
     did)."""
@@ -5670,14 +5670,19 @@ def _review_init(cfg: "ConfigManager", workflow: Dict, folder: Path, edited: set
             workflow.pop(row.key, None)
             edited.discard(row.key)
             continue
-        if row.key in workflow or row.key in _REVIEW_UNSET_UNTIL_EDITED:
+        if row.key in edited or row.key in _REVIEW_UNSET_UNTIL_EDITED:
             continue
+        # not edited: the default as it is NOW (b to another folder moves mode 2's ZIP_flat
+        # with it; a dry run makes the remembered answers "last run")
         workflow[row.key] = defaults[row.key][0]
 
 
 def _review_value(workflow: Dict, row: ReviewRow, defaults) -> Tuple[object, str]:
+    """(the value, where it comes from). The caller says "you" for an edited row; any other
+    row holds its default (_review_init), so the default's source is the truth (review of
+    v3.3.0: every row said "-")."""
     if row.key in workflow:
-        return workflow[row.key], ""
+        return workflow[row.key], defaults[row.key][1]
     return defaults[row.key]
 
 
@@ -5739,13 +5744,13 @@ def _review_edit(cfg: "ConfigManager", workflow: Dict, row: ReviewRow, value) ->
             return False
         if ed == "flat_output":
             folder = Path(workflow.get("input_dir", ""))
-            if text and Path(text).resolve() == folder.resolve():
-                warn = ("Output folder is the input folder: TIFFs will be recompressed in "
-                        "place, without a backup.")
-                if not _ask_yes_no(f"{warn} Continue?", False, "yellow"):
-                    return False
-                workflow.pop(row.key, None)
-                return True
+            if text and tw.same_path(str(Path(text).resolve()), str(folder.resolve())):
+                # v3.3 (review): mode 2 into its own input folder would recompress every TIFF
+                # in place with no backup. The screen does not offer it -- not changed, said.
+                _say("Mode 2 cannot write into its own input folder (every TIFF recompressed "
+                     "in place, with no backup): not changed. For in place, use mode 9 (the "
+                     "originals kept in OLD_TIFFs).", "yellow")
+                return False
             if not text:
                 _say("Mode 2 needs an output folder.", "yellow")
                 return False
@@ -6217,10 +6222,32 @@ def _mode8_steps(commands) -> Tuple[bool, bool]:
             any(s.values.get("delete_source") for s in steps))
 
 
+#: Where a yes keeps the lines it took --delete-source out of, so that a No (`[U]`) puts them
+#: back exactly as they were saved (review of v3.3.0).
+_DELETE_SOURCE_LINES_KEY = "commands_with_delete_source"
+_DELETES_TAG = " [DELETES SOURCES]"
+_REPLACES_TAG = " [REPLACES IN PLACE]"
+
+
+def _label_for_lines(label: Optional[str], commands) -> str:
+    """A mode-8 preset's label with the tag its lines really earn: `[DELETES SOURCES]` while a
+    line passes --delete-source, `[REPLACES IN PLACE]` once none does (review of v3.3.0: the
+    label kept `[DELETES SOURCES]` after --delete-source was taken out)."""
+    base = str(label or "")
+    for tag in (_DELETES_TAG, _REPLACES_TAG):
+        if base.endswith(tag):
+            base = base[:-len(tag)]
+    mode8, deletes = _mode8_steps(commands)
+    if deletes:
+        return base + _DELETES_TAG
+    return base + _REPLACES_TAG if mode8 else base
+
+
 def _ask_unattended_replace(entry: Dict) -> Dict:
     """For a preset that runs mode 8: the question (default No). Yes stores the answer -- and
     takes --delete-source out of its lines, which can never run unattended (a .tiff source then
-    stays next to its .tif). No (or no mode 8) takes an earlier yes away. Returns the entry."""
+    stays next to its .tif), keeping the lines as saved. No (or no mode 8) takes an earlier yes
+    away and puts those lines back. The label follows the lines. Returns the entry."""
     entry = dict(entry)
     mode8, deletes = _mode8_steps(entry.get("commands"))
     entry.pop(UNATTENDED_REPLACE_KEY, None)
@@ -6228,13 +6255,24 @@ def _ask_unattended_replace(entry: Dict) -> Dict:
         return entry
     question = _UNATTENDED_QUESTION
     if deletes:
-        question += " --delete-source is taken out of it (a .tiff source stays next to its .tif)."
+        question += (" --delete-source is taken out of it (a .tiff source stays next to its "
+                     ".tif; a No later, main menu 5 [U], puts it back).")
     if not _ask_yes_no(question, False, "red"):
+        saved = entry.pop(_DELETE_SOURCE_LINES_KEY, None)
+        if isinstance(saved, list) and all(isinstance(line, list) for line in saved):
+            entry["commands"] = saved
+            _say("--delete-source is back in its command line, as it was saved: from the menu "
+                 "it deletes each .tiff source again.", "yellow")
+        entry["label"] = _label_for_lines(entry.get("label"), entry.get("commands"))
         return entry
     if deletes:
+        entry[_DELETE_SOURCE_LINES_KEY] = json.loads(json.dumps(entry["commands"]))
         switch = tw.cli_switch("delete_source", True)
         entry["commands"] = [[a for a in line if a != switch] for line in entry["commands"]]
+        _say("--delete-source is out of this preset, also when it runs from the menu: a .tiff "
+             "source stays next to its .tif.", "yellow")
     entry[UNATTENDED_REPLACE_KEY] = True
+    entry["label"] = _label_for_lines(entry.get("label"), entry.get("commands"))
     return entry
 
 
@@ -6618,6 +6656,11 @@ def presets_menu(cfg) -> None:
                 _say("No preset with that number.", "red")
                 continue
             name = names[int(target) - 1]
+            if presets[name].get("kind") == "manifest":
+                _say(f"Preset '{name}' is a manifest: it cannot be allowed -- its rows are read "
+                     "when it runs, and a manifest with a mode-8 row never runs unattended.",
+                     "yellow")
+                continue
             if not _mode8_steps(presets[name].get("commands"))[0]:
                 _say(f"Preset '{name}' does not run mode 8: it needs no permission.", "yellow")
                 continue

@@ -859,6 +859,10 @@ def recompress_run(*argv):
     return compress_run(*argv, "--recompress-zip")
 
 
+#: compress's own --zip-level default, read from its table (never a literal)
+ZIP_LEVEL = next(p.default for p in cz.PARAMS if p.name == "zip_level")
+
+
 class TestRecompressZip:
     """--recompress-zip rewrites a TIFF compressed with Deflate WITHOUT a predictor (Capture
     One's exports: zlib level 6, no predictor) and keeps the new file only when it is smaller:
@@ -1120,7 +1124,7 @@ class TestNoGainMemory:
         mem = self._memory(tmp_path, monkeypatch)
         tools.comp, tools.magick_data = "Deflate", LARGER
         run = recompress_run(*IN_PLACE)
-        run.no_gain = cz.NoGainMemory.open(run.log)
+        run.no_gain = cz.NoGainMemory.open(run.log, run.opt["zip_level"])
         t = cz.Job(src=str(photo), write_dst=str(photo), final_dst=str(photo), name=photo.name)
         outcome = cz._run_group(run, [t], 1, {})
         assert outcome.results[0][1].no_gain
@@ -1132,14 +1136,14 @@ class TestNoGainMemory:
         # the next run knows it and starts no magick for it
         tools.magick_calls.clear()
         again = recompress_run(*IN_PLACE)
-        again.no_gain = cz.NoGainMemory.open(again.log)
+        again.no_gain = cz.NoGainMemory.open(again.log, again.opt["zip_level"])
         r = job(again, photo)
         assert r.result.startswith("SKIP (no gain on ") and \
             r.result.endswith(f" - not tried again) | {photo.name}"), r.result
         assert tools.magick_calls == []
         # ...the same in the plan of modes 0/9
         nine = recompress_run("--mode", "9")
-        nine.no_gain = cz.NoGainMemory.open(nine.log)
+        nine.no_gain = cz.NoGainMemory.open(nine.log, nine.opt["zip_level"])
         f = tw.FoundFile(str(photo), photo.name, str(photo.parent), 8, os.stat(photo).st_mtime_ns)
         assert cz._keep_original_job(nine, f, str(photo), str(photo), "Deflate",
                                      {str(photo).lower(): "Deflate"}) is None
@@ -1149,10 +1153,54 @@ class TestNoGainMemory:
         r = job(again, photo)
         assert r.result.startswith("SKIP (no gain: ") and tools.magick_calls, r.result
 
+    def test_the_zip_level_counts(self, tools, photo, tmp_path, monkeypatch):
+        """Review of v3.3.0 (S5): a file that did not shrink at --zip-level 3 was never tried
+        again at 9. It is now remembered per level; a v3.2 entry (no levels) counts at 7, what
+        v3.2 wrote; a level found no gain again is added to the entry, not put in its place."""
+        mem = self._memory(tmp_path, monkeypatch)
+        tools.comp, tools.magick_data = "Deflate", LARGER
+        three = recompress_run(*IN_PLACE, "--zip-level", "3")
+        three.no_gain = cz.NoGainMemory.open(three.log, three.opt["zip_level"])
+        t = cz.Job(src=str(photo), write_dst=str(photo), final_dst=str(photo), name=photo.name)
+        assert cz._run_group(three, [t], 1, {}).results[0][1].no_gain
+        three.no_gain.save()
+        entry = json.loads(mem.read_text(encoding="utf-8"))["files"][str(photo).lower()]
+        assert entry["zip_levels"] == [3]
+        # level 3 again: remembered, no magick
+        tools.magick_calls.clear()
+        again = recompress_run(*IN_PLACE, "--zip-level", "3")
+        again.no_gain = cz.NoGainMemory.open(again.log, again.opt["zip_level"])
+        r = job(again, photo)
+        assert r.result.startswith("SKIP (no gain on ") and " at ZIP level 3 - " in r.result
+        assert tools.magick_calls == []
+        # level 9: tried again; no gain there too -> both levels remembered
+        nine = recompress_run(*IN_PLACE, "--zip-level", "9")
+        nine.no_gain = cz.NoGainMemory.open(nine.log, nine.opt["zip_level"])
+        assert cz._run_group(nine, [t], 1, {}).results[0][1].no_gain and tools.magick_calls
+        nine.no_gain.save()
+        entry = json.loads(mem.read_text(encoding="utf-8"))["files"][str(photo).lower()]
+        assert entry["zip_levels"] == [3, 9]
+
+    def test_a_memory_of_v32_still_counts_at_level_7(self, tools, photo, tmp_path, monkeypatch):
+        mem = self._memory(tmp_path, monkeypatch)
+        mem.parent.mkdir()
+        st = os.stat(photo)
+        mem.write_text(json.dumps({"version": 1, "files": {str(photo).lower(): {
+            "size": st.st_size, "mtime_ns": st.st_mtime_ns, "date": "2026-11-15",
+            "release": "3.2.0"}}}), encoding="utf-8")
+        assert cz.NoGainMemory.V32_LEVEL == 7
+        assert cz.NoGainMemory.open(NoLog(), 7).remembered(str(photo)) == "2026-11-15"
+        assert cz.NoGainMemory.open(NoLog(), 1).remembered(str(photo)) is None
+        one = cz.NoGainMemory.open(NoLog(), 1)
+        one.record(str(photo))
+        one.save()
+        entry = json.loads(mem.read_text(encoding="utf-8"))["files"][str(photo).lower()]
+        assert entry["zip_levels"] == [1, 7]
+
     def test_a_save_keeps_what_another_run_saved_meanwhile(self, tools, photo, tmp_path, monkeypatch):
         mem = self._memory(tmp_path, monkeypatch)
-        first = cz.NoGainMemory.open(NoLog())
-        second = cz.NoGainMemory.open(NoLog())
+        first = cz.NoGainMemory.open(NoLog(), ZIP_LEVEL)
+        second = cz.NoGainMemory.open(NoLog(), ZIP_LEVEL)
         other = photo.parent / "other.tif"
         other.write_bytes(b"OTHER")
         first.record(str(photo))
@@ -1166,7 +1214,7 @@ class TestNoGainMemory:
         mem = self._memory(tmp_path, monkeypatch)
         tools.comp = "Deflate"
         run = recompress_run(*IN_PLACE, "--dry-run")
-        run.no_gain = cz.NoGainMemory.open(run.log)
+        run.no_gain = cz.NoGainMemory.open(run.log, run.opt["zip_level"])
         t = cz.Job(src=str(photo), write_dst=str(photo), final_dst=str(photo), name=photo.name)
         cz._run_group(run, [t], 1, {})
         run.no_gain.save()
@@ -1177,7 +1225,7 @@ class TestNoGainMemory:
         mem.parent.mkdir()
         mem.write_text("{not json", encoding="utf-8")
         log = NoLog()
-        memory = cz.NoGainMemory.open(log)
+        memory = cz.NoGainMemory.open(log, ZIP_LEVEL)
         assert memory.files == {}
         assert any(level == "WARN" and "not read" in msg for level, msg in log.lines), log.lines
         memory.record(str(photo))
@@ -1186,11 +1234,11 @@ class TestNoGainMemory:
 
     def test_blank_turns_it_off_and_by_default_it_is_in_the_profile(self, monkeypatch, tmp_path):
         monkeypatch.setenv(cz.NO_GAIN_ENV, "")
-        assert cz.NoGainMemory.open(NoLog()) is None
+        assert cz.NoGainMemory.open(NoLog(), ZIP_LEVEL) is None
         monkeypatch.delenv(cz.NO_GAIN_ENV)
         monkeypatch.setenv("USERPROFILE", str(tmp_path))
         monkeypatch.setenv("HOME", str(tmp_path))
-        memory = cz.NoGainMemory.open(NoLog())
+        memory = cz.NoGainMemory.open(NoLog(), ZIP_LEVEL)
         assert Path(memory.path) == tmp_path / cz.NO_GAIN_FILE and memory.files == {}
 
     def test_without_a_profile_folder_the_memory_is_off(self, monkeypatch, tmp_path):
@@ -1201,14 +1249,14 @@ class TestNoGainMemory:
             monkeypatch.delenv(var, raising=False)
         monkeypatch.chdir(tmp_path)
         log = NoLog()
-        assert cz.NoGainMemory.open(log) is None
+        assert cz.NoGainMemory.open(log, ZIP_LEVEL) is None
         assert any(level == "WARN" and "no user profile folder" in msg for level, msg in log.lines), log.lines
         assert not (tmp_path / "~").exists()
 
     def test_an_interrupt_keeps_what_was_learned(self, tools, photo, tmp_path, monkeypatch):
         mem = self._memory(tmp_path, monkeypatch)
         run = recompress_run(*IN_PLACE)
-        run.no_gain = cz.NoGainMemory.open(run.log)
+        run.no_gain = cz.NoGainMemory.open(run.log, run.opt["zip_level"])
         run.no_gain.record(str(photo))
         cz.cleanup_after_stop(run)
         assert list(json.loads(mem.read_text(encoding="utf-8"))["files"]) == [str(photo).lower()]
@@ -1964,6 +2012,59 @@ class TestStagedMoveFailures:
         staged = [n for n in os.listdir(photo.parent) if tw.LEFTOVER_NAME_RE.search(n)]
         assert staged == [], "the staged ZIP stayed next to the photo"
         assert not [m for _lv, m in run.log.lines if "Moved" in m]
+        assert photo.read_bytes() == b"ORIGINAL"
+
+    @pytest.mark.parametrize("kind", ["missing", "size", "error"])
+    def test_modes_keep_the_staged_file_when_the_source_is_gone(self, tools, photo, tmp_path,
+                                                                monkeypatch, kind):
+        """Review of v3.3.0 (S3): the staged file of a failed move is dropped only while its
+        source is a file -- otherwise it may be the only copy. The source vanishes during the
+        move: the staged file stays in the staging folder and a WARN names it."""
+        real = failing_move(kind)
+
+        def move(src, dst, run_id):
+            photo.unlink()
+            return real(src, dst, run_id)
+        monkeypatch.setattr(tw, "move_file_into_place", move)
+        stg = tmp_path / "stg 一時 [x]"
+        run = compress_run("--mode", "1", "--input-dir", str(photo.parent),
+                           "--staging-dir", str(stg), "--force-sequential")
+        assert cz.run_modes(run, {"mode", "input_dir", "staging_dir", "force_sequential"}) == 1
+        (staged,) = os.listdir(stg)
+        assert (stg / staged).read_bytes() == b"COMPRESSED"
+        assert ("WARN", f"  the source is missing: the compressed copy stays in {stg / staged}") \
+            in run.log.lines, run.log.lines
+        assert (run.err, run.ok) == (1, 0)
+
+    @pytest.mark.parametrize("kind", ["missing", "error"])
+    def test_copy_exif_keeps_the_staged_zip_when_the_tiff_is_gone(self, tools, photo, tmp_path,
+                                                                  monkeypatch, kind):
+        """The same for copy-exif --compress-zip: its staged ZIP stays, named in a WARN. (In
+        place the TIFF's place is the destination: "size" means something IS there, and a real
+        move that reports success has taken the staged file with it.)"""
+        photo.with_suffix(".jpg").write_bytes(b"JPEG")
+        real = failing_move(kind)
+
+        def move(src, dst, run_id):
+            photo.unlink()
+            return real(src, dst, run_id)
+        monkeypatch.setattr(tw, "move_file_into_place", move)
+        run = exif_run("--compress-zip", "--workers", "1")
+        cx.process_folder(run, str(photo.parent))
+        warns = [m for lv, m in run.log.lines if lv == "WARN" and "the TIFF is missing" in m]
+        assert len(warns) == 1, run.log.lines
+        kept = Path(warns[0].split("its ZIP copy stays in ", 1)[1])
+        assert kept.read_bytes() == b"COMPRESSED"
+        assert (run.err, run.ok) == (1, 0)
+
+    def test_modes_0_9_a_keep_original_error_is_one_error_not_also_an_ok(self, tools, photo,
+                                                                        monkeypatch):
+        """Review of v3.3.0 (S3): the uncount of _archive_originals had no test."""
+        monkeypatch.setattr(cz, "complete_keep_original", lambda *a, **k: "boom")
+        run = compress_run("--mode", "9", "--input-dir", str(photo.parent), "--force-sequential")
+        assert cz.run_modes(run, {"mode", "input_dir", "force_sequential"}) == 1
+        assert error_lines(run) == [f"ERROR (keep original) | {self.NAME} | boom"]
+        assert (run.err, run.ok, run.counter) == (1, 0, 1)
         assert photo.read_bytes() == b"ORIGINAL"
 
     def test_modes_land_the_staged_file(self, tools, photo, tmp_path):
