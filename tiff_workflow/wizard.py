@@ -42,6 +42,11 @@ DIAGNOSE_CACHE = True
 # never remembered. The padded -> 8-bit conversion still compares every file's pixels
 # before replacing it. False = check everything on every run.
 
+PADDED_ZIP_LEVEL = 7
+# The ZIP (Deflate) level 1-9 of the padded 16 -> 8-bit conversion (Diagnose, workflow 7).
+# 7 is what ImageMagick writes when it is not told; 5 measured 56 % faster for 3 % larger on a
+# 45 MP 8-bit file (AI_tools, 14/11/2026). The pixels are the same at every level.
+
 # Subprocess timeouts (seconds)
 CONVERT_TIMEOUT_S = 60   # magick depth/format conversions
 COMPARE_TIMEOUT_S = 120  # magick compare (RMSE)
@@ -513,6 +518,7 @@ def _overlay_values(script_name: str) -> Dict[str, object]:
 _OVERLAY_SETTINGS = {
     "WORKER_MEMORY_FRACTION": "float:0:2",   # 0 = no cap; above 1 trusts the estimate (jxl-photo: 0-2)
     "WORKER_MEMORY_LIMIT": "choice:both|commit|physical",
+    "PADDED_ZIP_LEVEL": "int:1:9",
     "DIAGNOSE_CACHE": "bool",
     "CONVERT_TIMEOUT_S": "int:1:",
     "COMPARE_TIMEOUT_S": "int:1:",
@@ -2209,6 +2215,10 @@ _ADV_MAGICK = Opt("magick_timeout", "advanced.magick_timeout", "notnone", "perfo
                   "ImageMagick timeout (seconds)",
                   "How long one magick call may run before it is killed. Raise it for very "
                   "large scans on a slow disk.", value_spec="int:1:")
+_ADV_ZIP_LEVEL = Opt("zip_level", "advanced.zip_level", "notnone", "performance", "advanced",
+                     "ZIP level (1-9)",
+                     "Deflate level of the written TIFF: lower writes faster and a little larger; "
+                     "the pixels are the same. 7 = ImageMagick's own.", value_spec="int:1:9")
 _ADV_MEMORY = Opt("worker_memory_fraction", "advanced.worker_memory_fraction", "notnone",
                   "performance", "advanced", "Memory share for the workers (0-2)",
                   "Caps the parallel workers so their ImageMagick processes fit in this share "
@@ -2283,6 +2293,7 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             "on = always the predictor; auto = a sample of each file decides with or without "
             "it, whichever is smaller (the file is still written once).",
             value_spec="choice:on|auto"),
+        _ADV_ZIP_LEVEL,
         # Settings file only (decision 6: the discovery must know the folder names, so they
         # are not per-run):
         Opt("zip_suffix", "", "none", "files", "overlay", "ZIP suffix", "Mode 4 folder suffix."),
@@ -2324,6 +2335,7 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             "';'-separated folder NAMES to skip during discovery."),
         _ADV_MAGICK,
         _ADV_MEMORY,
+        _ADV_ZIP_LEVEL,
         Opt("fail_on_warn", "advanced.fail_on_warn", "flag", "run", "advanced", "Fail on warning",
             "Exit 1 when a file only produced a warning or was missing its JPEG.",
             value_spec="bool"),
@@ -4054,7 +4066,8 @@ def _process_single_padded(tiff_path, staging) -> PaddedResult:
         try:
             result = _run_captured(
                 ["magick", str(tiff_path), "-depth", "8"] + type_args
-                + ["-compress", "zip", tw.magick_path_spec(tmp8)],
+                + ["-compress", "zip"] + tw.zip_level_args(PADDED_ZIP_LEVEL)
+                + [tw.magick_path_spec(tmp8)],
                 _work_timeout(CONVERT_TIMEOUT_S, tiff_path)
             )
         except FileNotFoundError:
@@ -6130,6 +6143,7 @@ _OVERLAY_MENU = [
 _CONVERT_SETTING_HELP = {
     "WORKER_MEMORY_FRACTION": "Share of the available memory the Python workflows' parallel workers may use; 0 = no cap.",
     "WORKER_MEMORY_LIMIT": "Which memory reading that share is taken from: both, commit or physical.",
+    "PADDED_ZIP_LEVEL": "ZIP level 1-9 of the padded 16 -> 8-bit conversion; lower = faster, a little larger.",
     "DIAGNOSE_CACHE": "Diagnose remembers each TIFF's verdict between runs.",
     "CONVERT_TIMEOUT_S": "Base timeout (seconds) of a magick depth/format conversion.",
     "COMPARE_TIMEOUT_S": "Base timeout (seconds) of a magick compare (RMSE).",

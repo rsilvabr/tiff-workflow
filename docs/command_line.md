@@ -104,6 +104,7 @@ the file can change.
 | (new in v3.2, no old form) | `--recompress-zip` / `--no-recompress-zip` |  |
 | (new in v3.2, no old form) | `--recompress-min-saving <value>` | `recompress_min_saving` |
 | (new in v3.2, no old form) | `--zip-predictor <value>` | `zip_predictor` |
+| (new in v3.3, no old form) | `--zip-level <value>` | `zip_level` |
 | (new in v3.2, no old form) | `--include-folders <value>` |  |
 
 ### tiff_workflow/copy_exif_to_tiff.py (`convert_tiff.py copy-exif`)
@@ -128,6 +129,7 @@ the file can change.
 | `-ExcludeFolders <value>` | `--exclude-folders <value>` |  |
 | `-WorkerMemoryFraction <value>` | `--worker-memory-fraction <value>` | `worker_memory_fraction` |
 | `-InputDirFile <value>` | `--input-dir-file <value>` |  |
+| (new in v3.3, no old form) | `--zip-level <value>` | `zip_level` |
 
 ### tiff_workflow/generate_thumbnails.py (`convert_tiff.py thumbnails`)
 

@@ -1281,8 +1281,9 @@ class TestZipPredictorAuto:
         (write,) = tiff_writes(tools)
         assert write[write.index("-define") + 1] == "tiff:predictor=1"
         assert tools.events.index("probe") < tools.events.index("magick"), "decided BEFORE the write"
-        assert tools.probe_write_args == ["-type", "TrueColor"], \
-            "the sample is written with the write's own options (its channels)"
+        # v3.3: and at the level of the real write
+        assert tools.probe_write_args == ["-quality", "70", "-type", "TrueColor"], \
+            "the sample is written with the write's own options (its level, its channels)"
         assert tools.history_params == ("compress_tiff_zip mode 2: ZIP (Deflate) without predictor"
                                         " - zipcheck 1 predictor 1")
 

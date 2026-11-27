@@ -2257,6 +2257,15 @@ def resolve_srgb_profile(explicit):
     return None
 
 
+def zip_level_args(level):
+    """The ImageMagick options that write a ZIP (Deflate) TIFF at zlib `level` (1-9): its
+    -quality is level x 10 for a ZIP TIFF. Passed on EVERY ZIP write, also at 7: -quality 70 is
+    byte for byte what magick writes without it (measured 27/11/2026, 8 and 16 bits), so the
+    default changes nothing, and a level set anywhere (the PARAMS table, the settings file, the
+    command line) is the level written."""
+    return ["-quality", str(int(level) * 10)]
+
+
 def thumbnail_magick_args(srgb_profile, size):
     """The magick options that turn a page into an sRGB thumbnail no larger than `size`."""
     args = []

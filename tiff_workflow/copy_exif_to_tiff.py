@@ -43,6 +43,7 @@ PARAMS = (
     P("folder_pattern", "str", "S5pro"),
     P("magick_timeout", "int", 30),
     P("fail_on_warn", "switch"),
+    P("zip_level", "int", 7, lo=1, hi=9, help="ZIP (Deflate) level 1-9: lower writes faster and a little larger, the pixels are the same (7 = what ImageMagick writes when it is not told)"),
     P("exclude_folders", "str", "", help="';'-separated folder NAMES to skip during discovery"),
     P("worker_memory_fraction", "float", 0.8, help="Cap parallel workers so their ImageMagick processes fit in this share of free memory; 0 = no cap"),
     P("input_dir_file", "str", "", help="UTF-8 text file, one input folder per line (the wizard uses it when --input-dir would exceed the command-line limit)"),
@@ -56,6 +57,7 @@ PARAMS = (
 OVERLAY_SPECS = {
     "magick_timeout": "int:1:",
     "worker_memory_fraction": "float:0:2",
+    "zip_level": "int:1:9",
 }
 # OVERLAY-SPECS-END
 
@@ -278,7 +280,8 @@ def _zip_staged(run, name, tiff_target, facts, write_dst, timeout, load_factor, 
     # Input literal, OUTPUT escaped: a '%' in the name sends the output somewhere else while
     # magick still exits 0.
     try:
-        tw.magick_run(["-quiet", tiff_target, "-compress", "zip"] + type_args
+        tw.magick_run(["-quiet", tiff_target, "-compress", "zip"]
+                      + tw.zip_level_args(run.opt["zip_level"]) + type_args
                       + [tw.magick_path_spec(write_dst)])
     except tw.ToolError as e:
         failure = tw.one_line(e.output)

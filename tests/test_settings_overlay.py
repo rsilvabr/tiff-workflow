@@ -173,11 +173,14 @@ def test_T6_the_tables_are_exactly_the_planned_ones():
         # every kept file still passes the pixel and metadata gates
         "recompress_min_saving": "float:0:50",
         # v3.2: on or auto -- how each file is compressed, never whether one is replaced
-        "zip_predictor": "choice:on|auto"}
+        "zip_predictor": "choice:on|auto",
+        # v3.3: how hard Deflate works -- the bytes, never the pixels
+        "zip_level": "int:1:9"}
     assert _table("generate_thumbnails.py") == {
         "size": "int:1:", "quality": "intstr:1:100", "format": "name", "srgb_profile": "path?"}
     assert _table("copy_exif_to_tiff.py") == {"magick_timeout": "int:1:",
-                                              "worker_memory_fraction": "float:0:2"}
+                                              "worker_memory_fraction": "float:0:2",
+                                              "zip_level": "int:1:9"}
 
 
 def test_T6_a_name_of_v3_0_0_in_the_file_changes_nothing(tmp_path, monkeypatch):

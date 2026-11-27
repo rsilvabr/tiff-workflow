@@ -177,6 +177,9 @@ pytest tests --cov=..
 ### `test_tidy_v330.py` covers
 - v3.3 tidy: the padded gate refuses when its dimension or page reader (the module's `_tiff_dimensions` / `_tiff_page_count`) cannot read either file -- the original stays; the Diagnose cache written by v3.2.1 still loads, is written on one line through `_write_json_file`, and a save that fails leaves the old file whole and no temp file
 
+### `test_zip_level.py` covers
+- v3.3 `--zip-level` (compress, copy-exif, settings file `zip_level`, the wizard's Advanced) and `PADDED_ZIP_LEVEL`: one setting per backend with its range; every ZIP write and the predictor sample pass `tw.zip_level_args(<the option>)`, never a literal; the wizard passes it only when edited; on real files lower levels are larger and the pixels identical; the settings file sets it; level 7 is byte for byte what magick writes untold
+
 ### `test_lint.py` covers
 - v3.1 (T11): `ruff check` and `mypy` find nothing in `convert_tiff.py`, the package and `tools/`, with the settings of `pyproject.toml` (ruff: pyflakes, pycodestyle's errors, bugbear; mypy 1.x against Python 3.9, the annotated functions). Skipped in a Python without them (`python -m pip install ruff "mypy<2"`); proved by mutation with them installed: an unused import, a type error at the entry point, the copy_exif loop closure unbound
 

@@ -61,6 +61,7 @@ PARAMS = (
     P("skip_lzw_as_compressed", "bool", False, help="true = treat LZW as already compressed"),
     P("recompress_zip", "switch", help="Also rewrite TIFFs already ZIP-compressed WITHOUT a predictor (Capture One exports); a file is kept only when it comes out smaller"),
     P("recompress_min_saving", "float", 1.0, lo=0, hi=50, help="--recompress-zip keeps a rewritten file only when it is at least this many percent smaller"),
+    P("zip_level", "int", 7, lo=1, hi=9, help="ZIP (Deflate) level 1-9: lower writes faster and a little larger, the pixels are the same (7 = what ImageMagick writes when it is not told)"),
     P("zip_predictor", "str", "on", choices=("on", "auto"), help="on = always the ZIP predictor; auto = a sample of each file decides with or without it, whichever is smaller (the file is still written once)"),
     P("overwrite", "switch"),
     P("delete_source", "switch"),
@@ -105,6 +106,7 @@ OVERLAY_SPECS = {
     "worker_memory_fraction": "float:0:2",
     "recompress_min_saving": "float:0:50",
     "zip_predictor": "choice:on|auto",
+    "zip_level": "int:1:9",
 }
 # OVERLAY-SPECS-END
 
@@ -604,13 +606,15 @@ def _write_with_thumbnail(run, src, write_dst, type_args, name):
             # The thumbnail INPUT stays literal: a plain input is opened verbatim.
             try:
                 tw.magick_run(["-quiet", main_page, f"{thumb_ext}:{thumb_temp}",
-                               "-compress", "zip"] + type_args + [out_spec])
+                               "-compress", "zip"] + tw.zip_level_args(opt["zip_level"])
+                              + type_args + [out_spec])
             except tw.ToolError:
                 no_thumb = True
         if no_thumb:
             # the thumbnail failed: the main image alone (over what a failed join left)
             try:
-                tw.magick_run(["-quiet", main_page, "-compress", "zip"] + type_args + [out_spec])
+                tw.magick_run(["-quiet", main_page, "-compress", "zip"]
+                              + tw.zip_level_args(opt["zip_level"]) + type_args + [out_spec])
             except tw.ToolError as e:
                 return ThumbWrite(error=f"ERROR (magick compress) | {name} | {tw.one_line(e.output)}",
                                   drop_output=True)
@@ -808,7 +812,9 @@ def _compress_job(run, t, load, own):
     zipcheck = None
     sample_note = ""
     if recompress or (opt["zip_predictor"] == "auto" and tw.predictor_choice_applies(layout_pages)):
-        probe = tw.predictor_probe(src, facts.width, facts.height, timeout, load, type_args)
+        # the sample is written at the level of the real write, or auto decides on other bytes
+        probe = tw.predictor_probe(src, facts.width, facts.height, timeout, load,
+                                   tw.zip_level_args(opt["zip_level"]) + type_args)
         without_wins = False
         if probe:
             with_size, without_size = probe
@@ -865,8 +871,8 @@ def _compress_job(run, t, load, own):
         # The input stays literal (magick opens a plain path verbatim); the OUTPUT is
         # escaped, or a '%' in the name silently redirects it.
         try:
-            tw.magick_run(["-quiet", src, "-compress", "zip"] + type_args + predictor_args
-                          + [tw.magick_path_spec(write_dst)])
+            tw.magick_run(["-quiet", src, "-compress", "zip"] + tw.zip_level_args(opt["zip_level"])
+                          + type_args + predictor_args + [tw.magick_path_spec(write_dst)])
         except tw.ToolError as e:
             tw.remove_quietly(meta_backup)
             # The partial output is this run's own file (never the source: an in-place

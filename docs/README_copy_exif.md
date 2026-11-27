@@ -82,6 +82,7 @@ The defaults below are the `PARAMS` table at the top of `tiff_workflow/copy_exif
 | `--input-dir-file` | string | `""` | UTF-8 text file with one input folder per line, used instead of `--input-dir` (not together). The wizard switches to it automatically when the folder list would exceed the Windows command-line limit. |
 | `--output-dir` | string | `""` | Output folder for processed TIFFs. **If set and different from source folder, the original TIFF is preserved** — a copy is created in the output folder and EXIF is applied to the copy |
 | `--workers` | int | `16` | TIFFs processed at once (1-64). `1` = one at a time |
+| `--zip-level` | int | `7` | With `--compress-zip`: the Deflate level 1-9 (lower = faster, a little larger; the pixels are the same). Settings file: `zip_level` |
 | `--worker-memory-fraction` | double | `0.8` | Cap parallel workers so their ImageMagick compares fit in this share of the memory still free (0 = no cap; with `--workers 1` there is nothing to cap) |
 | `--dry-run` | switch | off | Show what would be copied, don't modify anything. No folder is created either, `--output-dir` included |
 | `--skip-if-tiff-has-exif` | switch | off | Skip TIFFs that already carry camera EXIF (an Exif IFD: exposure, aperture, dates). The basic tags every TIFF has -- size, resolution, orientation, and the Make/Model some converters write -- do not count. Before v2.7.1 they did, and the option skipped every TIFF |

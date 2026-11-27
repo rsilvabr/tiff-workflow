@@ -301,9 +301,10 @@ def test_T3_dash_takes_an_edit_back(monkeypatch, ui):
 @pytest.mark.parametrize("ui", UIS)
 def test_T3_combined_workflow_lists_both_backends_and_keeps_them_apart(monkeypatch, ui):
     wf = {"origin": "both", "mode": 9, "folders": [HOSTILE]}
-    # 1-5 compress (MagickTimeout, SrgbProfile, WorkerMemoryFraction, RecompressMinSaving,
-    # ZipPredictor), 6-8 copy_exif (MagickTimeout, WorkerMemoryFraction, FailOnWarn)
-    ui(monkeypatch, ["y", "6", "77", "8", "yes", "3", "0.25", "4", "2.5", "5", "auto", "0"])
+    # 1-6 compress (MagickTimeout, SrgbProfile, WorkerMemoryFraction, RecompressMinSaving,
+    # ZipPredictor, ZipLevel), 7-10 copy_exif (MagickTimeout, WorkerMemoryFraction, ZipLevel,
+    # FailOnWarn)
+    ui(monkeypatch, ["y", "7", "77", "10", "yes", "3", "0.25", "4", "2.5", "5", "auto", "0"])
     REAL_ADVANCED(_cfg(), wf)
     assert wf["advanced"] == {"copy_exif": {"magick_timeout": 77, "fail_on_warn": True},
                               "compress": {"worker_memory_fraction": 0.25,
@@ -322,13 +323,16 @@ def test_T3_combined_workflow_lists_both_backends_and_keeps_them_apart(monkeypat
 @pytest.mark.parametrize("ui", UIS)
 def test_T3_copy_exif_workflow_never_offers_compress_options(monkeypatch, ui):
     wf = {"origin": "copy_exif", "folders": [HOSTILE]}
-    # rows are copy_exif's: 1 MagickTimeout, 2 WorkerMemoryFraction, 3 FailOnWarn; 4 does not exist
-    ui(monkeypatch, ["y", "4", "3", "no", "1", "45", "0"])
+    # rows are copy_exif's: 1 MagickTimeout, 2 WorkerMemoryFraction, 3 ZipLevel, 4 FailOnWarn;
+    # 5 does not exist; a level of 10 is refused (1-9), 3 is taken
+    ui(monkeypatch, ["y", "5", "4", "no", "1", "45", "3", "10", "3", "3", "0"])
     REAL_ADVANCED(_cfg(), wf)
-    assert wf["advanced"] == {"copy_exif": {"fail_on_warn": False, "magick_timeout": 45}}
+    assert wf["advanced"] == {"copy_exif": {"fail_on_warn": False, "magick_timeout": 45,
+                                            "zip_level": 3}}
     argv = convert_tiff.build_copy_exif_command(wf, [Path(HOSTILE)])
     assert "--fail-on-warn" not in argv            # off is the switch's default
     assert argv[argv.index("--magick-timeout") + 1] == "45"
+    assert argv[argv.index("--zip-level") + 1] == "3"
 
 
 def test_T3_a_workflow_without_a_registry_backend_is_not_asked(monkeypatch):

@@ -76,6 +76,7 @@ The defaults below are the `PARAMS` table at the top of `tiff_workflow/compress_
 | `--skip-lzw-as-compressed` / `--no-skip-lzw-as-compressed` | yes/no | off | Treat LZW as already compressed (skip re-compression) |
 | `--recompress-zip` | switch | off | Also rewrite TIFFs that are already ZIP **without a predictor** (Capture One's exports), keeping a file only when it comes out smaller. See [Recompressing ZIP TIFFs](#recompressing-zip-tiffs-without-a-predictor---recompress-zip) |
 | `--recompress-min-saving` | number | `1` | `--recompress-zip` keeps a rewritten file only when it is at least this many percent smaller (0-50). Settings file: `recompress_min_saving` |
+| `--zip-level` | int | `7` | Deflate level 1-9 of the written TIFF: lower writes faster and a little larger, the pixels are the same. `7` is what ImageMagick writes when it is not told (byte for byte); measured on a 45 MP 16-bit export, level 3 took 25 % less time for 0.01 % more bytes. Settings file: `zip_level` |
 | `--zip-predictor` | `on` / `auto` | `on` | `on` = always the ZIP predictor (as every version before); `auto` = a sample of each file decides with or without it, whichever is smaller -- the file is still written once. See [Choosing the predictor](#choosing-the-predictor---zip-predictor-auto). Settings file: `zip_predictor` |
 | `--overwrite` | switch | off | Overwrite existing ZIP files |
 | `--delete-source` | switch | off | Delete source TIFF after successful compression (mode 8 only) |

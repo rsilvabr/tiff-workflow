@@ -39,7 +39,7 @@ PARAM_TOKEN = re.compile(r"-([A-Za-z][A-Za-z0-9]*)(?::(.*))?", re.S)
 #: so they never make a prefix of v3.0.0 ambiguous (-Re stays -RestoreStranded although
 #: --recompress-zip came in v3.2).
 NEW_SINCE_V300 = frozenset({"recompress_zip", "recompress_min_saving", "include_folders",
-                            "zip_predictor"})
+                            "zip_predictor", "zip_level"})
 
 
 def _v300(params):

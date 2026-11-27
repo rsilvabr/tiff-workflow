@@ -68,6 +68,7 @@ with what each one is right now (this run, the settings file, or the script's ow
 | `--srgb-profile` | compress | ICC file used to convert wide-gamut sources; empty = auto-detect |
 | `--recompress-min-saving` | compress | `--recompress-zip` keeps a rewritten file only when it is at least this many percent smaller, `0`-`50` |
 | `--zip-predictor` | compress | `on` (always the ZIP predictor, the default) or `auto` (a sample of each file decides with or without it, whichever is smaller; the file is still written once) |
+| `--zip-level` | compress, Copy EXIF | the Deflate level `1`-`9` of the written TIFF: lower writes faster and a little larger, the pixels are the same (`7`, the default, is ImageMagick's own) |
 | `--fail-on-warn` | Copy EXIF | exit 1 when a file only produced a warning or had no JPEG |
 
 Type a number, then a value; `-` takes your change back; `0` is done. A value is checked
@@ -512,10 +513,10 @@ type and range:
 
 | Section | Names |
 |---|---|
-| `compress_tiff_zip` | `zip_suffix`, `zip_subfolder_name`, `export_marker`, `export_zip_subfolder`, `export_tiff_subfolder` (folder/file names), `cap_workers` (0-64), `magick_timeout`, `thumb_size` (whole numbers >= 1), `thumb_quality` (1-100), `thumb_format` (name), `srgb_profile` (path or `null`), `worker_memory_fraction` (0-2), `recompress_min_saving` (0-50), `zip_predictor` (`on`, `auto`) |
-| `copy_exif` | `magick_timeout`, `worker_memory_fraction` |
-| `generate_thumbnails` | `size`, `quality`, `format`, `srgb_profile` |
-| `convert_tiff` | `WORKER_MEMORY_FRACTION`, `WORKER_MEMORY_LIMIT` (`both`, `commit`, `physical`), `DIAGNOSE_CACHE`, `CONVERT_TIMEOUT_S`, `COMPARE_TIMEOUT_S`, `TIMEOUT_S_PER_MB` |
+| `compress_tiff_zip` | `zip_suffix`, `zip_subfolder_name`, `export_marker`, `export_zip_subfolder`, `export_tiff_subfolder` (folder/file names), `cap_workers` (0-64), `magick_timeout`, `thumb_size` (whole numbers >= 1), `thumb_quality` (1-100), `thumb_format` (name), `srgb_profile` (path or `null`), `worker_memory_fraction` (0-2), `recompress_min_saving` (0-50), `zip_predictor` (`on`, `auto`), `zip_level` (1-9) |
+| `copy_exif` | `magick_timeout`, `worker_memory_fraction`, `zip_level` (1-9) |
+| `generate_thumbnails` | `size` (32-4096), `quality`, `format`, `srgb_profile` |
+| `convert_tiff` | `WORKER_MEMORY_FRACTION`, `WORKER_MEMORY_LIMIT` (`both`, `commit`, `physical`), `PADDED_ZIP_LEVEL` (1-9: the Deflate level of the padded 16 -> 8-bit conversion), `DIAGNOSE_CACHE`, `CONVERT_TIMEOUT_S`, `COMPARE_TIMEOUT_S`, `TIMEOUT_S_PER_MB` |
 
 **What it can never change:** anything that deletes, overwrites or is chosen per run -- `mode`,
 the input/output/staging folders, `workers`, `dry_run`, `safe_mode`, `skip_lzw_as_compressed`,
