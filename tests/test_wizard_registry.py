@@ -466,6 +466,8 @@ def test_every_asked_option_is_set_by_a_wizard_step():
             set_keys.add(node.slice.value)
         if isinstance(node, ast.Dict):
             set_keys.update(k.value for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str))
+    # v3.4: a row of the review screen sets its key (workflow[row.key] = ..., _review_edit)
+    set_keys.update(r.key for r in convert_tiff._REVIEW_ROWS)
     missing = sorted({o.key for opts in convert_tiff.REGISTRY.values() for o in opts
                       if o.level == "asked" and o.kind != "none"       # thumbnails: own command
                       and o.key not in set_keys})

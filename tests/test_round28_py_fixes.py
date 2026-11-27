@@ -575,12 +575,15 @@ def test_rich_prints_a_folder_name_with_markup_as_it_is(tmp_path, monkeypatch):
     from rich.console import Console
     out = io.StringIO()
     monkeypatch.setattr(ct, "console", Console(file=out, force_terminal=False, width=300))
-    monkeypatch.setattr(ct.Confirm, "ask", staticmethod(lambda *a, **k: False))
+    monkeypatch.setattr(ct.Prompt, "ask", staticmethod(lambda *a, **k: "q"))
     name = "伊豆沼 [bold]x[/bold] [/b] 50%"
     workflow = {"origin": "free_compress", "dest": "zip", "mode": 1,
                 "input_dir": "E:\\" + name, "staging": str(tmp_path / "[red]stg"),
                 "exclude_folders": "[/i]RAW", "workers": 2}
-    assert ct.step_confirm(workflow, SimpleNamespace(config=ct.ToolConfig())) is False
+    # v3.4: the review screen replaced step_confirm's Summary
+    cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
+    assert ct._review_screen(cfg, workflow, Path("E:\\" + name), [["Folder:", "E:\\" + name]],
+                             lambda dry: [], lambda: None, lambda: None, set()) == "q"
     text = out.getvalue()
     assert name in text and "[red]stg" in text and "[/i]RAW" in text, text
 

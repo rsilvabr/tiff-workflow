@@ -1074,15 +1074,6 @@ class TestWorkflow4TwoSteps:
         out = capsys.readouterr().out
         assert out.index("Step 1/2") < out.index("Running: copy") < out.index("Step 2/2") < out.index("Running: zip")
 
-    def test_the_offer_to_run_for_real(self, monkeypatch, capsys):
-        self._wizard(monkeypatch, [], ["sim"])
-        assert convert_tiff._offer_real_run(True, "Run it?", "Going...", lambda: 7) == 7
-        out = capsys.readouterr().out
-        assert "Dry-run completed with errors" in out and "Going..." in out
-        self._wizard(monkeypatch, [], [""])                    # default: no
-        assert convert_tiff._offer_real_run(False, "Run it?", "Going...", lambda: 7) is None
-        assert "Skipped." in capsys.readouterr().out
-
     def test_the_run_for_real_keeps_the_gate(self, monkeypatch, tmp_path):
         """Dry run: both steps exit 0. Run for real: Copy EXIF fails -- compress must not run,
         and the workflow reports the failure."""

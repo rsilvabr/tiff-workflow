@@ -1969,64 +1969,6 @@ def _advanced_summary_rows(workflow: Dict) -> List[list]:
     return [["Advanced:" if i == 0 else "", t] for i, t in enumerate(texts)]
 
 
-def step_confirm(workflow: Dict, cfg: "ConfigManager") -> bool:
-    """Show summary and confirm."""
-    origin = workflow.get("origin", "?")
-    mode = workflow.get("mode", "?")
-    dry = "Yes" if workflow.get("dry_run") else "No"
-    folders_count = len(workflow.get("folders", []))
-
-    rows: List[list] = []
-    if origin in ("copy_exif",):
-        rows.append(["Workflow:", f"Copy EXIF ({origin})"])
-    elif origin == "free_compress":
-        rows.append(["Workflow:", "Compress TIFFs"])
-    elif origin in ("compress", "both"):
-        rows.append(["Workflow:", f"Fuji: Compress ({origin})"])
-
-    if origin != "free_compress" and folders_count > 1:
-        pattern_val = workflow.get("pattern", [])
-        pattern_str = ", ".join(pattern_val) if isinstance(pattern_val, list) else str(pattern_val)
-        rows.append(["Pattern:", pattern_str or "?"])
-        rows.append(["Sessions:", f"{folders_count} folder(s)"])
-    elif origin == "free_compress":
-        rows.append(["Mode:", f"{mode} - {MODE_NAMES.get(mode, '?')}"])
-        rows.append(["Folder:", str(workflow.get("input_dir", "?"))[:60]])
-    else:
-        rows.append(["Folder:", str(workflow.get("folders", [workflow.get("input_dir")])[0].name
-                                    if workflow.get("folders") else workflow.get("input_dir", "?"))])
-
-    rows.append(["Workers:", str(workflow.get("workers", cfg.config.default_workers))])
-    if workflow.get("cap_workers"):
-        rows.append(["Cap workers:", str(workflow["cap_workers"])])
-    if workflow.get("exclude_folders"):
-        rows.append([("Excluding:", "yellow"), workflow["exclude_folders"]])
-    if workflow.get("include_folders"):
-        rows.append([("Only folders:", "yellow"), workflow["include_folders"]])
-    if workflow.get("recompress_zip"):
-        rows.append([("Recompress ZIP:", "yellow"),
-                     "ON -- ZIP files without a predictor are rewritten when smaller"])
-    rows.append(["Staging:", str(workflow.get("staging") or "disabled")])
-    rows.append(["Dry-run:", dry])
-    if workflow.get("force_parallel"):
-        rows.append([("Parallelism:", "yellow"), "FORCED ON (--force-parallel)"])
-    elif workflow.get("force_sequential"):
-        rows.append([("Parallelism:", "yellow"), "FORCED OFF (--force-sequential)"])
-
-    if origin == "free_compress" and mode == 8:
-        rows.append([("Delete source:", "red"), "ON -- originals will be DELETED"])
-    rows += _advanced_summary_rows(workflow)
-
-    _table([{"style": "bold cyan"}, {}], rows,
-           panel={"title": ("Summary", "bold"), "border_style": "green"},
-           box=None, show_header=False, pad_edge=False)
-    if not _ask_yes_no("Proceed?", True, "yellow"):
-        _say("Cancelled.", "dim")
-        return False
-
-    return True
-
-
 # --- Command Builders ----------------------------------------------
 
 #: backend script -> its subcommand
@@ -5560,18 +5502,6 @@ def _echo_command(cmd, lead: str = "\n") -> None:
     _say(f"{lead}Running: {' '.join(str(a) for a in cmd)}\n", "dim")
 
 
-def _offer_real_run(failed: bool, question: str, announce: str, run_real):
-    """After a dry run: say so when it had errors, ask whether to run it for real (default
-    no) and, if so, announce it and return what `run_real()` returns; None when skipped."""
-    if failed:
-        _say("Dry-run completed with errors. Review output above before running for real.", "yellow")
-    if not _ask_yes_no(f"\nDry-run complete. {question}", False, "yellow"):
-        _say("Skipped.", "dim")
-        return None
-    _say(f"{announce}\n", "cyan")
-    return run_real()
-
-
 def _run_exif_then_compress(cmd_copy: List[str], cmd_compress: List[str]):
     """Workflow 4's two runs, (exit code of Copy EXIF, of compress). Compress runs only when
     Copy EXIF exited 0 -- it would ZIP TIFFs whose metadata never landed; its code is then
@@ -5585,54 +5515,6 @@ def _run_exif_then_compress(cmd_copy: List[str], cmd_compress: List[str]):
     _say("\n=== Step 2/2: Fuji: Compress ===", "cyan")
     _echo_command(cmd_compress, lead="")
     return rc_copy, run_subprocess(cmd_compress)
-
-
-def _ask_flat_output(folder: Path, workflow: Dict) -> bool:
-    """Mode 2's own questions. Mode 2 flattens every TIFF into one folder; without an
-    explicit output folder the backend falls back to the input root, mixing outputs with
-    sources and recompressing root-level TIFFs in place -- so it is asked here, with the
-    policy for names that collide. False = cancelled or refused."""
-    default_out = str(folder / "ZIP_flat")
-    out_dir = _ask("Output folder (mode 2 merges all TIFFs here)", default_out)
-    if len(out_dir) >= 2 and out_dir[0] == out_dir[-1] and out_dir[0] in ("'", '"'):
-        out_dir = out_dir[1:-1]
-    if ";" in out_dir:
-        _error(f"Output path contains ';' which is not supported: {out_dir}")
-        return False
-    if Path(out_dir).resolve() == folder.resolve():
-        warn = "Output folder is the input folder: TIFFs will be recompressed in place, without a backup."
-        if not _ask_yes_no(f"{warn} Continue?", False, "yellow"):
-            _say("Cancelled.", "dim")
-            return False
-    else:
-        workflow["output_dir"] = out_dir
-
-    # Collision policy for the flattened output
-    dup_default = _backend_default("compress_tiff_zip.py", "duplicate_action")
-    workflow["duplicate_action"] = _ask("Duplicate filenames", dup_default,
-                                        choices=["Numbered", "Skip", "Overwrite"])
-    return True
-
-
-def _ask_thumbnails(workflow: Dict) -> None:
-    """The embedded-thumbnail questions. The defaults come from the backend's own PARAMS
-    table; "Configure? No" adds no thumb_* keys at all, so the backend runs on its own
-    settings (audit round 17 -- the wizard used to force 256/"85"/jpg always)."""
-    thumb_size_default = _backend_default("compress_tiff_zip.py", "thumb_size")
-    thumb_quality_default = _backend_default("compress_tiff_zip.py", "thumb_quality")
-    thumb_format_default = _backend_default("compress_tiff_zip.py", "thumb_format")
-    if not _ask_yes_no("Generate embedded thumbnails?", False, "cyan"):
-        return
-    workflow["generate_thumbnail"] = True
-    if _ask_yes_no("Configure thumbnail settings?", False, "cyan"):
-        size_str = _ask("Thumbnail size (px)", str(thumb_size_default))
-        workflow["thumb_size"] = int(size_str) if size_str.isdigit() else thumb_size_default
-        workflow["thumb_quality"] = _ask("JPEG quality", thumb_quality_default)
-        # audit round 16: --thumb-format only ever gets one of the formats the backend takes
-        workflow["thumb_format"] = _ask("Format", thumb_format_default, choices=["jpg", "png", "tif"])
-    # Option to skip compressed TIFFs with existing thumbnails
-    workflow["skip_compressed_with_thumb"] = _ask_yes_no(
-        "Skip already-compressed TIFFs that have thumbnails?", False, "cyan")
 
 
 # --- The review screen (the wizard by task, v3.4) ----------------------------------
@@ -6151,119 +6033,74 @@ def _run_exif_or_compress(cfg: "ConfigManager", workflow_type: str) -> bool:
 
 
 def run_generate_thumbnails(cfg: "ConfigManager") -> bool:
-    """Workflow 8: Generate sRGB thumbnails from TIFFs."""
+    """Workflow 8: sRGB thumbnails of the TIFFs. The folder and create-or-remove, then the
+    review screen. True when the backend exited 0."""
     script = PACKAGE_DIR / "generate_thumbnails.py"
     if not script.exists():
         _error("generate_thumbnails.py not found.")
         return False
-
-    # Input directory
-    input_dir = _ask("Input directory", str(cfg.config.last_input_dir or "."))
-    input_dir = (input_dir or "").strip().strip('"').strip("'")
-    p = Path(input_dir)
-    if not p.is_dir():
-        _error(f"Directory does not exist: {input_dir}")
-        return False
-    # The backend splits --input-dir on ';' like the other three, so a path containing one
-    # would silently become two bogus roots. step_folder rejects it for every other workflow.
-    if ";" in str(p):
-        _error(f"Folder path contains ';' which is not supported: {p}")
-        return False
-    cfg.config.last_input_dir = os.path.abspath(str(p))
-    cfg.save_config()
-    # audit round 28: the backend gets (and a preset saves) the absolute path, never "."
-    # or a relative answer -- see step_folder.
-    input_dir = os.path.abspath(p)
-
-    # Remove mode: skip the generation questions entirely
-    remove_mode = _ask_yes_no("Remove existing thumbnails instead of creating them?", False, "yellow")
-
-    # Recursive / dry-run apply to both modes
-    def _ask_recursive_and_dry():
-        return (_ask_yes_no("Recursive?", False, "cyan"), _ask_yes_no("Dry-run?", False, "cyan"))
-
-    def _ask_exclude_folders():
-        """Same question the compress/Copy EXIF workflows ask. The backend used to carry a
-        hardcoded, silent exclusion list instead (ZIP and _EXPORT included, which are exactly
-        where the compressed library and the export trees live)."""
-        default = cfg.config.last_exclude_folders or ""
-        value = _ask([("Exclude folders?", "cyan"), " (';'-separated folder names, '-' = none)"],
-                     default or "-", style="")
-        if value in ("-", "", "none"):
-            cfg.config.last_exclude_folders = None
-            return ""
-        cfg.config.last_exclude_folders = value
-        return value
-
-    def _ask_output_dir():
-        value = _ask("Output folder (empty = next to each TIFF)", "")
-        value = value.strip('"').strip("'")
-        if ";" in value:
-            _error(f"Output path contains ';' which is not supported: {value}")
-            return None
-        return value
-
-    folders = [Path(input_dir)]
-    if remove_mode:
-        out_dir = _ask_output_dir()
-        if out_dir is None:
+    workflow: Dict = {"origin": "thumbnails", "dry_run": False}
+    edited: set = set()
+    while True:
+        input_dir = _ask("Input directory", str(cfg.config.last_input_dir or "."))
+        input_dir = (input_dir or "").strip().strip('"').strip("'")
+        p = Path(input_dir)
+        if not p.is_dir():
+            _error(f"Directory does not exist: {input_dir}")
             return False
-        recursive, dry_run = _ask_recursive_and_dry()
-        workflow = {"origin": "thumbnails", "remove": True, "output_dir": out_dir,
-                    "recursive": recursive, "dry_run": dry_run}
-        cmd = build_thumbnails_command(workflow, folders)
-        _save_last_run(cfg, "thumbnails_remove", f"Thumbnails: REMOVE under {truncate_path(p, 60)}",
-                       [build_thumbnails_command({**workflow, "dry_run": False}, folders)])
-        _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
-        return run_subprocess(cmd) == 0
+        # The backend splits --input-dir on ';' like the other three, so a path containing one
+        # would silently become two bogus roots. step_folder rejects it for every other workflow.
+        if ";" in str(p):
+            _error(f"Folder path contains ';' which is not supported: {p}")
+            return False
+        cfg.config.last_input_dir = os.path.abspath(str(p))
+        cfg.save_config()
+        # audit round 28: the backend gets (and a preset saves) the absolute path, never "."
+        # or a relative answer -- see step_folder.
+        folder = Path(os.path.abspath(p))
+        remove = _ask_yes_no("Remove existing thumbnails instead of creating them?", False, "yellow")
+        if workflow.get("remove") != remove:
+            edited.clear()          # the other task's rows: its own defaults
+        workflow["remove"] = remove
+        kind = "thumbnails_remove" if remove else "thumbnails"
 
-    # The four prompt defaults come from generate_thumbnails.py's own PARAMS table
-    # (audit round 17): a literal here silently overrode an edited backend setting.
-    size_default = _backend_default("generate_thumbnails.py", "size")
-    quality_default = _backend_default("generate_thumbnails.py", "quality")
-    format_default = _backend_default("generate_thumbnails.py", "format")
-    page_default = _backend_default("generate_thumbnails.py", "page")
+        def commands(dry: bool, folder=folder) -> List[List[str]]:
+            return [build_thumbnails_command(dict(workflow, dry_run=dry), [folder])]
 
-    # Thumbnail size: the range is the backend's (its P's lo/hi), never a copy of it
-    size_p = _backend_param("generate_thumbnails.py", "size")
-    lo, hi = (size_p.lo, size_p.hi) if size_p is not None else (None, None)
-    span = f"{lo}-{hi}" if lo is not None and hi is not None else "px"
-    size_str = _ask(f"Thumbnail size (px, {span})", str(size_default))
-    try:
-        size = int(size_str)
-    except ValueError:
-        size = size_default
-    if (lo is not None and size < lo) or (hi is not None and size > hi):
-        _say(f"Size {size} out of range ({span}), using {size_default}.", "yellow")
-        size = size_default
+        def label(folder=folder) -> str:
+            if workflow.get("remove"):
+                return f"Thumbnails: REMOVE under {truncate_path(folder, 60)}"
+            return (f"Thumbnails: {workflow.get('size')}px {workflow.get('format')} under "
+                    f"{truncate_path(folder, 60)}")
 
-    # Quality: the backend validates 1-100 and refuses to start otherwise
-    quality_str = _ask("JPEG quality (1-100)", quality_default)
-    if not (quality_str.isdigit() and 1 <= int(quality_str) <= 100):
-        _say(f"Invalid quality '{quality_str}' (must be 1-100), using {quality_default}.", "yellow")
-        quality_str = quality_default
+        def run(dry: bool, commands=commands, label=label, kind=kind) -> int:
+            _review_remember(cfg, workflow)
+            cfg.save_config()
+            _save_last_run(cfg, kind, label(), commands(False))
+            (cmd,) = commands(dry)
+            _echo_command(cmd)
+            return run_subprocess(cmd)
 
-    # Format and page: what the backend offers, asked again until it is one of them
-    fmt = _ask("Format", format_default, choices=["jpg", "png", "tif"])
-    page = _ask("Page", page_default, choices=["0", "all"])
+        def run_dry(run=run) -> None:
+            if run(True) != 0:
+                _say("Dry-run completed with errors. Review the output above before running "
+                     "for real.", "yellow")
 
-    out_dir = _ask_output_dir()
-    if out_dir is None:
-        return False
-    recursive, dry_run = _ask_recursive_and_dry()
-    exclude_folders = _ask_exclude_folders() if recursive else ""
+        def save(commands=commands, label=label, kind=kind) -> None:
+            _review_remember(cfg, workflow)
+            _review_save_preset(cfg, kind, label(), commands(False))
 
-    workflow = {"origin": "thumbnails", "remove": False, "size": size, "quality": quality_str,
-                "format": fmt, "page": page,
-                "workers": cfg.config.last_workers or cfg.config.default_workers,
-                "output_dir": out_dir, "exclude_folders": exclude_folders,
-                "recursive": recursive, "dry_run": dry_run}
-    cmd = build_thumbnails_command(workflow, folders)
-    _save_last_run(cfg, "thumbnails", f"Thumbnails: {size}px {fmt} under {truncate_path(p, 60)}",
-                   [build_thumbnails_command({**workflow, "dry_run": False}, folders)])
+        header = [["Task:", "Thumbnails: " + ("remove" if remove else "create")],
+                  ["Folder:", str(folder)]]
+        action = _review_screen(cfg, workflow, folder, header, commands, run_dry, save, edited)
+        if action == "b":
+            continue
+        if action == "q":
+            _say("Cancelled.", "dim")
+            return False
+        workflow["dry_run"] = False
+        return run(False) == 0
 
-    _say(f"\nRunning: {' '.join(cmd)}\n", "dim")
-    return run_subprocess(cmd) == 0
 
 # --- Main ---------------------------------------------------------
 

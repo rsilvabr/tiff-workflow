@@ -1,7 +1,8 @@
 """Workflow 8 of the wizard, Generate Thumbnails (run_generate_thumbnails), on both screens.
 
-What the wizard is for here: the questions in order, what each answer becomes on the command
-line of generate_thumbnails.py, and what is journalled for Repeat last and the presets.
+What the wizard is for here: the questions (since v3.4 the folder, create or remove, then the
+review screen's rows), what each answer becomes on the command line of generate_thumbnails.py,
+and what is journalled for Repeat last and the presets.
 
 The answers go in through builtins.input -- where the plain-text prompts AND Rich's
 Prompt.ask / Confirm.ask read -- so Rich's own handling of an answer (its choices, its
@@ -99,8 +100,14 @@ def folder(tmp_path):
     return d
 
 
-# The nine questions of a generation run that is not recursive, all answered with Enter.
-ENTER = [""] * 8
+def row(key, recursive=False, remove=False):
+    """The number of the review row that edits `key` (v3.4: the review screen)."""
+    wf = {"origin": "thumbnails", "remove": remove, "recursive": recursive}
+    return str(next(i for i, r in enumerate(ct._review_rows(wf), 1) if r.key == key))
+
+
+# v3.4: the folder, create or remove (Enter = create), then the review screen; `r` runs.
+ENTER = ["", "r"]
 
 
 def test_enter_everywhere_runs_the_backend_with_its_own_defaults(wiz, folder):
@@ -108,7 +115,7 @@ def test_enter_everywhere_runs_the_backend_with_its_own_defaults(wiz, folder):
     assert wiz.argv() == ["--input-dir", str(folder), "--size", default("size"),
                           "--quality", default("quality"), "--format", default("format"),
                           "--page", default("page"), "--workers", "8"]
-    assert len(wiz.asked) == 9, wiz.asked
+    assert len(wiz.asked) == 3, wiz.asked
     assert "Running: " in wiz.text
 
 
@@ -127,48 +134,52 @@ def test_the_run_is_journalled_for_repeat_last(wiz, folder):
 
 def test_every_answer_reaches_the_command_line(wiz, folder, tmp_path):
     out_dir = tmp_path / "thumbs out [x] 一時"
-    assert wiz.run(folder, "n", "512", "70", "png", "all", out_dir, "y", "y", "sub [x];deep") is True
+    assert wiz.run(folder, "n", row("size"), "512", row("quality"), "70", row("format"), "png",
+                   row("page"), "all", row("output_dir"), out_dir, row("recursive"), "y",
+                   row("exclude_folders", recursive=True), "sub [x];deep", "r") is True
     assert wiz.argv() == ["--input-dir", str(folder), "--size", "512", "--quality", "70", "--format", "png",
                           "--page", "all", "--workers", "8", "--output-dir", str(out_dir),
-                          "--exclude-folders", "sub [x];deep", "--recursive", "--dry-run"]
+                          "--exclude-folders", "sub [x];deep", "--recursive"]
     assert wiz.cfg.config.last_exclude_folders == "sub [x];deep"
     assert not out_dir.exists(), "the wizard must not create the output folder"
 
 
 def test_a_dry_run_is_never_journalled(wiz, folder):
-    """Repeat last and a preset run for real unless --dry-run is asked again."""
-    wiz.run(folder, "", "", "", "", "", "", "", "y")
+    """Repeat last and a preset run for real unless --dry-run is asked again. v3.4: `d` runs
+    the dry run and comes back to the screen."""
+    wiz.run(folder, "", "d", "q")
     assert wiz.argv()[-1] == "--dry-run"
     journalled = wiz.cfg.config.last_run_commands
     assert journalled == [ct._journal_line(wiz.ran[0][:-1])] and "--dry-run" not in journalled[0]
 
 
-def test_exclude_folders_is_asked_only_for_a_recursive_run(wiz, folder):
-    wiz.run(folder, "", "", "", "", "", "", "y", "", "-")
-    assert len(wiz.asked) == 10 and "Exclude folders?" in wiz.text
+def test_exclude_folders_is_a_row_only_for_a_recursive_run(wiz, folder):
+    wiz.run(folder, "", row("recursive"), "y", row("exclude_folders", recursive=True), "-", "r")
+    assert "Exclude folders?" in wiz.text
     assert "--exclude-folders" not in wiz.argv() and "--recursive" in wiz.argv()
     assert wiz.cfg.config.last_exclude_folders is None
 
 
 def test_the_last_exclusion_is_offered_again(wiz, folder):
     wiz.cfg.config.last_exclude_folders = "ZIP;_EXPORT"
-    wiz.run(folder, "", "", "", "", "", "", "y", "", "")
+    wiz.run(folder, "", row("recursive"), "y", "r")
     argv = wiz.argv()
     assert argv[argv.index("--exclude-folders") + 1] == "ZIP;_EXPORT"
 
 
-def test_remove_asks_three_things_and_no_generation_setting(wiz, folder, tmp_path):
+def test_remove_has_two_rows_and_no_generation_setting(wiz, folder, tmp_path):
     out_dir = tmp_path / "thumbs out"
-    assert wiz.run(folder, "y", out_dir, "y", "n") is True
+    assert wiz.run(folder, "y", row("output_dir", remove=True), out_dir,
+                   row("recursive", remove=True), "y", "r") is True
     assert wiz.argv() == ["--input-dir", str(folder), "--remove", "--output-dir", str(out_dir), "--recursive"]
-    assert len(wiz.asked) == 5, wiz.asked
     c = wiz.cfg.config
     assert c.last_run_kind == "thumbnails_remove" and c.last_run_label.startswith("Thumbnails: REMOVE under ")
     assert c.last_run_commands == [ct._journal_line(wiz.ran[0])]
+    assert len(ct._review_rows({"origin": "thumbnails", "remove": True})) == 2
 
 
 def test_remove_dry_run(wiz, folder):
-    wiz.run(folder, "y", "", "n", "y")
+    wiz.run(folder, "y", "d", "q")
     assert wiz.argv() == ["--input-dir", str(folder), "--remove", "--dry-run"]
     assert wiz.cfg.config.last_run_commands == [ct._journal_line(wiz.ran[0][:-1])]
 
@@ -195,14 +206,14 @@ def test_a_semicolon_in_the_folder_is_refused(wiz, tmp_path):
 
 
 def test_a_semicolon_in_the_output_folder_is_refused(wiz, folder):
-    assert wiz.run(folder, "", "", "", "", "", "C:\\out;C:\\other") is False
+    assert wiz.run(folder, "", row("output_dir"), "C:\\out;C:\\other", "q") is False
     assert wiz.ran == [] and "Output path contains ';'" in wiz.text
     assert wiz.cfg.config.last_run_kind is None
 
 
 def test_quotes_around_a_pasted_path_are_dropped(wiz, folder, tmp_path):
     out_dir = tmp_path / "o"
-    wiz.run(f'"{folder}"', "", "", "", "", "", f"'{out_dir}'", "", "")
+    wiz.run(f'"{folder}"', "", row("output_dir"), f"'{out_dir}'", "r")
     argv = wiz.argv()
     assert argv[1] == str(folder) and argv[argv.index("--output-dir") + 1] == str(out_dir)
 
@@ -222,8 +233,8 @@ def test_the_last_folder_is_the_default(wiz, folder):
 
 
 @pytest.mark.parametrize("answer", ["8", "5000", "abc", "-1", "31", "4097"])
-def test_a_size_out_of_range_falls_back_to_the_backends_default(wiz, folder, answer):
-    wiz.run(folder, "", answer, "", "", "", "", "", "")
+def test_a_size_out_of_range_is_not_taken(wiz, folder, answer):
+    wiz.run(folder, "", row("size"), answer, "r")
     argv = wiz.argv()
     assert argv[argv.index("--size") + 1] == default("size")
     if answer != "abc":
@@ -232,14 +243,14 @@ def test_a_size_out_of_range_falls_back_to_the_backends_default(wiz, folder, ans
 
 @pytest.mark.parametrize("answer", ["32", "4096", "1024"])
 def test_a_size_in_range_is_taken(wiz, folder, answer):
-    wiz.run(folder, "", answer, "", "", "", "", "", "")
+    wiz.run(folder, "", row("size"), answer, "r")
     argv = wiz.argv()
     assert argv[argv.index("--size") + 1] == answer
 
 
 @pytest.mark.parametrize("answer", ["0", "101", "abc", "8.5", "-3"])
-def test_a_bad_quality_falls_back_to_the_backends_default(wiz, folder, answer):
-    wiz.run(folder, "", "", answer, "", "", "", "", "")
+def test_a_bad_quality_is_not_taken(wiz, folder, answer):
+    wiz.run(folder, "", row("quality"), answer, "r")
     argv = wiz.argv()
     assert argv[argv.index("--quality") + 1] == default("quality")
     assert f"Invalid quality '{answer}'" in wiz.text
@@ -262,20 +273,21 @@ def test_the_workers_come_from_the_config_and_are_clamped(wiz, folder):
 def test_a_format_that_is_not_offered_is_asked_again(wiz, folder):
     """The plain screen said "Invalid format" and took the default; Rich asked again. Both
     ask again now."""
-    wiz.run(folder, "", "", "", "gif", "tif", "", "", "", "")
+    wiz.run(folder, "", row("format"), "gif", "tif", "r")
     argv = wiz.argv()
     assert argv[argv.index("--format") + 1] == "tif"
 
 
 def test_a_page_that_is_not_offered_is_asked_again(wiz, folder):
     """The plain screen took any number; Rich offered 0 and all. Both offer 0 and all."""
-    wiz.run(folder, "", "", "", "", "7", "all", "", "", "")
+    wiz.run(folder, "", row("page"), "7", "all", "r")
     argv = wiz.argv()
     assert argv[argv.index("--page") + 1] == "all"
 
 
 def test_a_long_format_name_is_asked_again(wiz, folder):
-    """The plain screen took JPEG and passed -Format jpeg; both offer jpg / png / tif."""
-    wiz.run(folder, "", "", "", "JPEG", "png", "", "", "", "")
+    """The plain screen took JPEG and passed -Format jpeg; both offer jpg / png / tif.
+    (v3.3: a choice is matched without case -- `JPG` is jpg -- but JPEG is no choice.)"""
+    wiz.run(folder, "", row("format"), "JPEG", "png", "r")
     argv = wiz.argv()
     assert argv[argv.index("--format") + 1] == "png"

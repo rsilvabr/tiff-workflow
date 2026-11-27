@@ -634,7 +634,9 @@ def test_copy_exif_copies_the_exif_and_skips_the_zip_of_associated_alpha(tmp_pat
 # ---------------------------------------------------------------------------------------------
 
 def _summary(monkeypatch, capsys, workflow, screen):
-    """What step_confirm shows for `workflow`, answered yes, on `screen`."""
+    """What the screen before a run shows for `workflow`, on `screen`: step_confirm's Summary
+    until v3.3, the review screen since (it lists the edited Advanced options the same way,
+    _advanced_summary_rows); left with `q`."""
     import io
     from types import SimpleNamespace
 
@@ -646,11 +648,13 @@ def _summary(monkeypatch, capsys, workflow, screen):
         monkeypatch.setattr(ct, "RICH_AVAILABLE", True)
         monkeypatch.setattr(ct, "console", Console(file=out, force_terminal=False,
                                                    color_system=None, width=300))
-        monkeypatch.setattr(ct.Confirm, "ask", staticmethod(lambda *a, **k: True))
+        monkeypatch.setattr(ct.Prompt, "ask", staticmethod(lambda *a, **k: "q"))
     else:
         monkeypatch.setattr(ct, "RICH_AVAILABLE", False)
-        monkeypatch.setattr("builtins.input", lambda prompt="": "y")
-    assert ct.step_confirm(workflow, SimpleNamespace(config=ct.ToolConfig())) is True
+        monkeypatch.setattr("builtins.input", lambda prompt="": "q")
+    cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
+    assert ct._review_screen(cfg, workflow, Path("a"), [["Task:", "x"]], lambda dry: [],
+                             lambda: None, lambda: None, set()) == "q"
     return out.getvalue() + capsys.readouterr().out
 
 

@@ -19,7 +19,7 @@ import review_golden as rg  # noqa: E402
 GOLDEN = json.loads((ROOT / "tests" / "data" / "review_default_argv.json").read_text(encoding="utf-8"))
 UIS = ["plain", "rich"]
 #: the tasks on the review screen: answered with just `r` (the others: Enter everywhere)
-REVIEW_TASKS = {"compress", "copy_exif", "fuji_compress", "both"}
+REVIEW_TASKS = {"compress", "copy_exif", "fuji_compress", "both", "thumbnails", "thumbnails_remove"}
 
 
 def test_the_golden_was_captured_from_v321_and_covers_every_case():
@@ -324,3 +324,36 @@ def test_fuji_b_goes_back_to_the_pattern_with_the_answers_kept(tmp_path, monkeyp
     (cmd,) = ran
     assert _arg(cmd, "--workers") == "5"
     assert sum(q.startswith("Choice") for q in asked) == 2
+
+
+@pytest.mark.parametrize("task", ["compress", "copy_exif", "both", "thumbnails",
+                                  "thumbnails_remove"])
+def test_each_tasks_screen_on_rich_shows_the_hostile_folder(tmp_path, monkeypatch, task):
+    """A transcript of each task's screen: the folder `伊豆沼 [FINAL] 50% x` and the sessions
+    `070101 S5pro [1]` in a Rich table, nothing eaten as markup; every row has a value."""
+    pytest.importorskip("rich")
+    import io
+
+    from rich.console import Console
+    from types import SimpleNamespace
+    out = io.StringIO()
+    lib = rg.make_tree(tmp_path)
+    first = {"compress": ["9", str(lib)], "copy_exif": ["", str(lib), ""],
+             "both": ["", str(lib), ""], "thumbnails": [str(lib), ""],
+             "thumbnails_remove": [str(lib), "y"]}[task]
+    seq = _Seq(first + ["q"])
+    rg._script(monkeypatch, ct, "rich", seq)
+    monkeypatch.setattr(ct, "console", Console(file=out, force_terminal=False, color_system=None,
+                                               width=300))
+    cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
+    start = {"compress": lambda: ct.run_free_compress(cfg),
+             "copy_exif": lambda: ct._run_exif_or_compress(cfg, "copy_exif"),
+             "both": lambda: ct._run_exif_or_compress(cfg, "both"),
+             "thumbnails": lambda: ct.run_generate_thumbnails(cfg),
+             "thumbnails_remove": lambda: ct.run_generate_thumbnails(cfg)}[task]
+    assert start() is False
+    text = out.getvalue()
+    assert "伊豆沼 [FINAL] 50% x" in text, text
+    assert "Review" in text and "[r] run" in text
+    if task in ("copy_exif", "both"):
+        assert "Sessions:" in text and "2 folder(s)" in text
