@@ -247,8 +247,13 @@ inventing a new one.
   characters AND `[ ]` AND a space -- not only an ASCII `tmp_path`. Round
   2026-10-17 shipped three such bugs (alias copies filling C:, every conversion
   refused under `伊豆沼`, Delete OLD_TIFFs refused).
-On the owner's machine `py` is a Python 3.13 without pytest -- use `python` for
-the suite and the battery.
+On the owner's machine (2026-11-27) Pythons 3.9-3.15 are installed, every one with
+pytest and rich; ruff and mypy (the lint tests) are in 3.10 and 3.13. `py` is 3.13, and
+so is `python` in a shell started after that date (an older one may still find 3.10):
+name the version, `py -3.X`. The backends the suite starts run under the same
+interpreter (`sys.executable`). Before a release the suite runs on the floor and the
+newest, `py -3.9` and `py -3.15` (round 33: 3.13 changed `subprocess`, and the tests
+themselves had stopped running on 3.9).
 - **A mini run before every long run** (owner's rule, 2026-11-12: "quando for rodar
   algo demorado, 10min ou mais, faz um mini teste rápido"). Anything of ~10 min or
   more (the literal suite, the battery, a side-by-side, a timing measurement, a chain

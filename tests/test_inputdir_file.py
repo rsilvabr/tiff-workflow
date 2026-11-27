@@ -44,7 +44,7 @@ def test_backend_reads_the_list_file(lane, script, extra, tmp_path):
     make_tiff(scratch / "b.tif")
     (scratch / "b.tif").rename(jp / "b.tif")
     list_file = tmp_path / "dirs.txt"
-    list_file.write_text(f"{plain}\n{jp}\n", encoding="utf-8", newline="\n")
+    list_file.write_bytes(f"{plain}\n{jp}\n".encode("utf-8"))
 
     result = run_ps(lane, script,
                     ["--input-dir-file", str(list_file), "--dry-run", "--workers", "1"] + extra,
@@ -77,7 +77,7 @@ def test_missing_or_empty_list_file_is_refused(lane, tmp_path):
     assert missing.returncode == 1
 
     empty_file = tmp_path / "empty.txt"
-    empty_file.write_text("", encoding="utf-8", newline="\n")
+    empty_file.write_bytes(b"")
     empty = run_ps(lane, "compress_tiff_zip.py",
                    ["--mode", "1", "--input-dir-file", str(empty_file), "--dry-run"],
                    tmp_path)

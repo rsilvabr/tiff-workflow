@@ -46,7 +46,7 @@ def _edit_default(path, param, new_literal):
         r'("(?:[^"]*)"|True|False|-?\d+(?:\.\d+)?)', re.MULTILINE)
     new_text, n = pattern.subn(lambda m: m.group(1) + new_literal, text)
     assert n == 1, f"{param}: expected exactly 1 substitution in {path.name}, got {n}"
-    path.write_text(new_text, encoding="utf-8", newline="")
+    path.write_bytes(new_text.encode("utf-8"))
 
 
 def test_fallbacks_match_the_scripts():

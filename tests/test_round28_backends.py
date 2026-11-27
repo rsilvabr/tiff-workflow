@@ -332,9 +332,9 @@ def _failing_restore_env(tmp_path):
     shim = tmp_path / "shim"
     shim.mkdir()
     (shim / "shim_exiftool.py").write_text(_EXIFTOOL_SHIM, encoding="utf-8")
-    (shim / "exiftool.cmd").write_text(
-        '@echo off\r\n"' + sys.executable + '" "%~dp0shim_exiftool.py" %*\r\nexit /b %ERRORLEVEL%\r\n',
-        encoding="ascii", newline="")
+    (shim / "exiftool.cmd").write_bytes(
+        ('@echo off\r\n"' + sys.executable + '" "%~dp0shim_exiftool.py" %*\r\nexit /b %ERRORLEVEL%\r\n'
+         ).encode("ascii"))
     env = env_off(TW_REAL_EXIFTOOL=shutil.which("exiftool"))
     env["PATH"] = str(shim) + os.pathsep + env["PATH"]
     return env

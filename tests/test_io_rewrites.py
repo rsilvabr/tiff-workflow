@@ -228,8 +228,15 @@ class TestPageClassesWithPing:
         subprocess.run(["magick", str(built), "-compress", "zip", str(zipped)],
                        capture_output=True, check=True, timeout=120)
         _write_tags(zipped, ["-IFD0:SubfileType=", "-IFD1:SubfileType#=1"])
+        # The damage starts at page 0's first strip (audit round 33): over its zlib header
+        # (0x5555 is no header) inflate fails at once. Bytes in mid-stream failed only now and
+        # then: plasma:fractal is random, and 0x55 often decodes as valid Deflate until libtiff
+        # has the bytes it wants (24 of 200 builds: the identify succeeded).
+        start = int(exif_stdin(zipped, "-s3", "-n", "-IFD0:StripOffsets").split()[0])
+        first_strip = int(exif_stdin(zipped, "-s3", "-n", "-IFD0:StripByteCounts").split()[0])
+        assert first_strip > 20000, "the fixture: the damage must stay inside page 0's first strip"
         data = bytearray(zipped.read_bytes())
-        for i in range(len(data) // 3, len(data) // 3 + 20000):
+        for i in range(start, start + 20000):
             data[i] = 0x55
         zipped.write_bytes(bytes(data))
         full = subprocess.run(["magick", "identify", "-format", "%[tiff:subfiletype]|%w|%h\n",

@@ -739,8 +739,8 @@ def c14(fixtures):
     for s in sessions:
         shutil.copytree(s, fj2 / s.name)
     list_file = LANE_DIR / "fj2_dirs.txt"
-    list_file.write_text("".join(str(fj2 / s.name) + "\n" for s in sessions),
-                         encoding="utf-8", newline="\n")
+    # write_bytes, not write_text(newline=): that keyword is Python 3.10+.
+    list_file.write_bytes("".join(str(fj2 / s.name) + "\n" for s in sessions).encode("utf-8"))
     rc, _ = run("c14_run3", backend, ["--input-dir-file", str(list_file), "--workers", "2"])
     check("C14: third run (-InputDirFile) rc == 0", rc == 0, f"rc={rc}")
     for tif in sorted(p for p in fj2.rglob("*")

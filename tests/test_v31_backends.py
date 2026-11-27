@@ -228,9 +228,9 @@ def test_an_exiftool_without_the_status_of_each_command_is_refused(tmp_path, hos
     shim = tmp_path / "old exiftool"
     shim.mkdir()
     (shim / "old_exiftool.py").write_text(_OLD_EXIFTOOL, encoding="utf-8")
-    (shim / "exiftool.cmd").write_text(
-        '@echo off\r\n"' + sys.executable + '" "%~dp0old_exiftool.py" %*\r\nexit /b %ERRORLEVEL%\r\n',
-        encoding="ascii", newline="")
+    (shim / "exiftool.cmd").write_bytes(
+        ('@echo off\r\n"' + sys.executable + '" "%~dp0old_exiftool.py" %*\r\nexit /b %ERRORLEVEL%\r\n'
+         ).encode("ascii"))
     env = dict(os.environ, TW_REAL_EXIFTOOL=shutil.which("exiftool"), TIFFWORKFLOW_SETTINGS="")
     env["PATH"] = str(shim) + os.pathsep + env["PATH"]
     r = subprocess.run(backend_cmd("parallel", script, ["--input-dir", str(photo.parent)] + args),

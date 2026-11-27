@@ -110,9 +110,9 @@ def slow_magick(tmp_path):
     shim = tmp_path / "shim"
     shim.mkdir()
     (shim / "slow_magick.py").write_text(_SLOW_MAGICK, encoding="utf-8")
-    (shim / "magick.cmd").write_text(
-        '@echo off\r\n"' + sys.executable + '" "%~dp0slow_magick.py" %*\r\nexit /b %ERRORLEVEL%\r\n',
-        encoding="ascii", newline="")
+    (shim / "magick.cmd").write_bytes(
+        ('@echo off\r\n"' + sys.executable + '" "%~dp0slow_magick.py" %*\r\nexit /b %ERRORLEVEL%\r\n'
+         ).encode("ascii"))
     mark = tmp_path / "in_flight.txt"
     env = dict(os.environ, TIFFWORKFLOW_SETTINGS="", TW_REAL_MAGICK=shutil.which("magick"),
                TW_SLOW_MARK=str(mark), PYTHONIOENCODING="utf-8")
