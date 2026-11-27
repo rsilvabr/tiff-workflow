@@ -9,7 +9,7 @@ Unified TIFF processing toolkit with four complementary workflows:
 
 **Key feature:** Lossless recompression. ZIP/Deflate is a lossless format — pixel data stays identical, only the compression is re-optimized.
 
-**Current version: v3.2.1** (2026-11-27) · [What's new](#whats-new-in-v321) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
+**Current version: v3.3.0** (2026-11-27) · [What's new](#whats-new-in-v330) · [Coming from v3.0.0](docs/command_line.md) · [All releases](docs/CHANGELOG.md)
 
 **Windows program, no Python needed:** [tiff-workflow-exe](https://github.com/rsilvabr/tiff-workflow-exe/releases/latest) — unzip and double-click; ExifTool and ImageMagick included.
 
@@ -172,14 +172,16 @@ One line each; the detail is behind each link.
 
 ---
 
-## What's new in v3.2.1
+## What's new in v3.3.0
 
-2026-11-27. Nothing to change if you run v3.2.0.
+2026-11-27. Nothing to change if you run v3.2.1: answered with just `r`, the wizard runs what v3.2.1 ran with Enter everywhere.
 
-- **Checked on every Python from 3.9 to 3.15:** the whole test suite passes on each.
-- **Python 3.13 and newer:** the wizard's exiftool calls start no thread again, so a run with the memory exhausted cannot hang there (audit round 33).
+- **One review screen:** each task asks the folder (and the mode or the pattern), then shows every setting as a numbered row with where it comes from; a number edits it, `d` dry-runs, `s` saves a preset, `r` runs.
+- **`--zip-level 1-9`:** faster compression when you want it, the same pixels (default 7 = the files of before).
+- **Mode-8 presets can run unattended** once you allow it (`[U]` in menu 5); `--delete-source` never runs unattended.
+- **A killed run cleans up after itself** on the next run, and a file held open by another program is one clear error (audit round 34).
 
-[Every change](docs/CHANGELOG.md#v321) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
+[Every change](docs/CHANGELOG.md#v330) · [earlier releases](docs/CHANGELOG.md) · [GitHub Releases](https://github.com/rsilvabr/tiff-workflow/releases)
 
 ---
 

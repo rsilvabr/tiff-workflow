@@ -10,6 +10,24 @@ the [GitHub Releases page](https://github.com/rsilvabr/tiff-workflow/releases).
 
 ---
 
+## v3.3.0
+
+2026-11-27. **The wizard shows every answer on one screen**, compression can be told to go
+faster, and a mode-8 preset can run on its own. Nothing to change for whoever runs v3.2.1: the
+same command line, presets, settings and files, and answered with just `r` the wizard runs
+exactly what v3.2.1 ran with Enter everywhere (pinned by a test captured from v3.2.1).
+
+- **The review screen** (options 1-4 and 8): a task asks only what cannot have a default -- the mode and the folder, the Fuji pattern and AutoFind, create or remove thumbnails -- and then shows every other answer as a numbered row with where it comes from (`last run`, `config`, `settings file`, `script`, `you`). A number edits a row; `c` shows the command line, `d` runs a dry run and comes back, `s` saves a preset, `r` runs, `b` goes back with every answer kept. Enter never runs anything; mode 8's question is asked at `r`
+- **`--zip-level 1-9`** (compress, copy-exif `--compress-zip`; settings file `zip_level`; the Advanced screen): lower writes faster and a little larger, the pixels are the same. The default `7` is byte for byte what ImageMagick wrote before; on a 45 MP 16-bit export level 3 took 25 % less time for 0.01 % more bytes. `--recompress-zip` remembers per level the files that did not shrink, so another level tries them again
+- **A mode-8 preset may run unattended** (`--run-preset`) once you say yes to `Allow this preset to run unattended?` -- asked when a mode-8 workflow is saved as a preset, and for an existing one by `[U]` in menu 5. Mode 8 replaces each TIFF only with a file proven pixel-identical; `--delete-source` is never run unattended, and the preset's label says `[REPLACES IN PLACE]`. A No puts everything back as it was saved
+- **A killed run cleans up after itself on the next run** (audit round 34): a staged file, a temp sibling or exiftool's `_exiftool_tmp` left next to a photo is removed by the next run over that photo -- only when it is an hour old, another run's, a plain file, its photo is there and its name is one the toolkit writes. With `x.tif_exiftool_tmp` there, every later exiftool write of `x.tif` used to fail
+- **A file another program holds open** (mode 8) is one clear error and nothing is left in the staging folder; a file that did not land is never also counted OK
+- **Delete OLD_TIFFs** and `tools/move_old_backups.py` take a timestamped backup together with its base
+- **Smaller:** associated, non-opaque alpha is a SKIP instead of an error on every run; `u` works in the main menu; the summary lists the Advanced options you changed; a thumbnail size outside 32-4096 in the settings file is refused where it is read; a `%` in the temp folder no longer refuses every file with `%` in its name
+- **Found by the review and fixed before the release:** the new cleanup now never touches a name of digits only (a photo renamed `20190815_201908151430_scan.tif` next to `scan.tif` has the staged shape); the review screen says where each value comes from; mode 2 into its own input folder is refused with a sentence. Detail: [bugs_fixed.md](bugs_fixed.md) (round 34)
+
+---
+
 ## v3.2.1
 
 2026-11-27. **Checked on every Python from 3.9 to 3.15.** Nothing to change for whoever runs
