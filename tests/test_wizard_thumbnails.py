@@ -1,6 +1,6 @@
 """Workflow 8 of the wizard, Generate Thumbnails (run_generate_thumbnails), on both screens.
 
-What the wizard is for here: the questions (since v3.4 the folder, create or remove, then the
+What the wizard is for here: the questions (since v3.3 the folder, create or remove, then the
 review screen's rows), what each answer becomes on the command line of generate_thumbnails.py,
 and what is journalled for Repeat last and the presets.
 
@@ -101,12 +101,12 @@ def folder(tmp_path):
 
 
 def row(key, recursive=False, remove=False):
-    """The number of the review row that edits `key` (v3.4: the review screen)."""
+    """The number of the review row that edits `key` (v3.3: the review screen)."""
     wf = {"origin": "thumbnails", "remove": remove, "recursive": recursive}
     return str(next(i for i, r in enumerate(ct._review_rows(wf), 1) if r.key == key))
 
 
-# v3.4: the folder, create or remove (Enter = create), then the review screen; `r` runs.
+# v3.3: the folder, create or remove (Enter = create), then the review screen; `r` runs.
 ENTER = ["", "r"]
 
 
@@ -145,7 +145,7 @@ def test_every_answer_reaches_the_command_line(wiz, folder, tmp_path):
 
 
 def test_a_dry_run_is_never_journalled(wiz, folder):
-    """Repeat last and a preset run for real unless --dry-run is asked again. v3.4: `d` runs
+    """Repeat last and a preset run for real unless --dry-run is asked again. v3.3: `d` runs
     the dry run and comes back to the screen."""
     wiz.run(folder, "", "d", "q")
     assert wiz.argv()[-1] == "--dry-run"

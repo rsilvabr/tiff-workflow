@@ -2301,7 +2301,7 @@ REGISTRY: Dict[str, Tuple[Opt, ...]] = {
             value_spec="bool"),
     ),
     "thumbnails": (
-        # Through the workflow dict since v3.4 (item 13, commit 2): the order is the order
+        # Through the workflow dict since v3.3 (item 13, commit 2): the order is the order
         # run_generate_thumbnails emitted by hand, for creating (input, size, quality, format,
         # page, workers, output, exclusion, recursive, dry run) and for removing (input,
         # --remove, output, recursive, dry run).
@@ -5517,7 +5517,7 @@ def _run_exif_then_compress(cmd_copy: List[str], cmd_compress: List[str]):
     return rc_copy, run_subprocess(cmd_compress)
 
 
-# --- The review screen (the wizard by task, v3.4) ----------------------------------
+# --- The review screen (the wizard by task, v3.3) ----------------------------------
 #
 # A task asks only what cannot have a default -- the task, the folder (Fuji: the pattern and
 # AutoFind), the mode for Compress, create or remove for Thumbnails -- and then shows ONE

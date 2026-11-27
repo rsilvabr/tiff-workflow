@@ -81,7 +81,7 @@ Eight workflows available:
 - **[7] Diagnose TIFFs** — Check if 16-bit TIFFs are real 16-bit or padded 8-bit
 - **[8] Generate Thumbnails** — Create sRGB thumbnails from TIFFs (standalone or embedded in compression)
 
-The wizard supports **AutoFind** — automatically locates folders matching patterns like `S5pro` or `S3pro` for Fuji workflows. The main menu also repeats the last workflow, runs a manifest, saves and runs presets, and edits the script settings. Full guide: [docs/README_convert_tiff_py.md](docs/README_convert_tiff_py.md).
+Each task asks the folder (and the mode, or the pattern), then shows one review screen with every setting as a numbered row: a number edits it, `d` dry-runs, `r` runs. The wizard supports **AutoFind** — automatically locates folders matching patterns like `S5pro` or `S3pro` for Fuji workflows. The main menu also repeats the last workflow, runs a manifest, saves and runs presets, and edits the script settings. Full guide: [docs/README_convert_tiff_py.md](docs/README_convert_tiff_py.md).
 
 ---
 

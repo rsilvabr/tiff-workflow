@@ -1,5 +1,5 @@
 """The wizard's command lines when every question is answered with Enter -- captured ONCE from
-v3.2.1 (tests/data/review_default_argv.json), the contract of the review screen (v3.4 plan,
+v3.2.1 (tests/data/review_default_argv.json), the contract of the review screen (v3.3 plan,
 item 13): answered with just `r`, the new flow must give the same command lines.
 
     PYTHONIOENCODING=utf-8 python tests/review_golden.py <installation> <out.json>   # once

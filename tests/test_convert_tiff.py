@@ -847,7 +847,7 @@ class TestThumbFormatPlainTextFallback:
         answers = iter([
             "0",            # mode
             str(tmp_path),  # input folder
-            str(gen), "y",  # the review screen (v3.4): the thumbnail row, yes
+            str(gen), "y",  # the review screen (v3.3): the thumbnail row, yes
             str(fmt), "bmp",  # the format row: not offered ...
             "png",          # ... asked again
             "r",            # run
@@ -1083,7 +1083,7 @@ class TestWorkflow4TwoSteps:
         monkeypatch.setattr(convert_tiff, "step_pattern", lambda cfg: ["S5pro"])
         monkeypatch.setattr(convert_tiff, "step_folder", lambda cfg, *a: tmp_path)
         monkeypatch.setattr(convert_tiff, "step_autofind", lambda cfg, p, root: sessions)
-        # v3.4, the review screen: d (both steps, dry), then r (Copy EXIF fails)
+        # v3.3, the review screen: d (both steps, dry), then r (Copy EXIF fails)
         ran = self._wizard(monkeypatch, [0, 0, 1], ["d", "r"])
         cfg = SimpleNamespace(config=ToolConfig(), save_config=lambda: None)
         assert convert_tiff._run_exif_or_compress(cfg, "both") is False

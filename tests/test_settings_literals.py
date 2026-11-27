@@ -152,7 +152,7 @@ def test_run_free_compress_no_configure_adds_no_thumb_keys(tmp_path, monkeypatch
     answers = iter([
         "0",            # mode
         str(tmp_path),  # input folder
-        str(gen), "y",  # v3.4, the review screen: thumbnails yes, nothing else edited
+        str(gen), "y",  # v3.3, the review screen: thumbnails yes, nothing else edited
         "q",            # cancel
     ])
     monkeypatch.setattr("builtins.input", lambda *a, **k: next(answers))

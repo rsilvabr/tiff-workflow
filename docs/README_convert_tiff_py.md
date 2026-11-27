@@ -26,29 +26,55 @@ Eight workflows available:
 
 ## Workflows
 
+### The review screen (options 1-4 and 8)
+
+A task asks first only what cannot have a default -- Compress: the mode and the folder; the
+Fuji tasks: the pattern, the root folder and the AutoFind list; Thumbnails: the folder and
+whether to create or remove -- and then shows **one screen** with every other answer as a
+numbered row: `#`, the option, its value, and where the value comes from (`last run`, `config`,
+`settings file`, `script`, or `you` once you changed it).
+
+```
+ #  Option                                   Value                From
+ 1  Workers                                  8                    config
+ 2  Staging folder (SSD for faster I/O)      none                 -
+ 3  Safe mode (skip multi-page TIFFs)        yes                  script
+ ...
+[a] all options  [c] command line  [d] dry run  [s] save as preset  [r] run  [b] back  [q] cancel
+```
+
+| Key | What it does |
+|---|---|
+| a number | edits that row (a wrong value is said and not kept; a number out of range is clamped and the clamp is said) |
+| `a` | all options: the Advanced options below |
+| `c` | shows the command line(s) the run would start (both steps of Fuji: Copy + Compress) |
+| `d` | runs it as a dry run and comes back to the screen with every answer kept |
+| `s` | saves the current answers as a preset (menu 5), without running |
+| `r` | runs it |
+| `b` | back to the first questions (the mode, the folder), every answer kept |
+| `q` | cancels |
+| `m` | Compress only: writes a manifest CSV of the folder instead (see Manifest System) |
+
+Answered with just `r`, a task runs exactly what the question-by-question wizard of v3.2 ran
+when every question was answered with Enter (a test holds that command line for every task and
+mode). **Mode 8** is never a row: `r` asks `Mode 8 will DELETE source TIFFs after compression.
+Are you sure? [y/N]` (No comes back to the screen), and its `--delete-source` is tied to that
+answer; `d` deletes nothing.
+
 ### Compress TIFFs (option 1)
 
-Full TIFF ZIP compression with modes 0-9:
+Full TIFF ZIP compression with modes 0-9: the mode, the folder, then the review screen.
 
-```
-Step 1: Select mode (0-9)
-Step 2: Choose input folder
-Step 3: Output folder + duplicate policy (mode 2 only)
-Step 4: Workers, staging, dry-run
-Step 5: Thumbnail generation options (optional)
-Step 6: Summary + confirm
-```
-
-**Mode 2** merges every TIFF into one folder, so the wizard asks where that folder is
-(default `<input>\ZIP_flat`) and how to handle duplicate filenames (`Numbered` (default),
-`Skip`, `Overwrite`). Choosing the input folder itself means recompressing in place without
-a backup, so it requires an explicit confirmation.
+**Mode 2** merges every TIFF into one folder, so its screen has two more rows: where that
+folder is (default `<input>\ZIP_flat`) and how to handle duplicate filenames (`Numbered`
+(default), `Skip`, `Overwrite`). Choosing the input folder itself means recompressing in place
+without a backup, so it requires an explicit confirmation.
 
 **Workers** are clamped to 1-64, the range the backends accept.
 
-Two questions of step 4 exist only for compress (since v3.2):
+Two rows exist only for compress (since v3.2):
 
-- `Recompress ZIP TIFFs saved without a predictor? [y/N]` -- `--recompress-zip`: Capture One's
+- `Recompress ZIP TIFFs saved without a predictor` -- `--recompress-zip`: Capture One's
   exports, already ZIP but without a predictor, are rewritten when that makes them smaller
   (about 10 %; a file that would not shrink stays as it is and is remembered).
   [More](README_compress_tiff_zip.md#recompressing-zip-tiffs-without-a-predictor---recompress-zip)
@@ -56,10 +82,10 @@ Two questions of step 4 exist only for compress (since v3.2):
   `;`-separated names (`TIFF16`); `-` = every folder. Offered again on the next run, like the
   exclusion before it.
 
-**Advanced options.** Right after the basic questions (Workers, staging, dry-run, safe mode,
-...) every compress and Copy EXIF workflow asks `Advanced options? [y/N]`. The default is
-**No** and then nothing changes. On yes it lists the backend parameters no other step asks,
-with what each one is right now (this run, the settings file, or the script's own default):
+**Advanced options.** The review screen's `a` (and, in the manifest workflow, the question
+`Advanced options? [y/N]` after its basic questions; default **No**, then nothing changes) lists
+the backend parameters no row shows, with what each one is right now (this run, the settings
+file, or the script's own default). The ones you changed are listed under the review table:
 
 | Option | Backend | What it is |
 |---|---|---|
@@ -79,19 +105,16 @@ the command line, so the script's own setting (or the settings file) applies. Th
 part of the workflow, so Repeat last, presets and the manifest runs carry it. In the combined
 workflow (4) the Copy EXIF options go to step 1 and the compress ones to step 2.
 
-**Thumbnail Options (v1.2+):**
-- Generate embedded thumbnails? [y/N]
-- Configure thumbnail settings? [y/N]
-  - Thumbnail size (px): default 256
-  - JPEG quality: default 85
-  - Format: jpg/png/tif (default: jpg)
-- Skip already-compressed TIFFs that have thumbnails? [y/N]
+**Thumbnail rows (v1.2+):** `Generate embedded thumbnails` (no); once it is yes, four more
+rows: the thumbnail size (256), JPEG quality (85) and format (jpg/png/tif) -- each passed only
+when you change it, otherwise the script's own setting applies -- and `Skip already-compressed
+TIFFs that have thumbnails` (no).
 
 When enabled, creates a multi-page TIFF:
 - Page 0: Original image (ZIP/Deflate compressed)
 - Page 1: Thumbnail (sRGB, ICC stripped, aspect ratio preserved)
 
-Mode 8 shows an extra confirmation prompt since it deletes source TIFFs after compression.
+Mode 8 asks its confirmation at `r`, since it deletes source TIFFs after compression.
 
 ### Fuji: Copy EXIF (option 2)
 
@@ -206,19 +229,19 @@ settings file, menu 6) turns it off. A hand-edited preset may list several folde
 
 Create sRGB thumbnails from TIFFs. Can be used standalone or as part of the compression workflow.
 
-**Settings:**
-- Input directory
-- Remove mode (delete existing thumbnails instead of creating them)
+**First:** the input directory, then whether to remove existing thumbnails instead of
+creating them. **The review screen's rows:**
 - Thumbnail size (32-4096 px, default: 256)
 - JPEG quality (1-100, default: 85)
 - Format: jpg, png, or tif (default: jpg)
 - Page: `0` (first) or `all`
 - Output folder (empty = next to each TIFF)
-- Recursive processing
-- Dry-run mode
+- Recursive processing, and then the excluded folder names
+- Workers
 
-Size, quality and format are validated before the backend is launched — an out-of-range
-value falls back to the default instead of the backend refusing the run.
+Removing has two rows: the output folder and recursive. A dry run is the screen's `d`.
+Size, quality and format are checked when you type them -- a value out of range is said and
+not kept, so the backend never refuses the run.
 
 **Output:** `filename_thumb.jpg` next to each TIFF (or in specified output folder)
 

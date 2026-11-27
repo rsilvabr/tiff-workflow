@@ -30,7 +30,12 @@ starts it.
   lines and runs them as subprocesses (`_backend_command`: this Python, the
   installation's `convert_tiff.py`, the backend's subcommand), owns the manifest,
   the AutoFind search and the multi-step workflows (it gates step 2 on step 1's
-  exit code). Presets
+  exit code). Since v3.3 the tasks that run a backend (1-4, 8) ask only the
+  up-front questions and then show ONE review screen (`_review_screen`, rows in
+  `_REVIEW_ROWS`; an asked REGISTRY option is a row or named in `_REVIEW_NOT_ROWS`):
+  answered with just `r` it must give the command lines of v3.2.1 answered with Enter
+  everywhere -- `tests/data/review_default_argv.json`, captured once from v3.2.1's code,
+  never regenerated. Danger is never a row (mode 8's question is asked at `r`). Presets
   (menu 5, `--run-preset`, `--list-presets`) are named journal snapshots run
   by `_run_journal`, the same runner as Repeat last. A Diagnose journal
   (kind `diagnose`, settings in `diagnose`, no commands) is REPORT ONLY unless its

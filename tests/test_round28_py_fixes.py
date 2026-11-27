@@ -580,7 +580,7 @@ def test_rich_prints_a_folder_name_with_markup_as_it_is(tmp_path, monkeypatch):
     workflow = {"origin": "free_compress", "dest": "zip", "mode": 1,
                 "input_dir": "E:\\" + name, "staging": str(tmp_path / "[red]stg"),
                 "exclude_folders": "[/i]RAW", "workers": 2}
-    # v3.4: the review screen replaced step_confirm's Summary
+    # v3.3: the review screen replaced step_confirm's Summary
     cfg = SimpleNamespace(config=ct.ToolConfig(), save_config=lambda: None)
     assert ct._review_screen(cfg, workflow, Path("E:\\" + name), [["Folder:", "E:\\" + name]],
                              lambda dry: [], lambda: None, lambda: None, set()) == "q"

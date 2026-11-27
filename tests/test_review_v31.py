@@ -45,7 +45,7 @@ def test_enter_at_the_mode8_delete_question_runs_nothing(tmp_path, monkeypatch, 
     monkeypatch.setattr(ct, "step_mode", lambda cfg: 8)
     monkeypatch.setattr(ct, "step_folder", lambda cfg, *a, **k: folder)
     monkeypatch.setattr(ct, "run_subprocess", lambda *a, **k: ran.append(a) or 0)
-    # v3.4: the review screen; `r` asks mode 8's question, Enter (no) comes back to the
+    # v3.3: the review screen; `r` asks mode 8's question, Enter (no) comes back to the
     # screen, `q` leaves. Every other question is Enter.
     reviews = iter(["r", "q"])
 
